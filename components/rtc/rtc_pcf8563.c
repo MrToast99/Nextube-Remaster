@@ -2,6 +2,7 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/i2c.h"
+#include <string.h>
 
 static const char *TAG = "rtc";
 static bool s_initialized = false;
