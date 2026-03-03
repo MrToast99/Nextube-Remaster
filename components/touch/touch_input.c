@@ -9,7 +9,7 @@ static const char *TAG = "touch";
 static touch_callback_t user_cb = NULL;
 static TaskHandle_t touch_task_handle = NULL;
 
-static const int touch_gpios[] = { PIN_TOUCH_LEFT, PIN_TOUCH_MIDDLE, PIN_TOUCH_RIGHT };
+/* touch_gpios array removed to fix unused-const-variable compiler error */
 static const touch_pad_t touch_channels[] = { TOUCH_PAD_NUM2, TOUCH_PAD_NUM0, TOUCH_PAD_NUM3 };
 static uint16_t thresholds[3] = {0};
 
