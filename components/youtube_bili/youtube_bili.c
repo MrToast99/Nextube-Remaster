@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include "esp_crt_bundle.h"
 
 static const char *TAG = "yt_bili";
 static sub_count_t s_sub = {0};

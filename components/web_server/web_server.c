@@ -137,7 +137,7 @@ static esp_err_t api_file_ls(httpd_req_t *r)
         while ((e = readdir(dp))) {
             cJSON *it = cJSON_CreateObject();
             cJSON_AddStringToObject(it, "name", e->d_name);
-            char fp[192]; snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
+            char fp[400]; snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
             struct stat st;
             if (stat(fp, &st)==0) cJSON_AddNumberToObject(it, "size", st.st_size);
             cJSON_AddItemToArray(arr, it);
@@ -204,7 +204,7 @@ static const char *content_type(const char *p)
 static esp_err_t serve_static(httpd_req_t *r)
 {
     const char *uri = r->uri;
-    char fp[256];
+    char fp[600];
     if (strcmp(uri,"/")==0) snprintf(fp,sizeof(fp),"/spiffs/web/index.html");
     else snprintf(fp,sizeof(fp),"/spiffs/web%s",uri);
     if (strstr(fp,"..")) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad path"), ESP_FAIL;
