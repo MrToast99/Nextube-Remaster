@@ -199,13 +199,25 @@ static const char *wmo_condition(int code)
 }
 
 /* Geocode city → lat/lon via Open-Meteo geocoding API.
- * Result is cached; geocoding only runs again when the city changes. */
+ * Result is cached; geocoding only runs again when the city changes.
+ *
+ * The city string may be in "City,CC" format (e.g. "Airdrie,CA") as used by
+ * wttr.in.  Open-Meteo's geocoding API expects a plain city name; passing the
+ * country code as part of the name returns zero results.  We strip everything
+ * after the first comma and use only the city portion for the API call. */
 static bool geocode_open_meteo(const char *city, float *lat, float *lon)
 {
+    /* Extract just the city name (before any comma) */
+    char cityname[64];
+    strncpy(cityname, city, sizeof(cityname) - 1);
+    cityname[sizeof(cityname) - 1] = '\0';
+    char *comma = strchr(cityname, ',');
+    if (comma) *comma = '\0';
+
     char url[256];
     snprintf(url, sizeof(url),
              "https://geocoding-api.open-meteo.com/v1/search"
-             "?name=%s&count=1&format=json", city);
+             "?name=%s&count=1&format=json", cityname);
 
     char *body = http_get(url);
     if (!body) return false;
