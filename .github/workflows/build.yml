@@ -35,8 +35,8 @@ jobs:
           . $IDF_PATH/export.sh
           esptool.py --chip esp32 merge_bin \
             -o artifacts/nextube-fw-full.bin \
-            --flash_mode qio \
-            --flash_freq 80m \
+            --flash_mode dio \
+            --flash_freq 40m \
             --flash_size 16MB \
             0x1000  build/bootloader/bootloader.bin \
             0x8000  build/partition_table/partition-table.bin \
@@ -89,6 +89,7 @@ jobs:
             **Individual partitions:**
             ```bash
             esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
+              --flash_mode dio --flash_freq 40m --flash_size 16MB \
               write_flash \
               0x1000   bootloader.bin \
               0x8000   partition-table.bin \
