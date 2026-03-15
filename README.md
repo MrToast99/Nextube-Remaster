@@ -26,10 +26,10 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | YouTube subscriber counter | ✅ Working |
 | Bilibili follower counter | ✅ Working |
 | DAC audio playback (LTK8002D amp, WAV files) | ✅ Working |
-| Clock themes (Nixie/Digital/Flip art) | 🔧 Stub (needs theme images) |
-| Countdown / Pomodoro timer modes | 🔧 Stub |
-| Scoreboard mode | 🔧 Stub |
-| Album/slideshow mode | 🔧 Stub |
+| Clock themes (Nixie/Digital/Flip art) | ✅ Working (requires theme images in SPIFFS) |
+| Countdown / Pomodoro timer modes | ✅ Working |
+| Album/slideshow mode | ✅ Working (place JPEGs in `/images/album/`) |
+| Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
 
 ## Hardware
 
@@ -158,13 +158,13 @@ GET  /api/wifi/scan         → scan results
 nextube-fw/
 ├── .github/workflows/build.yml    # CI/CD
 ├── main/
-│   ├── main.c                     # Application entry point
-│   └── board_pins.h               # Hardware pin definitions
+│   └── main.c                     # Application entry point + touch handler
 ├── components/
+│   ├── board/include/board_pins.h # Hardware pin & display constants
 │   ├── config_mgr/                # JSON config persistence
-│   ├── display/                   # 6× ST7735 SPI display driver
-│   ├── leds/                      # WS2812 RGB LED effects
-│   ├── touch/                     # Capacitive touch input
+│   ├── display/                   # 6× ST7735 SPI display driver + mode renderer
+│   ├── leds/                      # WS2812 RGB LED effects task
+│   ├── touch/                     # Capacitive touch input (L/R = mode, M = backlight)
 │   ├── rtc/                       # PCF8563 RTC driver
 │   ├── audio/                     # DAC audio playback (WAV)
 │   ├── wifi_manager/              # AP+STA WiFi management
