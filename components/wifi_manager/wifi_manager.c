@@ -4,6 +4,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "mdns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -17,10 +18,28 @@ static char s_ip_str[20] = "0.0.0.0";
 static esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif  = NULL;
 
-/* The device stays in APSTA mode permanently.  The "Nextube-Setup" AP is
- * always reachable at 192.168.4.1 so the web UI is accessible regardless
- * of whether home WiFi is connected.  Disabling the AP after STA connects
- * was killing in-flight HTTP connections and making the web UI unreachable. */
+/* AP is disabled 60 seconds after STA gets an IP.  60 s gives the browser
+ * enough time to finish loading the web UI before the AP disappears.
+ * If STA later disconnects the AP is re-enabled immediately so the device
+ * remains accessible at 192.168.4.1 for re-configuration. */
+#define AP_DISABLE_DELAY_US  (60LL * 1000 * 1000)   /* 60 seconds */
+
+static esp_timer_handle_t s_ap_disable_timer = NULL;
+
+static void ap_disable_cb(void *arg)
+{
+    ESP_LOGI(TAG, "STA connected – disabling setup AP");
+    esp_wifi_set_mode(WIFI_MODE_STA);
+}
+
+static void init_ap_timer(void)
+{
+    esp_timer_create_args_t args = {
+        .callback = ap_disable_cb,
+        .name     = "ap_disable",
+    };
+    esp_timer_create(&args, &s_ap_disable_timer);
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                int32_t id, void *data)
@@ -33,6 +52,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         case WIFI_EVENT_STA_DISCONNECTED:
             ESP_LOGW(TAG, "STA disconnected, retrying...");
             xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
+            /* Cancel any pending AP-disable and restore AP so the user can
+             * reach 192.168.4.1 to fix credentials if needed. */
+            if (s_ap_disable_timer) esp_timer_stop(s_ap_disable_timer);
+            esp_wifi_set_mode(WIFI_MODE_APSTA);
             esp_wifi_connect();
             break;
         case WIFI_EVENT_AP_STACONNECTED: {
@@ -45,8 +68,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = data;
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
-        ESP_LOGI(TAG, "STA got IP: %s", s_ip_str);
+        ESP_LOGI(TAG, "STA got IP: %s – AP will stop in 60 s", s_ip_str);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
+        /* Schedule AP shutdown 60 s from now to let any open web UI sessions
+         * finish loading before the AP interface disappears. */
+        if (s_ap_disable_timer) {
+            esp_timer_stop(s_ap_disable_timer);
+            esp_timer_start_once(s_ap_disable_timer, AP_DISABLE_DELAY_US);
+        }
     }
 }
 
@@ -70,10 +99,12 @@ void wifi_manager_start(void)
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
 
+    init_ap_timer();
+
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
 
-    /* AP+STA mode: always provide a captive portal AP */
+    /* Start in APSTA so the setup AP is reachable immediately */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
     /* Configure AP */
@@ -106,6 +137,9 @@ void wifi_manager_reconnect_sta(void)
 {
     const nextube_config_t *cfg = config_get();
     if (strlen(cfg->ssid) == 0) return;
+
+    /* Ensure AP is back up while we attempt to reconnect */
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
 
     wifi_config_t sta_cfg = {0};
     strncpy((char *)sta_cfg.sta.ssid,     cfg->ssid,     sizeof(sta_cfg.sta.ssid)     - 1);

@@ -107,9 +107,27 @@ static void fetch_wttr(const nextube_config_t *cfg)
         cJSON *desc0 = cJSON_GetArrayItem(desc_arr, 0);
         if (desc0) {
             cJSON *val = cJSON_GetObjectItem(desc0, "value");
-            if (val && val->valuestring)
+            if (val && val->valuestring) {
                 strncpy(s_weather.condition, val->valuestring,
                         sizeof(s_weather.condition) - 1);
+                /* Map wttr.in condition string to SPIFFS icon filename. */
+                const char *d = val->valuestring;
+                const char *icon;
+                if      (strstr(d, "Sunny")     || strstr(d, "Clear"))     icon = "sun";
+                else if (strstr(d, "Thunder")   || strstr(d, "thunder"))   icon = "thunderstorm";
+                else if (strstr(d, "Snow")      || strstr(d, "Blizzard"))  icon = "snow";
+                else if (strstr(d, "Sleet"))                               icon = "rain";
+                else if (strstr(d, "Rain")      || strstr(d, "Drizzle")
+                      || strstr(d, "rain")      || strstr(d, "drizzle"))   icon = "rain";
+                else if (strstr(d, "Shower"))                              icon = "squalls";
+                else if (strstr(d, "Fog")       || strstr(d, "Mist")
+                      || strstr(d, "fog")       || strstr(d, "mist"))      icon = "fog";
+                else if (strstr(d, "Overcast"))                            icon = "overcastClouds";
+                else if (strstr(d, "Partly")    || strstr(d, "Few"))       icon = "fewClouds";
+                else if (strstr(d, "Cloud")     || strstr(d, "cloud"))     icon = "overcastClouds";
+                else                                                        icon = "sun";
+                strncpy(s_weather.icon, icon, sizeof(s_weather.icon) - 1);
+            }
         }
         s_weather.valid = true;
         ESP_LOGI(TAG, "wttr.in: %.1f°C  %d%%  %s",
@@ -153,9 +171,22 @@ static void fetch_openweather(const nextube_config_t *cfg)
         if (desc && desc->valuestring)
             strncpy(s_weather.condition, desc->valuestring,
                     sizeof(s_weather.condition) - 1);
-        if (icon && icon->valuestring)
-            strncpy(s_weather.icon, icon->valuestring,
-                    sizeof(s_weather.icon) - 1);
+        /* OWM returns codes like "01d","02n" etc. Map to SPIFFS filenames. */
+        if (icon && icon->valuestring) {
+            const char *ic = icon->valuestring;
+            const char *mapped;
+            if      (strncmp(ic, "01", 2) == 0) mapped = "sun";
+            else if (strncmp(ic, "02", 2) == 0) mapped = "fewClouds";
+            else if (strncmp(ic, "03", 2) == 0) mapped = "fewClouds";
+            else if (strncmp(ic, "04", 2) == 0) mapped = "overcastClouds";
+            else if (strncmp(ic, "09", 2) == 0) mapped = "squalls";
+            else if (strncmp(ic, "10", 2) == 0) mapped = "rain";
+            else if (strncmp(ic, "11", 2) == 0) mapped = "thunderstorm";
+            else if (strncmp(ic, "13", 2) == 0) mapped = "snow";
+            else if (strncmp(ic, "50", 2) == 0) mapped = "fog";
+            else                                 mapped = "sun";
+            strncpy(s_weather.icon, mapped, sizeof(s_weather.icon) - 1);
+        }
     }
     s_weather.valid = true;
     ESP_LOGI(TAG, "OWM: %.1f°C  %d%%  %s",
@@ -172,16 +203,16 @@ static void fetch_openweather(const nextube_config_t *cfg)
  *
  * WMO weather codes → icon name used by display_path_weather()
  */
+/* Maps WMO weather codes to SPIFFS icon filenames (no extension). */
 static const char *wmo_icon(int code)
 {
-    if (code == 0)        return "sunny";
-    if (code <= 2)        return "partlycloudy";
-    if (code == 3)        return "overcast";
-    if (code <= 48)       return "foggy";
-    if (code <= 57)       return "drizzle";
-    if (code <= 67)       return "rainy";
-    if (code <= 77)       return "snowy";
-    if (code <= 82)       return "showery";
+    if (code == 0)        return "sun";
+    if (code <= 2)        return "fewClouds";
+    if (code == 3)        return "overcastClouds";
+    if (code <= 48)       return "fog";
+    if (code <= 67)       return "rain";
+    if (code <= 77)       return "snow";
+    if (code <= 82)       return "squalls";
     return "thunderstorm";
 }
 
@@ -313,28 +344,29 @@ static const char *metno_icon(const char *symbol_code)
     if (slen >= sizeof(stem)) slen = sizeof(stem) - 1;
     memcpy(stem, symbol_code, slen);
 
-    if (strcmp(stem, "clearsky")        == 0) return "sunny";
-    if (strcmp(stem, "fair")            == 0) return "sunny";
-    if (strcmp(stem, "partlycloudy")    == 0) return "partlycloudy";
-    if (strcmp(stem, "cloudy")          == 0) return "overcast";
-    if (strcmp(stem, "fog")             == 0) return "foggy";
-    if (strcmp(stem, "lightdrizzle")    == 0) return "drizzle";
-    if (strcmp(stem, "drizzle")         == 0) return "drizzle";
-    if (strcmp(stem, "heavydrizzle")    == 0) return "drizzle";
-    if (strcmp(stem, "lightrain")       == 0) return "rainy";
-    if (strcmp(stem, "rain")            == 0) return "rainy";
-    if (strcmp(stem, "heavyrain")       == 0) return "rainy";
-    if (strcmp(stem, "lightsleet")      == 0) return "rainy";
-    if (strcmp(stem, "sleet")           == 0) return "rainy";
-    if (strcmp(stem, "heavysleet")      == 0) return "rainy";
-    if (strcmp(stem, "lightsnow")       == 0) return "snowy";
-    if (strcmp(stem, "snow")            == 0) return "snowy";
-    if (strcmp(stem, "heavysnow")       == 0) return "snowy";
-    if (strncmp(stem, "rainshowers",   11) == 0) return "showery";
-    if (strncmp(stem, "sleetshowers",  12) == 0) return "showery";
-    if (strncmp(stem, "snowshowers",   11) == 0) return "showery";
+    /* Maps Met.no symbol stems to SPIFFS icon filenames (no extension). */
+    if (strcmp(stem, "clearsky")        == 0) return "sun";
+    if (strcmp(stem, "fair")            == 0) return "sun";
+    if (strcmp(stem, "partlycloudy")    == 0) return "fewClouds";
+    if (strcmp(stem, "cloudy")          == 0) return "overcastClouds";
+    if (strcmp(stem, "fog")             == 0) return "fog";
+    if (strcmp(stem, "lightdrizzle")    == 0) return "rain";
+    if (strcmp(stem, "drizzle")         == 0) return "rain";
+    if (strcmp(stem, "heavydrizzle")    == 0) return "rain";
+    if (strcmp(stem, "lightrain")       == 0) return "rain";
+    if (strcmp(stem, "rain")            == 0) return "rain";
+    if (strcmp(stem, "heavyrain")       == 0) return "rain";
+    if (strcmp(stem, "lightsleet")      == 0) return "rain";
+    if (strcmp(stem, "sleet")           == 0) return "rain";
+    if (strcmp(stem, "heavysleet")      == 0) return "rain";
+    if (strcmp(stem, "lightsnow")       == 0) return "snow";
+    if (strcmp(stem, "snow")            == 0) return "snow";
+    if (strcmp(stem, "heavysnow")       == 0) return "snow";
+    if (strncmp(stem, "rainshowers",   11) == 0) return "squalls";
+    if (strncmp(stem, "sleetshowers",  12) == 0) return "squalls";
+    if (strncmp(stem, "snowshowers",   11) == 0) return "squalls";
     if (strstr(stem,  "thunder")           != NULL) return "thunderstorm";
-    return "overcast";
+    return "overcastClouds";
 }
 
 static const char *metno_condition(const char *symbol_code)

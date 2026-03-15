@@ -455,10 +455,16 @@ static void render_album(const nextube_config_t *cfg,
 /* ── Weather mode ───────────────────────────────────────────────────── */
 /*
  * Layout: [TT][TT][unit][HH][HH][icon]
- *   tubes 0-1 : temperature integer (absolute value, 00-99)
- *   tube  2   : unit icon  (°C or °F)  from MutiInfo/Temperature/{c|f}.jpg
+ *   tubes 0-1 : temperature – positive: tens/ones; negative: "minus" + abs digit
+ *   tube  2   : unit icon → MutiInfo/Temperature/degreec.jpg or degreef.jpg
  *   tubes 3-4 : humidity integer (00-99)
- *   tube  5   : weather condition icon from MutiInfo/Weather/{icon}.jpg
+ *   tube  5   : weather icon from MutiInfo/Weather/{icon}.jpg
+ *
+ * Actual SPIFFS filenames (must match exactly):
+ *   Temperature/ : degreec  degreef  minus
+ *   Weather/     : sun  fewClouds  overcastClouds  fog
+ *                  rain  snow  squalls  thunderstorm
+ *                  sand  tornado  volcanicAsh
  */
 static void render_weather(const nextube_config_t *cfg)
 {
@@ -474,22 +480,30 @@ static void render_weather(const nextube_config_t *cfg)
     float temp_f = strncmp(cfg->temp_format, "Fahrenheit", 10) == 0
                        ? w->temp_c * 9.0f / 5.0f + 32.0f
                        : w->temp_c;
-    int temp = (int)(temp_f < 0.0f ? temp_f - 0.5f : temp_f + 0.5f);
-    if (temp < 0) temp = -temp;   /* show absolute value – no minus glyph in themes */
+    bool negative = (temp_f < -0.5f);
+    int  temp     = (int)(negative ? -temp_f + 0.5f : temp_f + 0.5f);
     if (temp > 99) temp = 99;
 
     int hum = (int)(w->humidity + 0.5f);
     if (hum < 0)  hum = 0;
     if (hum > 99) hum = 99;
 
-    /* Tube 0-1: temperature digits */
-    display_path_number(path, sizeof(path), cfg->theme, temp / 10);
-    display_show_image(0, path);
-    display_path_number(path, sizeof(path), cfg->theme, temp % 10);
-    display_show_image(1, path);
+    /* Tube 0-1: temperature digits (or minus sign + digit for sub-zero) */
+    if (negative) {
+        display_path_temperature(path, sizeof(path), cfg->theme, "minus");
+        display_show_image(0, path);
+        display_path_number(path, sizeof(path), cfg->theme, temp > 9 ? temp / 10 : temp);
+        display_show_image(1, path);
+    } else {
+        display_path_number(path, sizeof(path), cfg->theme, temp / 10);
+        display_show_image(0, path);
+        display_path_number(path, sizeof(path), cfg->theme, temp % 10);
+        display_show_image(1, path);
+    }
 
-    /* Tube 2: °C / °F unit */
-    const char *unit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0) ? "f" : "c";
+    /* Tube 2: °C / °F unit – filenames are "degreec" and "degreef" */
+    const char *unit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0)
+                           ? "degreef" : "degreec";
     display_path_temperature(path, sizeof(path), cfg->theme, unit);
     display_show_image(2, path);
 
@@ -499,8 +513,8 @@ static void render_weather(const nextube_config_t *cfg)
     display_path_number(path, sizeof(path), cfg->theme, hum % 10);
     display_show_image(4, path);
 
-    /* Tube 5: weather condition icon */
-    const char *icon = (w->icon[0] != '\0') ? w->icon : "sunny";
+    /* Tube 5: weather icon – default "sun" matches the SPIFFS filename */
+    const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
     display_path_weather(path, sizeof(path), cfg->theme, icon);
     display_show_image(5, path);
 }
