@@ -27,11 +27,11 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifacts
-          cp build/nextube-fw.bin           artifacts/
+          cp build/nextube-fw.bin           artifacts/nextube-fw-ota.bin
           cp build/bootloader/bootloader.bin artifacts/
           cp build/partition_table/partition-table.bin artifacts/
           cp build/spiffs.bin               artifacts/
-          # Create combined flashable image
+          # Create combined flashable image (USB full-flash only, NOT for OTA)
           . $IDF_PATH/export.sh
           esptool.py --chip esp32 merge_bin \
             -o artifacts/nextube-fw-full.bin \
@@ -67,7 +67,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/nextube-fw.bin
+            artifacts/nextube-fw-ota.bin
             artifacts/nextube-fw-full.bin
             artifacts/bootloader.bin
             artifacts/partition-table.bin
@@ -77,23 +77,23 @@ jobs:
 
             ### Flash Instructions
 
-            **OTA (over-the-air):**
-            Upload `nextube-fw.bin` via the web UI at `http://nextube.local` → System → Firmware Update.
+            **OTA (over-the-air) — use this for updates on a running device:**
+            Upload `nextube-fw-ota.bin` via the web UI at `http://nextube-remaster.local` → System → Firmware Update.
 
-            **Full flash via USB:**
+            **Full flash via USB — first-time or recovery flash:**
             ```bash
             esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
               write_flash 0x0 nextube-fw-full.bin
             ```
 
-            **Individual partitions:**
+            **Individual partitions via USB:**
             ```bash
             esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
               --flash_mode dio --flash_freq 40m --flash_size 16MB \
               write_flash \
               0x1000   bootloader.bin \
               0x8000   partition-table.bin \
-              0x10000  nextube-fw.bin \
+              0x10000  nextube-fw-ota.bin \
               0x910000 spiffs.bin
             ```
           draft: false

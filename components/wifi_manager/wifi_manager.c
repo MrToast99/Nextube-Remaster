@@ -4,6 +4,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "mdns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -17,6 +18,35 @@ static char s_ip_str[20] = "0.0.0.0";
 static esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif  = NULL;
 
+/* ── AP auto-disable / re-enable timers ─────────────────────────────── */
+/* esp_wifi_set_mode() must not be called from within a WiFi event handler
+ * (it takes the WiFi mutex, causing deadlock).  We defer via esp_timer
+ * callbacks which run in the esp_timer task, outside the WiFi event task. */
+static esp_timer_handle_t s_ap_disable_timer = NULL;
+static esp_timer_handle_t s_ap_enable_timer  = NULL;
+
+static void ap_disable_cb(void *arg)
+{
+    /* Switch to STA-only – hides the "Nextube-Setup" AP after connecting */
+    if (esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK)
+        ESP_LOGI(TAG, "AP disabled – STA connected");
+}
+
+static void ap_enable_cb(void *arg)
+{
+    /* Switch back to AP+STA – restores setup AP on disconnect */
+    if (esp_wifi_set_mode(WIFI_MODE_APSTA) == ESP_OK)
+        ESP_LOGI(TAG, "AP re-enabled – STA disconnected");
+}
+
+static void init_ap_timers(void)
+{
+    esp_timer_create_args_t a = { .callback = ap_disable_cb, .name = "ap_off" };
+    esp_timer_create(&a, &s_ap_disable_timer);
+    a.callback = ap_enable_cb; a.name = "ap_on";
+    esp_timer_create(&a, &s_ap_enable_timer);
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                int32_t id, void *data)
 {
@@ -28,7 +58,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         case WIFI_EVENT_STA_DISCONNECTED:
             ESP_LOGW(TAG, "STA disconnected, retrying...");
             xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
-            /* Never vTaskDelay inside an event handler – it stalls the event loop. */
+            /* Re-enable AP so user can reconfigure; defer mode switch out of handler */
+            if (s_ap_enable_timer) {
+                esp_timer_stop(s_ap_enable_timer);
+                esp_timer_start_once(s_ap_enable_timer, 2 * 1000000ULL); /* 2 s */
+            }
             esp_wifi_connect();
             break;
         case WIFI_EVENT_AP_STACONNECTED: {
@@ -43,6 +77,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         ESP_LOGI(TAG, "STA got IP: %s", s_ip_str);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
+        /* Disable setup AP 5 s after connecting – gives any open browser time to
+         * receive the save-settings response before the AP disappears. */
+        if (s_ap_disable_timer) {
+            esp_timer_stop(s_ap_disable_timer);
+            esp_timer_start_once(s_ap_disable_timer, 5 * 1000000ULL); /* 5 s */
+        }
     }
 }
 
@@ -94,6 +134,7 @@ void wifi_manager_start(void)
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
+    init_ap_timers();
     start_mdns();
     ESP_LOGI(TAG, "WiFi AP+STA started. AP SSID: Nextube-Setup");
 }

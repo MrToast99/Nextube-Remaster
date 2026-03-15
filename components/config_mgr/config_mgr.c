@@ -43,6 +43,7 @@ static void set_defaults(void)
     strcpy(s_cfg.ntp_server, "pool.ntp.org");
     s_cfg.time_zone = -21600;  /* UTC-6 */
 
+    strcpy(s_cfg.weather_source, "wttr");  /* default: no API key needed */
     strcpy(s_cfg.weather_api_key, "");
     strcpy(s_cfg.city, "Airdrie,CA");
     strcpy(s_cfg.temp_format, "Celsius");
@@ -125,6 +126,7 @@ static void parse_json(const char *json)
     json_read_str(root, "youtube_id",       s_cfg.youtube_id,      sizeof(s_cfg.youtube_id));
     json_read_str(root, "youtube_key",      s_cfg.youtube_key,     sizeof(s_cfg.youtube_key));
     json_read_str(root, "bili_uid",         s_cfg.bili_uid,        sizeof(s_cfg.bili_uid));
+    json_read_str(root, "weather_source",   s_cfg.weather_source,  sizeof(s_cfg.weather_source));
     json_read_str(root, "weather_api_key",  s_cfg.weather_api_key, sizeof(s_cfg.weather_api_key));
     json_read_str(root, "City",             s_cfg.city,            sizeof(s_cfg.city));
     json_read_str(root, "temperature_formate", s_cfg.temp_format,  sizeof(s_cfg.temp_format));
@@ -274,6 +276,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "bili_uid",         s_cfg.bili_uid);
     /* Serialize as ±hours so the web UI shows human-readable values (e.g. -6, +5.5) */
     cJSON_AddNumberToObject(root, "time_zone", s_cfg.time_zone / 3600.0);
+    cJSON_AddStringToObject(root, "weather_source",   s_cfg.weather_source);
     cJSON_AddStringToObject(root, "weather_api_key",  s_cfg.weather_api_key);
     cJSON_AddStringToObject(root, "City",             s_cfg.city);
     cJSON_AddStringToObject(root, "temperature_formate", s_cfg.temp_format);

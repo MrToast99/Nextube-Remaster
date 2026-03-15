@@ -55,6 +55,7 @@ typedef struct {
     char             ntp_server[64];
 
     /* Weather */
+    char             weather_source[16]; /* "wttr" (no key) or "openweather" (API key) */
     char             weather_api_key[48];
     char             city[64];
     char             temp_format[12];    /* "Celsius" or "Fahrenheit" */

@@ -6,8 +6,8 @@
  * (available for the original ESP32 since IDF 5.5).
  *
  * Three channels:
- *   TOUCH_LEFT   – GPIO 2  (touch pad channel 2)
- *   TOUCH_MIDDLE – GPIO 4  (touch pad channel 0)
+ *   TOUCH_LEFT   – GPIO 4  (touch pad channel 0)
+ *   TOUCH_MIDDLE – GPIO 2  (touch pad channel 2)
  *   TOUCH_RIGHT  – GPIO 15 (touch pad channel 3)
  *
  * Strategy: continuous scanning with software IIR filter.  A poll task
@@ -28,8 +28,8 @@
 static const char *TAG = "touch";
 
 /* ── Touch pad channel numbers (match GPIO from board_pins.h) ───────── */
-/*   PIN_TOUCH_LEFT=2→pad2, PIN_TOUCH_MIDDLE=4→pad0, PIN_TOUCH_RIGHT=15→pad3 */
-static const int touch_channels[] = { 2, 0, 3 };  /* pad IDs, not GPIO numbers */
+/*   PIN_TOUCH_LEFT=4→pad0, PIN_TOUCH_MIDDLE=2→pad2, PIN_TOUCH_RIGHT=15→pad3 */
+static const int touch_channels[] = { 0, 2, 3 };  /* pad IDs, not GPIO numbers */
 
 /* ── Driver state ───────────────────────────────────────────────────── */
 static touch_sensor_handle_t  s_sens = NULL;

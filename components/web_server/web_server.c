@@ -131,19 +131,38 @@ static esp_err_t api_ota(httpd_req_t *r)
     esp_ota_handle_t h;
     if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin fail"), ESP_FAIL;
+
     char *buf = malloc(4096);
     int rem = r->content_len;
+    bool first_chunk = true;
+
     while (rem > 0) {
-        int n = httpd_req_recv(r, buf, rem>4096?4096:rem);
-        if (n<=0) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
-        if (esp_ota_write(h, buf, n)!=ESP_OK) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
+        int n = httpd_req_recv(r, buf, rem > 4096 ? 4096 : rem);
+        if (n <= 0) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
+
+        /* Validate on the very first chunk: ESP32 app images start with magic
+         * byte 0xE9.  The merged full-flash binary (nextube-fw-full.bin) starts
+         * with the bootloader at offset 0x1000, not an app header, so its first
+         * byte is NOT 0xE9.  Reject it early with a human-readable message. */
+        if (first_chunk) {
+            first_chunk = false;
+            if ((uint8_t)buf[0] != 0xE9) {
+                free(buf);
+                esp_ota_abort(h);
+                return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                    "Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin"), ESP_FAIL;
+            }
+        }
+
+        if (esp_ota_write(h, buf, n) != ESP_OK) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
         rem -= n;
     }
     free(buf);
-    if (esp_ota_end(h)!=ESP_OK || esp_ota_set_boot_partition(upd)!=ESP_OK)
+    if (esp_ota_end(h) != ESP_OK || esp_ota_set_boot_partition(upd) != ESP_OK)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA finalize fail"), ESP_FAIL;
     send_json(r, "{\"status\":\"ok\",\"message\":\"Rebooting...\"}");
-    vTaskDelay(pdMS_TO_TICKS(500)); esp_restart();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
     return ESP_OK;
 }
 
