@@ -99,6 +99,12 @@ void touch_input_init(void)
                                                  &chan_cfg, &s_chan[i]));
     }
 
+    /* ── Configure software (IIR) filter ── */
+    /* Required before enable; SMOOTH data type won't work without it.
+     * The default config uses a reasonable IIR weight for capacitive pads. */
+    touch_filter_config_t filter_cfg = TOUCH_SENSOR_DEFAULT_FILTER_CONFIG();
+    ESP_ERROR_CHECK(touch_sensor_config_filter(s_sens, &filter_cfg));
+
     /* ── Enable and start continuous scanning ── */
     ESP_ERROR_CHECK(touch_sensor_enable(s_sens));
     ESP_ERROR_CHECK(touch_sensor_start_continuous_scanning(s_sens));

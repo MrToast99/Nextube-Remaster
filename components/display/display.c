@@ -43,20 +43,19 @@ static void deselect_all(void)
     for (int i = 0; i < LCD_COUNT; i++) gpio_set_level(cs_pins[i], 1);
 }
 
+/* RST is shared across all 6 displays — call display_reset_all() ONCE
+ * before looping over tubes.  This function only sends the init sequence
+ * to the already-selected tube; it does NOT toggle RST. */
 static void st7735_init_one(int tube)
 {
     select_tube(tube);
-    gpio_set_level(PIN_LCD_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    gpio_set_level(PIN_LCD_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(120));
-    lcd_cmd(0x01); vTaskDelay(pdMS_TO_TICKS(150));
-    lcd_cmd(0x11); vTaskDelay(pdMS_TO_TICKS(120));
-    lcd_cmd(0x3A); lcd_data_byte(0x05);
-    lcd_cmd(0x36); lcd_data_byte(0x08);
+    lcd_cmd(0x01); vTaskDelay(pdMS_TO_TICKS(150)); /* SWRESET */
+    lcd_cmd(0x11); vTaskDelay(pdMS_TO_TICKS(120)); /* SLPOUT  */
+    lcd_cmd(0x3A); lcd_data_byte(0x05);            /* COLMOD  RGB565 */
+    lcd_cmd(0x36); lcd_data_byte(0x08);            /* MADCTL  BGR */
     uint8_t fr[] = {0x01, 0x2C, 0x2D};
-    lcd_cmd(0xB1); lcd_data(fr, 3);
-    lcd_cmd(0x29); vTaskDelay(pdMS_TO_TICKS(50));
+    lcd_cmd(0xB1); lcd_data(fr, 3);                /* FRMCTR1 */
+    lcd_cmd(0x29); vTaskDelay(pdMS_TO_TICKS(50));  /* DISPON  */
     deselect_all();
 }
 
@@ -91,6 +90,10 @@ void display_init(void)
     };
     ledc_channel_config(&ch);
 
+    /* Hardware reset is shared — pulse RST once to reset all 6 displays,
+     * then send the init sequence to each tube individually. */
+    gpio_set_level(PIN_LCD_RST, 0); vTaskDelay(pdMS_TO_TICKS(50));
+    gpio_set_level(PIN_LCD_RST, 1); vTaskDelay(pdMS_TO_TICKS(120));
     for (int i = 0; i < LCD_COUNT; i++) { st7735_init_one(i); display_fill(i, 0x0000); }
     ESP_LOGI(TAG, "Displays ready");
 }
