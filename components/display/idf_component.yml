@@ -1,4 +1,0 @@
-## IDF Component Manager manifest for the display component
-dependencies:
-  espressif/esp_jpeg:
-    version: "*"

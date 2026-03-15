@@ -1,0 +1,10 @@
+## Project-level managed component dependencies.
+## The IDF Component Manager downloads these to managed_components/
+## and makes them available to all components in the project.
+dependencies:
+  espressif/esp_jpeg:
+    version: "*"
+  espressif/mdns:
+    version: "*"
+  idf:
+    version: ">=5.0.0"

@@ -1,4 +1,0 @@
-## IDF Component Manager manifest for wifi_manager
-dependencies:
-  espressif/mdns:
-    version: "*"
