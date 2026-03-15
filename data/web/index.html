@@ -223,6 +223,17 @@ main{padding:0 1rem 2rem}
     <div class="btn-group"><button class="btn btn-primary" onclick="doOTA()">Upload & Flash</button></div>
   </div>
   <div class="card">
+    <h2>Web UI Update (SPIFFS)</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>spiffs.bin</strong> to update the web interface and built-in assets without a USB flash. Required when the release notes mention web UI changes.</p>
+    <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5">
+      ⚠️ <strong>Warning:</strong> this overwrites <em>all</em> SPIFFS flash — including any custom themes or images you have uploaded to the device. Built-in themes will be restored from the new image. Back up custom files first using the SPIFFS Files list below.
+    </div>
+    <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
+    <div class="progress" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
+    <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doSPIFFSOTA()">Upload & Flash</button></div>
+  </div>
+  <div class="card">
     <h2>SPIFFS Files</h2>
     <div id="file-list" style="font-size:.85rem;max-height:300px;overflow-y:auto"></div>
     <div class="btn-group"><button class="btn btn-outline" onclick="loadFiles()">Refresh</button></div>
@@ -406,6 +417,54 @@ async function doOTA() {
   };
   xhr.onerror = () => toast('OTA failed: network error', true);
   xhr.open('POST', '/api/update_firmware');
+  xhr.send(file);
+}
+
+/* ── SPIFFS OTA ─────────────────────────────────────── */
+function doSPIFFSOTA() {
+  const file = $('spiffs-file').files[0];
+  if (!file) return toast('Select spiffs.bin first', true);
+  if (!file.name.toLowerCase().includes('spiffs')) {
+    if (!confirm('File name doesn\'t look like spiffs.bin — upload anyway?')) return;
+  }
+  if (!confirm(
+    'This will overwrite ALL SPIFFS flash including any uploaded custom files.\n\n' +
+    'Built-in themes will be restored. Custom themes/images will be erased.\n\n' +
+    'Continue?'
+  )) return;
+
+  const prog = $('spiffs-progress');
+  const bar  = $('spiffs-bar');
+  const stat = $('spiffs-status');
+  prog.style.display = 'block';
+  stat.style.display = 'block';
+  bar.style.width = '0%';
+  stat.textContent = 'Uploading… (this may take 30–90 seconds)';
+
+  const xhr = new XMLHttpRequest();
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const pct = (e.loaded / e.total * 100).toFixed(0);
+      bar.style.width = pct + '%';
+      stat.textContent = 'Uploading… ' + pct + '%  (' + (e.loaded/1024/1024).toFixed(1) + ' / ' + (e.total/1024/1024).toFixed(1) + ' MB)';
+    }
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      bar.style.width = '100%';
+      stat.textContent = 'Done! Device is rebooting — page will reload in 15 s…';
+      toast('SPIFFS updated! Rebooting…');
+      setTimeout(() => location.reload(), 15000);
+    } else {
+      stat.textContent = 'Failed: ' + (xhr.responseText || xhr.statusText);
+      toast('SPIFFS update failed: ' + (xhr.responseText || xhr.statusText), true);
+    }
+  };
+  xhr.onerror = () => {
+    stat.textContent = 'Network error during upload.';
+    toast('SPIFFS update failed: network error', true);
+  };
+  xhr.open('POST', '/api/update_spiffs');
   xhr.send(file);
 }
 

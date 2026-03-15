@@ -10,6 +10,8 @@
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "cJSON.h"
@@ -170,6 +172,79 @@ static esp_err_t api_ota(httpd_req_t *r)
     return ESP_OK;
 }
 
+/* ── SPIFFS (web UI) OTA ───────────────────────────────────────────── */
+/* Receives a spiffs.bin image and writes it to the SPIFFS partition in
+ * 4 KB sectors.  Each sector is erased immediately before it is written
+ * so the erase latency is interleaved with the network receive rather
+ * than blocking the connection upfront.
+ *
+ * SPIFFS is unmounted before the first write and the device reboots
+ * after a successful flash.  If the upload is interrupted the partition
+ * is left partially erased; a retry will always fix this since erasing
+ * before writing is idempotent. */
+#define SPIFFS_SECTOR 4096
+static esp_err_t api_spiffs_ota(httpd_req_t *r)
+{
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "spiffs");
+    if (!part)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "SPIFFS partition not found"), ESP_FAIL;
+
+    int content_len = r->content_len;
+    if (content_len <= 0 || (uint32_t)content_len > part->size)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "Bad content length"), ESP_FAIL;
+
+    char *buf = malloc(SPIFFS_SECTOR);
+    if (!buf)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Out of memory"), ESP_FAIL;
+
+    /* Unmount SPIFFS before touching flash.  The HTTP server itself runs
+     * from firmware (app partition), so it stays alive. */
+    esp_vfs_spiffs_unregister("spiffs");
+
+    int written = 0;
+    while (written < content_len) {
+        /* Fill one sector from the network stream */
+        int to_recv = content_len - written;
+        if (to_recv > SPIFFS_SECTOR) to_recv = SPIFFS_SECTOR;
+
+        /* Pad the buffer with 0xFF (erased flash value) so the final
+         * write is always a full sector and satisfies the 4-byte alignment
+         * requirement for raw partition writes. */
+        memset(buf, 0xFF, SPIFFS_SECTOR);
+
+        int rx = 0;
+        while (rx < to_recv) {
+            int n = httpd_req_recv(r, buf + rx, to_recv - rx);
+            if (n <= 0) { free(buf); return ESP_FAIL; }
+            rx += n;
+        }
+
+        /* Erase this sector then write it */
+        if (esp_partition_erase_range(part, written, SPIFFS_SECTOR) != ESP_OK) {
+            free(buf);
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       "Erase failed"), ESP_FAIL;
+        }
+        if (esp_partition_write(part, written, buf, SPIFFS_SECTOR) != ESP_OK) {
+            free(buf);
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       "Write failed"), ESP_FAIL;
+        }
+        written += rx;
+    }
+    free(buf);
+
+    ESP_LOGI(TAG, "SPIFFS updated: %d bytes written", written);
+    send_json(r, "{\"status\":\"ok\",\"message\":\"SPIFFS updated, rebooting...\"}");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return ESP_OK;
+}
+
 static esp_err_t api_file_ls(httpd_req_t *r)
 {
     char path[128] = "/spiffs";
@@ -284,6 +359,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/reset",           api_reset),
     R(HTTP_GET,  "/api/status",          api_status),
     R(HTTP_POST, "/api/update_firmware", api_ota),
+    R(HTTP_POST, "/api/update_spiffs",   api_spiffs_ota),
     R(HTTP_GET,  "/api/file/ls",         api_file_ls),
     R(HTTP_POST, "/api/wifi/scan",       api_wifi_scan_post),
     R(HTTP_GET,  "/api/wifi/scan",       api_wifi_scan_get),
@@ -293,7 +369,7 @@ static const httpd_uri_t uris[] = {
 void web_server_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 20;
+    cfg.max_uri_handlers = 24;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.stack_size = 8192;
 
