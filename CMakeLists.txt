@@ -3,6 +3,11 @@ cmake_minimum_required(VERSION 3.16)
 set(EXTRA_COMPONENT_DIRS "components")
 
 # ── Read firmware version from version.json ──────────────────────────
+# Tell CMake to re-run configure automatically whenever version.json
+# changes, so fw_version.h is always regenerated on the next build.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/version.json")
+
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/version.json" _VER_JSON)
 string(REGEX MATCH "\"version\"[[:space:]]*:[[:space:]]*\"([^\"]+)\"" _ "${_VER_JSON}")
 set(FW_VERSION "${CMAKE_MATCH_1}")

@@ -45,6 +45,9 @@ select option{background:var(--accent);color:var(--text)}
 .wifi-item .ssid{font-weight:500}.wifi-item .rssi{color:var(--dim);font-size:.8rem}
 .progress{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin-top:.5rem}
 .progress-bar{height:100%;background:var(--hi);transition:width .3s}
+.file-row{display:flex;justify-content:space-between;align-items:center;padding:.35rem .7rem;border-bottom:1px solid rgba(255,255,255,.05)}
+.file-row:last-child{border-bottom:none}
+.file-row:hover{background:rgba(255,255,255,.04)}
 .stat{text-align:center;padding:.5rem}
 .stat .val{font-size:1.6rem;font-weight:700;color:var(--hi)}
 .stat .lbl{font-size:.75rem;color:var(--dim);margin-top:2px}
@@ -256,14 +259,28 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <div class="card">
     <h2>SPIFFS Files</h2>
-    <div id="file-list" style="font-size:.85rem;max-height:300px;overflow-y:auto"></div>
-    <div class="btn-group"><button class="btn btn-outline" onclick="loadFiles()">Refresh</button></div>
+    <div id="file-breadcrumb" style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem;min-height:1.2em"></div>
+    <div id="file-list" style="font-size:.85rem;max-height:320px;overflow-y:auto;border:1px solid rgba(255,255,255,.07);border-radius:6px"></div>
+    <div class="btn-group" style="margin-top:.7rem">
+      <button class="btn btn-outline" onclick="browseDir('/')">Browse</button>
+      <button class="btn btn-outline" onclick="browseDir(s_filePath)">Refresh</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Device Logs</h2>
+    <p style="color:var(--dim);font-size:.82rem;margin-bottom:.8rem">Live device log output — buffered in RAM from boot, not written to flash. Last 80 lines. Use auto-refresh to watch in real time.</p>
+    <pre id="log-output" style="background:#0d0d0d;color:#bbb;font-family:'Courier New',Courier,monospace;font-size:.73rem;line-height:1.45;padding:.8rem;border-radius:6px;height:300px;overflow-y:auto;margin:0 0 .8rem;white-space:pre-wrap;word-break:break-all;border:1px solid #222"></pre>
+    <div class="btn-group">
+      <button class="btn btn-outline" id="log-auto-btn" onclick="toggleLogAuto()">Auto-refresh</button>
+      <button class="btn btn-outline" onclick="refreshLogs()">Refresh</button>
+      <button class="btn btn-outline" onclick="clearLogs()">Clear</button>
+    </div>
   </div>
   <div class="card">
     <h2>Danger Zone</h2>
     <div class="btn-group">
       <button class="btn btn-danger" onclick="if(confirm('Reset ALL settings to factory defaults?'))fetch('/api/reset',{method:'POST'}).then(()=>toast('Resetting...'))">Factory Reset</button>
-      <button class="btn btn-outline" onclick="fetch('/api/reset',{method:'POST'})">Reboot Device</button>
+      <button class="btn btn-outline" onclick="if(confirm('Reboot the device?'))fetch('/api/reboot',{method:'POST'}).then(()=>toast('Rebooting...'))">Reboot Device</button>
     </div>
   </div>
   <div class="card">
@@ -532,15 +549,108 @@ function doSPIFFSOTA() {
   xhr.send(file);
 }
 
-/* ── File list ─────────────────────────────────────── */
-async function loadFiles() {
-  const files = await api('file/ls?dir=/');
+/* ── SPIFFS file browser ───────────────────────────── */
+let s_filePath = '/';
+let s_fileHistory = [];
+
+async function browseDir(dir) {
+  dir = dir || '/';
+  const files = await api('file/ls?dir=' + encodeURIComponent(dir));
   if (!files) return;
-  $('file-list').innerHTML = files.map(f =>
-    `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.05)">
-      <span>${f.name}</span><span style="color:var(--dim)">${f.size ? (f.size/1024).toFixed(1)+'K' : 'dir'}</span>
-    </div>`
-  ).join('') || '<em style="color:var(--dim)">No files</em>';
+
+  s_filePath = dir;
+
+  /* Breadcrumb */
+  const parts = dir.replace(/\/+$/, '').split('/').filter(Boolean);
+  let crumbHtml = '<span style="cursor:pointer;color:var(--hi)" onclick="browseDir(\'/\')">/ root</span>';
+  let built = '';
+  parts.forEach(p => {
+    built += '/' + p;
+    const path = built;
+    crumbHtml += ` › <span style="cursor:pointer;color:var(--hi)" onclick="browseDir('${path}')">${p}</span>`;
+  });
+  $('file-breadcrumb').innerHTML = crumbHtml;
+
+  /* File rows */
+  let rows = '';
+
+  /* Back row */
+  if (dir !== '/') {
+    const parent = dir.replace(/\/[^\/]+\/?$/, '') || '/';
+    rows += `<div class="file-row" onclick="browseDir('${parent}')" style="cursor:pointer;color:var(--hi)">
+      <span>← ..</span><span></span>
+    </div>`;
+  }
+
+  if (files.length === 0 && dir === '/') {
+    rows = '<div style="padding:.6rem .8rem;color:var(--dim);font-style:italic">No files</div>';
+  } else {
+    files.forEach(f => {
+      const isDir = !f.size;
+      const sizeStr = isDir ? 'folder' : (f.size < 1024 ? f.size + ' B' : (f.size/1024).toFixed(1) + ' K');
+      const icon = isDir ? '📁' : '📄';
+      const fullPath = (dir.replace(/\/$/, '') + '/' + f.name);
+      const click = isDir ? `browseDir('${fullPath}')` : '';
+      const cursor = isDir ? 'cursor:pointer' : '';
+      rows += `<div class="file-row" onclick="${click}" style="${cursor}">
+        <span>${icon} ${f.name}</span>
+        <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
+      </div>`;
+    });
+  }
+
+  $('file-list').innerHTML = rows;
+}
+
+/* Keep backward-compat alias used by auto-load on tab switch */
+function loadFiles() { browseDir(s_filePath); }
+
+/* ── Device logs ───────────────────────────────────── */
+let s_logAuto = false;
+let s_logTimer = null;
+
+function toggleLogAuto() {
+  s_logAuto = !s_logAuto;
+  const btn = $('log-auto-btn');
+  if (s_logAuto) {
+    btn.textContent = 'Auto-refresh ✓';
+    btn.classList.replace('btn-outline','btn-primary');
+    s_logTimer = setInterval(refreshLogs, 2000);
+    refreshLogs();
+  } else {
+    btn.textContent = 'Auto-refresh';
+    btn.classList.replace('btn-primary','btn-outline');
+    clearInterval(s_logTimer);
+  }
+}
+
+async function refreshLogs() {
+  try {
+    const r = await fetch('/api/logs');
+    if (!r.ok) return;
+    const d = await r.json();
+    const pre = $('log-output');
+    const atBottom = pre.scrollHeight - pre.clientHeight <= pre.scrollTop + 8;
+    pre.innerHTML = '';
+    (d.lines || []).forEach(line => {
+      const s = document.createElement('span');
+      s.textContent = line + '\n';
+      /* Colour by ESP-IDF level prefix: E/W/I/D/V */
+      const lv = line.charAt(0);
+      if      (lv === 'E') s.style.color = '#ff6b6b';
+      else if (lv === 'W') s.style.color = '#ffd166';
+      else if (lv === 'I') s.style.color = '#a8d8a8';
+      else if (lv === 'D') s.style.color = '#778';
+      else                 s.style.color = '#555';
+      pre.appendChild(s);
+    });
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  } catch(_) {}
+}
+
+async function clearLogs() {
+  await fetch('/api/logs/clear', {method:'POST'});
+  if ($('log-output')) $('log-output').innerHTML = '';
 }
 
 /* ── Status polling ────────────────────────────────── */

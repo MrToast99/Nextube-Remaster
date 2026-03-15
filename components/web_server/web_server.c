@@ -17,13 +17,62 @@
 #include "esp_wifi.h"
 #include "cJSON.h"
 
+#include "freertos/semphr.h"
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
 
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
+
+/* ── In-RAM log ring buffer ────────────────────────────────────────── */
+/* Captures all ESP_LOG* output into a circular buffer so the web UI
+ * can display recent device logs without a serial connection.
+ * Lines are stored in internal SRAM; nothing is written to flash.
+ * The buffer holds the most recent LOG_RING_LINES entries and wraps
+ * silently once full — oldest lines are overwritten. */
+#define LOG_RING_LINES  80
+#define LOG_LINE_LEN   160
+
+static char              s_log_ring[LOG_RING_LINES][LOG_LINE_LEN];
+static int               s_log_head  = 0;   /* next write slot */
+static int               s_log_count = 0;   /* lines stored (≤ LOG_RING_LINES) */
+static SemaphoreHandle_t s_log_mutex = NULL;
+
+/* vprintf hook: intercept all ESP_LOG* output, buffer it, then forward
+ * to UART via the standard vprintf so the serial monitor still works. */
+static int log_vprintf_hook(const char *fmt, va_list args)
+{
+    /* Take a copy of the va_list BEFORE consuming it with vprintf so we
+     * can format the same message a second time into our ring buffer. */
+    va_list copy;
+    va_copy(copy, args);
+
+    /* Forward to UART as normal */
+    int ret = vprintf(fmt, args);
+
+    /* Buffer the formatted line — non-blocking try-lock so we never
+     * stall the logging task if the HTTP handler holds the mutex. */
+    if (s_log_mutex && xSemaphoreTake(s_log_mutex, 0) == pdTRUE) {
+        char line[LOG_LINE_LEN];
+        vsnprintf(line, sizeof(line), fmt, copy);
+        /* Strip trailing newline / carriage-return */
+        int n = (int)strlen(line);
+        while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+        if (n > 0) {
+            memcpy(s_log_ring[s_log_head], line, LOG_LINE_LEN);
+            s_log_ring[s_log_head][LOG_LINE_LEN - 1] = '\0';
+            s_log_head  = (s_log_head + 1) % LOG_RING_LINES;
+            if (s_log_count < LOG_RING_LINES) s_log_count++;
+        }
+        xSemaphoreGive(s_log_mutex);
+    }
+
+    va_end(copy);
+    return ret;
+}
 
 #include "fw_version.h"
 #define HW_VER "1.31"
@@ -114,6 +163,15 @@ static esp_err_t api_reset(httpd_req_t *r)
 {
     config_reset();
     send_json(r, "{\"status\":\"ok\"}");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return ESP_OK;
+}
+
+/* POST /api/reboot — restart the device without touching the config */
+static esp_err_t api_reboot(httpd_req_t *r)
+{
+    send_json(r, "{\"status\":\"ok\",\"message\":\"Rebooting...\"}");
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
     return ESP_OK;
@@ -304,6 +362,41 @@ static esp_err_t api_file_ls(httpd_req_t *r)
     return ret;
 }
 
+/* ── Log ring API ──────────────────────────────────────────────────── */
+/* GET /api/logs  → {"lines":["I (12) tag: msg", ...]}  chronological  */
+static esp_err_t api_get_logs(httpd_req_t *r)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr  = cJSON_AddArrayToObject(root, "lines");
+
+    if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+        int count = s_log_count;
+        /* oldest entry when the buffer has wrapped */
+        int start = (count < LOG_RING_LINES) ? 0 : s_log_head;
+        for (int i = 0; i < count; i++) {
+            int idx = (start + i) % LOG_RING_LINES;
+            cJSON_AddItemToArray(arr, cJSON_CreateString(s_log_ring[idx]));
+        }
+        xSemaphoreGive(s_log_mutex);
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    esp_err_t ret = send_json(r, json);
+    free(json); cJSON_Delete(root);
+    return ret;
+}
+
+/* POST /api/logs/clear  → clears the in-RAM ring buffer only */
+static esp_err_t api_clear_logs(httpd_req_t *r)
+{
+    if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+        s_log_head  = 0;
+        s_log_count = 0;
+        xSemaphoreGive(s_log_mutex);
+    }
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 static esp_err_t api_wifi_scan_post(httpd_req_t *r)
 {
     wifi_manager_scan_start();
@@ -387,6 +480,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/firmwareVersion", api_fw_ver),
     R(HTTP_GET,  "/api/hardwareVersion", api_hw_ver),
     R(HTTP_POST, "/api/reset",           api_reset),
+    R(HTTP_POST, "/api/reboot",          api_reboot),
     R(HTTP_POST, "/api/audio/play",      api_audio_play),
     R(HTTP_GET,  "/api/status",          api_status),
     R(HTTP_POST, "/api/update_firmware", api_ota),
@@ -394,11 +488,19 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/file/ls",         api_file_ls),
     R(HTTP_POST, "/api/wifi/scan",       api_wifi_scan_post),
     R(HTTP_GET,  "/api/wifi/scan",       api_wifi_scan_get),
+    R(HTTP_GET,  "/api/logs",            api_get_logs),
+    R(HTTP_POST, "/api/logs/clear",      api_clear_logs),
     R(HTTP_OPTIONS, "/api/*",            api_cors),
 };
 
 void web_server_start(void)
 {
+    /* Install the log capture hook as early as possible so boot messages
+     * after this point are captured.  All pre-hook messages still appear
+     * on UART; only post-hook messages are buffered for the web viewer. */
+    s_log_mutex = xSemaphoreCreateMutex();
+    esp_log_set_vprintf(log_vprintf_hook);
+
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 24;
     cfg.uri_match_fn = httpd_uri_match_wildcard;

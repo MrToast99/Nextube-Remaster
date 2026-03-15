@@ -40,6 +40,7 @@
 #include "ntp_time.h"
 #include "weather.h"
 #include "youtube_bili.h"
+#include "fw_version.h"
 
 static const char *TAG = "main";
 
@@ -133,7 +134,6 @@ static void init_nvs(void)
 /* ── Application entry ─────────────────────────────────────────────── */
 void app_main(void)
 {
-#include "fw_version.h"
     /* Restart once after any hard reset so WiFi PHY initialises cleanly.
      * (See s_warm_boot comment above.) */
     if (esp_reset_reason() == ESP_RST_EXT && s_warm_boot != WARM_BOOT_MAGIC) {
@@ -143,7 +143,7 @@ void app_main(void)
     s_warm_boot = 0;     /* clear so the next hard-reset also triggers a restart */
 
     ESP_LOGI(TAG, "╔════════════════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║  Nextube Open-Source Firmware v%-16s ║", FW_VERSION_STR);
+    ESP_LOGI(TAG, "║  Nextube-Remaster Open-Source Firmware v%-7s ║", FW_VERSION_STR);
     ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster ║");
     ESP_LOGI(TAG, "╚════════════════════════════════════════════════╝");
 
