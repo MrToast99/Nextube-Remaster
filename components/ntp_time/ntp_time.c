@@ -41,6 +41,18 @@ static void ntp_task(void *arg)
     }
 }
 
+void ntp_apply_timezone(void)
+{
+    const nextube_config_t *cfg = config_get();
+    int hrs  = cfg->time_zone / 3600;
+    int mins = abs((cfg->time_zone % 3600) / 60);
+    char tz[32];
+    snprintf(tz, sizeof(tz), "UTC%+d:%02d", -hrs, mins);
+    setenv("TZ", tz, 1);
+    tzset();
+    ESP_LOGI(TAG, "Timezone updated to %s (offset=%ld s)", tz, (long)cfg->time_zone);
+}
+
 void ntp_time_start(void)
 {
     xTaskCreate(ntp_task, "ntp", 4096, NULL, 5, NULL);

@@ -13,6 +13,7 @@
 
 #include "leds.h"
 #include "board_pins.h"
+#include "config_mgr.h"
 #include "esp_log.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
@@ -154,4 +155,48 @@ void leds_effect_rainbow(void)
         leds_set_color(i, r, g, b);
     }
     leds_update();
+}
+
+/* ── Effect task ────────────────────────────────────────────────────── */
+static void led_task(void *arg)
+{
+    while (1) {
+        const nextube_config_t *cfg = config_get();
+        /* Original firmware stored brightness as attenuation (0=full bright, 100=off).
+         * Invert so the web UI slider behaves as expected. */
+        uint8_t brt = cfg->led_brightness;
+        leds_set_brightness(brt <= 100 ? 100 - brt : 0);
+
+        switch (cfg->backlight_mode) {
+        case BL_MODE_STATIC:
+            for (int i = 0; i < LED_COUNT; i++) {
+                leds_set_color(i,
+                    cfg->backlight_rgb[i][0],
+                    cfg->backlight_rgb[i][1],
+                    cfg->backlight_rgb[i][2]);
+            }
+            leds_update();
+            vTaskDelay(pdMS_TO_TICKS(100));   /* static: update slowly */
+            break;
+        case BL_MODE_BREATH:
+            leds_effect_breath();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            break;
+        case BL_MODE_RAINBOW:
+            leds_effect_rainbow();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            break;
+        case BL_MODE_OFF:
+        default:
+            leds_off();
+            vTaskDelay(pdMS_TO_TICKS(200));
+            break;
+        }
+    }
+}
+
+void leds_task_start(void)
+{
+    xTaskCreatePinnedToCore(led_task, "leds", 2048, NULL, 4, NULL, 1);
+    ESP_LOGI(TAG, "LED effect task started");
 }

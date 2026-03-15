@@ -51,5 +51,5 @@
 /* ── Display characteristics ───────────────────────────────────────── */
 #define LCD_WIDTH          80
 #define LCD_HEIGHT        160
-#define LCD_OFFSET_X       26  /* ST7735 column offset: (132-80)/2  */
-#define LCD_OFFSET_Y        1  /* ST7735 row offset:    (162-160)/2 */
+#define LCD_OFFSET_X       24  /* ST7735 column offset for 80px display (matches Adafruit MINI160x80) */
+#define LCD_OFFSET_Y        0  /* ST7735 row offset */

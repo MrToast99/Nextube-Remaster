@@ -41,6 +41,39 @@
 
 static const char *TAG = "main";
 
+/* ── Touch handler ─────────────────────────────────────────────────── */
+static void on_touch(touch_pad_id_t pad)
+{
+    const nextube_config_t *cfg = config_get();
+    static const char *mode_names[] = {
+        "Clock","Countdown","Scoreboard","Pomodoro","YouTube","CustomClock","Album"
+    };
+    char json[80];
+
+    switch (pad) {
+    case TOUCH_LEFT: {
+        int m = ((int)cfg->current_mode - 1 + APP_MODE_MAX) % APP_MODE_MAX;
+        snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", mode_names[m]);
+        config_set_json(json, strlen(json));
+        break;
+    }
+    case TOUCH_RIGHT: {
+        int m = ((int)cfg->current_mode + 1) % APP_MODE_MAX;
+        snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", mode_names[m]);
+        config_set_json(json, strlen(json));
+        break;
+    }
+    case TOUCH_MIDDLE: {
+        /* Toggle backlight on/off */
+        const char *j = cfg->backlight_on
+            ? "{\"backlight_onoff\":\"OFF\"}"
+            : "{\"backlight_onoff\":\"ON\"}";
+        config_set_json(j, strlen(j));
+        break;
+    }
+    }
+}
+
 /* ── SPIFFS mount ──────────────────────────────────────────────────── */
 static void init_spiffs(void)
 {
@@ -99,7 +132,9 @@ void app_main(void)
     audio_set_volume(cfg->volume); /* restore saved volume level */
 
     leds_init();
+    leds_task_start();
     touch_input_init();
+    touch_input_register_callback(on_touch);
     rtc_init();
 
     /* Networking – start AP+STA, then web server */

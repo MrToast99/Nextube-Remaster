@@ -81,7 +81,7 @@ void display_init(void)
 
     ledc_timer_config_t tmr = {
         .speed_mode = LEDC_LOW_SPEED_MODE, .duty_resolution = LEDC_TIMER_8_BIT,
-        .timer_num = LEDC_TIMER_0, .freq_hz = 5000, .clk_cfg = LEDC_AUTO_CLK,
+        .timer_num = LEDC_TIMER_0, .freq_hz = 20000, .clk_cfg = LEDC_AUTO_CLK,
     };
     ledc_timer_config(&tmr);
     ledc_channel_config_t ch = {
@@ -296,16 +296,16 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
         bool pm = (h >= 12);
         h = h % 12;
         if (h == 0) h = 12;
-        /* tubes 0-4: H1 H2 M1 M2 S1   tube 5: am/pm icon */
-        int d[5] = {h/10, h%10, m/10, m%10, s/10};
-        for (int i = 0; i < 5; i++) {
-            /* leading zero on hour suppressed → show blank */
-            if (i == 0 && d[0] == 0)
-                display_show_ampm(0, "blank", cfg->theme);
-            else
-                display_show_number(i, d[i], cfg->theme);
-        }
-        display_show_ampm(5, pm ? "pm" : "am", cfg->theme);
+        /* tubes: H1  H2  colon  M1  M2  AM/PM  (no seconds in 12H) */
+        if (h / 10 == 0)
+            display_show_ampm  (0, "blank",          cfg->theme);
+        else
+            display_show_number(0, h / 10,           cfg->theme);
+        display_show_number(1, h % 10,               cfg->theme);
+        display_show_ampm  (2, "colon",              cfg->theme);
+        display_show_number(3, m / 10,               cfg->theme);
+        display_show_number(4, m % 10,               cfg->theme);
+        display_show_ampm  (5, pm ? "pm" : "am",     cfg->theme);
     } else {
         /* 24H: all six tubes = H1 H2 M1 M2 S1 S2 */
         int d[6] = {h/10, h%10, m/10, m%10, s/10, s%10};
