@@ -34,8 +34,6 @@ CONFIG_ESP_WIFI_NVS_ENABLED=y
 # HTTP Server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
-# Raise send timeout so non-blocking EAGAIN (errno 11) retries don't spam the log
-CONFIG_HTTPD_SEND_WAIT_TIMEOUT=10
 
 # SPIFFS
 CONFIG_SPIFFS_MAX_PARTITIONS=3
@@ -61,7 +59,10 @@ CONFIG_MDNS_MAX_SERVICES=10
 # works in the weather HTTP client.  Without this the bundle is empty and
 # esp-tls rejects the connection with "No server verification option set".
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
-CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# Partial bundle (~40 KB, 40 most common CAs) covers Let's Encrypt / DigiCert /
+# GlobalSign used by wttr.in, Open-Meteo, and Met.no.  The full bundle (~70 KB,
+# 150+ CAs) wastes heap and was causing HTTP server connection-slot exhaustion.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_PARTIAL=y
 
 # LWIP
 CONFIG_LWIP_MAX_SOCKETS=16
