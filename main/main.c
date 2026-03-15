@@ -52,13 +52,23 @@ static void on_touch(touch_pad_id_t pad)
 
     switch (pad) {
     case TOUCH_LEFT: {
-        int m = ((int)cfg->current_mode - 1 + APP_MODE_MAX) % APP_MODE_MAX;
+        /* Step backward; skip modes disabled in enabled_modes bitmask */
+        int m = (int)cfg->current_mode;
+        for (int tries = 0; tries < APP_MODE_MAX; tries++) {
+            m = (m - 1 + APP_MODE_MAX) % APP_MODE_MAX;
+            if (cfg->enabled_modes & (1 << m)) break;
+        }
         snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", mode_names[m]);
         config_set_json(json, strlen(json));
         break;
     }
     case TOUCH_RIGHT: {
-        int m = ((int)cfg->current_mode + 1) % APP_MODE_MAX;
+        /* Step forward; skip modes disabled in enabled_modes bitmask */
+        int m = (int)cfg->current_mode;
+        for (int tries = 0; tries < APP_MODE_MAX; tries++) {
+            m = (m + 1) % APP_MODE_MAX;
+            if (cfg->enabled_modes & (1 << m)) break;
+        }
         snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", mode_names[m]);
         config_set_json(json, strlen(json));
         break;
