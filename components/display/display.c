@@ -136,10 +136,13 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
 #include <stdio.h>
 #include <stdlib.h>
 #include "esp_heap_caps.h"
-#include "esp_jpeg_dec.h"   /* ESP-IDF 5.x esp_jpeg component */
+#include "jpeg_decoder.h"   /* espressif/esp_jpeg v1.x managed component */
 
-/* Allocate decode buffer from PSRAM so we don't exhaust IRAM. */
+/* Allocate decode buffer from PSRAM so we don't exhaust DRAM. */
 #define PSRAM_MALLOC(sz)  heap_caps_malloc((sz), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+
+/* TJpgDec workspace: ~3100 bytes for JD_FASTDECODE=0 – round up with margin. */
+#define JPEG_WORK_BUF_SIZE  3200
 
 void display_show_image(int tube, const char *path)
 {
@@ -164,38 +167,40 @@ void display_show_image(int tube, const char *path)
     fread(jpeg_buf, 1, sz, f);
     fclose(f);
 
-    /* ── 2. Decode JPEG → RGB565 (big-endian for ST7735) ────────── */
-    jpeg_dec_config_t cfg = {
-        .output_type = JPEG_RAW_TYPE_RGB565_BE,
-        .rotate      = JPEG_ROTATE_0D,
-    };
-    jpeg_dec_handle_t dec = NULL;
-    if (jpeg_dec_open(&cfg, &dec) != JPEG_ERR_OK) {
-        free(jpeg_buf); display_fill(tube, 0x0000); return;
+    /* ── 2. Decode JPEG → RGB565 big-endian (for ST7735) ────────── */
+    uint8_t *work_buf = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
+    size_t   out_sz   = LCD_WIDTH * LCD_HEIGHT * 2;
+    uint8_t *rgb_buf  = PSRAM_MALLOC(out_sz);
+
+    if (!work_buf || !rgb_buf) {
+        free(work_buf); free(rgb_buf); free(jpeg_buf);
+        display_fill(tube, 0x0000); return;
     }
 
-    jpeg_dec_io_t io = { .inbuf = jpeg_buf, .inbuf_len = (uint32_t)sz };
-    jpeg_dec_header_info_t hdr = {0};
-    if (jpeg_dec_parse_header(dec, &io, &hdr) != JPEG_ERR_OK) {
-        jpeg_dec_close(dec); free(jpeg_buf); display_fill(tube, 0x0000); return;
-    }
+    esp_jpeg_image_cfg_t dec_cfg = {0};
+    dec_cfg.indata                       = jpeg_buf;
+    dec_cfg.indata_size                  = (uint32_t)sz;
+    dec_cfg.outbuf                       = rgb_buf;
+    dec_cfg.outbuf_size                  = out_sz;
+    dec_cfg.out_format                   = JPEG_IMAGE_FORMAT_RGB565;
+    dec_cfg.out_scale                    = JPEG_IMAGE_SCALE_0;
+    dec_cfg.flags.swap_color_bytes       = 1;   /* big-endian bytes for ST7735 */
+    dec_cfg.advanced.working_buffer      = work_buf;
+    dec_cfg.advanced.working_buffer_size = JPEG_WORK_BUF_SIZE;
 
-    size_t out_sz = hdr.width * hdr.height * 2;
-    uint8_t *rgb_buf = PSRAM_MALLOC(out_sz);
-    if (!rgb_buf) {
-        jpeg_dec_close(dec); free(jpeg_buf); display_fill(tube, 0x0000); return;
-    }
-    io.outbuf = rgb_buf;
-    esp_err_t dec_err = (jpeg_dec_process(dec, &io) == JPEG_ERR_OK) ? ESP_OK : ESP_FAIL;
-    jpeg_dec_close(dec);
+    esp_jpeg_image_output_t out_img = {0};
+    esp_err_t dec_err = esp_jpeg_decode(&dec_cfg, &out_img);
+
+    free(work_buf);
     free(jpeg_buf);
 
     if (dec_err != ESP_OK) {
+        ESP_LOGW(TAG, "JPEG decode failed %d: %s", dec_err, full);
         free(rgb_buf); display_fill(tube, 0x0000); return;
     }
 
     /* ── 3. Push RGB565 frame to LCD ────────────────────────────── */
-    display_show_digit(tube, rgb_buf, (int)hdr.width, (int)hdr.height);
+    display_show_digit(tube, rgb_buf, (int)out_img.width, (int)out_img.height);
     free(rgb_buf);
 }
 
