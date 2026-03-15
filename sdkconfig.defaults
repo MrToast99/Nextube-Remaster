@@ -59,3 +59,19 @@ CONFIG_LWIP_MAX_SOCKETS=16
 
 # NVS
 CONFIG_NVS_ENCRYPTION=n
+
+# ── IRAM optimisation ─────────────────────────────────────────────────
+# IRAM overflows by ~5 KB when esp_jpeg + WiFi + BT all load.
+# Move non-ISR-critical code to flash to free headroom.
+
+# FreeRTOS tick hook and utility functions don't need to be in IRAM.
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+
+# We use spi_device_polling_transmit exclusively – the DMA/ISR path
+# for SPI master is never exercised, so save the IRAM it would occupy.
+CONFIG_SPI_MASTER_ISR_IN_IRAM=n
+
+# Ring-buffer ISR and helper functions (used by RMT LED driver and I2S)
+# can live in flash; latency is acceptable for our use case.
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
