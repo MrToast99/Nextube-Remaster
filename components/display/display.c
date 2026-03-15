@@ -75,7 +75,8 @@ void display_init(void)
     };
     spi_bus_initialize(HSPI_HOST, &bus, SPI_DMA_CH_AUTO);
     spi_device_interface_config_t dev = {
-        .clock_speed_hz = 40*1000*1000, .mode = 0, .spics_io_num = -1, .queue_size = 7,
+        /* 26 MHz: max safe SPI speed when PSRAM is active on ESP32 (APB/3 = 26.666 MHz ceiling) */
+        .clock_speed_hz = 26*1000*1000, .mode = 0, .spics_io_num = -1, .queue_size = 7,
     };
     spi_bus_add_device(HSPI_HOST, &dev, &spi_dev);
 
