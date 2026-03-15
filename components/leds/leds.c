@@ -162,10 +162,8 @@ static void led_task(void *arg)
 {
     while (1) {
         const nextube_config_t *cfg = config_get();
-        /* Original firmware stored brightness as attenuation (0=full bright, 100=off).
-         * Invert so the web UI slider behaves as expected. */
-        uint8_t brt = cfg->led_brightness;
-        leds_set_brightness(brt <= 100 ? 100 - brt : 0);
+        /* led_brightness is 0=off, 100=full bright — use directly. */
+        leds_set_brightness(cfg->led_brightness);
 
         switch (cfg->backlight_mode) {
         case BL_MODE_STATIC:

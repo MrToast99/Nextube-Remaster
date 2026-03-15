@@ -23,6 +23,7 @@
 #include "driver/touch_sens.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "touch";
 
@@ -51,7 +52,8 @@ static TaskHandle_t touch_task_handle = NULL;
  * the 50 ms poll loop unblocked during slow flash writes.
  */
 
-static TaskHandle_t s_handler_task = NULL;
+static TaskHandle_t  s_handler_task = NULL;
+static QueueHandle_t s_touch_queue  = NULL;  /* depth-8 queue: survives burst presses */
 
 /* Software baseline: IIR-tracked idle level per channel.
  * ESP32 V1 touch_sens only exposes RAW and SMOOTH (no hardware BENCHMARK),
@@ -62,10 +64,10 @@ static uint32_t s_baseline[3] = { 0 };
 
 static void touch_handler_task(void *arg)
 {
+    touch_pad_id_t id;
     while (1) {
-        uint32_t notif = 0;
-        if (xTaskNotifyWait(0, UINT32_MAX, &notif, portMAX_DELAY) == pdTRUE) {
-            if (user_cb) user_cb((touch_pad_id_t)notif);
+        if (xQueueReceive(s_touch_queue, &id, portMAX_DELAY) == pdTRUE) {
+            if (user_cb) user_cb(id);
         }
     }
 }
@@ -107,9 +109,10 @@ static void touch_poll_task(void *arg)
             }
 
             if (pressed && !was_pressed[i]) {
-                /* Dispatch to handler task so flash write doesn't block poll */
-                if (s_handler_task)
-                    xTaskNotify(s_handler_task, (uint32_t)i, eSetValueWithOverwrite);
+                /* Queue the event – queue depth 8 prevents overwrite of rapid presses */
+                touch_pad_id_t id = (touch_pad_id_t)i;
+                if (s_touch_queue)
+                    xQueueSend(s_touch_queue, &id, 0);  /* non-blocking; drop if full */
             }
             was_pressed[i] = pressed;
         }
@@ -178,9 +181,10 @@ void touch_input_init(void)
                  (unsigned)(s_baseline[i] * 80 / 100));
     }
 
-    /* Handler task: receives notifications from poll task and calls user_cb.
+    /* Handler task: drains the touch queue and calls user_cb.
      * Keeps the 50 ms poll loop unblocked during slow flash writes.
      * Pinned to CPU 0 where other app tasks live. */
+    s_touch_queue = xQueueCreate(8, sizeof(touch_pad_id_t));
     xTaskCreatePinnedToCore(touch_handler_task, "touch_hdl", 3072, NULL,
                             4, &s_handler_task, 0);
 

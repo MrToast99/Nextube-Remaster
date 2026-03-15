@@ -30,6 +30,7 @@ static void set_defaults(void)
     s_cfg.led_brightness  = 60;
     s_cfg.backlight_mode  = BL_MODE_BREATH;
     s_cfg.backlight_on    = true;
+    s_cfg.enabled_modes   = 0x7F;  /* all 7 modes enabled */
 
     /* Default rainbow-ish backlight colours */
     uint8_t defaults[6][3] = {
@@ -38,7 +39,7 @@ static void set_defaults(void)
     };
     memcpy(s_cfg.backlight_rgb, defaults, sizeof(defaults));
 
-    strcpy(s_cfg.hostname, "nextube");
+    strcpy(s_cfg.hostname, "nextube-remaster");
     strcpy(s_cfg.ntp_server, "pool.ntp.org");
     s_cfg.time_zone = -21600;  /* UTC-6 */
 
@@ -132,11 +133,17 @@ static void parse_json(const char *json)
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
     json_read_str(root, "timer_file",       s_cfg.timer_file,      sizeof(s_cfg.timer_file));
 
-    /* time_zone is stored in JSON as ±hours (e.g. -6), internally as seconds */
+    /* time_zone: new format = ±hours (|value| ≤ 24), legacy = raw seconds (|value| > 24).
+     * Migration: old SPIFFS files stored -21600 (seconds); new format stores -6 (hours). */
     {
         cJSON *tz_item = cJSON_GetObjectItem(root, "time_zone");
-        if (cJSON_IsNumber(tz_item))
-            s_cfg.time_zone = (int32_t)(tz_item->valuedouble * 3600.0);
+        if (cJSON_IsNumber(tz_item)) {
+            double v = tz_item->valuedouble;
+            if (v > 24.0 || v < -24.0)
+                s_cfg.time_zone = (int32_t)v;             /* legacy: already in seconds */
+            else
+                s_cfg.time_zone = (int32_t)(v * 3600.0); /* new: ±hours                */
+        }
     }
 
     json_read_u8(root, "volume",         &s_cfg.volume);
@@ -156,6 +163,10 @@ static void parse_json(const char *json)
     char bl_onoff[8] = {0};
     json_read_str(root, "backlight_onoff", bl_onoff, sizeof(bl_onoff));
     s_cfg.backlight_on = (strcmp(bl_onoff, "OFF") != 0);
+
+    json_read_u8(root, "enabled_modes", &s_cfg.enabled_modes);
+    /* Always keep Clock (bit 0) enabled so the device is never stuck with no mode */
+    s_cfg.enabled_modes |= (1 << APP_MODE_CLOCK);
 
     /* Backlight RGB array */
     cJSON *bl_rgb = cJSON_GetObjectItem(root, "backlight_RGB");
@@ -279,6 +290,7 @@ char *config_to_json(void)
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off"};
     cJSON_AddStringToObject(root, "backlight_mode",  bl_modes[s_cfg.backlight_mode]);
     cJSON_AddStringToObject(root, "backlight_onoff", s_cfg.backlight_on ? "ON" : "OFF");
+    cJSON_AddNumberToObject(root, "enabled_modes",   s_cfg.enabled_modes);
 
     cJSON *bl_rgb = cJSON_AddArrayToObject(root, "backlight_RGB");
     for (int i = 0; i < 6; i++) {

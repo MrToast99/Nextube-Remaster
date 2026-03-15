@@ -101,7 +101,10 @@ void display_init(void)
 
 void display_set_brightness(uint8_t pct)
 {
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (pct * 255) / 100);
+    /* Backlight control is active-LOW: duty 0 = full bright, 255 = off.
+     * Invert so pct=100 → full bright, pct=0 → off. */
+    if (pct > 100) pct = 100;
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, ((100 - pct) * 255) / 100);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 

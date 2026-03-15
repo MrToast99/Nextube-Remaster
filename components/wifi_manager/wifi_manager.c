@@ -28,7 +28,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         case WIFI_EVENT_STA_DISCONNECTED:
             ESP_LOGW(TAG, "STA disconnected, retrying...");
             xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
-            vTaskDelay(pdMS_TO_TICKS(3000));
+            /* Never vTaskDelay inside an event handler – it stalls the event loop. */
             esp_wifi_connect();
             break;
         case WIFI_EVENT_AP_STACONNECTED: {
@@ -50,10 +50,10 @@ static void start_mdns(void)
 {
     const nextube_config_t *cfg = config_get();
     mdns_init();
-    mdns_hostname_set(cfg->hostname);
-    mdns_instance_name_set("Nextube Clock");
+    mdns_hostname_set("nextube-remaster");
+    mdns_instance_name_set("Nextube Remaster");
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-    ESP_LOGI(TAG, "mDNS: http://%s.local", cfg->hostname);
+    ESP_LOGI(TAG, "mDNS: http://nextube-remaster.local");
 }
 
 void wifi_manager_start(void)

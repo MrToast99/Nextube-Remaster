@@ -44,6 +44,30 @@ static esp_err_t api_get_settings(httpd_req_t *r)
     return ret;
 }
 
+/* One-shot esp_timer: reconnect WiFi after the HTTP response has been sent.
+ * Calling esp_wifi_disconnect() inside the HTTP handler kills the live TCP
+ * connection before the response reaches the browser and can also disrupt
+ * SPI DMA in-flight, blanking the displays. */
+#include "esp_timer.h"
+static void reconnect_timer_cb(void *arg)
+{
+    wifi_manager_reconnect_sta();
+}
+static esp_timer_handle_t s_reconnect_timer = NULL;
+static void schedule_wifi_reconnect(void)
+{
+    if (!s_reconnect_timer) {
+        esp_timer_create_args_t a = {
+            .callback = reconnect_timer_cb,
+            .name     = "wifi_reconnect",
+        };
+        esp_timer_create(&a, &s_reconnect_timer);
+    }
+    /* Cancel any pending timer, then fire once after 600 ms */
+    esp_timer_stop(s_reconnect_timer);
+    esp_timer_start_once(s_reconnect_timer, 600 * 1000);  /* 600 ms in µs */
+}
+
 static esp_err_t api_post_settings(httpd_req_t *r)
 {
     int len = r->content_len;
@@ -56,9 +80,9 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     free(buf);
     const nextube_config_t *cfg = config_get();
     display_set_brightness(cfg->lcd_brightness);
-    { uint8_t b = cfg->led_brightness; leds_set_brightness(b <= 100 ? 100 - b : 0); }
-    ntp_apply_timezone();          /* re-apply TZ immediately so clock updates without reboot */
-    wifi_manager_reconnect_sta();  /* apply new SSID/password without reboot */
+    leds_set_brightness(cfg->led_brightness);
+    ntp_apply_timezone();      /* re-apply TZ immediately */
+    schedule_wifi_reconnect(); /* reconnect AFTER response is sent */
     return send_json(r, ok ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}");
 }
 

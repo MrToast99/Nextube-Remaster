@@ -43,6 +43,7 @@ typedef struct {
     backlight_mode_t backlight_mode;
     bool             backlight_on;
     uint8_t          backlight_rgb[6][3];
+    uint8_t          enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0x7F (all 7) */
 
     /* Network */
     char             ssid[64];
