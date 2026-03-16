@@ -36,7 +36,7 @@ static const char *content_type(const char *p);
  * Lines are stored in internal SRAM; nothing is written to flash.
  * The buffer holds the most recent LOG_RING_LINES entries and wraps
  * silently once full — oldest lines are overwritten. */
-#define LOG_RING_LINES  80
+#define LOG_RING_LINES  200
 #define LOG_LINE_LEN   160
 
 static char              s_log_ring[LOG_RING_LINES][LOG_LINE_LEN];
