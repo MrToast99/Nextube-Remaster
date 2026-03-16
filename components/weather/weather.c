@@ -456,18 +456,27 @@ static const char *metno_condition(const char *symbol_code)
 }
 
 /* Lightweight strstr-based extraction of a JSON number value.
- * Finds the first occurrence of "key": and returns atof of the value. */
+ * Scans forward through all occurrences of "key": and returns atof of the
+ * first occurrence whose value is numeric (not a quoted string).
+ *
+ * This is necessary for Met.no responses which contain the key twice:
+ *   "units":   { "air_temperature": "celsius" }   ← string, must skip
+ *   "details": { "air_temperature": 5.5 }          ← number, use this */
 static bool json_extract_number(const char *buf, const char *key, float *out)
 {
     char search[64];
     snprintf(search, sizeof(search), "\"%s\"", key);
-    const char *p = strstr(buf, search);
-    if (!p) return false;
-    p += strlen(search);
-    while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    if (!*p) return false;
-    *out = (float)atof(p);
-    return true;
+    size_t slen = strlen(search);
+    const char *p = buf;
+    while ((p = strstr(p, search)) != NULL) {
+        p += slen;
+        while (*p == ' ' || *p == ':' || *p == '\t') p++;
+        if (!*p) break;
+        if (*p == '"') continue;  /* string value (e.g. "celsius") — skip */
+        *out = (float)atof(p);
+        return true;
+    }
+    return false;
 }
 
 /* Lightweight extraction of a JSON string value (first match). */
