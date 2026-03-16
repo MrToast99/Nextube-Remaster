@@ -196,8 +196,7 @@ static void audio_play_task(void *arg)
              (unsigned)esp_get_free_heap_size(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
-    uint8_t *buf     = NULL;   /* internal-SRAM DMA window               */
-    uint8_t *pcm_buf = NULL;   /* PSRAM pre-buffer (whole file, optional) */
+    uint8_t *buf = NULL;   /* internal-SRAM DMA window */
 
     /* ── Open file ── */
     FILE *f = fopen(path, "rb");
@@ -248,61 +247,11 @@ static void audio_play_task(void *arg)
              path, (unsigned)hdr.sample_rate, hdr.num_channels,
              hdr.bits_per_sample, s_volume);
 
-    /* ── Pre-buffer entire PCM payload into PSRAM ─────────────────────
-     * SPIFFS fread latency can be 100–600 ms per 4 KB chunk, which starves
-     * the DAC and causes audible glitches.  Reading the whole file in one
-     * go amortises that cost.  CPU reads from PSRAM are fine; only DMA
-     * from PSRAM is forbidden (see DMA window below).
-     *
-     * Fallback: if PSRAM is unavailable or the file is too large, we fall
-     * back to the original chunked-fread path. */
-
-    /* Determine remaining PCM byte count */
-    long pcm_start = ftell(f);
-    fseek(f, 0, SEEK_END);
-    long pcm_end   = ftell(f);
-    fseek(f, pcm_start, SEEK_SET);
-    size_t pcm_size = (size_t)(pcm_end - pcm_start);
-
-    if (pcm_size > 0) {
-        pcm_buf = (uint8_t *)heap_caps_malloc(pcm_size, MALLOC_CAP_SPIRAM);
-        if (pcm_buf) {
-            /* Chunked pre-buffer: read STREAM_BUF_BYTES at a time and yield
-             * 50 ms between chunks so the display task can service the LCDs.
-             *
-             * A single fread(pcm_size) blocks SPIFFS for 10–12 s on a large
-             * WAV file (SPIFFS reads ~573 ms / 4 KB).  While SPIFFS is locked
-             * the display task cannot load JPEG images; when it finally
-             * unblocks it catches up all missed render cycles in rapid
-             * succession, causing all 6 LCDs to repaint in a burst that looks
-             * like a "screen reset".  Chunking + yields prevent both issues. */
-            int64_t t_load = esp_timer_get_time();
-            size_t  pos    = 0;
-            while (pos < pcm_size && !s_stop_flag) {
-                size_t chunk = pcm_size - pos;
-                if (chunk > (size_t)STREAM_BUF_BYTES)
-                    chunk = (size_t)STREAM_BUF_BYTES;
-                size_t got = fread(pcm_buf + pos, 1, chunk, f);
-                if (got == 0) break;
-                pos += got;
-                vTaskDelay(pdMS_TO_TICKS(50));   /* yield to display task */
-            }
-            int64_t load_ms = (esp_timer_get_time() - t_load) / 1000;
-            ESP_LOGI(TAG, "pre-buffered %u/%u bytes into PSRAM in %lld ms%s",
-                     (unsigned)pos, (unsigned)pcm_size,
-                     (long long)load_ms,
-                     s_stop_flag ? " (cancelled)" : "");
-            pcm_size = pos;
-        } else {
-            ESP_LOGW(TAG, "PSRAM alloc failed for %u bytes — using chunked fread",
-                     (unsigned)pcm_size);
-        }
-    }
-
-    /* ── Small DMA window in internal SRAM ────────────────────────────
-     * The DAC DMA controller cannot access PSRAM.  We copy STREAM_BUF_BYTES
-     * at a time from the PSRAM pre-buffer into this internal-SRAM window
-     * before handing it to dac_continuous_write. */
+    /* ── DMA window in internal SRAM ──────────────────────────────────
+     * The DAC DMA controller cannot access PSRAM.  All PCM is streamed
+     * directly from SPIFFS into this internal-SRAM window (no pre-buffer).
+     * 8-bit mono files at 8 000 Hz are small (≤ ~32 KB) so SPIFFS read
+     * latency is negligible; fread() timing is logged for diagnostics. */
     buf = (uint8_t *)heap_caps_malloc(STREAM_BUF_BYTES,
                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!buf) {
@@ -313,58 +262,41 @@ static void audio_play_task(void *arg)
 
     /* ── Start DAC continuous at the file's sample rate ── */
     if (dac_cont_start(hdr.sample_rate) != ESP_OK)
-        goto task_cleanup;   /* buf and pcm_buf allocated; task_cleanup frees both */
+        goto task_cleanup;   /* buf allocated; task_cleanup frees it */
 
-    /* ── Prime DMA ring buffer with silence ────────────────────────────
-     * When dac_continuous_enable() fires the DMA descriptor buffers are
-     * zeroed (0x00 = DAC at ground = full negative rail).  The sudden
-     * step from the oneshot idle level (128 = mid-rail) down to 0 is
-     * amplified and heard as a pop at the very start of every sound.
+    /* ── Prime DMA ring with a short silence burst ─────────────────────
+     * dac_continuous_enable() zeros the DMA descriptors (0x00 = full
+     * negative rail).  A step from oneshot idle (128 = mid-rail) down to
+     * 0x00 is amplified as a pop.  Writing ~100 ms of 0x80 before the
+     * first PCM data smooths the transition without causing a noticeable
+     * delay.
      *
-     * Pre-filling the entire ring with 0x80 (128 = mid-rail = silence)
-     * before the first real PCM write eliminates that transient.
-     *
-     * Ring size = DAC_DESC_NUM × DAC_DMA_BUF_SIZE = 8 × 2 048 = 16 384 B.
-     * STREAM_BUF_BYTES = 4 096, so 4 writes saturate the ring exactly. */
-    memset(buf, 128, STREAM_BUF_BYTES);
+     * Priming = sample_rate / 10 bytes (100 ms at any sample rate).
+     * At 8 000 Hz this is 800 bytes — far less than the old full-ring fill
+     * of 16 384 bytes which caused a ~2-second silence before audio started. */
     {
+        size_t prime_bytes = hdr.sample_rate / 10;   /* 100 ms of 8-bit mono */
+        if (prime_bytes > STREAM_BUF_BYTES) prime_bytes = STREAM_BUF_BYTES;
+        memset(buf, 128, prime_bytes);
         size_t _w;
-        for (int i = 0; i < (DAC_DESC_NUM * DAC_DMA_BUF_SIZE) / STREAM_BUF_BYTES; i++)
-            dac_continuous_write(s_dac_cont, buf, STREAM_BUF_BYTES, &_w, pdMS_TO_TICKS(100));
-        ESP_LOGI(TAG, "DMA ring primed with silence (%d × %d bytes)",
-                 (DAC_DESC_NUM * DAC_DMA_BUF_SIZE) / STREAM_BUF_BYTES, STREAM_BUF_BYTES);
+        dac_continuous_write(s_dac_cont, buf, prime_bytes, &_w, pdMS_TO_TICKS(200));
+        ESP_LOGI(TAG, "DMA ring primed with %u bytes of silence (~100 ms)",
+                 (unsigned)prime_bytes);
     }
 
-    /* ── Stream PCM data ── */
+    /* ── Stream PCM data directly from SPIFFS ── */
     {
         uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
         int64_t  t_start = esp_timer_get_time();
 
-        size_t psram_pos = 0;   /* read cursor into PSRAM pre-buffer */
-
         while (!s_stop_flag) {
-            int rd;
-
-            if (pcm_buf) {
-                /* Fast path: copy from PSRAM pre-buffer into DMA window */
-                size_t remaining = pcm_size - psram_pos;
-                if (remaining == 0) break;
-                rd = (int)(remaining < (size_t)STREAM_BUF_BYTES
-                           ? remaining : (size_t)STREAM_BUF_BYTES);
-                memcpy(buf, pcm_buf + psram_pos, (size_t)rd);
-                psram_pos += (size_t)rd;
-            } else {
-                /* Fallback path: chunked fread (original behaviour) */
-                int64_t t_rd = esp_timer_get_time();
-                rd = fread(buf, 1, STREAM_BUF_BYTES, f);
-                int64_t rd_us = esp_timer_get_time() - t_rd;
-                if (rd <= 0) break;
-                if (rd_us > 50000)
-                    ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
-                             (long long)(rd_us / 1000), frame);
-            }
-
+            int64_t t_rd = esp_timer_get_time();
+            int rd = (int)fread(buf, 1, STREAM_BUF_BYTES, f);
+            int64_t rd_us = esp_timer_get_time() - t_rd;
             if (rd <= 0) break;
+            if (rd_us > 50000)
+                ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
+                         (long long)(rd_us / 1000), frame);
 
             /* Volume attenuation (operates on native bit depth) */
             apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
@@ -401,7 +333,14 @@ static void audio_play_task(void *arg)
     }
 
 task_cleanup:
-    heap_caps_free(pcm_buf);   /* NULL-safe; frees PSRAM pre-buffer if used */
+    /* Fade out: write one buffer of silence before stopping the DAC to
+     * prevent the abrupt 0x80→0x00 transient that causes an audible click
+     * at the end of playback. */
+    if (buf && s_dac_cont) {
+        memset(buf, 128, STREAM_BUF_BYTES);
+        size_t _fw;
+        dac_continuous_write(s_dac_cont, buf, STREAM_BUF_BYTES, &_fw, pdMS_TO_TICKS(200));
+    }
     free(buf);
     dac_cont_stop();   /* disable continuous, restore oneshot silence */
 
@@ -460,12 +399,18 @@ void audio_play_file(const char *path)
         return;
     }
 
-    /* Stop any running playback first */
-    audio_stop();
-
-    /* Acquire play lock (playback task releases it on exit) */
-    if (xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(300)) != pdTRUE) {
-        ESP_LOGW(TAG, "audio busy – play request dropped");
+    /* Non-blocking: drop immediately if a sound is already playing.
+     * audio_play_file() is called from the touch-handler and HTTP-handler
+     * tasks.  The old audio_stop() + 300 ms mutex wait blocked those tasks
+     * for up to 600 ms; during that window the touch poll task queued new
+     * events that fired immediately on unblock, producing cascading mode
+     * changes ("cycling screens").
+     *
+     * For click / notification sounds, dropping a concurrent request is
+     * the correct behaviour.  To interrupt a playing file and start a new
+     * one, call audio_stop() explicitly before audio_play_file(). */
+    if (xSemaphoreTake(s_play_mutex, 0) != pdTRUE) {
+        ESP_LOGI(TAG, "audio busy — dropping %s", path);
         return;
     }
 
