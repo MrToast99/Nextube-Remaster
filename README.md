@@ -1,4 +1,4 @@
-# Nextube Open-Source Firmware
+# Nextube-Remaster Open-Source Firmware
 
 [![Build](https://github.com/MrToast99/Nextube-Remaster/actions/workflows/build.yml/badge.svg)](https://github.com/MrToast99/Nextube-Remaster/actions/workflows/build.yml)
 
@@ -24,19 +24,21 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | OTA firmware updates via web UI | ✅ Working |
 | OTA web UI / SPIFFS updates via web UI | ✅ Working |
 | Firmware + SPIFFS version mismatch detection | ✅ Working |
-| Weather display mode (temp, humidity, condition icon) | ✅ Working |
+| Weather display (temp, humidity, condition icon) | ✅ Working |
 | wttr.in weather (free, no key) | ✅ Working |
 | Open-Meteo weather (free, no key) | ✅ Working |
 | OpenWeatherMap weather (free-tier API key) | ✅ Working |
-| Met.no weather (free, no key) | ✅ Working |
+| Met.no weather (free, no key, elevation-aware) | ✅ Working |
 | YouTube subscriber counter | ✅ Working |
 | Bilibili follower counter | ✅ Working |
 | DAC audio playback (LTK8002D amp, WAV files) | ✅ Working |
 | Clock themes (Nixie/Digital/Flip art) | ✅ Working (requires theme images in SPIFFS) |
 | Countdown / Pomodoro timer modes | ✅ Working |
 | Album/slideshow mode | ✅ Working (place JPEGs in `/images/album/`) |
-| Custom Clock mode | 🔧 Stub (mode switching works; custom face config not yet implemented) |
+| Custom Clock mode (date display) | ✅ Working |
 | Per-mode enable/disable toggles | ✅ Working |
+| Auto mode rotation with configurable interval | ✅ Working |
+| SPIFFS file browser with upload/delete | ✅ Working |
 | Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
 
 ## Hardware
@@ -105,7 +107,7 @@ The firmware version is defined in `version.json` at the project root:
 { "version": "1.0.0", "name": "Nextube-Remaster", "description": "..." }
 ```
 
-CMake reads this at configure time and generates `components/config_mgr/include/fw_version.h` (via `configure_file()`). The version string is then available to all C files as `FW_VERSION_STR` through `#include "fw_version.h"`. CMake also writes the version into `data/web/version.txt`, which is bundled into `spiffs.bin` — this lets the device detect at runtime whether the firmware and web UI are from the same build (see **Version mismatch detection** below).
+CMake reads this at configure time using a robust semver regex (`[0-9]+[.][0-9]+[.][0-9]+`). The version is injected into every component as a compiler `-D` flag via `target_compile_definitions(PUBLIC)` in `components/config_mgr/CMakeLists.txt` — this propagates to all consumers automatically through the CMake dependency graph. A `fw_version.h` header with `#ifndef` guard is also generated as a fallback. CMake also writes the version into `data/web/version.txt`, which is bundled into `spiffs.bin` for runtime mismatch detection.
 
 To release a new version, update `version.json` and tag the commit.
 
@@ -170,11 +172,64 @@ After setup, access the management interface via:
 
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, subscribers, heap), quick mode switching
-- **Display** — theme, brightness, LED accent lighting effects & per-tube colours, enabled mode toggles
+- **Display** — theme, brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation
 - **Network** — WiFi config, timezone, NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, YouTube/Bilibili tracking
 - **Audio** — volume, sound file selection
-- **System** — firmware OTA, web UI / SPIFFS OTA, SPIFFS file browser, factory reset, about
+- **System** — firmware OTA, web UI / SPIFFS OTA, SPIFFS file browser (browse/upload/delete), device log viewer, factory reset, about
+
+## Modes
+
+| Mode | Description |
+|---|---|
+| **Clock** | 12H or 24H digital clock |
+| **Custom Clock** | Date display (DD/MM/YY) |
+| **Countdown** | Configurable countdown timer |
+| **Pomodoro** | Work/break timer (configurable intervals) |
+| **YouTube** | Live subscriber/follower count |
+| **Weather** | Temperature, humidity, condition icon. Leading zeros suppressed; negative temps hide humidity. Tubes show `------` until first fetch completes. |
+| **Album** | Slideshow of JPEGs from `/images/album/` |
+| **Scoreboard** | Stub — displays zeros |
+
+### Mode Rotation
+
+Enable **Auto Rotation** in Display settings to automatically cycle through all enabled modes on a configurable interval (15 s → 1 hour). When disabled, modes only change via the Quick Actions buttons or the physical left/right touch pads. Any manual mode change resets the rotation timer.
+
+### Touch Buttons
+
+| Button | Action |
+|---|---|
+| LEFT | Previous enabled mode |
+| MIDDLE | Toggle LED accent lighting on/off |
+| RIGHT | Next enabled mode |
+
+## Weather
+
+Weather mode cycles through all enabled weather APIs until one succeeds. Supported sources:
+
+| Source | API Key | Notes |
+|---|---|---|
+| **wttr.in** | None | Default; city can be `Name,CC` format |
+| **Open-Meteo** | None | Geocoding via Open-Meteo; strips country code automatically |
+| **OpenWeatherMap** | Free-tier key | Configure at openweathermap.org |
+| **Met.no** | None | Elevation-aware (fetched from geocoding API for accurate results) |
+
+Weather display layout (6 tubes):
+
+```
+Positive:  [tens/blank] [units] [°C/°F] [hum tens/blank] [hum units] [icon]
+Negative single:  [-] [units] [°C/°F] [blank] [blank] [icon]
+Negative double:  [-] [tens] [units] [°C/°F] [blank] [icon]
+```
+
+Required SPIFFS image files (`/images/themes/{theme}/MutiInfo/`):
+
+```
+Temperature/  degreec.jpg  degreef.jpg  minus.jpg
+Weather/      sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
+              rain.jpg  snow.jpg  squalls.jpg  thunderstorm.jpg
+              sand.jpg  tornado.jpg  volcanicAsh.jpg
+```
 
 ## REST API
 
@@ -193,6 +248,8 @@ POST /api/update_spiffs     → OTA SPIFFS upload (binary body, spiffs.bin)
 GET  /api/file/ls?dir=/     → SPIFFS directory listing
 POST /api/wifi/scan         → trigger WiFi scan
 GET  /api/wifi/scan         → scan results
+GET  /api/logs              → in-RAM device log (last 64 lines)
+POST /api/logs/clear        → clear in-RAM log buffer
 ```
 
 ## Project Structure
@@ -206,14 +263,15 @@ nextube-fw/
 ├── components/
 │   ├── board/include/board_pins.h # Hardware pin & display constants
 │   ├── config_mgr/                # JSON config persistence (NVS + SPIFFS)
+│   │   ├── CMakeLists.txt         # Injects FW_VERSION_STR to all consumers
 │   │   └── include/fw_version.h  # Auto-generated by CMake — do not edit manually
 │   ├── display/                   # 6× ST7735 SPI display driver + mode renderer
 │   ├── leds/                      # WS2812 RGB LED accent lighting task
 │   ├── touch/                     # Capacitive touch input (L/R = mode cycle, M = brightness)
 │   ├── rtc/                       # PCF8563 RTC driver
 │   ├── audio/                     # DAC audio playback (WAV)
-│   ├── wifi_manager/              # AP+STA WiFi management (AP auto-disables 60s after connect)
-│   ├── web_server/                # HTTP server + REST API + OTA handlers
+│   ├── wifi_manager/              # AP+STA WiFi (AP auto-disables 60 s after STA connects)
+│   ├── web_server/                # HTTP server + REST API + OTA handlers + log viewer
 │   ├── ntp_time/                  # NTP synchronisation
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
 │   └── youtube_bili/              # YouTube/Bilibili API client
@@ -233,7 +291,7 @@ This is a community reverse-engineering effort. Key areas needing help:
 1. **Theme images** — Extract or recreate the Nixie/Digital/Flip digit artwork for the displays
 2. **Scoreboard mode** — Complete the score input API and display logic
 3. **SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)
-4. **Custom Clock mode** — Implement the configurable digit-mapped clock face (mode switching already works; the configuration UI and renderer are stubs)
+4. **Custom Clock face** — Configuration UI for custom digit-mapped clock face (mode switching already works)
 
 ## License
 

@@ -153,6 +153,33 @@ select option{background:var(--accent);color:var(--text)}
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather"> Weather</label>
     </div>
   </div>
+  <!-- Mode Rotation -->
+  <div class="card">
+    <h2>Mode Rotation</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
+      When enabled, the device automatically cycles through all enabled modes on a timer.
+      When disabled, the mode only changes via the Quick Actions buttons or the physical touch buttons.
+    </p>
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
+        <input type="checkbox" id="rot-enabled" onchange="onRotToggle()">
+        Enable Auto Rotation
+      </label>
+      <div id="rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
+        <label for="rot-interval" style="white-space:nowrap">Interval per mode:</label>
+        <select id="rot-interval" class="select">
+          <option value="15">15 seconds</option>
+          <option value="30">30 seconds</option>
+          <option value="60" selected>1 minute</option>
+          <option value="120">2 minutes</option>
+          <option value="300">5 minutes</option>
+          <option value="600">10 minutes</option>
+          <option value="1800">30 minutes</option>
+          <option value="3600">1 hour</option>
+        </select>
+      </div>
+    </div>
+  </div>
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Display Settings</button></div>
 </div>
 
@@ -393,6 +420,19 @@ async function loadSettings() {
   $('m-album').checked       = !!(em & (1 << 6));
   $('m-weather').checked     = !!(em & (1 << 7));
 
+  /* Mode rotation */
+  const rotEnabled = cfg.rotation_enabled === true;
+  $('rot-enabled').checked = rotEnabled;
+  const rotInterval = cfg.rotation_interval_s || 60;
+  /* Select the closest preset; fall back to 60 s if no exact match */
+  const rotSel = $('rot-interval');
+  let bestOpt = rotSel.options[2]; /* default: 60 s */
+  for (let i = 0; i < rotSel.options.length; i++) {
+    if (+rotSel.options[i].value === rotInterval) { bestOpt = rotSel.options[i]; break; }
+  }
+  rotSel.value = bestOpt.value;
+  $('rot-interval-wrap').style.opacity = rotEnabled ? '1' : '0.4';
+
   /* Colour swatches — one labelled column per tube */
   const sw = $('color-swatches'); sw.innerHTML = '';
   (cfg.backlight_RGB || []).forEach((c,i) => {
@@ -410,6 +450,11 @@ async function loadSettings() {
     col.appendChild(d);
     sw.appendChild(col);
   });
+}
+
+/* ── Rotation toggle – dim interval selector when disabled ── */
+function onRotToggle() {
+  $('rot-interval-wrap').style.opacity = $('rot-enabled').checked ? '1' : '0.4';
 }
 
 /* ── Save settings ─────────────────────────────────── */
@@ -433,6 +478,8 @@ async function saveSettings() {
     backlight_mode: $('f-blmode').value, backlight_onoff: $('f-blmode').value === 'Off' ? 'OFF' : 'ON',
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     enabled_modes: enabledModes,
+    rotation_enabled: $('rot-enabled').checked,
+    rotation_interval_s: +$('rot-interval').value,
     ssid: $('f-ssid').value, password: $('f-pass').value,
     time_zone: +$('f-tz').value,
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,

@@ -81,6 +81,12 @@ typedef struct {
 
     /* Album */
     uint16_t         album_switch_ms;
+
+    /* Mode Rotation – auto-cycle through enabled modes on a timer.
+     * When rotation_enabled is false the mode never changes automatically;
+     * only UI API calls and physical button presses can change it. */
+    bool             rotation_enabled;     /* false = manual-only mode switching */
+    uint16_t         rotation_interval_s;  /* seconds per mode; 0 treated as 60 */
 } nextube_config_t;
 
 /** Initialise config module – loads from flash or sets defaults. */
@@ -97,6 +103,11 @@ char *config_to_json(void);
 
 /** Reset to factory defaults and save. */
 void config_reset(void);
+
+/** Advance to the next enabled mode and save.
+ *  Called by the display task when the rotation timer fires.
+ *  Skips modes that are not set in enabled_modes.  Thread-safe. */
+void config_advance_mode(void);
 
 #ifdef __cplusplus
 }

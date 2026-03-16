@@ -65,6 +65,10 @@ static void set_defaults(void)
     s_cfg.pomodoro_work     = 25;
     s_cfg.pomodoro_break    = 5;
     s_cfg.album_switch_ms   = 2000;
+
+    /* Rotation off by default; user must explicitly enable it */
+    s_cfg.rotation_enabled    = false;
+    s_cfg.rotation_interval_s = 60;
 }
 
 /* ── JSON helpers ──────────────────────────────────────────────────── */
@@ -186,6 +190,15 @@ static void parse_json(const char *json)
         if (!has_clock && !has_custom)
             s_cfg.enabled_modes |= (1 << APP_MODE_CLOCK);
     }
+
+    /* Mode rotation */
+    {
+        cJSON *rot_en = cJSON_GetObjectItem(root, "rotation_enabled");
+        if (cJSON_IsBool(rot_en))
+            s_cfg.rotation_enabled = cJSON_IsTrue(rot_en);
+    }
+    json_read_u16(root, "rotation_interval_s", &s_cfg.rotation_interval_s);
+    if (s_cfg.rotation_interval_s == 0) s_cfg.rotation_interval_s = 60;
 
     /* Backlight RGB array */
     cJSON *bl_rgb = cJSON_GetObjectItem(root, "backlight_RGB");
@@ -313,7 +326,9 @@ char *config_to_json(void)
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off"};
     cJSON_AddStringToObject(root, "backlight_mode",  bl_modes[s_cfg.backlight_mode]);
     cJSON_AddStringToObject(root, "backlight_onoff", s_cfg.backlight_on ? "ON" : "OFF");
-    cJSON_AddNumberToObject(root, "enabled_modes",   s_cfg.enabled_modes);
+    cJSON_AddNumberToObject(root, "enabled_modes",      s_cfg.enabled_modes);
+    cJSON_AddBoolToObject  (root, "rotation_enabled",   s_cfg.rotation_enabled);
+    cJSON_AddNumberToObject(root, "rotation_interval_s", s_cfg.rotation_interval_s);
 
     cJSON *bl_rgb = cJSON_AddArrayToObject(root, "backlight_RGB");
     for (int i = 0; i < 6; i++) {
@@ -327,6 +342,28 @@ char *config_to_json(void)
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return out;
+}
+
+void config_advance_mode(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    /* Step forward through APP_MODE_MAX slots, skipping disabled ones.
+     * Worst case: all modes except the current one are disabled, so we
+     * try APP_MODE_MAX times before giving up (stays on current mode). */
+    int m = (int)s_cfg.current_mode;
+    for (int tries = 0; tries < APP_MODE_MAX; tries++) {
+        m = (m + 1) % APP_MODE_MAX;
+        if (s_cfg.enabled_modes & (1 << m)) break;
+    }
+
+    if ((app_mode_t)m != s_cfg.current_mode) {
+        s_cfg.current_mode = (app_mode_t)m;
+        save_to_flash();
+        ESP_LOGI(TAG, "Rotation: advanced to mode %d", m);
+    }
+
+    xSemaphoreGive(s_mutex);
 }
 
 void config_reset(void)

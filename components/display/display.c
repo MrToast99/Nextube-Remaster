@@ -460,7 +460,7 @@ static void render_album(const nextube_config_t *cfg,
  *     negative single-digit : [-][units][C/F][blank][blank][icon]
  *     negative double-digit : [-][tens][units][C/F][blank][icon]
  *   Leading zeros are blank.  Negative temps suppress humidity entirely.
- *   Unit: Temperature/c.jpg or f.jpg (letter only; auto-blanks if absent)
+ *   Unit: Temperature/degreec.jpg or Temperature/degreef.jpg
  *   tube  5   : weather icon from MutiInfo/Weather/{icon}.jpg
  *
  * Actual SPIFFS filenames (must match exactly):
@@ -475,7 +475,14 @@ static void render_weather(const nextube_config_t *cfg)
     char path[128];
 
     if (!w || !w->valid) {
-        for (int i = 0; i < LCD_COUNT; i++) display_fill(i, 0x0000);
+        /* No weather data yet – show "-" on every tube so the user knows
+         * weather mode is active but still waiting for the first fetch.
+         * Once WiFi connects and the weather task fires (~10 s later) the
+         * real data replaces these dashes automatically. */
+        for (int i = 0; i < LCD_COUNT; i++) {
+            display_path_temperature(path, sizeof(path), cfg->theme, "minus");
+            display_show_image(i, path);
+        }
         return;
     }
 
@@ -494,25 +501,22 @@ static void render_weather(const nextube_config_t *cfg)
     /* Tube layout:
      *
      *  Positive (0–99°): leading zero is BLANK, humidity leading zero is BLANK
-     *    [t/blank][units][C/F][h/blank][hum units][icon]
-     *    e.g. 2°C 92%:   _  2  C  9  2  ☁
-     *    e.g. 15°C 8%:   1  5  C  _  8  ☁
+     *    [t/blank][units][°C/F][h/blank][hum units][icon]
+     *    e.g. 2°C 92%:   _  2  °C  9  2  ☁
+     *    e.g. 15°C 8%:   1  5  °C  _  8  ☁
      *
      *  Negative single-digit (-1 to -9°): no humidity shown
-     *    [-][units][C/F][ _ ][ _ ][icon]
-     *    e.g. -7°C:  -  7  C  _  _  ☁
+     *    [-][units][°C/F][ _ ][ _ ][icon]
+     *    e.g. -7°C:  -  7  °C  _  _  ☁
      *
      *  Negative double-digit (-10 to -99°): no humidity shown
-     *    [-][tens][units][C/F][ _ ][icon]
-     *    e.g. -23°C:  -  2  3  C  _  ☁
+     *    [-][tens][units][°C/F][ _ ][icon]
+     *    e.g. -23°C:  -  2  3  °C  _  ☁
      *
-     * Unit symbol: loaded from Temperature/c.jpg or f.jpg (letter only,
-     * no degree circle).  display_show_image() blanks the tube automatically
-     * if the file is missing — add c.jpg/f.jpg to your SPIFFS theme to show
-     * the letter.
+     * Unit symbol: Temperature/degreec.jpg or Temperature/degreef.jpg
      */
-    const char *unit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0)
-                           ? "f" : "c";
+    bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
+    const char *unit = fahrenheit ? "degreef" : "degreec";
     const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
 
     if (!negative) {
@@ -526,7 +530,7 @@ static void render_weather(const nextube_config_t *cfg)
         /* Tube 1: temperature units */
         display_path_number(path, sizeof(path), cfg->theme, temp % 10);
         display_show_image(1, path);
-        /* Tube 2: unit letter (c.jpg / f.jpg) — auto-blanks if file absent */
+        /* Tube 2: degree symbol (°C or °F) */
         display_path_temperature(path, sizeof(path), cfg->theme, unit);
         display_show_image(2, path);
         /* Tube 3: humidity tens — blank if zero */
@@ -540,7 +544,7 @@ static void render_weather(const nextube_config_t *cfg)
         display_path_number(path, sizeof(path), cfg->theme, hum % 10);
         display_show_image(4, path);
     } else if (temp <= 9) {
-        /* Single-digit negative: [-][digit][C/F][blank][blank][icon] */
+        /* Single-digit negative: [-][digit][°C/F][blank][blank][icon] */
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
         display_show_image(0, path);
         display_path_number(path, sizeof(path), cfg->theme, temp);
@@ -550,7 +554,7 @@ static void render_weather(const nextube_config_t *cfg)
         display_fill(3, 0x0000);
         display_fill(4, 0x0000);
     } else {
-        /* Double-digit negative: [-][tens][units][C/F][blank][icon] */
+        /* Double-digit negative: [-][tens][units][°C/F][blank][icon] */
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
         display_show_image(0, path);
         display_path_number(path, sizeof(path), cfg->theme, temp / 10);
@@ -587,26 +591,44 @@ static void display_task(void *arg)
     s_timer_start  = xTaskGetTickCount();
 
     /* Per-render state for change detection */
-    struct tm     last_t       = {0};
-    app_mode_t    last_mode    = (app_mode_t)-1;
+    struct tm     last_t        = {0};
+    app_mode_t    last_mode     = (app_mode_t)-1;
     char          last_theme[32] = {0};
-    uint32_t      last_subs    = UINT32_MAX;
+    uint32_t      last_subs     = UINT32_MAX;
     int32_t       last_remain_s = INT32_MAX;  /* countdown/pomodoro change detection */
-    float         last_temp_c  = -9999.0f;    /* weather change detection */
-    float         last_hum     = -1.0f;
-    bool          last_wx_valid = false;      /* detect when data first arrives */
-    bool          last_bl_on   = true;        /* backlight on/off tracking */
-    uint8_t       last_bl_brt  = 255;         /* sentinel: force-apply on first tick */
-    TickType_t    album_switch = 0;
-    bool          first        = true;
+    float         last_temp_c   = -9999.0f;   /* weather change detection */
+    float         last_hum      = -1.0f;
+    bool          last_wx_valid = false;       /* detect when data first arrives */
+    bool          last_bl_on    = true;        /* backlight on/off tracking */
+    uint8_t       last_bl_brt   = 255;         /* sentinel: force-apply on first tick */
+    TickType_t    album_switch  = 0;
+    TickType_t    rotation_tick = 0;           /* tick when current mode started */
+    bool          first         = true;
 
     TickType_t wake = xTaskGetTickCount();
+    rotation_tick = wake;
 
     while (1) {
         const nextube_config_t *cfg = config_get();
         app_mode_t mode = cfg->current_mode;
         bool mode_changed  = (mode != last_mode);
         bool theme_changed = (strcmp(cfg->theme, last_theme) != 0);
+
+        /* ── Mode rotation ───────────────────────────────────────────
+         * Only fires when rotation_enabled is true.  Any mode change
+         * (UI, button, or previous rotation step) resets the timer so
+         * every mode gets the full interval before auto-advancing.    */
+        if (mode_changed) {
+            rotation_tick = xTaskGetTickCount();
+        } else if (cfg->rotation_enabled && !first) {
+            uint16_t interval = cfg->rotation_interval_s ? cfg->rotation_interval_s : 60;
+            uint32_t elapsed_ms = (uint32_t)pdTICKS_TO_MS(
+                                      xTaskGetTickCount() - rotation_tick);
+            if (elapsed_ms >= (uint32_t)interval * 1000u) {
+                config_advance_mode();   /* updates cfg->current_mode + saves */
+                rotation_tick = xTaskGetTickCount();
+            }
+        }
 
         if (mode_changed || theme_changed || first) {
             /* Reset album and timer state on mode/theme switch */

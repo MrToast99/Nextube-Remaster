@@ -3,30 +3,27 @@ cmake_minimum_required(VERSION 3.16)
 set(EXTRA_COMPONENT_DIRS "components")
 
 # ── Read firmware version from version.json ──────────────────────────
-# Tell CMake to re-run configure automatically whenever version.json
-# changes, so fw_version.h is always regenerated on the next build.
+# Tell CMake to re-run configure automatically whenever version.json changes.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/version.json")
 
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/version.json" _VER_JSON)
-string(REGEX MATCH "\"version\"[[:space:]]*:[[:space:]]*\"([^\"]+)\"" _ "${_VER_JSON}")
+# Use a robust semver pattern rather than [[:space:]] (POSIX classes can
+# misbehave on Windows where file(READ) preserves CRLF line endings).
+string(REGEX MATCH "\"version\"[^\"]*\"([0-9]+[.][0-9]+[.][0-9]+)\"" _ "${_VER_JSON}")
 set(FW_VERSION "${CMAKE_MATCH_1}")
 if(NOT FW_VERSION)
+    message(WARNING "Could not parse version from version.json – defaulting to 0.0.0")
     set(FW_VERSION "0.0.0")
 endif()
 
-# Write version into the SPIFFS web tree so the UI can detect mismatches at runtime
+# Write version into the SPIFFS web tree for runtime mismatch detection.
 file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/data/web/version.txt" "${FW_VERSION}")
 
-# Generate fw_version.h into config_mgr's public include dir.
-# All components that need FW_VERSION_STR already REQUIRE config_mgr, so
-# this header is automatically on their include path without any CMakeLists
-# changes.  configure_file() runs at CMake configure time (before any
-# compilation), so the file always exists when the compiler is invoked.
-#
-# NOTE: idf_build_set_property(COMPILE_DEFINITIONS) requires __idf_build_target
-# which is only created inside project() / idf_build_init().  Calling it before
-# project() silently no-ops, which is why the previous approach produced 0.0.0.
+# Generate fw_version.h as a #ifndef-guarded header (belt-and-suspenders
+# fallback in case a translation unit includes it without the -D flag).
+# The authoritative injection is target_compile_definitions(PUBLIC) in
+# components/config_mgr/CMakeLists.txt — that propagates to every consumer.
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/main/fw_version.h.in"
     "${CMAKE_CURRENT_SOURCE_DIR}/components/config_mgr/include/fw_version.h"

@@ -230,14 +230,16 @@ static const char *wmo_condition(int code)
     return "Thunderstorm";
 }
 
-/* Geocode city → lat/lon via Open-Meteo geocoding API.
+/* Geocode city → lat/lon/elevation via Open-Meteo geocoding API.
  * Result is cached; geocoding only runs again when the city changes.
  *
  * The city string may be in "City,CC" format (e.g. "Airdrie,CA") as used by
  * wttr.in.  Open-Meteo's geocoding API expects a plain city name; passing the
  * country code as part of the name returns zero results.  We strip everything
- * after the first comma and use only the city portion for the API call. */
-static bool geocode_open_meteo(const char *city, float *lat, float *lon)
+ * after the first comma and use only the city portion for the API call.
+ *
+ * alt_m may be NULL if the caller doesn't need elevation. */
+static bool geocode_open_meteo(const char *city, float *lat, float *lon, int *alt_m)
 {
     /* Extract just the city name (before any comma) */
     char cityname[64];
@@ -261,9 +263,15 @@ static bool geocode_open_meteo(const char *city, float *lat, float *lon)
     bool ok = false;
     cJSON *r0 = cJSON_GetArrayItem(cJSON_GetObjectItem(root, "results"), 0);
     if (r0) {
-        cJSON *la = cJSON_GetObjectItem(r0, "latitude");
-        cJSON *lo = cJSON_GetObjectItem(r0, "longitude");
-        if (la && lo) { *lat = (float)la->valuedouble; *lon = (float)lo->valuedouble; ok = true; }
+        cJSON *la  = cJSON_GetObjectItem(r0, "latitude");
+        cJSON *lo  = cJSON_GetObjectItem(r0, "longitude");
+        cJSON *el  = cJSON_GetObjectItem(r0, "elevation");
+        if (la && lo) {
+            *lat = (float)la->valuedouble;
+            *lon = (float)lo->valuedouble;
+            if (alt_m) *alt_m = el ? (int)el->valuedouble : 0;
+            ok = true;
+        }
     }
     cJSON_Delete(root);
     return ok;
@@ -280,7 +288,7 @@ static void fetch_open_meteo(const nextube_config_t *cfg)
     static char  s_last_city[64] = {0};
 
     if (strncmp(cfg->city, s_last_city, sizeof(s_last_city)) != 0) {
-        if (!geocode_open_meteo(cfg->city, &s_lat, &s_lon)) {
+        if (!geocode_open_meteo(cfg->city, &s_lat, &s_lon, NULL)) {
             ESP_LOGW(TAG, "Open-Meteo: geocoding failed for '%s'", cfg->city);
             return;
         }
@@ -439,24 +447,28 @@ static void fetch_met_no(const nextube_config_t *cfg)
         ESP_LOGW(TAG, "Met.no: no city configured"); return;
     }
 
-    /* Reuse Open-Meteo geocoding cache for lat/lon */
+    /* Geocode city → lat/lon/elevation (elevation is required by Met.no for
+     * accurate forecasts; without it the API uses a default of 0 m which
+     * produces wrong results for inland/elevated cities like Airdrie, AB). */
     static float s_lat = 0.0f, s_lon = 0.0f;
+    static int   s_alt = 0;
     static char  s_last_city[64] = {0};
 
     if (strncmp(cfg->city, s_last_city, sizeof(s_last_city)) != 0) {
-        if (!geocode_open_meteo(cfg->city, &s_lat, &s_lon)) {
+        if (!geocode_open_meteo(cfg->city, &s_lat, &s_lon, &s_alt)) {
             ESP_LOGW(TAG, "Met.no: geocoding failed for '%s'", cfg->city);
             return;
         }
         strncpy(s_last_city, cfg->city, sizeof(s_last_city) - 1);
-        ESP_LOGI(TAG, "Met.no: geocoded '%s' → %.4f, %.4f", cfg->city, s_lat, s_lon);
+        ESP_LOGI(TAG, "Met.no: geocoded '%s' → %.4f, %.4f  alt=%d m",
+                 cfg->city, s_lat, s_lon, s_alt);
     }
 
     char url[256];
     snprintf(url, sizeof(url),
              "https://api.met.no/weatherapi/locationforecast/2.0/compact"
-             "?lat=%.4f&lon=%.4f",
-             s_lat, s_lon);
+             "?lat=%.4f&lon=%.4f&altitude=%d",
+             s_lat, s_lon, s_alt);
 
     char *body = http_get(url);
     if (!body) return;
@@ -508,19 +520,18 @@ static void fetch_weather(void)
 static void weather_task(void *arg)
 {
     /* Wait until STA actually has an IP before attempting any HTTPS connection.
-     * A fixed 15 s delay from boot was wrong: if WiFi takes longer to connect
-     * (e.g. 112 s in the field), the first fetch failed silently, then the
-     * 10-minute retry fired exactly when the user opened the web UI – flooding
-     * the WiFi TX queue with TLS handshake traffic and causing EAGAIN on every
-     * concurrent HTTP send. */
+     * Tubes show "------" (six minus signs) until the first fetch succeeds. */
+    ESP_LOGI(TAG, "waiting for WiFi...");
     while (!wifi_manager_is_connected()) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    /* Extra settling time so the web UI can finish its initial API calls before
-     * TLS crypto spikes the CPU and competes for WiFi TX buffers. */
-    vTaskDelay(pdMS_TO_TICKS(10000));   /* 10 s after WiFi ready */
+    /* 10 s settling: lets the web UI finish its initial burst of API calls
+     * before TLS crypto competes for WiFi TX buffers (avoids EAGAIN). */
+    ESP_LOGI(TAG, "WiFi ready – first weather fetch in 10 s");
+    vTaskDelay(pdMS_TO_TICKS(10000));
 
     while (1) {
+        ESP_LOGI(TAG, "fetching weather...");
         fetch_weather();
         vTaskDelay(pdMS_TO_TICKS(600000));  /* every 10 minutes */
     }
