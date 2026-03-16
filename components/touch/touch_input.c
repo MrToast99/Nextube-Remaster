@@ -27,6 +27,13 @@
 
 static const char *TAG = "touch";
 
+/* Number of consecutive 50 ms poll samples that must all read "pressed"
+ * before a touch event fires.  Eliminates single-sample noise spikes that
+ * the IIR filter hasn't fully attenuated yet.
+ *   3 × 50 ms = 150 ms minimum hold – shorter than any intentional tap,
+ *   longer than typical EMI glitches on the capacitive pads. */
+#define PRESS_DEBOUNCE  3
+
 /* ── Touch pad channel numbers (match GPIO from board_pins.h) ───────── */
 /*   PIN_TOUCH_LEFT=4→pad0, PIN_TOUCH_MIDDLE=2→pad2, PIN_TOUCH_RIGHT=15→pad3 */
 static const int touch_channels[] = { 0, 2, 3 };  /* pad IDs, not GPIO numbers */
@@ -74,8 +81,9 @@ static void touch_handler_task(void *arg)
 
 static void touch_poll_task(void *arg)
 {
-    bool was_pressed[3] = { false, false, false };
-    int  stuck_count[3] = { 0, 0, 0 };   /* detect stuck-pressed */
+    bool was_pressed[3]    = { false, false, false };
+    int  stuck_count[3]    = { 0, 0, 0 };   /* detect stuck-pressed       */
+    int  debounce_count[3] = { 0, 0, 0 };   /* consecutive pressed samples */
 
     while (1) {
         for (int i = 0; i < 3; i++) {
@@ -88,29 +96,42 @@ static void touch_poll_task(void *arg)
 
             /* Dynamic threshold: 20 % drop below software baseline */
             uint32_t threshold = s_baseline[i] * 80 / 100;
-            bool pressed = (smooth[0] < threshold);
+            bool raw = (smooth[0] < threshold);
 
             /* Slowly track baseline toward current smooth only when NOT pressed.
              * IIR: baseline = baseline - baseline/64 + smooth/64 */
-            if (!pressed && s_baseline[i] > 0) {
+            if (!raw && s_baseline[i] > 0) {
                 s_baseline[i] = s_baseline[i] - (s_baseline[i] / 64) + (smooth[0] / 64);
             }
 
-            if (pressed) {
+            /* Debounce: accumulate consecutive pressed samples; clear on release.
+             * A single-sample noise spike resets to 0 on the next idle reading
+             * so it can never reach PRESS_DEBOUNCE and fire a spurious event. */
+            if (raw) {
+                if (debounce_count[i] < PRESS_DEBOUNCE)
+                    debounce_count[i]++;
+            } else {
+                debounce_count[i] = 0;
+            }
+            bool pressed = (debounce_count[i] >= PRESS_DEBOUNCE);
+
+            /* Stuck-press recovery: force-release after 1 s (20 × 50 ms) */
+            if (raw) {
                 stuck_count[i]++;
-                /* Force-release after 1 s (20 × 50 ms) to recover from
-                 * filter overshoot or a slow flash write stalling detection. */
                 if (stuck_count[i] > 20) {
-                    was_pressed[i] = false;
-                    stuck_count[i] = 0;
+                    was_pressed[i]    = false;
+                    stuck_count[i]    = 0;
+                    debounce_count[i] = 0;
                 }
             } else {
                 stuck_count[i] = 0;
             }
 
+            /* Fire on debounced rising edge only */
             if (pressed && !was_pressed[i]) {
-                /* Queue the event – queue depth 8 prevents overwrite of rapid presses */
                 touch_pad_id_t id = (touch_pad_id_t)i;
+                ESP_LOGI(TAG, "Touch%d pressed (smooth=%u baseline=%u)",
+                         i, (unsigned)smooth[0], (unsigned)s_baseline[i]);
                 if (s_touch_queue)
                     xQueueSend(s_touch_queue, &id, 0);  /* non-blocking; drop if full */
             }
@@ -168,8 +189,10 @@ void touch_input_init(void)
     ESP_ERROR_CHECK(touch_sensor_enable(s_sens));
     ESP_ERROR_CHECK(touch_sensor_start_continuous_scanning(s_sens));
 
-    /* Allow sensor readings and benchmark to settle */
-    vTaskDelay(pdMS_TO_TICKS(500));
+    /* Allow sensor readings and IIR filter to fully settle.
+     * 500 ms was sometimes insufficient on cold boot — the IIR filter
+     * needs ~20 × its time-constant to converge.  1 000 ms is reliable. */
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     /* Seed software baselines from settled smooth readings */
     for (int i = 0; i < 3; i++) {

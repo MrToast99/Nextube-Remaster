@@ -237,10 +237,6 @@ static void audio_play_task(void *arg)
              path, (unsigned)hdr.sample_rate, hdr.num_channels,
              hdr.bits_per_sample, s_volume);
 
-    /* ── Start DAC continuous at the file's sample rate ── */
-    if (dac_cont_start(hdr.sample_rate) != ESP_OK)
-        goto task_close;
-
     /* ── Pre-buffer entire PCM payload into PSRAM ─────────────────────
      * SPIFFS fread latency can be 100–600 ms per 4 KB chunk, which starves
      * the DAC and causes audible glitches.  Reading the whole file in one
@@ -283,6 +279,30 @@ static void audio_play_task(void *arg)
         goto task_cleanup;
     }
     ESP_LOGI(TAG, "DMA window @%p (internal SRAM)", buf);
+
+    /* ── Start DAC continuous at the file's sample rate ── */
+    if (dac_cont_start(hdr.sample_rate) != ESP_OK)
+        goto task_cleanup;   /* buf and pcm_buf allocated; task_cleanup frees both */
+
+    /* ── Prime DMA ring buffer with silence ────────────────────────────
+     * When dac_continuous_enable() fires the DMA descriptor buffers are
+     * zeroed (0x00 = DAC at ground = full negative rail).  The sudden
+     * step from the oneshot idle level (128 = mid-rail) down to 0 is
+     * amplified and heard as a pop at the very start of every sound.
+     *
+     * Pre-filling the entire ring with 0x80 (128 = mid-rail = silence)
+     * before the first real PCM write eliminates that transient.
+     *
+     * Ring size = DAC_DESC_NUM × DAC_DMA_BUF_SIZE = 8 × 2 048 = 16 384 B.
+     * STREAM_BUF_BYTES = 4 096, so 4 writes saturate the ring exactly. */
+    memset(buf, 128, STREAM_BUF_BYTES);
+    {
+        size_t _w;
+        for (int i = 0; i < (DAC_DESC_NUM * DAC_DMA_BUF_SIZE) / STREAM_BUF_BYTES; i++)
+            dac_continuous_write(s_dac_cont, buf, STREAM_BUF_BYTES, &_w, pdMS_TO_TICKS(100));
+        ESP_LOGI(TAG, "DMA ring primed with silence (%d × %d bytes)",
+                 (DAC_DESC_NUM * DAC_DMA_BUF_SIZE) / STREAM_BUF_BYTES, STREAM_BUF_BYTES);
+    }
 
     /* ── Stream PCM data ── */
     {
@@ -371,6 +391,11 @@ task_exit:
 
 void audio_init(void)
 {
+    /* Pin this component's log level to INFO at runtime.
+     * Prevents a global esp_log_level_set("*", WARN) elsewhere from
+     * silencing the diagnostic logs in audio_play_task. */
+    esp_log_level_set(TAG, ESP_LOG_INFO);
+
     ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
 
     /* Start in oneshot mode so we can set an idle DC level (silence) */

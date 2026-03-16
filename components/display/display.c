@@ -572,10 +572,22 @@ static void render_number6(uint32_t value, const char *theme,
         uint8_t d0 = (value / 100000) % 10;
         display_show_number(0, d0, theme);
     }
-    display_show_number(1, (value / 10000) % 10, theme);
-    display_show_number(2, (value /  1000) % 10, theme);
-    display_show_number(3, (value /   100) % 10, theme);
-    display_show_number(4, (value /    10) % 10, theme);
+
+    /* Tubes 1-4: suppress leading zeros with the theme blank image so
+     * small counts don't show a row of "0" tiles before the real digits. */
+    static const uint32_t div4[4] = { 10000, 1000, 100, 10 };
+    bool leading = true;
+    for (int i = 0; i < 4; i++) {
+        uint8_t d = (value / div4[i]) % 10;
+        if (leading && d == 0)
+            display_show_ampm(i + 1, "blank", theme);
+        else {
+            display_show_number(i + 1, d, theme);
+            leading = false;
+        }
+    }
+
+    /* Tube 5: suffix symbol or units digit — always shown, never blanked */
     if (suffix_tube5)
         display_show_ampm(5, suffix_tube5, theme);
     else
@@ -592,10 +604,20 @@ static void render_subs(const nextube_config_t *cfg)
     } else if (count >= 1000) {
         render_number6(count / 1000, cfg->theme, "youtube", "k-sub");
     } else {
-        /* tube 0 = youtube icon, tubes 1-5 = 5-digit count */
+        /* tube 0 = youtube icon, tubes 1-5 = 5-digit count, leading zeros blanked */
         display_show_ampm(0, "youtube", cfg->theme);
-        for (int i = 0; i < 5; i++)
-            display_show_number(i+1, (count / (uint32_t[]){10000,1000,100,10,1}[i]) % 10, cfg->theme);
+        static const uint32_t div5[5] = { 10000, 1000, 100, 10, 1 };
+        bool leading = true;
+        for (int i = 0; i < 5; i++) {
+            uint8_t d = (count / div5[i]) % 10;
+            /* Suppress leading zeros but always show the units digit (i == 4) */
+            if (leading && d == 0 && i < 4)
+                display_show_ampm(i + 1, "blank", cfg->theme);
+            else {
+                display_show_number(i + 1, d, cfg->theme);
+                leading = false;
+            }
+        }
     }
 }
 
