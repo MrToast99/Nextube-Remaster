@@ -33,6 +33,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <strings.h>    /* strcasecmp */
+#include "esp_heap_caps.h"
 
 static const char *TAG = "audio";
 
@@ -233,10 +234,16 @@ static void audio_play_task(void *arg)
     if (dac_cont_start(hdr.sample_rate) != ESP_OK)
         goto task_close;
 
-    /* ── Allocate stream buffer ── */
-    buf = (uint8_t *)malloc(STREAM_BUF_BYTES);
+    /* ── Allocate stream buffer in DMA-capable internal SRAM ──────────
+     * On ESP32-WROVER-E with CONFIG_SPIRAM_USE_MALLOC=y, plain malloc()
+     * can return PSRAM addresses.  The I2S DMA controller cannot access
+     * PSRAM – doing so faults the shared DMA/AHB bus and takes down both
+     * the I2S (audio) and the HSPI (LCD) peripherals simultaneously.
+     * heap_caps_malloc with MALLOC_CAP_DMA guarantees internal SRAM. */
+    buf = (uint8_t *)heap_caps_malloc(STREAM_BUF_BYTES,
+                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!buf) {
-        ESP_LOGE(TAG, "OOM for audio stream buffer");
+        ESP_LOGE(TAG, "OOM for audio stream buffer (DMA-capable SRAM)");
         goto task_cleanup;
     }
 
@@ -254,8 +261,12 @@ static void audio_play_task(void *arg)
             out_bytes = pcm16_to_pcm8(buf, rd);
 
         size_t written = 0;
-        dac_continuous_write(s_dac_cont, buf, (size_t)out_bytes,
-                             &written, pdMS_TO_TICKS(1000));
+        esp_err_t werr = dac_continuous_write(s_dac_cont, buf, (size_t)out_bytes,
+                                              &written, pdMS_TO_TICKS(1000));
+        if (werr != ESP_OK) {
+            ESP_LOGW(TAG, "DAC write error %s — stopping playback", esp_err_to_name(werr));
+            break;
+        }
     }
 
 task_cleanup:
@@ -325,7 +336,7 @@ void audio_play_file(const char *path)
     a->path[sizeof(a->path) - 1] = '\0';
 
     BaseType_t rc = xTaskCreate(audio_play_task, "audio_play",
-                                8192, a, 5, &s_audio_task);
+                                16384, a, 5, &s_audio_task);
     if (rc != pdPASS) {
         ESP_LOGE(TAG, "Failed to create audio_play task");
         free(a);

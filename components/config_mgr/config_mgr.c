@@ -59,7 +59,7 @@ static void set_defaults(void)
     strcpy(s_cfg.bell_file, "/spiffs/audio/bell.wav");
     strcpy(s_cfg.tone_file, "/spiffs/audio/tremolo3.wav");
     strcpy(s_cfg.timer_file, "/spiffs/audio/timer.wav");
-    strcpy(s_cfg.click_file, "");        /* empty = silent until user sets a file */
+    strcpy(s_cfg.click_file, "/spiffs/audio/click.wav");
     s_cfg.button_sound = true;
     s_cfg.volume = 20;
 

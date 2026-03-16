@@ -39,6 +39,7 @@
   "bell_file": "/spiffs/audio/bell.wav",
   "tone_file": "/spiffs/audio/tremolo3.wav",
   "timer_file": "/spiffs/audio/timer.wav",
+  "click_file": "/spiffs/audio/click.wav",
   "volume": 20,
   "lcd_brightness": 30,
   "led_brightness": 60,
