@@ -38,7 +38,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Clock themes (Nixie/Digital/Flip art) | ✅ Working |
 | Countdown / Pomodoro timer modes | ✅ Working |
 | Album/slideshow mode | ✅ Working (place JPEGs in `/images/album/`) |
-| Custom Clock mode (date display) | ✅ Working |
+| Date mode (date display, DD/MM/YY) | ✅ Working |
 | Per-mode enable/disable toggles | ✅ Working |
 | Auto mode rotation with configurable interval | ✅ Working |
 | SPIFFS file browser with upload/delete | ✅ Working |
@@ -198,7 +198,7 @@ The web UI provides:
 | Mode | Description |
 |---|---|
 | **Clock** | 12H or 24H digital clock |
-| **Custom Clock** | Date display (DD/MM/YY) |
+| **Date** | Date display (DD/MM/YY). Can be enabled alongside Clock — both appear as separate stops in the touch cycle. |
 | **Countdown** | Configurable countdown timer |
 | **Pomodoro** | Work/break timer (configurable intervals) |
 | **YouTube** | Live subscriber/follower count |
@@ -307,7 +307,7 @@ This is a community reverse-engineering effort. Key areas needing help:
 1. ~~**Theme images** — Extract or recreate the Nixie/Digital/Flip digit artwork for the displays~~
 2. **Scoreboard mode** — Complete the score input API and display logic
 3. **SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)
-4. **Custom Clock face** — Configuration UI for custom digit-mapped clock face (mode switching already works)
+4. **Date face** — Configuration UI for custom digit-mapped date face (mode switching already works)
 
 ## License
 

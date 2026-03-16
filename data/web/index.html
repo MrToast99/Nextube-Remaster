@@ -410,8 +410,8 @@ async function loadSettings() {
   $('f-click').value = cfg.click_file || '';
   $('f-btn-sound').checked = cfg.button_sound !== false;
 
-  /* Enabled modes bitmask.  Default 0xDF = all on except Custom Clock (bit 5). */
-  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xDF;
+  /* Enabled modes bitmask.  Default 0xFF = all modes on (Clock and Date are independent). */
+  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
   $('m-clock').checked       = !!(em & (1 << 0));
   $('m-countdown').checked   = !!(em & (1 << 1));
   $('m-scoreboard').checked  = !!(em & (1 << 2));
