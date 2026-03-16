@@ -14,13 +14,24 @@
 # so it is inherited into this directory scope when ESP-IDF processes
 # components during idf_build_process().
 if(NOT FW_VERSION)
-    # Fallback: re-parse version.json if somehow FW_VERSION wasn't inherited
-    file(READ "${CMAKE_SOURCE_DIR}/version.json" _VER_JSON)
-    string(REGEX MATCH "\"version\"[^\"]*\"([0-9]+[.][0-9]+[.][0-9]+)\"" _ "${_VER_JSON}")
-    set(FW_VERSION "${CMAKE_MATCH_1}")
+    # Fallback: re-parse version.json when FW_VERSION wasn't inherited.
+    #
+    # IMPORTANT: use CMAKE_CURRENT_LIST_DIR (always the directory of THIS file)
+    # rather than CMAKE_SOURCE_DIR.  During the ESP-IDF component requirements
+    # scan (__component_get_requirements), CMake evaluates component files in a
+    # subprocess where CMAKE_SOURCE_DIR resolves to the *build* directory, not
+    # the source root.  CMAKE_CURRENT_LIST_DIR is immune to this remapping.
+    #
+    # components/config_mgr/CMakeLists.txt → ../../ → project root
+    set(_VER_JSON_PATH "${CMAKE_CURRENT_LIST_DIR}/../../version.json")
+    if(EXISTS "${_VER_JSON_PATH}")
+        file(READ "${_VER_JSON_PATH}" _VER_JSON)
+        string(REGEX MATCH "\"version\"[^\"]*\"([0-9]+[.][0-9]+[.][0-9]+)\"" _ "${_VER_JSON}")
+        set(FW_VERSION "${CMAKE_MATCH_1}")
+    endif()
     if(NOT FW_VERSION)
         set(FW_VERSION "0.0.0")
-        message(WARNING "config_mgr: could not read version from version.json")
+        message(WARNING "config_mgr: could not read version from version.json – using 0.0.0")
     endif()
 endif()
 

@@ -32,7 +32,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | YouTube subscriber counter | ✅ Working |
 | Bilibili follower counter | ✅ Working |
 | DAC audio playback (LTK8002D amp, WAV files) | ✅ Working |
-| Clock themes (Nixie/Digital/Flip art) | ✅ Working (requires theme images in SPIFFS) |
+| Clock themes (Nixie/Digital/Flip art) | ✅ Working |
 | Countdown / Pomodoro timer modes | ✅ Working |
 | Album/slideshow mode | ✅ Working (place JPEGs in `/images/album/`) |
 | Custom Clock mode (date display) | ✅ Working |
@@ -288,7 +288,7 @@ nextube-fw/
 
 This is a community reverse-engineering effort. Key areas needing help:
 
-1. **Theme images** — Extract or recreate the Nixie/Digital/Flip digit artwork for the displays
+1. ~~**Theme images** — Extract or recreate the Nixie/Digital/Flip digit artwork for the displays~~
 2. **Scoreboard mode** — Complete the score input API and display logic
 3. **SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)
 4. **Custom Clock face** — Configuration UI for custom digit-mapped clock face (mode switching already works)
