@@ -402,7 +402,7 @@ static esp_err_t api_file_download(httpd_req_t *r)
     httpd_resp_set_type(r, content_type(p));
     httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
     const char *fname = strrchr(p, '/'); fname = fname ? fname + 1 : p;
-    char disp[160];
+    char disp[280];   /* 23 ("attachment; filename=\"\"") + 255 (max fname) + NUL */
     snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", fname);
     httpd_resp_set_hdr(r, "Content-Disposition", disp);
     char clen[24]; snprintf(clen, sizeof(clen), "%ld", sz);
