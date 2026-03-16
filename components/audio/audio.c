@@ -185,7 +185,8 @@ static void audio_play_task(void *arg)
              (unsigned)esp_get_free_heap_size(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
-    uint8_t *buf = NULL;
+    uint8_t *buf     = NULL;   /* internal-SRAM DMA window               */
+    uint8_t *pcm_buf = NULL;   /* PSRAM pre-buffer (whole file, optional) */
 
     /* ── Open file ── */
     FILE *f = fopen(path, "rb");
@@ -240,45 +241,79 @@ static void audio_play_task(void *arg)
     if (dac_cont_start(hdr.sample_rate) != ESP_OK)
         goto task_close;
 
-    /* ── Allocate stream buffer in DMA-capable internal SRAM ──────────
-     * On ESP32-WROVER-E with CONFIG_SPIRAM_USE_MALLOC=y, plain malloc()
-     * can return PSRAM addresses.  The I2S DMA controller cannot access
-     * PSRAM – doing so faults the shared DMA/AHB bus and takes down both
-     * the I2S (audio) and the HSPI (LCD) peripherals simultaneously.
-     * heap_caps_malloc with MALLOC_CAP_DMA guarantees internal SRAM. */
+    /* ── Pre-buffer entire PCM payload into PSRAM ─────────────────────
+     * SPIFFS fread latency can be 100–600 ms per 4 KB chunk, which starves
+     * the DAC and causes audible glitches.  Reading the whole file in one
+     * go amortises that cost.  CPU reads from PSRAM are fine; only DMA
+     * from PSRAM is forbidden (see DMA window below).
+     *
+     * Fallback: if PSRAM is unavailable or the file is too large, we fall
+     * back to the original chunked-fread path. */
+
+    /* Determine remaining PCM byte count */
+    long pcm_start = ftell(f);
+    fseek(f, 0, SEEK_END);
+    long pcm_end   = ftell(f);
+    fseek(f, pcm_start, SEEK_SET);
+    size_t pcm_size = (size_t)(pcm_end - pcm_start);
+
+    if (pcm_size > 0) {
+        pcm_buf = (uint8_t *)heap_caps_malloc(pcm_size, MALLOC_CAP_SPIRAM);
+        if (pcm_buf) {
+            int64_t t_load = esp_timer_get_time();
+            size_t got = fread(pcm_buf, 1, pcm_size, f);
+            int64_t load_ms = (esp_timer_get_time() - t_load) / 1000;
+            ESP_LOGI(TAG, "pre-buffered %u bytes into PSRAM @%p in %lld ms",
+                     (unsigned)got, pcm_buf, (long long)load_ms);
+            pcm_size = got;   /* actual bytes read */
+        } else {
+            ESP_LOGW(TAG, "PSRAM alloc failed for %u bytes — using chunked fread",
+                     (unsigned)pcm_size);
+        }
+    }
+
+    /* ── Small DMA window in internal SRAM ────────────────────────────
+     * The DAC DMA controller cannot access PSRAM.  We copy STREAM_BUF_BYTES
+     * at a time from the PSRAM pre-buffer into this internal-SRAM window
+     * before handing it to dac_continuous_write. */
     buf = (uint8_t *)heap_caps_malloc(STREAM_BUF_BYTES,
                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!buf) {
-        ESP_LOGE(TAG, "OOM for audio stream buffer (DMA-capable SRAM)");
+        ESP_LOGE(TAG, "OOM for DMA window (internal SRAM)");
         goto task_cleanup;
     }
-
-    {
-        /* Verify the buffer landed in internal SRAM, not PSRAM.
-         * PSRAM is mapped at 0x3F800000–0x3FBFFFFF on ESP32-WROVER-E. */
-        const bool buf_in_psram = ((uintptr_t)buf >= 0x3F800000U &&
-                                   (uintptr_t)buf <  0x3FC00000U);
-        ESP_LOGI(TAG, "stream buf @%p (%s)", buf,
-                 buf_in_psram ? "PSRAM — DMA UNSAFE!" : "internal SRAM ok");
-        if (buf_in_psram)
-            ESP_LOGE(TAG, "CRITICAL: buf in PSRAM — DAC DMA will fault AHB bus "
-                          "(LCD + audio will crash)");
-    }
+    ESP_LOGI(TAG, "DMA window @%p (internal SRAM)", buf);
 
     /* ── Stream PCM data ── */
     {
         uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
         int64_t  t_start = esp_timer_get_time();
 
-        while (!s_stop_flag) {
-            int64_t t_rd = esp_timer_get_time();
-            int rd = fread(buf, 1, STREAM_BUF_BYTES, f);
-            int64_t rd_us = esp_timer_get_time() - t_rd;
-            if (rd <= 0) break;
+        size_t psram_pos = 0;   /* read cursor into PSRAM pre-buffer */
 
-            if (rd_us > 50000)
-                ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
-                         (long long)(rd_us / 1000), frame);
+        while (!s_stop_flag) {
+            int rd;
+
+            if (pcm_buf) {
+                /* Fast path: copy from PSRAM pre-buffer into DMA window */
+                size_t remaining = pcm_size - psram_pos;
+                if (remaining == 0) break;
+                rd = (int)(remaining < (size_t)STREAM_BUF_BYTES
+                           ? remaining : (size_t)STREAM_BUF_BYTES);
+                memcpy(buf, pcm_buf + psram_pos, (size_t)rd);
+                psram_pos += (size_t)rd;
+            } else {
+                /* Fallback path: chunked fread (original behaviour) */
+                int64_t t_rd = esp_timer_get_time();
+                rd = fread(buf, 1, STREAM_BUF_BYTES, f);
+                int64_t rd_us = esp_timer_get_time() - t_rd;
+                if (rd <= 0) break;
+                if (rd_us > 50000)
+                    ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
+                             (long long)(rd_us / 1000), frame);
+            }
+
+            if (rd <= 0) break;
 
             /* Volume attenuation (operates on native bit depth) */
             apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
@@ -315,6 +350,7 @@ static void audio_play_task(void *arg)
     }
 
 task_cleanup:
+    heap_caps_free(pcm_buf);   /* NULL-safe; frees PSRAM pre-buffer if used */
     free(buf);
     dac_cont_stop();   /* disable continuous, restore oneshot silence */
 
