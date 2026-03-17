@@ -760,14 +760,12 @@ static void render_weather(const nextube_config_t *cfg)
     char path[128];
 
     if (!w || !w->valid) {
-        /* No weather data yet – show "-" on every tube so the user knows
-         * weather mode is active but still waiting for the first fetch.
-         * Once WiFi connects and the weather task fires (~10 s later) the
-         * real data replaces these dashes automatically. */
-        for (int i = 0; i < LCD_COUNT; i++) {
-            display_path_temperature(path, sizeof(path), cfg->theme, "minus");
-            display_show_image(i, path);
-        }
+        /* No weather data yet – show "·" (dot) on every tube so the user
+         * knows weather mode is active but still waiting for the first fetch.
+         * Uses AMPM/dot.jpg which is a small centred dot, clearly distinct
+         * from a digit and less alarming than a minus sign. */
+        for (int i = 0; i < LCD_COUNT; i++)
+            display_show_ampm(i, "dot", cfg->theme);
         return;
     }
 

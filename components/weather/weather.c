@@ -575,21 +575,27 @@ static void fetch_weather(void)
 
 static void weather_task(void *arg)
 {
-    /* Wait until STA actually has an IP before attempting any HTTPS connection.
-     * Tubes show "------" (six minus signs) until the first fetch succeeds. */
+    /* Wait until STA actually has an IP before attempting any HTTPS connection. */
     ESP_LOGI(TAG, "waiting for WiFi...");
     while (!wifi_manager_is_connected()) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    /* 10 s settling: lets the web UI finish its initial burst of API calls
-     * before TLS crypto competes for WiFi TX buffers (avoids EAGAIN). */
-    ESP_LOGI(TAG, "WiFi ready – first weather fetch in 10 s");
-    vTaskDelay(pdMS_TO_TICKS(10000));
 
+    /* First fetch: attempt immediately, then retry every 5 s until it succeeds.
+     * No blanket settling delay — fetch_weather() is resilient to failure
+     * (http_get returns NULL on any error) so a failed attempt is harmless. */
+    ESP_LOGI(TAG, "WiFi ready – fetching weather");
+    while (!s_weather.valid) {
+        fetch_weather();
+        if (!s_weather.valid)
+            vTaskDelay(pdMS_TO_TICKS(5000));   /* retry in 5 s if fetch failed */
+    }
+
+    /* Subsequent fetches every 10 minutes */
     while (1) {
+        vTaskDelay(pdMS_TO_TICKS(600000));
         ESP_LOGI(TAG, "fetching weather...");
         fetch_weather();
-        vTaskDelay(pdMS_TO_TICKS(600000));  /* every 10 minutes */
     }
 }
 
