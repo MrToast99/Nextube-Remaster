@@ -218,6 +218,9 @@ static void audio_play_task(void *arg)
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     uint8_t *buf = NULL;   /* internal-SRAM DMA window */
+    /* Declared here (not inside the streaming block) so task_cleanup can
+     * read total_bytes_out regardless of which goto reaches it. */
+    uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
 
     /* ── Open file ── */
     FILE *f = fopen(path, "rb");
@@ -326,9 +329,6 @@ static void audio_play_task(void *arg)
     }
 
     /* ── Stream PCM data directly from SPIFFS ── */
-    /* Declared at this scope so task_cleanup can read total_bytes_out to
-     * calculate the exact DMA ring drain time without over-waiting. */
-    uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
     {
         int64_t  t_start = esp_timer_get_time();
 
