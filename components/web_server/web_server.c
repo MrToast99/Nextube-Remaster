@@ -381,35 +381,69 @@ static esp_err_t api_file_ls(httpd_req_t *r)
     while (plen > 7 && path[plen - 1] == '/')
         path[--plen] = '\0';
 
-    cJSON *arr = cJSON_CreateArray();
+    /* Stream the directory listing as chunked JSON.
+     *
+     * Building the whole listing with cJSON then calling httpd_resp_sendstr()
+     * sends a single large payload that overflows the lwIP TCP send buffer
+     * (default 5760 B) and triggers EAGAIN → connection failure.  Instead,
+     * emit one JSON object per file via httpd_resp_send_chunk() so each
+     * chunk is ≤ 512 bytes and always fits in the send buffer. */
+    httpd_resp_set_type(r, "application/json");
+    httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
+
     DIR *dp = opendir(path);
-    if (!dp)
-        ESP_LOGW(TAG, "api_file_ls: opendir(%s) failed: errno=%d (%s)", path, errno, strerror(errno));
-    if (dp) {
-        struct dirent *e;
-        while ((e = readdir(dp))) {
-            cJSON *it = cJSON_CreateObject();
-            cJSON_AddStringToObject(it, "name", e->d_name);
-            /* Use d_type from readdir — more reliable than stat() for SPIFFS
-             * virtual directories where stat() fails with ENOENT. */
-            if (e->d_type == DT_DIR) {
-                cJSON_AddStringToObject(it, "type", "dir");
-            } else {
-                cJSON_AddStringToObject(it, "type", "file");
-                char fp[400];
-                snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
-                struct stat st;
-                if (stat(fp, &st) == 0)
-                    cJSON_AddNumberToObject(it, "size", st.st_size);
-            }
-            cJSON_AddItemToArray(arr, it);
-        }
-        closedir(dp);
+    if (!dp) {
+        ESP_LOGW(TAG, "api_file_ls: opendir(%s) failed: errno=%d (%s)",
+                 path, errno, strerror(errno));
+        /* Return an empty JSON array — the UI can distinguish "no files"
+         * from a real error by the HTTP status code remaining 200. */
+        return httpd_resp_sendstr(r, "[]");
     }
-    char *json = cJSON_PrintUnformatted(arr);
-    esp_err_t ret = send_json(r, json);
-    free(json); cJSON_Delete(arr);
-    return ret;
+
+    httpd_resp_send_chunk(r, "[", 1);
+
+    bool first = true;
+    struct dirent *e;
+    char chunk[512];
+    char ename[256];    /* JSON-escaped filename */
+
+    while ((e = readdir(dp))) {
+        /* JSON-escape the filename (guard against " and \ in names). */
+        {
+            const char *s = e->d_name;
+            char *w = ename, *wend = ename + sizeof(ename) - 2;
+            while (*s && w < wend) {
+                if (*s == '"' || *s == '\\') *w++ = '\\';
+                *w++ = *s++;
+            }
+            *w = '\0';
+        }
+
+        int n;
+        if (e->d_type == DT_DIR) {
+            n = snprintf(chunk, sizeof(chunk),
+                         "%s{\"name\":\"%s\",\"type\":\"dir\"}",
+                         first ? "" : ",", ename);
+        } else {
+            /* stat() the file for its size — use full SPIFFS path. */
+            char fp[384];
+            snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
+            struct stat st;
+            long sz = (stat(fp, &st) == 0) ? (long)st.st_size : 0;
+            n = snprintf(chunk, sizeof(chunk),
+                         "%s{\"name\":\"%s\",\"type\":\"file\",\"size\":%ld}",
+                         first ? "" : ",", ename, sz);
+        }
+
+        if (n > 0 && n < (int)sizeof(chunk))
+            httpd_resp_send_chunk(r, chunk, n);
+        first = false;
+    }
+    closedir(dp);
+
+    httpd_resp_send_chunk(r, "]", 1);
+    httpd_resp_send_chunk(r, NULL, 0);   /* terminate chunked transfer */
+    return ESP_OK;
 }
 
 /* GET /api/file/download?path=/images/themes/foo/1.jpg
