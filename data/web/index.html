@@ -322,11 +322,13 @@ select option{background:var(--accent);color:var(--text)}
     <h2>SPIFFS Files</h2>
     <div id="file-breadcrumb" style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem;min-height:1.2em"></div>
     <div id="file-list" style="font-size:.85rem;max-height:320px;overflow-y:auto;border:1px solid rgba(255,255,255,.07);border-radius:6px"></div>
-    <input type="file" id="upload-input" style="display:none" onchange="uploadFile()">
+    <input type="file" id="upload-input" multiple style="display:none" onchange="uploadFiles(this.files, false)">
+    <input type="file" id="upload-dir-input" webkitdirectory multiple style="display:none" onchange="uploadFiles(this.files, true)">
     <div class="btn-group" style="margin-top:.7rem">
       <button class="btn btn-outline" onclick="browseDir('/')">Browse</button>
       <button class="btn btn-outline" onclick="browseDir(s_filePath)">Refresh</button>
-      <button class="btn btn-outline" onclick="$('upload-input').click()">⬆ Upload File</button>
+      <button class="btn btn-outline" onclick="$('upload-input').click()">⬆ Upload File(s)</button>
+      <button class="btn btn-outline" onclick="$('upload-dir-input').click()">📁 Upload Folder</button>
     </div>
   </div>
   <div class="card">
@@ -714,23 +716,31 @@ async function deleteFile(path) {
   } catch(e) { toast('Delete error: ' + e.message, true); }
 }
 
-/* ── Upload a file to current SPIFFS directory ─────── */
-async function uploadFile() {
-  const input = $('upload-input');
-  const file = input.files[0];
-  if (!file) return;
-  const destPath = (s_filePath.replace(/\/$/, '') + '/' + file.name);
-  toast('Uploading ' + file.name + '…');
-  try {
-    const r = await fetch('/api/file/upload?path=' + encodeURIComponent(destPath), {
-      method: 'POST',
-      body: file
-    });
-    const d = await r.json();
-    if (d.status === 'ok') { toast('Uploaded ' + file.name); browseDir(s_filePath); }
-    else toast('Upload failed', true);
-  } catch(e) { toast('Upload error: ' + e.message, true); }
-  input.value = '';  /* reset so the same file can be re-uploaded */
+/* ── Upload files / folder to current SPIFFS directory ─ */
+async function uploadFiles(files, preservePath) {
+  if (!files || !files.length) return;
+  const total = files.length;
+  let ok = 0, fail = 0;
+  const label = total === 1 ? files[0].name : total + ' files';
+  toast('Uploading ' + label + '…');
+  for (const file of files) {
+    /* preservePath=true  → keep webkitRelativePath so folder structure is retained
+       preservePath=false → flat upload into the currently-browsed directory */
+    const rel = preservePath && file.webkitRelativePath ? file.webkitRelativePath : file.name;
+    const destPath = s_filePath.replace(/\/$/, '') + '/' + rel;
+    try {
+      const r = await fetch('/api/file/upload?path=' + encodeURIComponent(destPath), {
+        method: 'POST', body: file
+      });
+      const d = await r.json();
+      if (d.status === 'ok') ok++; else fail++;
+    } catch(e) { fail++; }
+  }
+  $('upload-input').value = '';
+  $('upload-dir-input').value = '';
+  if (fail === 0) toast('Uploaded ' + (ok === 1 ? files[0].name : ok + ' files'));
+  else toast(ok + ' uploaded, ' + fail + ' failed', true);
+  browseDir(s_filePath);
 }
 
 /* ── Device logs ───────────────────────────────────── */
