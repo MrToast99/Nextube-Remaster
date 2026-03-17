@@ -35,6 +35,7 @@
 #include <strings.h>    /* strcasecmp */
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"    /* esp_rom_delay_us – sub-tick busy-wait for DAC ramps */
 
 static const char *TAG = "audio";
 
@@ -79,12 +80,19 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
     /* Ramp DAC from mid-rail (128) down to 0 before releasing the oneshot.
      * When dac_continuous_enable() fires, the DMA ring is zero-filled (0x00).
      * A hard step from 128→0 is amplified as an audible pop.  A short ramp
-     * (9 steps × 1 ms ≈ 9 ms) brings the output to 0 first so the
-     * oneshot→continuous transition is 0→0 — inaudible. */
+     * (9 steps × 2 ms = 18 ms) brings the output to 0 first so the
+     * oneshot→continuous transition is 0→0 — inaudible.
+     *
+     * NOTE: vTaskDelay(pdMS_TO_TICKS(1)) must NOT be used here.  With the
+     * default ESP-IDF FreeRTOS tick rate of 100 Hz, pdMS_TO_TICKS(1) = 0
+     * (integer truncation), so the delay would be 0 ticks = no delay at
+     * all, making the ramp an instantaneous hard step.  esp_rom_delay_us is
+     * a busy-wait that bypasses tick granularity and gives accurate ms-range
+     * delays. */
     if (s_dac_one) {
         for (int v = 128; v >= 0; v -= 16) {
             dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
-            vTaskDelay(pdMS_TO_TICKS(1));
+            esp_rom_delay_us(2000);   /* 2 ms per step → 18 ms total ramp */
         }
         dac_oneshot_del_channel(s_dac_one);
         s_dac_one = NULL;
@@ -151,13 +159,15 @@ static void dac_cont_stop(void)
 
     /* Restore oneshot and ramp 0 → 128.
      * After del_channels the DAC holds the RTC register value (0).
-     * A hard jump to 128 would cause a pop; ramp instead. */
+     * A hard jump to 128 would cause a pop; ramp instead.
+     * Same busy-wait rationale as the ramp-down in dac_cont_start:
+     * pdMS_TO_TICKS(1) = 0 at 100 Hz tick rate → use esp_rom_delay_us. */
     if (!s_dac_one) {
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
         if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK) {
             for (int v = 0; v <= 128; v += 16) {
                 dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
-                vTaskDelay(pdMS_TO_TICKS(1));
+                esp_rom_delay_us(2000);   /* 2 ms per step → 18 ms total ramp */
             }
             dac_oneshot_output_voltage(s_dac_one, 128);   /* settle at silence */
         }
