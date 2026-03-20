@@ -13,18 +13,55 @@ jobs:
     container:
       image: espressif/idf:v5.5.3
     outputs:
-      fw_version: ${{ steps.version.outputs.fw_version }}
+      fw_version:     ${{ steps.version.outputs.fw_version }}
+      spiffs_version: ${{ steps.version.outputs.spiffs_version }}
+      update_type:    ${{ steps.updatetype.outputs.update_type }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0    # full history needed for git describe / diff
 
-      - name: Extract firmware version
+      - name: Extract versions
         id: version
         run: |
-          FW_VER=$(python3 -c "import json; print(json.load(open('version.json'))['version'])")
-          echo "fw_version=$FW_VER" >> $GITHUB_OUTPUT
-          echo "Firmware version: $FW_VER"
+          FW_VER=$(python3 -c "import json; print(json.load(open('version.json'))['firmware_version'])")
+          SP_VER=$(python3 -c "import json; print(json.load(open('version.json'))['spiffs_version'])")
+          echo "fw_version=$FW_VER"     >> $GITHUB_OUTPUT
+          echo "spiffs_version=$SP_VER" >> $GITHUB_OUTPUT
+          echo "Firmware version: $FW_VER   SPIFFS version: $SP_VER"
+
+      - name: Determine update type
+        id: updatetype
+        run: |
+          # Compare against the most recent previous tag to decide which
+          # partitions changed.  Falls back to "full" when no prior tag exists.
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous tag found – marking as full flash"
+            echo "update_type=full" >> $GITHUB_OUTPUT
+          else
+            echo "Comparing against $PREV_TAG"
+            FW_CHANGED=$(git diff --name-only "$PREV_TAG" HEAD \
+              -- main/ components/ CMakeLists.txt sdkconfig.defaults \
+                 partitions.csv version.json \
+              | grep -v '^data/' | wc -l | tr -d ' ')
+            SP_CHANGED=$(git diff --name-only "$PREV_TAG" HEAD -- data/ \
+              | wc -l | tr -d ' ')
+            echo "Firmware-side changes: $FW_CHANGED   SPIFFS-side changes: $SP_CHANGED"
+            if [ "$FW_CHANGED" -gt 0 ] && [ "$SP_CHANGED" -gt 0 ]; then
+              TYPE="full"
+            elif [ "$FW_CHANGED" -gt 0 ]; then
+              TYPE="firmware-ota"
+            elif [ "$SP_CHANGED" -gt 0 ]; then
+              TYPE="spiffs-only"
+            else
+              TYPE="no-change"
+            fi
+            echo "update_type=$TYPE" >> $GITHUB_OUTPUT
+            echo "Update type: $TYPE"
+          fi
 
       - name: Build firmware
         shell: bash
@@ -36,11 +73,18 @@ jobs:
       - name: Prepare artifacts
         run: |
           FW_VER=${{ steps.version.outputs.fw_version }}
+          SP_VER=${{ steps.version.outputs.spiffs_version }}
+          TYPE=${{ steps.updatetype.outputs.update_type }}
           mkdir -p artifacts
+
+          # OTA firmware binary (use firmware version in name)
           cp build/nextube-fw.bin           artifacts/nextube-fw-v${FW_VER}-ota.bin
           cp build/bootloader/bootloader.bin artifacts/
           cp build/partition_table/partition-table.bin artifacts/
-          cp build/spiffs.bin               artifacts/
+
+          # SPIFFS binary (use SPIFFS version in name)
+          cp build/spiffs.bin               artifacts/nextube-spiffs-v${SP_VER}.bin
+
           # Create combined flashable image (USB full-flash only, NOT for OTA)
           . $IDF_PATH/export.sh
           esptool.py --chip esp32 merge_bin \
@@ -48,10 +92,15 @@ jobs:
             --flash_mode dio \
             --flash_freq 40m \
             --flash_size 16MB \
-            0x1000  build/bootloader/bootloader.bin \
-            0x8000  build/partition_table/partition-table.bin \
-            0x10000 build/nextube-fw.bin \
+            0x1000   build/bootloader/bootloader.bin \
+            0x8000   build/partition_table/partition-table.bin \
+            0x10000  build/nextube-fw.bin \
             0x910000 build/spiffs.bin
+
+          # Record the detected update type so the release notes can reference it
+          echo "$TYPE" > artifacts/update_type.txt
+          echo "Firmware v${FW_VER} / SPIFFS v${SP_VER} / Update type: ${TYPE}" \
+            > artifacts/build_info.txt
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4.6.2
@@ -73,6 +122,51 @@ jobs:
           name: nextube-firmware
           path: artifacts/
 
+      - name: Build release notes
+        id: relnotes
+        run: |
+          FW_VER=${{ needs.build.outputs.fw_version }}
+          SP_VER=${{ needs.build.outputs.spiffs_version }}
+          TYPE=${{ needs.build.outputs.update_type }}
+
+          # Human-readable update guidance
+          case "$TYPE" in
+            firmware-ota)
+              GUIDANCE="**Update required:** flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**."
+              ;;
+            spiffs-only)
+              GUIDANCE="**Update required:** flash \`nextube-spiffs-v${SP_VER}.bin\` via **System → Web UI Update**."
+              ;;
+            full)
+              GUIDANCE="**Both partitions changed.** Flash \`nextube-fw-v${FW_VER}-ota.bin\` then \`nextube-spiffs-v${SP_VER}.bin\` via the web UI, or use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
+              ;;
+            *)
+              GUIDANCE="Refer to the included binaries."
+              ;;
+          esac
+
+          cat > release_notes.md <<EOF
+          ## Nextube-Remaster v${FW_VER}
+
+          | | Version |
+          |---|---|
+          | **Firmware** | v${FW_VER} |
+          | **SPIFFS / Web UI** | v${SP_VER} |
+
+          ### ${GUIDANCE}
+
+          ### Files
+          | File | Purpose |
+          |---|---|
+          | \`nextube-fw-v${FW_VER}-full.bin\` | USB full flash (ESPConnect / esptool, offset 0x0) |
+          | \`nextube-fw-v${FW_VER}-ota.bin\` | Firmware OTA (System → Firmware Update) |
+          | \`nextube-spiffs-v${SP_VER}.bin\` | Web UI / SPIFFS OTA (System → Web UI Update) |
+          | \`bootloader.bin\` | Bootloader (USB flash only) |
+          | \`partition-table.bin\` | Partition table (USB flash only) |
+          EOF
+
+          echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
+
       - name: Zip artifacts
         run: |
           FW_VER=${{ needs.build.outputs.fw_version }}
@@ -84,6 +178,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Nextube-Remaster v${{ needs.build.outputs.fw_version }}
+          body_path: release_notes.md
           files: Nextube-Remaster v${{ needs.build.outputs.fw_version }}.zip
           draft: false
           prerelease: false

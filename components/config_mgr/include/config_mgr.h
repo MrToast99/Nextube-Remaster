@@ -84,6 +84,9 @@ typedef struct {
     /* Album */
     uint16_t         album_switch_ms;
 
+    /* Weather panel rotation interval (ms between temp/humidity panel switch) */
+    uint16_t         weather_panel_ms;
+
     /* Mode Rotation – auto-cycle through enabled modes on a timer.
      * When rotation_enabled is false the mode never changes automatically;
      * only UI API calls and physical button presses can change it. */
@@ -109,7 +112,8 @@ void config_reset(void);
 /** Advance to the next enabled mode and save.
  *  Called by the display task when the rotation timer fires.
  *  Skips modes that are not set in enabled_modes.  Thread-safe. */
-void config_advance_mode(void);
+void config_set_mode    (app_mode_t mode); /* RAM-only – no flash write */
+void config_advance_mode(void);            /* RAM-only – no flash write */
 
 /** Return the canonical display name string for a mode enum value.
  *  Returns "Clock" for any out-of-range value.

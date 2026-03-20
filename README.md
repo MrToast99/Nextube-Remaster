@@ -105,19 +105,29 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ### Versioning
 
-The firmware version is defined in `version.json` at the project root:
+Firmware and SPIFFS/Web UI versions are tracked independently in `version.json`:
 
 ```json
-{ "version": "1.0.0", "name": "Nextube-Remaster", "description": "..." }
+{
+  "firmware_version": "1.0.2",
+  "spiffs_version":   "1.0.2",
+  "name": "Nextube-Remaster",
+  "description": "..."
+}
 ```
 
-CMake reads this at configure time using a robust semver regex (`[0-9]+[.][0-9]+[.][0-9]+`). The version is injected into every component as a compiler `-D` flag via `target_compile_definitions(PUBLIC)` in `components/config_mgr/CMakeLists.txt` — this propagates to all consumers automatically through the CMake dependency graph. A `fw_version.h` header with `#ifndef` guard is also generated as a fallback. CMake also writes the version into `data/web/version.txt`, which is bundled into `spiffs.bin` for runtime mismatch detection.
+| Key | Controls | When to bump |
+|---|---|---|
+| `firmware_version` | `nextube-fw-*-ota.bin` / `nextube-fw-*-full.bin` | Any change to `main/`, `components/`, `CMakeLists.txt`, etc. |
+| `spiffs_version` | `nextube-spiffs-*.bin` | Any change to `data/` (web UI, theme images, audio) |
+
+CMake reads `firmware_version` and injects it as `FW_VERSION_STR` into all components via `target_compile_definitions(PUBLIC)` in `components/config_mgr/CMakeLists.txt`. `spiffs_version` is written to `data/web/version.txt` and bundled into the SPIFFS image — the web UI reads it at runtime to detect mismatches. Bumping only `spiffs_version` never triggers the mismatch banner. Bumping only `firmware_version` will show the banner until the matching `spiffs.bin` is flashed.
 
 To release a new version, update `version.json` and tag the commit.
 
 ### CI Build
 
-Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) automatically create a GitHub Release with downloadable firmware binaries.
+Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) automatically create a GitHub Release with downloadable firmware binaries and generated release notes that identify which partitions changed (firmware-only OTA, SPIFFS-only, or full re-flash) by comparing changed files against the previous tag.
 
 ## Flashing
 
@@ -164,8 +174,8 @@ The web UI provides two separate OTA upload paths under **System**:
 
 | Update type | File | When to use |
 |---|---|---|
-| **Firmware Update** | `nextube-fw-ota.bin` | New firmware, bug fixes |
-| **Web UI Update** | `spiffs.bin` | New web interface, weather sources, theme changes |
+| **Firmware Update** | `nextube-fw-v{ver}-ota.bin` | New firmware, bug fixes |
+| **Web UI Update** | `nextube-spiffs-v{ver}.bin` | New web interface, weather sources, theme changes |
 
 > **Do not** upload `nextube-fw-full.bin` via OTA — it is the merged USB-flash image, not a valid OTA app image.
 
@@ -188,11 +198,11 @@ After setup, access the management interface via:
 
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, subscribers, heap), quick mode switching
-- **Display** — theme, brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation
+- **Display** — theme (populated dynamically from SPIFFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation
 - **Network** — WiFi config, timezone, NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
-- **System** — firmware OTA, web UI / SPIFFS OTA, SPIFFS file browser (browse/upload/delete), device log viewer, factory reset, about
+- **System** — firmware OTA, web UI / SPIFFS OTA, SPIFFS file browser (browse/upload/delete), device log viewer, firmware update check (compares against latest GitHub release), factory reset, about (shows firmware + web UI versions independently)
 
 ## Modes
 
@@ -203,7 +213,7 @@ The web UI provides:
 | **Countdown** | Configurable countdown timer. Middle touch pauses/resumes. |
 | **Pomodoro** | Work/break timer with configurable work and break durations. Middle touch pauses/resumes. Automatically flips between work and break phases. |
 | **YouTube** | Live subscriber/follower count |
-| **Weather** | Temperature (rounded to whole degrees), humidity, condition icon. Leading zeros suppressed; negative temps hide humidity. All 6 tubes show `······` (dots) until the first fetch completes. The °C/°F tube blends the degree symbol over a blank background so it displays correctly. |
+| **Weather** | Two panels cycling every 5 s: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + condition icon. Temperatures rounded to whole degrees; leading zeros suppressed. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/` |
 | **Scoreboard** | Stub — displays zeros |
 
@@ -232,27 +242,96 @@ Weather mode cycles through all enabled weather APIs until one succeeds. Support
 
 Weather fetching: On WiFi connect the first fetch happens immediately with automatic 5-second retries until data arrives. After the first successful fetch, weather is refreshed every 10 minutes.
 
-Weather display layout (6 tubes):
+Weather mode auto-cycles between two panels every 5 seconds:
+
+**Panel 1 — temperature + icon:**
+```
+Positive:        [tens/blank] [units] [°C/°F] [blank] [blank] [icon]
+Negative single: [-]          [units] [°C/°F] [blank] [blank] [icon]
+Negative double: [-]          [tens]  [units] [°C/°F] [blank] [icon]
+```
+
+**Panel 2 — humidity + icon:**
+```
+[blank] [blank] [blank] [hum_tens/blank] [hum_units] [icon]
+```
+
+**Waiting (no data yet):**
+```
+[·] [·] [·] [·] [·] [·]   (all tubes show dot.jpg until first fetch)
+```
+
+Required SPIFFS image files — see the **Themes** section for the full folder structure. Key files for weather:
 
 ```
-Positive:        [tens/blank] [units] [°C/°F] [hum tens/blank] [hum units] [icon]
-Negative single: [-] [units] [°C/°F] [blank] [blank] [icon]
-Negative double: [-] [tens] [units] [°C/°F] [blank] [icon]
-Waiting:         [·] [·] [·] [·] [·] [·]  (dots until first fetch)
+AMPM/              blank.jpg   dot.jpg
+MutiInfo/Temperature/   degreec.jpg   degreef.jpg   minus.jpg
+MutiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
+                        rain.jpg  snow.jpg  squalls.jpg  thunderstorm.jpg
+                        sand.jpg  tornado.jpg  volcanicAsh.jpg
 ```
 
-The °C/°F tube is rendered by OR-blending `blank.jpg` with `degreec.jpg` or `degreef.jpg`, so the degree symbol appears correctly over the theme background (avoids the standalone degree image reading as "0").
+## Themes
 
-Required SPIFFS image files:
+### Adding a Custom Theme
+
+The web UI theme dropdown is populated dynamically by scanning `/images/themes/` on SPIFFS at runtime (via `/api/themes`). Any folder you upload there with the required file structure will appear in the dropdown automatically — no firmware update needed.
+
+Upload your theme folder via **System → SPIFFS Files → 📁 Upload Folder**, then navigate to `/images/themes/` and select your local theme directory.
+
+### Required Folder Structure
+
+All paths are relative to `/images/themes/{ThemeName}/`.
 
 ```
-/images/themes/{theme}/MutiInfo/Temperature/  degreec.jpg  degreef.jpg  minus.jpg
-/images/themes/{theme}/MutiInfo/Weather/      sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
-                                              rain.jpg  snow.jpg  squalls.jpg  thunderstorm.jpg
-                                              sand.jpg  tornado.jpg  volcanicAsh.jpg
-/images/themes/{theme}/AMPM/                  blank.jpg   ← blank tube slots and °C/°F base layer
-                                              dot.jpg    ← shown on all tubes while waiting for data
+{ThemeName}/
+├── Numbers/
+│   ├── 0.jpg  1.jpg  2.jpg  3.jpg  4.jpg
+│   └── 5.jpg  6.jpg  7.jpg  8.jpg  9.jpg
+├── AMPM/
+│   ├── blank.jpg        ← empty tube / suppressed digit placeholder
+│   ├── dot.jpg          ← weather-waiting indicator (all 6 tubes)
+│   ├── am.jpg           ← 12H clock AM indicator
+│   ├── pm.jpg           ← 12H clock PM indicator
+│   ├── colon.jpg        ← clock separator (tube 2)
+│   ├── countdown.jpg    ← countdown mode label (tube 0)
+│   ├── pomodoro.jpg     ← pomodoro mode label (tube 0)
+│   ├── pomodorosb.jpg   ← pomodoro work-session indicator (tube 5)
+│   ├── pomodorolb.jpg   ← pomodoro break indicator (tube 5)
+│   └── youtube.jpg      ← YouTube mode label (tube 0)
+├── MutiInfo/
+│   ├── Temperature/
+│   │   ├── degreec.jpg  ← °C symbol
+│   │   ├── degreef.jpg  ← °F symbol
+│   │   └── minus.jpg    ← negative temperature sign
+│   ├── Weather/
+│   │   ├── sun.jpg           overcastClouds.jpg   fewClouds.jpg
+│   │   ├── fog.jpg           rain.jpg             snow.jpg
+│   │   ├── squalls.jpg       thunderstorm.jpg     sand.jpg
+│   │   └── tornado.jpg       volcanicAsh.jpg
+│   └── WeekDate/
+│       ├── week/
+│       │   └── sunday.jpg  monday.jpg  tuesday.jpg  wednesday.jpg
+│       │       thursday.jpg  friday.jpg  saturday.jpg
+│       └── date/
+│           └── 0.jpg  1.jpg  2.jpg  3.jpg  4.jpg
+│               5.jpg  6.jpg  7.jpg  8.jpg  9.jpg
+└── FlipClock/            ← required only for FlipClock theme
+    └── (same Numbers + AMPM sub-structure, used for split-flap animation)
 ```
+
+### Image Dimensions
+
+All tube images must be exactly **80 × 160 pixels** (portrait), saved as JPEG. The ST7735 displays are 80 × 160 px; images at any other size will display at the wrong resolution or be rejected by the size check in the display driver.
+
+| Tube dimension | Value |
+|---|---|
+| Width | 80 px |
+| Height | 160 px |
+| Format | JPEG (any quality; 80–90 % is a good balance of size vs. artefacts) |
+| Colour space | RGB (no CMYK) |
+
+> **Tip:** Keep individual JPEGs under ~15 KB where possible. A full theme with all required images typically sits between 500 KB and 2 MB, well within the 6.9 MB SPIFFS partition.
 
 ## REST API
 

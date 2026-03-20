@@ -66,6 +66,7 @@ static void set_defaults(void)
     s_cfg.pomodoro_work     = 25;
     s_cfg.pomodoro_break    = 5;
     s_cfg.album_switch_ms   = 2000;
+    s_cfg.weather_panel_ms  = 5000;  /* 5 s between temp and humidity panels */
 
     /* Rotation off by default; user must explicitly enable it */
     s_cfg.rotation_enabled    = false;
@@ -171,6 +172,8 @@ static void parse_json(const char *json)
     json_read_u16(root, "pomodoro_work",          &s_cfg.pomodoro_work);
     json_read_u16(root, "pomodoro_break",         &s_cfg.pomodoro_break);
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
+    json_read_u16(root, "weather_panel_ms",       &s_cfg.weather_panel_ms);
+    if (s_cfg.weather_panel_ms < 1000) s_cfg.weather_panel_ms = 5000; /* floor: 1 s */
 
     /* Backlight mode */
     char bl_mode[16] = {0};
@@ -335,6 +338,7 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "pomodoro_work",          s_cfg.pomodoro_work);
     cJSON_AddNumberToObject(root, "pomodoro_break",         s_cfg.pomodoro_break);
     cJSON_AddNumberToObject(root, "album_switch_time",      s_cfg.album_switch_ms);
+    cJSON_AddNumberToObject(root, "weather_panel_ms",       s_cfg.weather_panel_ms);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off"};
     cJSON_AddStringToObject(root, "backlight_mode",  bl_modes[s_cfg.backlight_mode]);
@@ -357,6 +361,17 @@ char *config_to_json(void)
     return out;
 }
 
+/* Update the active mode in RAM without a flash write.
+ * Used by the touch handler and auto-rotation so that frequent mode
+ * changes do not wear the flash.  The mode is persisted to flash only
+ * when the user explicitly saves settings via the web UI. */
+void config_set_mode(app_mode_t mode)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_cfg.current_mode = mode;
+    xSemaphoreGive(s_mutex);
+}
+
 void config_advance_mode(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -372,7 +387,9 @@ void config_advance_mode(void)
 
     if ((app_mode_t)m != s_cfg.current_mode) {
         s_cfg.current_mode = (app_mode_t)m;
-        save_to_flash();
+        /* No flash write — auto-rotation fires every few seconds and flash
+         * wear from that frequency is unacceptable.  Mode is persisted only
+         * when the user saves settings via the web UI. */
         ESP_LOGI(TAG, "Rotation: advanced to mode %d", m);
     }
 

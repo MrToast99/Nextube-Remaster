@@ -105,24 +105,7 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>Display Settings</h2>
     <div class="field"><label>Theme</label>
-      <select id="f-theme">
-        <option>NixieOY</option>
-        <option>FlipClock</option>
-        <option>DarkSlate</option>
-        <option>DotMatrixRG</option>
-        <option>DotMatrixY</option>
-        <option>Formula1</option>
-        <option>GlitchGR</option>
-        <option>LightFuture</option>
-        <option>NotionRain</option>
-        <option>RedDigits</option>
-        <option>RetroPaper</option>
-        <option>WireMesh</option>
-        <option>Custom</option>
-        <option>Custom01</option>
-        <option>Custom02</option>
-        <option>Custom03</option>
-      </select>
+      <select id="f-theme"><option value="">Loading…</option></select>
     </div>
     <div class="field"><label>Time Format</label>
       <select id="f-timetype"><option value="24H">24 Hour</option><option value="12H">12 Hour</option></select>
@@ -257,6 +240,11 @@ select option{background:var(--accent);color:var(--text)}
         <input id="f-pomo-break" type="number" min="1" max="999" value="5">
       </div>
     </div>
+    <div class="row">
+      <div class="field"><label>Weather Panel Rotation (seconds)</label>
+        <input id="f-wx-panel" type="number" min="1" max="300" value="5">
+      </div>
+    </div>
   </div>
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Services</button></div>
 </div>
@@ -350,10 +338,20 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <div class="card">
     <h2>About</h2>
-    <p style="font-size:.85rem;color:var(--dim)">Nextube-Remaster Open-Source Firmware v<span id="s-fwver">1.0.0</span><br>
-    Hardware Rev <span id="s-hwver">1.31</span><br>
-    ESP32-WROVER-E · 16MB Flash · 8MB PSRAM<br>
-    <a href="https://github.com/MrToast99/Nextube-Remaster" target="_blank" style="color:var(--hi)">GitHub Repository</a></p>
+    <p style="font-size:.85rem;color:var(--dim)">
+      Firmware &nbsp;v<span id="s-fwver">--</span><br>
+      Web UI &nbsp;&nbsp;&nbsp;v<span id="s-spver">--</span><br>
+      Hardware Rev <span id="s-hwver">1.31</span><br>
+      ESP32-WROVER-E · 16MB Flash · 8MB PSRAM<br>
+      <a href="https://github.com/MrToast99/Nextube-Remaster" target="_blank" style="color:var(--hi)">GitHub Repository</a>
+    </p>
+    <div id="update-available" style="display:none;background:rgba(80,200,80,.12);border:1px solid rgba(80,200,80,.4);border-radius:6px;padding:.6rem .9rem;margin:.6rem 0;font-size:.83rem">
+      New release available: <strong>v<span id="update-version"></span></strong> —
+      <a id="update-url" href="#" target="_blank" style="color:var(--hi)">Download from GitHub</a>
+    </div>
+    <div class="btn-group" style="margin-top:.5rem">
+      <button id="check-updates-btn" class="btn btn-outline" onclick="checkForUpdates()">Check for Updates</button>
+    </div>
   </div>
 </div>
 </main>
@@ -400,8 +398,28 @@ async function api(path, opts) {
   catch(e) { toast('API error: ' + e.message, true); return null; }
 }
 
+/* ── Theme list (dynamic from /api/themes) ─────────── */
+async function loadThemes() {
+  try {
+    const data = await api('themes');
+    const themes = data?.themes;
+    if (!themes || !themes.length) return;
+    const sel = $('f-theme');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    themes.forEach(t => {
+      const o = document.createElement('option');
+      o.value = t; o.textContent = t;
+      sel.appendChild(o);
+    });
+    /* Restore previously-selected value if it still exists */
+    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  } catch(_) { /* keep placeholder if API unavailable */ }
+}
+
 /* ── Load settings ─────────────────────────────────── */
 async function loadSettings() {
+  await loadThemes();
   cfg = await api('settings');
   if (!cfg) return;
   const a = cfg.apps?.[0] || {};
@@ -430,6 +448,7 @@ async function loadSettings() {
   $('f-countdown').value  = cfg.default_countdown_time || 1;
   $('f-pomo-work').value  = cfg.pomodoro_work  || 25;
   $('f-pomo-break').value = cfg.pomodoro_break || 5;
+  $('f-wx-panel').value   = Math.round((cfg.weather_panel_ms || 5000) / 1000);
 
   /* Enabled modes bitmask.  Default 0xFF = all modes on (Clock and Date are independent). */
   const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
@@ -526,6 +545,7 @@ async function saveSettings() {
     default_countdown_time: +$('f-countdown').value,
     pomodoro_work:  +$('f-pomo-work').value,
     pomodoro_break: +$('f-pomo-break').value,
+    weather_panel_ms: Math.max(1000, +$('f-wx-panel').value * 1000),
   };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
@@ -806,6 +826,7 @@ async function refreshStatus() {
   $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
   $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';
   $('s-fwver').textContent = s.firmware || '--';
+  if ($('s-spver')) $('s-spver').textContent = s.spiffs_version || '--';
 
   /* Version mismatch banner */
   const fw = s.firmware, sp = s.spiffs_version;
@@ -815,6 +836,36 @@ async function refreshStatus() {
     $('ver-mismatch').style.display = 'block';
   } else {
     $('ver-mismatch').style.display = 'none';
+  }
+}
+
+/* ── Firmware update check (browser → GitHub API) ─── */
+async function checkForUpdates() {
+  const btn = $('check-updates-btn');
+  const prevLabel = btn ? btn.textContent : '';
+  if (btn) btn.textContent = 'Checking…';
+  try {
+    const r = await fetch(
+      'https://api.github.com/repos/MrToast99/Nextube-Remaster/releases/latest',
+      { headers: { 'Accept': 'application/vnd.github+json' } }
+    );
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const latest = (data.tag_name || '').replace(/^v/, '');
+    const current = ($('s-fwver').textContent || '').trim();
+    if (btn) btn.textContent = prevLabel;
+    if (!latest) throw new Error('No release found');
+    if (latest !== current) {
+      $('update-available').style.display = 'block';
+      $('update-version').textContent = latest;
+      $('update-url').href = data.html_url || '#';
+    } else {
+      $('update-available').style.display = 'none';
+      toast('Firmware is up to date (v' + current + ')');
+    }
+  } catch(e) {
+    if (btn) btn.textContent = prevLabel;
+    toast('Update check failed: ' + e.message, true);
   }
 }
 

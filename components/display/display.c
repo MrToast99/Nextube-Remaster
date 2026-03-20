@@ -767,25 +767,33 @@ static void render_album(const nextube_config_t *cfg,
  *                  rain  snow  squalls  thunderstorm
  *                  sand  tornado  volcanicAsh
  */
-static void render_weather(const nextube_config_t *cfg)
+/* render_weather – panel 0 = temperature + icon, panel 1 = humidity + icon.
+ *
+ * Two-panel layout (auto-cycles every WEATHER_PANEL_MS ms in the display task):
+ *
+ *  Panel 0 — temperature:
+ *    Positive:        [tens/blank] [units] [°C/°F] [blank] [blank] [icon]
+ *    Negative single: [-]          [units] [°C/°F] [blank] [blank] [icon]
+ *    Negative double: [-]          [tens]  [units] [°C/°F] [blank] [icon]
+ *
+ *  Panel 1 — humidity:
+ *    [blank] [blank] [blank] [hum_tens/blank] [hum_units] [icon]
+ */
+static void render_weather(const nextube_config_t *cfg, int panel)
 {
     const weather_data_t *w = weather_get();
     char path[128];
 
     if (!w || !w->valid) {
-        /* No weather data yet – show "·" (dot) on every tube so the user
-         * knows weather mode is active but still waiting for the first fetch.
-         * Uses AMPM/dot.jpg which is a small centred dot, clearly distinct
-         * from a digit and less alarming than a minus sign. */
+        /* No weather data yet – show "·" (dot) on every tube. */
         for (int i = 0; i < LCD_COUNT; i++)
             display_show_ampm(i, "dot", cfg->theme);
         return;
     }
 
     /* Temperature in the configured unit */
-    float temp_f = strncmp(cfg->temp_format, "Fahrenheit", 10) == 0
-                       ? w->temp_c * 9.0f / 5.0f + 32.0f
-                       : w->temp_c;
+    bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
+    float temp_f = fahrenheit ? w->temp_c * 9.0f / 5.0f + 32.0f : w->temp_c;
     bool negative = (temp_f < -0.5f);
     int  temp     = (int)(negative ? -temp_f + 0.5f : temp_f + 0.5f);
     if (temp > 99) temp = 99;
@@ -794,91 +802,74 @@ static void render_weather(const nextube_config_t *cfg)
     if (hum < 0)  hum = 0;
     if (hum > 99) hum = 99;
 
-    /* Tube layout:
-     *
-     *  Positive (0–99°): leading zero is BLANK, humidity leading zero is BLANK
-     *    [t/blank][units][C/F][h/blank][hum units][icon]
-     *    e.g. 2°C 92%:   _  2  C  9  2  ☁
-     *    e.g. 15°C 8%:   1  5  C  _  8  ☁
-     *
-     *  Negative single-digit (-1 to -9°): no humidity shown
-     *    [-][units][C/F][ _ ][ _ ][icon]
-     *    e.g. -7°C:  -  7  C  _  _  ☁
-     *
-     *  Negative double-digit (-10 to -99°): no humidity shown
-     *    [-][tens][units][C/F][ _ ][icon]
-     *    e.g. -23°C:  -  2  3  C  _  ☁
-     *
-     * Unit indicator: AMPM/c.jpg or AMPM/f.jpg (plain letter, no degree circle).
-     */
-    bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
     const char *unit = fahrenheit ? "degreef" : "degreec";
     const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
 
-    /* Prime the flip animation cache for the degree-symbol tube so that the
-     * animation transitions from blank.jpg, not from whatever the tube last
-     * displayed (e.g. colon in clock mode).  No-op for non-FlipClock themes
-     * or when the tube already holds a blank/degree image.
-     * Negative double-digit puts the degree symbol on tube 3; all other
-     * layouts put it on tube 2. */
-    flip_prime_blank(negative && temp >= 10 ? 3 : 2, cfg->theme);
+    /* Tube 5 (weather icon) is the same on both panels */
+    display_path_weather(path, sizeof(path), cfg->theme, icon);
+    display_show_image(5, path);
 
-    /* Pre-build the two paths used for the blended unit indicator:
-     *   base    – AMPM/blank.jpg   (theme's empty tube background)
-     *   overlay – Temperature/degreec.jpg or degreef.jpg (degree symbol)
-     * display_show_image_blended() OR-composites them: the degree symbol
-     * (bright pixels) appears on top of the blank background. */
-    char unit_blank_path[256], unit_degree_path[256];
-    display_path_ampm(unit_blank_path, sizeof(unit_blank_path), cfg->theme, "blank");
-    display_path_temperature(unit_degree_path, sizeof(unit_degree_path), cfg->theme, unit);
-
-    if (!negative) {
-        /* Tube 0: temperature tens — blank if zero (no leading zero) */
-        if (temp / 10 == 0) {
-            display_show_ampm(0, "blank", cfg->theme);
-        } else {
-            display_path_number(path, sizeof(path), cfg->theme, temp / 10);
-            display_show_image(0, path);
-        }
-        /* Tube 1: temperature units */
-        display_path_number(path, sizeof(path), cfg->theme, temp % 10);
-        display_show_image(1, path);
-        /* Tube 2: degree symbol composited onto blank background */
-        display_show_image_blended(2, unit_blank_path, unit_degree_path);
-        /* Tube 3: humidity tens — blank if zero */
+    /* ── Panel 1: humidity ─────────────────────────────────────────── */
+    if (panel == 1) {
+        display_show_ampm(0, "blank", cfg->theme);
+        display_show_ampm(1, "blank", cfg->theme);
+        display_show_ampm(2, "blank", cfg->theme);
         if (hum / 10 == 0) {
             display_show_ampm(3, "blank", cfg->theme);
         } else {
             display_path_number(path, sizeof(path), cfg->theme, hum / 10);
             display_show_image(3, path);
         }
-        /* Tube 4: humidity units */
         display_path_number(path, sizeof(path), cfg->theme, hum % 10);
         display_show_image(4, path);
+        return;
+    }
+
+    /* ── Panel 0: temperature ──────────────────────────────────────── */
+
+    /* Prime flip animation cache for the degree tube */
+    flip_prime_blank(negative && temp >= 10 ? 3 : 2, cfg->theme);
+
+    /* Degree-symbol tube: show degreec/degreef directly */
+    display_path_temperature(path, sizeof(path), cfg->theme, unit);
+
+    if (!negative) {
+        if (temp / 10 == 0) {
+            display_show_ampm(0, "blank", cfg->theme);
+        } else {
+            display_path_number(path, sizeof(path), cfg->theme, temp / 10);
+            display_show_image(0, path);
+            /* Restore path to degree image after overwriting above */
+            display_path_temperature(path, sizeof(path), cfg->theme, unit);
+        }
+        display_path_number(path, sizeof(path), cfg->theme, temp % 10);
+        display_show_image(1, path);
+        display_path_temperature(path, sizeof(path), cfg->theme, unit);
+        display_show_image(2, path);
+        display_show_ampm(3, "blank", cfg->theme);
+        display_show_ampm(4, "blank", cfg->theme);
     } else if (temp <= 9) {
-        /* Single-digit negative: [-][digit][C/F][blank][blank][icon] */
+        /* Single-digit negative: [-][digit][°C/°F][blank][blank][icon] */
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
         display_show_image(0, path);
         display_path_number(path, sizeof(path), cfg->theme, temp);
         display_show_image(1, path);
-        display_show_image_blended(2, unit_blank_path, unit_degree_path);
+        display_path_temperature(path, sizeof(path), cfg->theme, unit);
+        display_show_image(2, path);
         display_show_ampm(3, "blank", cfg->theme);
         display_show_ampm(4, "blank", cfg->theme);
     } else {
-        /* Double-digit negative: [-][tens][units][C/F][blank][icon] */
+        /* Double-digit negative: [-][tens][units][°C/°F][blank][icon] */
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
         display_show_image(0, path);
         display_path_number(path, sizeof(path), cfg->theme, temp / 10);
         display_show_image(1, path);
         display_path_number(path, sizeof(path), cfg->theme, temp % 10);
         display_show_image(2, path);
-        display_show_image_blended(3, unit_blank_path, unit_degree_path);
+        display_path_temperature(path, sizeof(path), cfg->theme, unit);
+        display_show_image(3, path);
         display_show_ampm(4, "blank", cfg->theme);
     }
-
-    /* Tube 5: weather icon */
-    display_path_weather(path, sizeof(path), cfg->theme, icon);
-    display_show_image(5, path);
 }
 
 /* ── Timer state ────────────────────────────────────────────────────── */
@@ -936,9 +927,11 @@ static void display_task(void *arg)
     bool          last_wx_valid = false;       /* detect when data first arrives */
     bool          last_bl_on    = true;        /* backlight on/off tracking */
     uint8_t       last_bl_brt   = 255;         /* sentinel: force-apply on first tick */
-    TickType_t    album_switch  = 0;
-    TickType_t    rotation_tick = 0;           /* tick when current mode started */
-    bool          first         = true;
+    TickType_t    album_switch       = 0;
+    TickType_t    rotation_tick      = 0;      /* tick when current mode started */
+    int           weather_panel      = 0;      /* 0 = temp, 1 = humidity */
+    TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
+    bool          first              = true;
 
     TickType_t wake = xTaskGetTickCount();
     rotation_tick = wake;
@@ -966,9 +959,10 @@ static void display_task(void *arg)
         }
 
         if (mode_changed || theme_changed || first) {
-            /* Reset album and timer state on mode/theme switch */
+            /* Reset album, timer, and weather panel state on mode/theme switch */
             s_album_loaded = false; s_album_index = 0; album_switch = 0;
             last_remain_s  = INT32_MAX;
+            weather_panel  = 0; weather_panel_tick = 0;
             display_timer_reset();
         }
 
@@ -1082,13 +1076,24 @@ static void display_task(void *arg)
         case APP_MODE_WEATHER: {
             const weather_data_t *w = weather_get();
             bool now_valid  = (w != NULL && w->valid);
+
+            /* Panel auto-switch: flip between temp (0) and humidity (1) every
+             * WEATHER_PANEL_MS ms, but only once we have valid data. */
+            bool panel_flipped = false;
+            if (now_valid) {
+                TickType_t now_t = xTaskGetTickCount();
+                if (weather_panel_tick == 0) {
+                    weather_panel_tick = now_t;           /* arm timer on first valid frame */
+                } else if ((now_t - weather_panel_tick) >= pdMS_TO_TICKS(
+                               cfg->weather_panel_ms ? cfg->weather_panel_ms : 5000)) {
+                    weather_panel      = 1 - weather_panel;
+                    weather_panel_tick = now_t;
+                    panel_flipped      = true;
+                }
+            }
+
             /* Trigger re-render when: first draw, mode/theme change, new data
-             * values arrived, OR validity flips (e.g. data fetched for the
-             * first time while already showing the blank loading screen).
-             *
-             * Compare rounded display values (same calculation as render_weather)
-             * so a decimal-only change (e.g. 2.1 → 2.3, both display as 2°)
-             * does not cause an unnecessary SPI repaint of all 6 tubes. */
+             * values arrived, validity flips, OR the panel just switched. */
             bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
             float cur_tf  = fahrenheit ? w->temp_c    * 9.0f / 5.0f + 32.0f : w->temp_c;
             float last_tf = fahrenheit ? last_temp_c  * 9.0f / 5.0f + 32.0f : last_temp_c;
@@ -1100,8 +1105,8 @@ static void display_task(void *arg)
                               (cur_t_i != last_t_i || cur_neg != last_neg ||
                                (int)(w->humidity + 0.5f) != (int)(last_hum + 0.5f));
             bool valid_changed = (now_valid != last_wx_valid);
-            if (first || mode_changed || theme_changed || wx_changed || valid_changed) {
-                render_weather(cfg);
+            if (first || mode_changed || theme_changed || wx_changed || valid_changed || panel_flipped) {
+                render_weather(cfg, weather_panel);
                 if (now_valid) { last_temp_c = w->temp_c; last_hum = w->humidity; }
                 last_wx_valid = now_valid;
             }

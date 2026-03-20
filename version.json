@@ -1,5 +1,6 @@
 {
-  "version": "1.0.2",
+  "firmware_version": "1.0.2",
+  "spiffs_version": "1.0.2",
   "name": "Nextube-Remaster",
   "description": "Open-source replacement firmware for the Nextube clock"
 }

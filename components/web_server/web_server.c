@@ -350,8 +350,16 @@ static void url_decode_inplace(char *s)
     while (*r) {
         if (*r == '%' && r[1] && r[2]) {
             char hex[3] = { r[1], r[2], '\0' };
-            *w++ = (char)strtol(hex, NULL, 16);
-            r += 3;
+            char *end;
+            long v = strtol(hex, &end, 16);
+            if (end == hex + 2) {
+                /* Both digits were valid hex — use the decoded byte */
+                *w++ = (char)v;
+                r += 3;
+            } else {
+                /* Malformed sequence — copy the '%' literally and advance one */
+                *w++ = *r++;
+            }
         } else if (*r == '+') {
             *w++ = ' '; r++;
         } else {
@@ -441,6 +449,62 @@ static esp_err_t api_file_ls(httpd_req_t *r)
     httpd_resp_send_chunk(r, "]", 1);
     httpd_resp_send_chunk(r, NULL, 0);   /* terminate chunked transfer */
     return ESP_OK;
+}
+
+/* GET /api/themes
+ * Scans /spiffs/images/themes/ and returns a sorted JSON array of directory
+ * names.  The web UI uses this to build the theme dropdown dynamically so
+ * custom themes added via the file browser appear without a firmware update. */
+static esp_err_t api_themes(httpd_req_t *r)
+{
+#define MAX_THEMES      48
+#define THEME_NAME_MAX  64
+    char names[MAX_THEMES][THEME_NAME_MAX];
+    int  count = 0;
+
+    DIR *dp = opendir("/spiffs/images/themes");
+    if (dp) {
+        struct dirent *e;
+        while ((e = readdir(dp)) && count < MAX_THEMES) {
+            if (e->d_type == DT_DIR && e->d_name[0] != '.') {
+                strncpy(names[count], e->d_name, THEME_NAME_MAX - 1);
+                names[count][THEME_NAME_MAX - 1] = '\0';
+                count++;
+            }
+        }
+        closedir(dp);
+    }
+
+    /* Insertion sort (small list — no need for qsort overhead) */
+    for (int i = 1; i < count; i++) {
+        char tmp[THEME_NAME_MAX];
+        strncpy(tmp, names[i], THEME_NAME_MAX);
+        int j = i - 1;
+        while (j >= 0 && strcmp(names[j], tmp) > 0) {
+            strncpy(names[j + 1], names[j], THEME_NAME_MAX);
+            j--;
+        }
+        strncpy(names[j + 1], tmp, THEME_NAME_MAX);
+    }
+
+    /* Build JSON: {"themes":["A","B",...]} */
+    /* Max size: 14 (header) + count*(THEME_NAME_MAX+4) + 2 (footer) */
+    size_t bufsz = 16 + (size_t)count * (THEME_NAME_MAX + 4);
+    char  *buf   = malloc(bufsz);
+    if (!buf)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+
+    char *p = buf;
+    p += snprintf(p, bufsz - (size_t)(p - buf), "{\"themes\":[");
+    for (int i = 0; i < count; i++) {
+        p += snprintf(p, bufsz - (size_t)(p - buf),
+                      "%s\"%s\"", i ? "," : "", names[i]);
+    }
+    snprintf(p, bufsz - (size_t)(p - buf), "]}");
+
+    esp_err_t ret = send_json(r, buf);
+    free(buf);
+    return ret;
 }
 
 /* GET /api/file/download?path=/images/themes/foo/1.jpg
@@ -654,7 +718,8 @@ static esp_err_t serve_static(httpd_req_t *r)
 #define R(m, p, h) { .uri=p, .method=m, .handler=h, .user_ctx=NULL }
 
 static const httpd_uri_t uris[] = {
-    R(HTTP_GET,  "/api/ping",            api_ping),
+    R(HTTP_GET,  "/api/ping",             api_ping),
+    R(HTTP_GET,  "/api/themes",           api_themes),
     R(HTTP_GET,  "/api/settings",        api_get_settings),
     R(HTTP_POST, "/api/settings",        api_post_settings),
     R(HTTP_GET,  "/api/firmwareVersion", api_fw_ver),
@@ -685,7 +750,7 @@ void web_server_start(void)
     esp_log_set_vprintf(log_vprintf_hook);
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 24;
+    cfg.max_uri_handlers = 26;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.stack_size = 8192;
 

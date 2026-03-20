@@ -60,29 +60,27 @@ RTC_DATA_ATTR static uint32_t s_warm_boot;
 static void on_touch(touch_pad_id_t pad)
 {
     const nextube_config_t *cfg = config_get();
-    char json[80];
 
     switch (pad) {
     case TOUCH_LEFT: {
-        /* Step backward; skip modes disabled in enabled_modes bitmask */
+        /* Step backward; skip modes disabled in enabled_modes bitmask.
+         * config_set_mode() updates RAM only — no flash write per button press. */
         int m = (int)cfg->current_mode;
         for (int tries = 0; tries < APP_MODE_MAX; tries++) {
             m = (m - 1 + APP_MODE_MAX) % APP_MODE_MAX;
             if (cfg->enabled_modes & (1 << m)) break;
         }
-        snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", app_mode_name((app_mode_t)m));
-        config_set_json(json, strlen(json));
+        config_set_mode((app_mode_t)m);
         break;
     }
     case TOUCH_RIGHT: {
-        /* Step forward; skip modes disabled in enabled_modes bitmask */
+        /* Step forward; skip modes disabled in enabled_modes bitmask. */
         int m = (int)cfg->current_mode;
         for (int tries = 0; tries < APP_MODE_MAX; tries++) {
             m = (m + 1) % APP_MODE_MAX;
             if (cfg->enabled_modes & (1 << m)) break;
         }
-        snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", app_mode_name((app_mode_t)m));
-        config_set_json(json, strlen(json));
+        config_set_mode((app_mode_t)m);
         break;
     }
     case TOUCH_MIDDLE: {
