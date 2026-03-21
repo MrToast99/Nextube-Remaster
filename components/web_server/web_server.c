@@ -165,16 +165,34 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     int len = r->content_len;
     if (len <= 0 || len > 4096) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad length"), ESP_FAIL;
     char *buf = malloc(len + 1);
+    if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
     int rx = 0;
     while (rx < len) { int n = httpd_req_recv(r, buf+rx, len-rx); if (n<=0){free(buf);return ESP_FAIL;} rx+=n; }
     buf[len] = 0;
+
+    /* Snapshot credentials BEFORE applying the new config so we can detect
+     * whether WiFi needs to reconnect.  Only reconnect when SSID or password
+     * actually changed — reconnecting on every display/theme/volume save
+     * stops the HTTP server 1500 ms later and drops the browser connection. */
+    const nextube_config_t *old = config_get();
+    char old_ssid[64], old_pass[64];
+    strlcpy(old_ssid, old->ssid,     sizeof(old_ssid));
+    strlcpy(old_pass, old->password, sizeof(old_pass));
+
     bool ok = config_set_json(buf, len);
     free(buf);
+
     const nextube_config_t *cfg = config_get();
     display_set_brightness(cfg->lcd_brightness);
     leds_set_brightness(cfg->led_brightness);
-    ntp_apply_timezone();      /* re-apply TZ immediately */
-    schedule_wifi_reconnect(); /* reconnect AFTER response is sent */
+    ntp_apply_timezone();
+
+    bool creds_changed = (strcmp(old_ssid, cfg->ssid)    != 0 ||
+                          strcmp(old_pass, cfg->password) != 0);
+    if (creds_changed) {
+        schedule_wifi_reconnect(); /* stop server + reconnect AFTER response is sent */
+    }
+
     return send_json(r, ok ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}");
 }
 
