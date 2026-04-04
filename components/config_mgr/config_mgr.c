@@ -27,6 +27,7 @@ static void set_defaults(void)
     strcpy(s_cfg.theme, "NixieOY");
     strcpy(s_cfg.time_type, "24H");
     strcpy(s_cfg.clock_tube5, "blank");
+    s_cfg.leading_zero    = false;
     s_cfg.led_brightness  = 60;
     s_cfg.lcd_brightness  = 60;
     s_cfg.auto_brightness = false;
@@ -165,6 +166,10 @@ static void parse_json(const char *json, size_t len)
     {
         cJSON *ae = cJSON_GetObjectItem(root, "audio_enabled");
         if (cJSON_IsBool(ae)) s_cfg.audio_enabled = cJSON_IsTrue(ae);
+    }
+    {
+        cJSON *lz = cJSON_GetObjectItem(root, "leading_zero");
+        if (cJSON_IsBool(lz)) s_cfg.leading_zero = cJSON_IsTrue(lz);
     }
 
     /* time_zone: new format = ±hours (|value| ≤ 24), legacy = raw seconds (|value| > 24).
@@ -373,6 +378,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "hostname",        s_cfg.hostname);
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
+    cJSON_AddBoolToObject  (root, "leading_zero",     s_cfg.leading_zero);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
     cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);

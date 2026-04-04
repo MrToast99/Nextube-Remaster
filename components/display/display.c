@@ -570,6 +570,10 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
 {
     bool is_12h  = (strcmp(cfg->time_type, "12H")    == 0);
     bool is_24ns = (strcmp(cfg->time_type, "24H_NS") == 0);
+    bool is_flip = (strcmp(cfg->theme, "FlipClock")  == 0);
+    /* Colon blinks every other second on all themes except FlipClock,
+     * which has its own flip animation and always shows a solid colon. */
+    const char *colon_img = (is_flip || t->tm_sec % 2 == 0) ? "colon" : "blank";
     int h = t->tm_hour, m = t->tm_min, s = t->tm_sec;
 
     if (is_12h) {
@@ -577,26 +581,34 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
         h = h % 12;
         if (h == 0) h = 12;
         /* tubes: H1  H2  colon  M1  M2  AM/PM  (no seconds in 12H) */
-        if (h / 10 == 0)
-            display_show_ampm  (0, "blank",          cfg->theme);
-        else
-            display_show_number(0, h / 10,           cfg->theme);
-        display_show_number(1, h % 10,               cfg->theme);
-        display_show_ampm  (2, "colon",              cfg->theme);
-        display_show_number(3, m / 10,               cfg->theme);
-        display_show_number(4, m % 10,               cfg->theme);
-        display_show_ampm  (5, pm ? "pm" : "am",     cfg->theme);
+        if (h / 10 == 0) {
+            if (cfg->leading_zero)
+                display_show_number(0, 0,     cfg->theme);
+            else
+                display_show_ampm  (0, "blank", cfg->theme);
+        } else {
+            display_show_number(0, h / 10,    cfg->theme);
+        }
+        display_show_number(1, h % 10,        cfg->theme);
+        display_show_ampm  (2, colon_img,     cfg->theme);
+        display_show_number(3, m / 10,        cfg->theme);
+        display_show_number(4, m % 10,        cfg->theme);
+        display_show_ampm  (5, pm ? "pm" : "am", cfg->theme);
     } else if (is_24ns) {
         /* 24H no-seconds: H1  H2  colon  M1  M2  [tube5]
          * tube5 is user-configurable: "blank" or "weather" */
-        if (h / 10 == 0)
-            display_show_ampm  (0, "blank",  cfg->theme);
-        else
-            display_show_number(0, h / 10,   cfg->theme);
-        display_show_number(1, h % 10,       cfg->theme);
-        display_show_ampm  (2, "colon",      cfg->theme);
-        display_show_number(3, m / 10,       cfg->theme);
-        display_show_number(4, m % 10,       cfg->theme);
+        if (h / 10 == 0) {
+            if (cfg->leading_zero)
+                display_show_number(0, 0,     cfg->theme);
+            else
+                display_show_ampm  (0, "blank", cfg->theme);
+        } else {
+            display_show_number(0, h / 10,    cfg->theme);
+        }
+        display_show_number(1, h % 10,        cfg->theme);
+        display_show_ampm  (2, colon_img,     cfg->theme);
+        display_show_number(3, m / 10,        cfg->theme);
+        display_show_number(4, m % 10,        cfg->theme);
         if (strcmp(cfg->clock_tube5, "weather") == 0) {
             const weather_data_t *w = weather_get();
             if (w && w->valid && w->icon[0] != '\0') {
@@ -610,9 +622,16 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
             display_show_ampm(5, "blank", cfg->theme);
         }
     } else {
-        /* 24H: all six tubes = H1 H2 M1 M2 S1 S2 */
-        int d[6] = {h/10, h%10, m/10, m%10, s/10, s%10};
-        for (int i = 0; i < 6; i++) display_show_number(i, d[i], cfg->theme);
+        /* 24H: all six tubes = H1 H2 M1 M2 S1 S2 (no colon tube) */
+        if (!cfg->leading_zero && h / 10 == 0)
+            display_show_ampm  (0, "blank", cfg->theme);
+        else
+            display_show_number(0, h / 10,  cfg->theme);
+        display_show_number(1, h % 10,  cfg->theme);
+        display_show_number(2, m / 10,  cfg->theme);
+        display_show_number(3, m % 10,  cfg->theme);
+        display_show_number(4, s / 10,  cfg->theme);
+        display_show_number(5, s % 10,  cfg->theme);
     }
 }
 
@@ -1035,13 +1054,19 @@ static void display_task(void *arg)
         case APP_MODE_CLOCK: {
             struct tm t; ntp_get_local(&t);
             bool is_24ns = (strcmp(cfg->time_type, "24H_NS") == 0);
+            bool is_flip = (strcmp(cfg->theme, "FlipClock")  == 0);
             bool time_type_changed = (strcmp(cfg->time_type, last_time_type) != 0);
             /* 24H_NS shows no seconds — only re-render on minute/hour change.
              * Standard 24H shows seconds and re-renders every second. */
             bool time_changed = (t.tm_hour != last_t.tm_hour ||
                                  t.tm_min  != last_t.tm_min);
             if (!is_24ns) time_changed |= (t.tm_sec != last_t.tm_sec);
-            if (first || mode_changed || theme_changed || time_type_changed || time_changed) {
+            /* Colon blinks every other second — need a re-render on each
+             * even/odd transition even when only the colon image changes. */
+            bool colon_blink_changed = !is_flip &&
+                                       (t.tm_sec % 2 != last_t.tm_sec % 2);
+            if (first || mode_changed || theme_changed || time_type_changed ||
+                    time_changed || colon_blink_changed) {
                 render_clock(cfg, &t);
                 last_t = t;
             }

@@ -120,6 +120,12 @@ select option{background:var(--accent);color:var(--text)}
     <div class="field"><label>Time Format</label>
       <select id="f-timetype" onchange="onTimeTypeChange()"><option value="24H">24 Hour</option><option value="24H_NS">24 Hour (No Sec)</option><option value="12H">12 Hour</option></select>
     </div>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-leading-zero" style="width:16px;height:16px;cursor:pointer">
+        <label for="f-leading-zero" style="margin:0;cursor:pointer;font-weight:normal">Show leading zero <span style="color:var(--dim);font-size:.82rem">(e.g. 09:30 instead of 9:30)</span></label>
+      </div>
+    </div>
     <div class="field" id="tube5-section" style="display:none"><label>Tube 6 Display</label>
       <select id="f-tube5"><option value="blank">Blank</option><option value="weather">Weather Icon</option></select>
     </div>
@@ -538,6 +544,7 @@ async function loadSettings() {
   $('f-theme').value = a.theme || 'NixieOY';
   $('f-timetype').value = a.type || '24H'; onTimeTypeChange();
   $('f-tube5').value = a.clock_tube5 || 'blank';
+  $('f-leading-zero').checked = cfg.leading_zero === true;
   $('f-lcdbr').value = cfg.lcd_brightness || 60; $('v-lcdbr').textContent = cfg.lcd_brightness || 60;
   $('f-ab-en').checked = cfg.auto_brightness || false;
   $('ab-cfg').style.display = cfg.auto_brightness ? 'block' : 'none';
@@ -678,6 +685,7 @@ async function saveSettings() {
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked,
+    leading_zero: $('f-leading-zero').checked,
     default_countdown_time: +$('f-countdown').value,
     pomodoro_work:  +$('f-pomo-work').value,
     pomodoro_break: +$('f-pomo-break').value,

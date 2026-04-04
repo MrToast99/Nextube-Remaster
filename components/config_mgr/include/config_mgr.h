@@ -40,6 +40,7 @@ typedef struct {
     char             theme[32];
     char             time_type[8];       /* "12H", "24H", or "24H_NS" */
     char             clock_tube5[16];    /* tube-5 content in 24H-no-sec mode: "blank"|"weather" */
+    bool             leading_zero;       /* true = show "09:30", false = show " 9:30" */
     uint8_t          led_brightness;     /* 0-100 */
     uint8_t          lcd_brightness;     /* primary brightness 0-100 */
     bool             auto_brightness;    /* enable night mode */
