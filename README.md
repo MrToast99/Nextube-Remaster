@@ -63,12 +63,106 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 
 ### Audio / DAC Notes
 
-The LTK8002D amplifier is AC-coupled to GPIO25 (DAC Channel 0). Because the
-coupling capacitor blocks DC, the correct 8-bit unsigned PCM silence level is
-**128 (= VDD/2)**. Deviating from this will misalign the capacitor's charge
-and produce a pop on every sound start.
+#### Signal chain
 
-#### Idle noise from WS2812 LEDs
+```
+ESP32 GPIO25 (DAC1, 8-bit)
+    → [0.1 µF AC coupling cap]
+    → [1 kΩ series resistor (Ri)]
+    → LTK8002D Pin 3 (+IN)
+    → LTK8002D internal BTL amplifier (3 W, ~3× gain)
+    → Pins 5 / 8 (VO1 / VO2, bridge-tied load)
+    → 4 Ω speaker
+```
+
+The LTK8002D is a **pure analog** Class-AB BTL amplifier — it has no I²S,
+PDM, or any other digital audio interface. The ESP32's built-in 8-bit DAC
+on GPIO25 is the only audio source.
+
+#### DAC driver — `dac_continuous` (ESP-IDF v5)
+
+The firmware uses `dac_continuous_new_channels()` from ESP-IDF v5, which
+internally configures the I²S0 peripheral in **DAC mode** (`i2s_set_dac_mode`
+equivalent). The I²S peripheral clocks 8-bit unsigned PCM samples from a DMA
+ring buffer directly into the DAC register at **32 kHz**. The DAC runs
+continuously at all times — there is no Hi-Z idle state between sounds.
+
+| Parameter | Value |
+|---|---|
+| Sample rate | 32 000 Hz (fixed) |
+| Bit depth | 8-bit unsigned PCM (0–255) |
+| Channels | Mono (DAC channel 0, GPIO25) |
+| Silence level | **128** (= VDD/2 ≈ 1.65 V) |
+| DMA buffers | 8 × 2048 bytes |
+
+#### Silence level — why 128, not 0
+
+The coupling capacitor between the DAC output and the amplifier input charges
+to the DC level of the DAC at idle. Because the cap blocks DC, the amplifier
+sees `V_DAC − V_cap`. At steady state `V_cap = V_DAC_idle`, so the amplifier
+input sits at 0 V differential — perfect silence — **regardless** of what the
+idle DAC voltage actually is.
+
+The pipeline uses **128** because:
+- 128 ÷ 255 × 3.3 V ≈ VDD/2 — the centre of the DAC's linear range
+- All WAV samples are decoded as signed 16-bit, volume-scaled, then offset by
+  128 before writing to the DMA buffer
+- If the idle level were anything other than 128, the coupling cap would charge
+  to a different voltage, and the next sound would start from the wrong
+  operating point, producing an audible pop as the cap re-centres
+
+#### Startup pop prevention — boot fade
+
+When the DAC DMA ring first starts, the output transitions from 0 V (hardware
+reset state) to 128 (silence). Through the coupling cap this looks like a DC
+step — a large low-frequency thump. The firmware prevents this with a
+**cosine S-curve fade** from 0 → 128 over **500 ms** written into the DMA
+buffer immediately after `dac_continuous_enable()`:
+
+```c
+boot_fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * M_PI)));  // 0..128
+```
+
+This keeps `dV/dt` low enough that the AC-coupled amp sees only the gentle
+ramp rather than a step, eliminating the startup thump.
+
+#### APLL cold-start delay
+
+The first-ever call to `dac_continuous_new_channels()` after power-on triggers
+ESP32 APLL lock and I²S peripheral initialisation — a one-time ~1.6 s stall.
+To hide this cost from the user, `audio_init()` performs a **warm-up start**
+at boot (creates and immediately tears down the DAC handle) so the APLL is
+already locked before the first sound is needed.
+
+#### LTK8002D hardware limitations
+
+| Limitation | Detail |
+|---|---|
+| **No digital interface** | Analog input only — no I²S, no PDM, no volume register |
+| **No software shutdown** | SD pin (pin 1) is pulled to VDD_5V via 100 kΩ — amp is permanently enabled; no ESP32 GPIO controls it |
+| **Always-on noise floor** | Because the amp is always powered, it amplifies its own thermal noise and any supply noise with no audio playing |
+| **Fixed gain** | ~3× (9.5 dB) set by internal resistors — not adjustable in software |
+
+The firmware's **software volume control** (`audio_set_volume`) works by
+scaling PCM sample values before writing to the DMA buffer — the amplifier
+gain itself is fixed.
+
+#### `Audio → Enable audio output` toggle
+
+When the **Enable audio output** checkbox in the web UI is unchecked:
+
+1. Any in-progress playback is stopped
+2. `dac_continuous_disable()` + `dac_continuous_del_channels()` tears down the DMA ring
+3. `gpio_reset_pin(GPIO25)` + `GPIO_MODE_INPUT` puts the DAC output pin into Hi-Z
+
+This removes the DAC's active output buffer from the signal chain, breaking
+the coupling path to the amplifier. **Note:** the LTK8002D itself remains
+powered (SD pin tied high), so its self-noise floor is still present even with
+audio output disabled — just no longer driven by the DAC.
+
+Re-enabling runs the full `dac_restart()` sequence including the boot fade.
+
+#### Idle noise — WS2812B LEDs (~400 Hz)
 
 The WS2812B LEDs use an **internal ~400 Hz PWM** to modulate their brightness.
 This creates current pulses on the shared 3.3 V rail at 400 Hz — solidly in
@@ -93,6 +187,20 @@ input.
 Place a **100 µF + 100 nF** decoupling cap as close as possible to the ESP32
 `VDD3P3_RTC` pin. This absorbs the 400 Hz current spikes at the source before
 they can reach the DAC buffer.
+
+#### Residual noise floor with everything off
+
+Even with audio output disabled (DAC Hi-Z), LEDs off, and LCD brightness at 0,
+a faint baseline hiss is audible. Root cause: the LTK8002D SD pin is tied to
+VDD_5V with no GPIO control. The amp remains fully powered and amplifies its
+own thermal noise (~3× gain into a 4 Ω speaker). No software mitigation is
+possible without a hardware modification:
+
+> **Hardware mod:** Cut the SD pull-up resistor and wire the SD pin to a free
+> ESP32 GPIO. `gpio_set_level(PIN_AMP_SHDN, 0)` will draw the amp's shutdown
+> current to < 0.5 µA — complete silence. Define `PIN_AMP_SHDN` in
+> `board_pins.h` and call it from `audio_set_enabled()` alongside the DAC
+> Hi-Z sequence.
 
 ### Original Firmware Analysis
 
