@@ -977,6 +977,7 @@ static void display_task(void *arg)
     float         last_temp_c   = -9999.0f;   /* weather change detection */
     float         last_hum      = -1.0f;
     bool          last_wx_valid = false;       /* detect when data first arrives */
+    bool          last_leading_zero = false;    /* leading-zero change detection */
     bool          last_bl_on    = true;        /* backlight on/off tracking */
     uint8_t       last_bl_brt   = 255;         /* sentinel: force-apply on first tick */
     TickType_t    album_switch       = 0;
@@ -1055,7 +1056,8 @@ static void display_task(void *arg)
             struct tm t; ntp_get_local(&t);
             bool is_24ns = (strcmp(cfg->time_type, "24H_NS") == 0);
             bool is_flip = (strcmp(cfg->theme, "FlipClock")  == 0);
-            bool time_type_changed = (strcmp(cfg->time_type, last_time_type) != 0);
+            bool time_type_changed  = (strcmp(cfg->time_type, last_time_type) != 0);
+            bool leading_zero_changed = (cfg->leading_zero != last_leading_zero);
             /* 24H_NS shows no seconds — only re-render on minute/hour change.
              * Standard 24H shows seconds and re-renders every second. */
             bool time_changed = (t.tm_hour != last_t.tm_hour ||
@@ -1066,11 +1068,12 @@ static void display_task(void *arg)
             bool colon_blink_changed = !is_flip &&
                                        (t.tm_sec % 2 != last_t.tm_sec % 2);
             if (first || mode_changed || theme_changed || time_type_changed ||
-                    time_changed || colon_blink_changed) {
+                    time_changed || colon_blink_changed || leading_zero_changed) {
                 render_clock(cfg, &t);
                 last_t = t;
             }
             strlcpy(last_time_type, cfg->time_type, sizeof(last_time_type));
+            last_leading_zero = cfg->leading_zero;
             break;
         }
 
