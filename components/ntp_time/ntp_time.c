@@ -41,17 +41,11 @@ static void ntp_task(void *arg)
     /* Wait for WiFi */
     vTaskDelay(pdMS_TO_TICKS(5000));
 
-    /* Set timezone.
-     * POSIX TZ strings invert the sign vs conventional UTC notation:
-     *   conventional UTC-6  →  POSIX "UTC+6"
-     * So we negate hrs when building the TZ string but log the conventional sign. */
-    char tz[32];
-    int hrs = cfg->time_zone / 3600;
-    int mins = abs((cfg->time_zone % 3600) / 60);
-    snprintf(tz, sizeof(tz), "UTC%+d:%02d", -hrs, mins);
-    setenv("TZ", tz, 1);
+    /* Apply POSIX TZ string — newlib handles DST transition rules natively.
+     * The string is stored verbatim in cfg->timezone, e.g. "EST5EDT,M3.2.0,M11.1.0". */
+    setenv("TZ", cfg->timezone, 1);
     tzset();
-    ESP_LOGI(TAG, "Timezone set to UTC%+d:%02d (offset=%ld s)", hrs, mins, (long)cfg->time_zone);
+    ESP_LOGI(TAG, "Timezone set: %s", cfg->timezone);
 
     /* Seed the system clock from the battery-backed RTC so the display shows
      * a reasonable time immediately, before the first NTP sync completes.
@@ -79,7 +73,10 @@ static void ntp_task(void *arg)
     }
 
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, cfg->ntp_server);
+    for (int i = 0; i < 4; i++) {
+        if (cfg->ntp_servers[i][0] != '\0')
+            esp_sntp_setservername(i, cfg->ntp_servers[i]);
+    }
     sntp_set_time_sync_notification_cb(time_sync_cb);
     esp_sntp_init();
 
@@ -91,13 +88,23 @@ static void ntp_task(void *arg)
 void ntp_apply_timezone(void)
 {
     const nextube_config_t *cfg = config_get();
-    int hrs  = cfg->time_zone / 3600;
-    int mins = abs((cfg->time_zone % 3600) / 60);
-    char tz[32];
-    snprintf(tz, sizeof(tz), "UTC%+d:%02d", -hrs, mins);
-    setenv("TZ", tz, 1);
+    setenv("TZ", cfg->timezone, 1);
     tzset();
-    ESP_LOGI(TAG, "Timezone updated to UTC%+d:%02d (offset=%ld s)", hrs, mins, (long)cfg->time_zone);
+    ESP_LOGI(TAG, "Timezone updated: %s", cfg->timezone);
+}
+
+void ntp_apply_servers(void)
+{
+    const nextube_config_t *cfg = config_get();
+    /* Stop SNTP before changing servers — lwIP setservername is not
+     * thread-safe while the SNTP polling timer is live. */
+    esp_sntp_stop();
+    for (int i = 0; i < 4; i++) {
+        esp_sntp_setservername(i,
+            cfg->ntp_servers[i][0] ? cfg->ntp_servers[i] : NULL);
+    }
+    esp_sntp_init();
+    ESP_LOGI(TAG, "NTP servers updated");
 }
 
 void ntp_time_start(void)

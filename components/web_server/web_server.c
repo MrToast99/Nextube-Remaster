@@ -191,6 +191,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     const nextube_config_t *cfg = config_get();
     leds_set_brightness(cfg->led_brightness);
     ntp_apply_timezone();
+    ntp_apply_servers();
     audio_set_enabled(cfg->audio_enabled);
 
     bool creds_changed = (strcmp(old_ssid, cfg->ssid)    != 0 ||

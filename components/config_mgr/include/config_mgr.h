@@ -58,8 +58,8 @@ typedef struct {
     char             hostname[32];
 
     /* Time */
-    int32_t          time_zone;          /* offset in seconds */
-    char             ntp_server[64];
+    char             timezone[64];       /* POSIX TZ string e.g. "EST5EDT,M3.2.0,M11.1.0" */
+    char             ntp_servers[4][64]; /* NTP server hostnames; empty string = skip slot */
 
     /* Weather */
     char             weather_source[16]; /* "wttr" (no key) or "openweather" (API key) */

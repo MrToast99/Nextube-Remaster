@@ -223,10 +223,81 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <div class="card">
     <h2>Time Zone</h2>
-    <div class="field"><label>UTC Offset (hours, e.g. -6 for UTC-6, +5.5 for IST)</label>
-      <input id="f-tz" type="number" step="0.5">
+    <div class="field"><label>Region</label>
+      <select id="f-tz-sel" onchange="onTzSelChange()">
+        <option value="">-- select or enter POSIX string below --</option>
+        <optgroup label="UTC">
+          <option value="UTC0">UTC (no offset, no DST)</option>
+        </optgroup>
+        <optgroup label="Americas">
+          <option value="NST3:30NDT,M3.2.0,M11.1.0">America/St_Johns (NT, UTC-3:30)</option>
+          <option value="AST4ADT,M3.2.0,M11.1.0">America/Halifax (AT, UTC-4)</option>
+          <option value="EST5EDT,M3.2.0,M11.1.0">America/New_York (ET, UTC-5)</option>
+          <option value="CST6CDT,M3.2.0,M11.1.0">America/Chicago (CT, UTC-6)</option>
+          <option value="MST7MDT,M3.2.0,M11.1.0">America/Denver (MT, UTC-7)</option>
+          <option value="MST7">America/Phoenix (MST, UTC-7, no DST)</option>
+          <option value="PST8PDT,M3.2.0,M11.1.0">America/Los_Angeles (PT, UTC-8)</option>
+          <option value="AKST9AKDT,M3.2.0,M11.1.0">America/Anchorage (AKT, UTC-9)</option>
+          <option value="HST10">Pacific/Honolulu (HT, UTC-10, no DST)</option>
+          <option value="VET4:30">America/Caracas (VET, UTC-4:30)</option>
+          <option value="COT5">America/Bogota (COT, UTC-5)</option>
+          <option value="PET5">America/Lima (PET, UTC-5)</option>
+          <option value="ART3">America/Buenos_Aires (ART, UTC-3)</option>
+          <option value="BRT3">America/Sao_Paulo (BRT, UTC-3)</option>
+        </optgroup>
+        <optgroup label="Europe">
+          <option value="GMT0BST,M3.5.0/1,M10.5.0">Europe/London (GMT/BST)</option>
+          <option value="WET0WEST,M3.5.0/1,M10.5.0">Europe/Lisbon (WET, UTC+0)</option>
+          <option value="CET-1CEST,M3.5.0,M10.5.0/3">Europe/Paris (CET, UTC+1)</option>
+          <option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Europe/Helsinki (EET, UTC+2)</option>
+          <option value="MSK-3">Europe/Moscow (MSK, UTC+3, no DST)</option>
+          <option value="TRT-3">Europe/Istanbul (TRT, UTC+3, no DST)</option>
+        </optgroup>
+        <optgroup label="Africa">
+          <option value="WAT-1">Africa/Lagos (WAT, UTC+1)</option>
+          <option value="CAT-2">Africa/Harare (CAT, UTC+2)</option>
+          <option value="EAT-3">Africa/Nairobi (EAT, UTC+3)</option>
+        </optgroup>
+        <optgroup label="Middle East">
+          <option value="AST-3">Asia/Riyadh (AST, UTC+3)</option>
+          <option value="IRST-3:30IRDT,M3.4.4/0,M9.4.4/0">Asia/Tehran (IRST, UTC+3:30)</option>
+          <option value="GST-4">Asia/Dubai (GST, UTC+4)</option>
+          <option value="AFT-4:30">Asia/Kabul (AFT, UTC+4:30)</option>
+          <option value="PKT-5">Asia/Karachi (PKT, UTC+5)</option>
+          <option value="IST-5:30">Asia/Kolkata (IST, UTC+5:30)</option>
+          <option value="NPT-5:45">Asia/Kathmandu (NPT, UTC+5:45)</option>
+        </optgroup>
+        <optgroup label="Asia">
+          <option value="BDT-6">Asia/Dhaka (BDT, UTC+6)</option>
+          <option value="MMT-6:30">Asia/Yangon (MMT, UTC+6:30)</option>
+          <option value="ICT-7">Asia/Bangkok (ICT, UTC+7)</option>
+          <option value="WIB-7">Asia/Jakarta (WIB, UTC+7)</option>
+          <option value="CST-8">Asia/Shanghai (CST, UTC+8)</option>
+          <option value="HKT-8">Asia/Hong_Kong (HKT, UTC+8)</option>
+          <option value="SGT-8">Asia/Singapore (SGT, UTC+8)</option>
+          <option value="ULAT-8">Asia/Ulaanbaatar (ULAT, UTC+8)</option>
+          <option value="JST-9">Asia/Tokyo (JST, UTC+9)</option>
+          <option value="KST-9">Asia/Seoul (KST, UTC+9)</option>
+          <option value="ACST-9:30ACDT,M10.1.0,M4.1.0/3">Australia/Adelaide (ACST, UTC+9:30)</option>
+          <option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Australia/Sydney (AEST, UTC+10)</option>
+          <option value="AWST-8">Australia/Perth (AWST, UTC+8, no DST)</option>
+        </optgroup>
+        <optgroup label="Pacific">
+          <option value="NZST-12NZDT,M9.5.0,M4.1.0/3">Pacific/Auckland (NZST, UTC+12)</option>
+          <option value="SST11">Pacific/Apia (SST, UTC-11)</option>
+        </optgroup>
+      </select>
     </div>
-    <div class="field"><label>NTP Server</label><input id="f-ntp" type="text" value="pool.ntp.org"></div>
+    <div class="field">
+      <label>POSIX TZ string <span style="color:var(--dim);font-size:.8rem">(auto-filled by region, or enter manually)</span></label>
+      <input id="f-tz" type="text" placeholder="e.g. EST5EDT,M3.2.0,M11.1.0" style="font-family:monospace">
+      <small style="color:var(--dim);display:block;margin-top:.3rem">Format: STD offset [DST [offset],start[/time],end[/time]] — supports automatic DST transitions</small>
+    </div>
+    <h2 style="margin-top:1.2rem">NTP Servers</h2>
+    <div class="field"><label>Server 1</label><input id="f-ntp0" type="text" placeholder="0.pool.ntp.org"></div>
+    <div class="field"><label>Server 2</label><input id="f-ntp1" type="text" placeholder="1.pool.ntp.org"></div>
+    <div class="field"><label>Server 3 <span style="color:var(--dim);font-size:.8rem">(optional)</span></label><input id="f-ntp2" type="text" placeholder="leave blank to skip"></div>
+    <div class="field"><label>Server 4 <span style="color:var(--dim);font-size:.8rem">(optional)</span></label><input id="f-ntp3" type="text" placeholder="leave blank to skip"></div>
     <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save</button></div>
   </div>
 </div>
@@ -556,8 +627,13 @@ async function loadSettings() {
   $('f-ssid').value = cfg.ssid || '';
   $('f-pass').value = cfg.password || '';
   $('f-hostname').value = cfg.hostname || 'nextube-remaster';
-  $('f-tz').value = cfg.time_zone !== undefined ? cfg.time_zone : -6;
-  $('f-ntp').value = cfg.ntp_server || 'pool.ntp.org';
+  const tzStr = cfg.timezone || 'UTC0';
+  $('f-tz').value = tzStr;
+  $('f-tz-sel').value = tzStr; /* pre-selects matching option; stays blank for custom strings */
+  const ntpDef = ['0.pool.ntp.org','1.pool.ntp.org','2.pool.ntp.org','3.pool.ntp.org'];
+  const ntpArr = cfg.ntp_servers || [cfg.ntp_server || ntpDef[0]];
+  for (let i = 0; i < 4; i++)
+    $('f-ntp' + i).value = (ntpArr[i] !== undefined && ntpArr[i] !== null) ? ntpArr[i] : (i < 2 ? ntpDef[i] : '');
   $('f-wsrc').value = cfg.weather_source || 'wttr'; toggleWeatherKey();
   $('f-wkey').value = cfg.weather_api_key || '';
   $('f-city').value = cfg.City || '';
@@ -631,6 +707,12 @@ function onTimeTypeChange() {
   $('tube5-section').style.display = $('f-timetype').value === '24H_NS' ? '' : 'none';
 }
 
+/* ── Timezone dropdown → populate POSIX text field ── */
+function onTzSelChange() {
+  const v = $('f-tz-sel').value;
+  if (v) $('f-tz').value = v;
+}
+
 /* ── LED mode change – hide colour pickers for Rainbow / Off ── */
 function onBlModeChange() {
   const mode = $('f-blmode').value;
@@ -680,7 +762,8 @@ async function saveSettings() {
     rotation_enabled: $('rot-enabled').checked,
     rotation_interval_s: +$('rot-interval').value,
     ssid: $('f-ssid').value, password: $('f-pass').value, hostname: $('f-hostname').value,
-    time_zone: +$('f-tz').value, ntp_server: $('f-ntp').value,
+    timezone: $('f-tz').value,
+    ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,

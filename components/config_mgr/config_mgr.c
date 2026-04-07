@@ -48,8 +48,11 @@ static void set_defaults(void)
     memcpy(s_cfg.backlight_rgb, defaults, sizeof(defaults));
 
     strcpy(s_cfg.hostname, "nextube-remaster");
-    strcpy(s_cfg.ntp_server, "pool.ntp.org");
-    s_cfg.time_zone = -21600;  /* UTC-6 */
+    strcpy(s_cfg.timezone, "UTC0");
+    strcpy(s_cfg.ntp_servers[0], "0.pool.ntp.org");
+    strcpy(s_cfg.ntp_servers[1], "1.pool.ntp.org");
+    strcpy(s_cfg.ntp_servers[2], "2.pool.ntp.org");
+    strcpy(s_cfg.ntp_servers[3], "3.pool.ntp.org");
 
     strcpy(s_cfg.weather_source, "metno"); /* default: free, no API key needed */
     strcpy(s_cfg.weather_api_key, "");
@@ -157,7 +160,6 @@ static void parse_json(const char *json, size_t len)
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
     json_read_str(root, "timer_file",       s_cfg.timer_file,      sizeof(s_cfg.timer_file));
     json_read_str(root, "click_file",       s_cfg.click_file,      sizeof(s_cfg.click_file));
-    json_read_str(root, "ntp_server",      s_cfg.ntp_server,      sizeof(s_cfg.ntp_server));
     json_read_str(root, "hostname",        s_cfg.hostname,        sizeof(s_cfg.hostname));
     {
         cJSON *bs = cJSON_GetObjectItem(root, "button_sound");
@@ -172,16 +174,43 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(lz)) s_cfg.leading_zero = cJSON_IsTrue(lz);
     }
 
-    /* time_zone: new format = ±hours (|value| ≤ 24), legacy = raw seconds (|value| > 24).
-     * Migration: old SPIFFS files stored -21600 (seconds); new format stores -6 (hours). */
+    /* NTP servers — new array format, with fallback to legacy single key */
     {
-        cJSON *tz_item = cJSON_GetObjectItem(root, "time_zone");
-        if (cJSON_IsNumber(tz_item)) {
-            double v = tz_item->valuedouble;
-            if (v > 24.0 || v < -24.0)
-                s_cfg.time_zone = (int32_t)v;             /* legacy: already in seconds */
-            else
-                s_cfg.time_zone = (int32_t)(v * 3600.0); /* new: ±hours                */
+        cJSON *arr = cJSON_GetObjectItem(root, "ntp_servers");
+        if (cJSON_IsArray(arr)) {
+            int cnt = cJSON_GetArraySize(arr);
+            if (cnt > 4) cnt = 4;
+            for (int i = 0; i < cnt; i++) {
+                cJSON *it = cJSON_GetArrayItem(arr, i);
+                if (cJSON_IsString(it) && it->valuestring)
+                    strncpy(s_cfg.ntp_servers[i], it->valuestring,
+                            sizeof(s_cfg.ntp_servers[i]) - 1);
+            }
+        } else {
+            /* Legacy: single "ntp_server" key → slot 0 */
+            json_read_str(root, "ntp_server", s_cfg.ntp_servers[0],
+                          sizeof(s_cfg.ntp_servers[0]));
+        }
+    }
+    /* Timezone — POSIX TZ string; migrate from legacy numeric time_zone if absent */
+    {
+        cJSON *tz = cJSON_GetObjectItem(root, "timezone");
+        if (cJSON_IsString(tz) && tz->valuestring && tz->valuestring[0]) {
+            strncpy(s_cfg.timezone, tz->valuestring, sizeof(s_cfg.timezone) - 1);
+            s_cfg.timezone[sizeof(s_cfg.timezone) - 1] = '\0';
+        } else {
+            /* Legacy: numeric time_zone (seconds if |v|>24, else hours) → UTC±H:MM */
+            cJSON *old = cJSON_GetObjectItem(root, "time_zone");
+            if (cJSON_IsNumber(old)) {
+                double v = old->valuedouble;
+                int32_t secs = (v > 24.0 || v < -24.0) ? (int32_t)v
+                                                        : (int32_t)(v * 3600.0);
+                int hrs  = secs / 3600;
+                int mins = abs((secs % 3600) / 60);
+                /* POSIX sign is inverted vs conventional: UTC-6 → "UTC+6" */
+                snprintf(s_cfg.timezone, sizeof(s_cfg.timezone),
+                         "UTC%+d:%02d", -hrs, mins);
+            }
         }
     }
 
@@ -364,7 +393,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "youtube_key",      s_cfg.youtube_key);
     cJSON_AddStringToObject(root, "bili_uid",         s_cfg.bili_uid);
     /* Serialize as ±hours so the web UI shows human-readable values (e.g. -6, +5.5) */
-    cJSON_AddNumberToObject(root, "time_zone", s_cfg.time_zone / 3600.0);
+    /* time_zone intentionally omitted — new format uses "timezone" POSIX string */
     cJSON_AddStringToObject(root, "weather_source",   s_cfg.weather_source);
     cJSON_AddStringToObject(root, "weather_api_key",  s_cfg.weather_api_key);
     cJSON_AddStringToObject(root, "City",             s_cfg.city);
@@ -374,8 +403,13 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "tone_file",        s_cfg.tone_file);
     cJSON_AddStringToObject(root, "timer_file",       s_cfg.timer_file);
     cJSON_AddStringToObject(root, "click_file",       s_cfg.click_file);
-    cJSON_AddStringToObject(root, "ntp_server",      s_cfg.ntp_server);
     cJSON_AddStringToObject(root, "hostname",        s_cfg.hostname);
+    cJSON_AddStringToObject(root, "timezone",        s_cfg.timezone);
+    {
+        cJSON *ntp_arr = cJSON_AddArrayToObject(root, "ntp_servers");
+        for (int i = 0; i < 4; i++)
+            cJSON_AddItemToArray(ntp_arr, cJSON_CreateString(s_cfg.ntp_servers[i]));
+    }
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddBoolToObject  (root, "leading_zero",     s_cfg.leading_zero);
