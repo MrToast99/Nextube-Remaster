@@ -650,6 +650,33 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/file/mkdir?path=/images/themes/MyTheme/Numbers
+ * Creates a hidden .keep placeholder so the directory becomes visible in the
+ * file browser.  SPIFFS has no real directories; a file with this path prefix
+ * is enough to make readdir() return the directory entry.               */
+static esp_err_t api_file_mkdir(httpd_req_t *r)
+{
+    char q[256], p[256] = {0}, spiffs_path[320];
+    if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
+    url_decode_inplace(p);
+    if (strstr(p, ".."))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
+
+    /* Strip trailing slash, then append /.keep */
+    size_t plen = strlen(p);
+    if (plen > 0 && p[plen - 1] == '/') p[--plen] = '\0';
+    snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s/.keep", p);
+
+    FILE *f = fopen(spiffs_path, "wb");
+    if (!f)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create dir"), ESP_FAIL;
+    fclose(f);
+    ESP_LOGI(TAG, "mkdir: %s", spiffs_path);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* DELETE /api/file/delete?path=/audio/click.wav
  * Removes the file.  config.json is protected. */
 static esp_err_t api_file_delete(httpd_req_t *r)
@@ -800,6 +827,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,    "/api/file/ls",         api_file_ls),
     R(HTTP_GET,    "/api/file/download",  api_file_download),
     R(HTTP_POST,   "/api/file/upload",    api_file_upload),
+    R(HTTP_POST,   "/api/file/mkdir",     api_file_mkdir),
     R(HTTP_DELETE, "/api/file/delete",    api_file_delete),
     R(HTTP_POST,   "/api/wifi/scan",      api_wifi_scan_post),
     R(HTTP_GET,  "/api/wifi/scan",       api_wifi_scan_get),

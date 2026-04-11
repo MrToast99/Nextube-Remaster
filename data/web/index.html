@@ -455,6 +455,7 @@ select option{background:var(--accent);color:var(--text)}
     <div class="btn-group" style="margin-top:.7rem">
       <button class="btn btn-outline" onclick="browseDir('/')">Browse</button>
       <button class="btn btn-outline" onclick="browseDir(s_filePath)">Refresh</button>
+      <button class="btn btn-outline" onclick="mkdirFolder()">📂 New Folder</button>
       <button class="btn btn-outline" onclick="$('upload-input').click()">⬆ Upload File(s)</button>
       <button class="btn btn-outline" onclick="$('upload-dir-input').click()">📁 Upload Folder</button>
     </div>
@@ -924,6 +925,7 @@ async function browseDir(dir) {
     rows += '<div style="padding:.6rem .8rem;color:var(--dim);font-style:italic">No files</div>';
   } else {
     files.forEach(f => {
+      if (f.name === '.keep') return;   /* hidden placeholder — skip */
       const isDir = f.type === 'dir';
       const sizeStr = isDir ? 'folder' : (f.size < 1024 ? f.size + ' B' : (f.size/1024).toFixed(1) + ' K');
       const icon = isDir ? '📁' : '📄';
@@ -951,6 +953,20 @@ async function browseDir(dir) {
   }
 
   $('file-list').innerHTML = rows;
+}
+
+async function mkdirFolder() {
+  const name = prompt('New folder name:');
+  if (!name || !name.trim()) return;
+  const folderName = name.trim().replace(/[/\\]/g, '');
+  if (!folderName) return;
+  const path = s_filePath.replace(/\/$/, '') + '/' + folderName;
+  const r = await api('file/mkdir?path=' + encodeURIComponent(path), { method: 'POST' });
+  if (r?.status === 'ok') {
+    browseDir(path);
+  } else {
+    toast('Failed to create folder', true);
+  }
 }
 
 /* Keep backward-compat alias used by auto-load on tab switch */

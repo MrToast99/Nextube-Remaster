@@ -429,7 +429,20 @@ MutiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
 
 The web UI theme dropdown is populated dynamically by scanning `/images/themes/` on SPIFFS at runtime (via `/api/themes`). Any folder you upload there with the required file structure will appear in the dropdown automatically — no firmware update needed.
 
-Upload your theme folder via **System → SPIFFS Files → 📁 Upload Folder**, then navigate to `/images/themes/` and select your local theme directory.
+#### Option A — File browser (recommended)
+
+Use the built-in SPIFFS file browser under **System → SPIFFS Files**:
+
+1. Browse to `/images/themes/`
+2. Click **📂 New Folder** → enter your theme name (e.g. `MyTheme`)
+3. Navigate into `MyTheme/`, click **New Folder** → `Numbers`
+4. Navigate into `Numbers/`, click **⬆ Upload File(s)** → select `0.jpg` … `9.jpg`
+5. Go back to `MyTheme/` and repeat for `AMPM/` and `MutiInfo/Weather/` (and any other subfolders needed)
+6. Open the **Display** tab — your theme appears in the dropdown immediately
+
+#### Option B — Bulk folder upload
+
+Prepare the full folder structure locally first, then go to **System → SPIFFS Files**, browse to `/images/themes/`, and click **📁 Upload Folder**. Select your local theme directory. All files are uploaded in one pass with paths preserved.
 
 ### Required Folder Structure
 
