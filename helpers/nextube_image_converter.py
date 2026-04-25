@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 Nextube Image Converter v2
-Converts images to 80x160 RGB565 raw binary (or JPEG/PNG) for Nextube displays.
-Features interactive crop-box with live preview.
-Run with: python nextube_image_converter.py  →  open http://localhost:5000
+Converts images to 80x160 JPEG or PNG for Nextube displays.
+Features interactive crop-box with live preview and bulk processing.
+Run with: python nextube_image_converter.py  →  opens http://localhost:5000
 """
 
 import os, io, sys, zipfile, threading, webbrowser, json, base64, mimetypes
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 try:
     from PIL import Image
@@ -174,8 +174,8 @@ input[type=number]:focus,select:focus{border-color:var(--accent)}
 .crop-editor{display:none;gap:1.25rem}
 .crop-editor.active{display:grid;grid-template-columns:1fr 120px}
 
-.crop-stage-wrap{position:relative;background:#000;border:1px solid var(--border);border-radius:3px;overflow:hidden;line-height:0;cursor:crosshair;user-select:none}
-#crop-img{display:block;max-width:100%;max-height:480px;width:100%}
+.crop-stage-wrap{position:relative;background:#000;border:1px solid var(--border);border-radius:3px;overflow:hidden;line-height:0;cursor:crosshair;user-select:none;width:fit-content;max-width:100%}
+#crop-img{display:block;max-width:100%;max-height:480px;width:auto;height:auto}
 
 /* Crop overlay = darkened areas outside box */
 .crop-overlay{position:absolute;inset:0;pointer-events:none}
@@ -272,11 +272,13 @@ input[type=number]:focus,select:focus{border-color:var(--accent)}
         <div class="radio-btn"><input type="radio" name="cropmode" id="cm-stretch" value="stretch"><label for="cm-stretch">Stretch<br><span style="color:var(--dim);font-size:.55rem">fill</span></label></div>
       </div>
 
+      <input type="file" id="folder-input" webkitdirectory accept="image/*" style="display:none">
       <div id="dropzone">
         <input type="file" id="file-input" accept="image/*" multiple>
         <span class="drop-icon">⬡</span>
         <div class="drop-text"><strong>Drop images here</strong><br>or click to browse<br><span style="font-size:.6rem">JPG · PNG · BMP · WEBP · GIF</span></div>
       </div>
+      <button class="btn btn-reset" id="btn-folder" style="width:100%;margin-top:.5rem;justify-content:center" onclick="document.getElementById('folder-input').click()">📁 Browse Folder</button>
 
       <div class="file-queue" id="file-queue"></div>
       <div class="err-msg" id="err-msg"></div>
@@ -352,6 +354,7 @@ input[type=number]:focus,select:focus{border-color:var(--accent)}
 //  State
 // ═══════════════════════════════════════════════════════════════
 let files = [];          // File objects queued
+let fileRelPaths = [];   // webkitRelativePath per file ('' for individually-added files)
 let cropData = {};       // { fileIndex: {x,y,w,h} } — in original image coords
 let results = [];
 let currentIdx = 0;
@@ -400,13 +403,22 @@ dropzone.addEventListener('dragover', e=>{e.preventDefault();dropzone.classList.
 dropzone.addEventListener('dragleave', ()=>dropzone.classList.remove('drag-over'));
 dropzone.addEventListener('drop', e=>{
   e.preventDefault(); dropzone.classList.remove('drag-over');
-  addFiles([...e.dataTransfer.files].filter(f=>f.type.startsWith('image/')));
+  addFiles([...e.dataTransfer.files].filter(f=>f.type.startsWith('image/')), []);
 });
-fileInput.addEventListener('change', ()=>addFiles([...fileInput.files]));
+fileInput.addEventListener('change', ()=>addFiles([...fileInput.files], []));
+document.getElementById('folder-input').addEventListener('change', e=>{
+  const newFiles = [...e.target.files];
+  const relPaths = newFiles.map(f=>f.webkitRelativePath||'');
+  addFiles(newFiles, relPaths);
+  e.target.value='';
+});
 
-function addFiles(newFiles){
+function addFiles(newFiles, relPaths){
+  relPaths = relPaths||[];
+  while(relPaths.length < newFiles.length) relPaths.push('');
   const start = files.length;
   files = [...files, ...newFiles];
+  fileRelPaths = [...fileRelPaths, ...relPaths];
   renderQueue();
   convertBtn.disabled = files.length===0;
   hideErr();
@@ -416,7 +428,7 @@ function addFiles(newFiles){
 function renderQueue(){
   fileQueue.innerHTML = files.map((f,i)=>`
     <div class="file-item">
-      <span class="fname">${f.name}</span>
+      <span class="fname" title="${fileRelPaths[i]||f.name}">${fileRelPaths[i]||f.name}</span>
       <span class="fsize">${formatBytes(f.size)}</span>
     </div>`).join('');
 }
@@ -449,7 +461,7 @@ function loadCropEditor(idx){
 
 // Default box = centered crop at target aspect ratio
 function defaultBox(){
-  const sw = cropStage.clientWidth;
+  const sw = cropImg.clientWidth;
   const sh = cropImg.clientHeight;
   const ratio = getOutW() / getOutH();
   let bw, bh;
@@ -623,22 +635,32 @@ function updatePreview(){
   previewCanvas.width  = tw;
   previewCanvas.height = th;
 
+  // Keep the canvas display size proportional and within the pane bounds.
+  // drawImage uses the img element's *natural* pixel coordinates as source,
+  // so all source rects below must be in natural (not display-pixel) space.
+  const maxW = 80, maxH = 160;
+  const s = Math.min(maxW / tw, maxH / th);
+  previewCanvas.style.width  = Math.round(tw * s) + 'px';
+  previewCanvas.style.height = Math.round(th * s) + 'px';
+
   const mode = getMode();
   if(mode==='stretch'){
-    pctx.drawImage(cropImg, 0,0, tw, th);
+    pctx.drawImage(cropImg, 0, 0, tw, th);
   } else if(mode==='auto'){
-    // center crop preview
-    const ratio = tw/th;
-    const srcRatio = natW/natH;
-    let sx=0,sy=0,sw=natW,sh=natH;
-    if(srcRatio>ratio){ sw=Math.round(natH*ratio); sx=(natW-sw)/2; }
-    else              { sh=Math.round(natW/ratio); sy=(natH-sh)/2; }
-    // draw using the img element for simplicity
-    const scaleX=cropImg.clientWidth/natW, scaleY=cropImg.clientHeight/natH;
-    pctx.drawImage(cropImg, sx*scaleX, sy*scaleY, sw*scaleX, sh*scaleY, 0,0, tw, th);
+    // Compute center-crop rect in natural pixel coords.
+    const ratio = tw / th;
+    const srcRatio = natW / natH;
+    let sx=0, sy=0, sw=natW, sh=natH;
+    if(srcRatio > ratio){ sw=Math.round(natH*ratio); sx=(natW-sw)/2; }
+    else                { sh=Math.round(natW/ratio); sy=(natH-sh)/2; }
+    pctx.drawImage(cropImg, sx, sy, sw, sh, 0, 0, tw, th);
   } else {
-    // manual
-    pctx.drawImage(cropImg, box.x, box.y, box.w, box.h, 0,0, tw, th);
+    // Manual — box is in display-pixel space; convert to natural coords first.
+    const scaleX = natW / cropImg.clientWidth;
+    const scaleY = natH / cropImg.clientHeight;
+    pctx.drawImage(cropImg,
+      box.x*scaleX, box.y*scaleY, box.w*scaleX, box.h*scaleY,
+      0, 0, tw, th);
   }
 }
 
@@ -672,6 +694,7 @@ convertBtn.addEventListener('click', async ()=>{
       fd.append('height', height);
       fd.append('format', fmt);
       fd.append('cropmode', mode);
+      if(fileRelPaths[i]) fd.append('relative_path', fileRelPaths[i]);
 
       // Attach crop coords if manual mode and we have them
       if(mode==='manual' && cropData[i]){
@@ -700,17 +723,18 @@ convertBtn.addEventListener('click', async ()=>{
     resultsPanel.style.display='block';
   }
   convertBtn.disabled=false;
-  files=[]; cropData={}; renderQueue(); fileInput.value='';
+  files=[]; fileRelPaths=[]; cropData={}; renderQueue(); fileInput.value='';
   cropPanel.style.display='none';
 });
 
 function addCard(r){
+  const displayName = r.out_name.split('/').pop();
   const card = document.createElement('div');
   card.className='result-card';
   card.innerHTML=`
-    <img src="data:image/jpeg;base64,${r.preview_b64}" alt="${r.out_name}">
+    <img src="data:image/jpeg;base64,${r.preview_b64}" alt="${displayName}">
     <div class="card-info">
-      <div class="card-name">${r.out_name}</div>
+      <div class="card-name" title="${r.out_name}">${displayName}</div>
       <div class="card-meta">${r.dims} · ${formatBytes(r.size)}</div>
       <button class="btn btn-sm" onclick="downloadOne('${r.out_name}')">↓ Save</button>
     </div>`;
@@ -768,15 +792,18 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif path.startswith("/download/"):
-            fname = path[len("/download/"):]
-            fpath = OUTPUT_DIR / fname
+            fname = unquote(path[len("/download/"):])
+            fpath = (OUTPUT_DIR / fname).resolve()
+            # Security: must stay inside OUTPUT_DIR
+            if not str(fpath).startswith(str(OUTPUT_DIR.resolve())):
+                self.send_response(403); self.end_headers(); return
             if not fpath.exists():
                 self.send_response(404); self.end_headers(); return
             data = fpath.read_bytes()
             mt, _ = mimetypes.guess_type(str(fpath))
             self.send_response(200)
             self.send_header("Content-Type", mt or "application/octet-stream")
-            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            self.send_header("Content-Disposition", f'attachment; filename="{Path(fname).name}"')
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -855,7 +882,21 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 result = process_image(image_data, filename, width, height, fmt, crop_box)
 
-            (OUTPUT_DIR / result["out_name"]).write_bytes(result["out_bytes"])
+            # If a relative path was supplied (folder upload), preserve the
+            # original name and directory structure; just swap the extension.
+            rel = f.get("relative_path", {}).get("value", b"").decode().strip()
+            if rel:
+                rel = rel.replace("\\", "/").lstrip("/")
+                ext = ".jpg" if fmt == "jpeg" else ".png"
+                out_rel = str(Path(rel).with_suffix(ext)).replace("\\", "/")
+                out_path = (OUTPUT_DIR / out_rel).resolve()
+                if not str(out_path).startswith(str(OUTPUT_DIR.resolve())):
+                    raise ValueError("Invalid path")
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                result["out_name"] = out_rel
+                out_path.write_bytes(result["out_bytes"])
+            else:
+                (OUTPUT_DIR / result["out_name"]).write_bytes(result["out_bytes"])
             self.send_json({"out_name":result["out_name"],"preview_b64":result["preview_b64"],
                             "size":result["size"],"dims":result["dims"],"format":result["format"]})
         except Exception as e:
