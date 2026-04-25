@@ -17,18 +17,18 @@ if(NOT FW_VERSION)
     set(FW_VERSION "0.0.0")
 endif()
 
-string(REGEX MATCH "\"spiffs_version\"[^\"]*\"([0-9]+[.][0-9]+[.][0-9]+)\"" _ "${_VER_JSON}")
-set(SPIFFS_VERSION "${CMAKE_MATCH_1}")
-if(NOT SPIFFS_VERSION)
-    message(WARNING "Could not parse spiffs_version from version.json – defaulting to ${FW_VERSION}")
-    set(SPIFFS_VERSION "${FW_VERSION}")
+string(REGEX MATCH "\"fs_version\"[^\"]*\"([0-9]+[.][0-9]+[.][0-9]+)\"" _ "${_VER_JSON}")
+set(FS_VERSION "${CMAKE_MATCH_1}")
+if(NOT FS_VERSION)
+    message(WARNING "Could not parse fs_version from version.json – defaulting to ${FW_VERSION}")
+    set(FS_VERSION "${FW_VERSION}")
 endif()
 
-# Write SPIFFS version into the web tree for runtime mismatch detection.
+# Write LittleFS version into the web tree for runtime mismatch detection.
 # The firmware reports FW_VERSION_STR; the web UI reports this file's content.
-# Bumping only spiffs_version (data/ changes) never triggers the mismatch banner.
-# Bumping only firmware_version (code changes) will trigger it until spiffs.bin is re-flashed.
-file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/data/web/version.txt" "${SPIFFS_VERSION}")
+# Bumping only fs_version (data/ changes) never triggers the mismatch banner.
+# Bumping only firmware_version (code changes) will trigger it until littlefs.bin is re-flashed.
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/data/web/version.txt" "${FS_VERSION}")
 
 # Generate fw_version.h as a #ifndef-guarded header (belt-and-suspenders
 # fallback in case a translation unit includes it without the -D flag).
@@ -44,7 +44,7 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(nextube-fw)
 
-message(STATUS "Nextube-Remaster firmware v${FW_VERSION}  SPIFFS v${SPIFFS_VERSION}")
+message(STATUS "Nextube-Remaster firmware v${FW_VERSION}  LittleFS v${FS_VERSION}")
 
-# Embed the SPIFFS web filesystem into the firmware
-spiffs_create_partition_image(spiffs data FLASH_IN_PROJECT)
+# Embed the LittleFS web filesystem into the firmware
+littlefs_create_partition_image(littlefs data FLASH_IN_PROJECT)

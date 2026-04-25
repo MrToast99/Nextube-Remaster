@@ -22,6 +22,7 @@ typedef enum {
     APP_MODE_CUSTOM_CLOCK,
     APP_MODE_ALBUM,
     APP_MODE_WEATHER,
+    APP_MODE_SPECTRUM,  /* = 8 — microphone audio visualiser */
     APP_MODE_MAX,
 } app_mode_t;
 
@@ -50,7 +51,8 @@ typedef struct {
     backlight_mode_t backlight_mode;
     bool             backlight_on;
     uint8_t          backlight_rgb[6][3];
-    uint8_t          enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0xFF (all 8) */
+    uint8_t          spectrum_rgb[3];    /* LED colour for Spectrum mode [R, G, B] */
+    uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0x1FF (all 9) */
 
     /* Network */
     char             ssid[64];

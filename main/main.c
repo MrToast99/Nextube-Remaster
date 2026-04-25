@@ -25,7 +25,7 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
-#include "esp_spiffs.h"
+#include "esp_littlefs.h"
 
 #include "esp_attr.h"
 
@@ -42,6 +42,7 @@
 #include "ntp_time.h"
 #include "weather.h"
 #include "youtube_bili.h"
+#include "microphone.h"
 #include "fw_version.h"
 
 static const char *TAG = "main";
@@ -108,23 +109,26 @@ static void on_touch(touch_pad_id_t pad)
         audio_play_file(cfg->click_file);
 }
 
-/* ── SPIFFS mount ──────────────────────────────────────────────────── */
-static void init_spiffs(void)
+/* ── LittleFS mount ────────────────────────────────────────────────── */
+static void init_littlefs(void)
 {
-    esp_vfs_spiffs_conf_t conf = {
+    /* base_path is kept as "/spiffs" so all existing path strings in the
+     * firmware (config.json, audio/, images/) are unchanged — only the
+     * partition label and VFS API differ from the old SPIFFS setup. */
+    esp_vfs_littlefs_conf_t conf = {
         .base_path       = "/spiffs",
-        .partition_label = "spiffs",
-        .max_files       = 20,
-        .format_if_mount_failed = true,
+        .partition_label = "littlefs",
+        .dont_mount      = false,
+        .grow_on_mount   = false,
     };
-    esp_err_t err = esp_vfs_spiffs_register(&conf);
+    esp_err_t err = esp_vfs_littlefs_register(&conf);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SPIFFS mount failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "LittleFS mount failed: %s", esp_err_to_name(err));
         return;
     }
     size_t total = 0, used = 0;
-    esp_spiffs_info("spiffs", &total, &used);
-    ESP_LOGI(TAG, "SPIFFS: total=%u  used=%u", (unsigned)total, (unsigned)used);
+    esp_littlefs_info("littlefs", &total, &used);
+    ESP_LOGI(TAG, "LittleFS: total=%u  used=%u", (unsigned)total, (unsigned)used);
 }
 
 /* ── NVS init ──────────────────────────────────────────────────────── */
@@ -163,9 +167,9 @@ void app_main(void)
     init_nvs();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    init_spiffs();
+    init_littlefs();
 
-    /* Load configuration from /spiffs/config.json (or defaults) */
+    /* Load configuration from /spiffs/config.json (or defaults) — /spiffs is the LittleFS mount point */
     config_mgr_init();
     const nextube_config_t *cfg = config_get();
 
@@ -176,6 +180,9 @@ void app_main(void)
     audio_init();
     audio_set_volume(cfg->volume);          /* restore saved volume level   */
     audio_set_enabled(cfg->audio_enabled);  /* tear down DAC if disabled    */
+
+    mic_init();
+    mic_task_start();
 
     leds_init();
     leds_task_start();

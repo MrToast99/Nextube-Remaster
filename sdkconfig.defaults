@@ -40,12 +40,6 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
 
-# SPIFFS
-CONFIG_SPIFFS_MAX_PARTITIONS=3
-# Longest asset path is 63 chars (e.g. /images/themes/LightFuture/MutiInfo/WeekDate/week/wednesday.jpg)
-# Value includes the null terminator, so 64 is the minimum required
-CONFIG_SPIFFS_OBJ_NAME_LEN=64
-
 # Watchdog
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 

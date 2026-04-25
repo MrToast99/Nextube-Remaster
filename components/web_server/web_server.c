@@ -13,7 +13,7 @@
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_spiffs.h"
+#include "esp_littlefs.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -251,21 +251,21 @@ static esp_err_t api_status(httpd_req_t *r)
     if (s && s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
     cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size());
     cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
-    /* expected_spiffs: the SPIFFS version this firmware binary was built against.
-     * Baked in at compile time from version.json → spiffs_version.
-     * spiffs_version: the version actually present on the device, read at
-     * runtime from /spiffs/web/version.txt (written when SPIFFS was flashed).
-     * The UI shows a mismatch banner when these two differ — i.e. the SPIFFS
+    /* expected_fs: the LittleFS version this firmware binary was built against.
+     * Baked in at compile time from version.json → fs_version.
+     * fs_version: the version actually present on the device, read at
+     * runtime from /spiffs/web/version.txt (written when littlefs.bin was flashed).
+     * The UI shows a mismatch banner when these two differ — i.e. the LittleFS
      * image on the device is not the one this firmware expects. */
-    cJSON_AddStringToObject(root, "expected_spiffs", SPIFFS_VERSION_STR);
-    char spiffs_ver[32] = "unknown";
+    cJSON_AddStringToObject(root, "expected_fs", FS_VERSION_STR);
+    char fs_ver[32] = "unknown";
     FILE *vf = fopen("/spiffs/web/version.txt", "r");
     if (vf) {
-        if (fgets(spiffs_ver, sizeof(spiffs_ver), vf))
-            spiffs_ver[strcspn(spiffs_ver, "\r\n")] = '\0';
+        if (fgets(fs_ver, sizeof(fs_ver), vf))
+            fs_ver[strcspn(fs_ver, "\r\n")] = '\0';
         fclose(vf);
     }
-    cJSON_AddStringToObject(root, "spiffs_version", spiffs_ver);
+    cJSON_AddStringToObject(root, "fs_version", fs_ver);
     const nextube_config_t *cfg = config_get();
     cJSON_AddStringToObject(root, "mode", app_mode_name(cfg->current_mode));
     char *json = cJSON_PrintUnformatted(root);
@@ -317,47 +317,50 @@ static esp_err_t api_ota(httpd_req_t *r)
     return ESP_OK;
 }
 
-/* ── SPIFFS (web UI) OTA ───────────────────────────────────────────── */
-/* Receives a spiffs.bin image and writes it to the SPIFFS partition in
+/* ── LittleFS (web UI) OTA ─────────────────────────────────────────── */
+/* Receives a littlefs.bin image and writes it to the LittleFS partition in
  * 4 KB sectors.  Each sector is erased immediately before it is written
  * so the erase latency is interleaved with the network receive rather
  * than blocking the connection upfront.
  *
- * SPIFFS is unmounted before the first write and the device reboots
+ * LittleFS is unmounted before the first write and the device reboots
  * after a successful flash.  If the upload is interrupted the partition
  * is left partially erased; a retry will always fix this since erasing
- * before writing is idempotent. */
-#define SPIFFS_SECTOR 4096
-static esp_err_t api_spiffs_ota(httpd_req_t *r)
+ * before writing is idempotent.
+ *
+ * The old /api/update_spiffs URL is kept as a backward-compatible alias
+ * (see route table) so existing scripts and OTA tools continue to work. */
+#define FS_SECTOR 4096
+static esp_err_t api_fs_ota(httpd_req_t *r)
 {
     const esp_partition_t *part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "spiffs");
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, "littlefs");
     if (!part)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "SPIFFS partition not found"), ESP_FAIL;
+                                   "LittleFS partition not found"), ESP_FAIL;
 
     int content_len = r->content_len;
     if (content_len <= 0 || (uint32_t)content_len > part->size)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
                                    "Bad content length"), ESP_FAIL;
 
-    char *buf = malloc(SPIFFS_SECTOR);
+    char *buf = malloc(FS_SECTOR);
     if (!buf)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "Out of memory"), ESP_FAIL;
 
-    /* Unmount SPIFFS before touching flash.  The HTTP server itself runs
+    /* Unmount LittleFS before touching flash.  The HTTP server itself runs
      * from firmware (app partition), so it stays alive. */
-    esp_vfs_spiffs_unregister("spiffs");
+    esp_vfs_littlefs_unregister("littlefs");
 
-/* Re-mount SPIFFS and return an error response.  Called on any flash
- * failure so the VFS is never left dead after a failed SPIFFS OTA. */
-#define SPIFFS_OTA_FAIL(msg) do { \
+/* Re-mount LittleFS and return an error response.  Called on any flash
+ * failure so the VFS is never left dead after a failed LittleFS OTA. */
+#define FS_OTA_FAIL(msg) do { \
     free(buf); \
-    esp_vfs_spiffs_conf_t _c = { \
-        .base_path = "/spiffs", .partition_label = "spiffs", \
-        .max_files = 20, .format_if_mount_failed = true }; \
-    esp_vfs_spiffs_register(&_c); \
+    esp_vfs_littlefs_conf_t _c = { \
+        .base_path = "/spiffs", .partition_label = "littlefs", \
+        .dont_mount = false, .grow_on_mount = false }; \
+    esp_vfs_littlefs_register(&_c); \
     return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, (msg)), ESP_FAIL; \
 } while(0)
 
@@ -365,32 +368,32 @@ static esp_err_t api_spiffs_ota(httpd_req_t *r)
     while (written < content_len) {
         /* Fill one sector from the network stream */
         int to_recv = content_len - written;
-        if (to_recv > SPIFFS_SECTOR) to_recv = SPIFFS_SECTOR;
+        if (to_recv > FS_SECTOR) to_recv = FS_SECTOR;
 
         /* Pad the buffer with 0xFF (erased flash value) so the final
          * write is always a full sector and satisfies the 4-byte alignment
          * requirement for raw partition writes. */
-        memset(buf, 0xFF, SPIFFS_SECTOR);
+        memset(buf, 0xFF, FS_SECTOR);
 
         int rx = 0;
         while (rx < to_recv) {
             int n = httpd_req_recv(r, buf + rx, to_recv - rx);
-            if (n <= 0) { SPIFFS_OTA_FAIL("Receive failed"); }
+            if (n <= 0) { FS_OTA_FAIL("Receive failed"); }
             rx += n;
         }
 
         /* Erase this sector then write it */
-        if (esp_partition_erase_range(part, written, SPIFFS_SECTOR) != ESP_OK)
-            SPIFFS_OTA_FAIL("Erase failed");
-        if (esp_partition_write(part, written, buf, SPIFFS_SECTOR) != ESP_OK)
-            SPIFFS_OTA_FAIL("Write failed");
+        if (esp_partition_erase_range(part, written, FS_SECTOR) != ESP_OK)
+            FS_OTA_FAIL("Erase failed");
+        if (esp_partition_write(part, written, buf, FS_SECTOR) != ESP_OK)
+            FS_OTA_FAIL("Write failed");
         written += rx;
     }
     free(buf);
-#undef SPIFFS_OTA_FAIL
+#undef FS_OTA_FAIL
 
-    ESP_LOGI(TAG, "SPIFFS updated: %d bytes written", written);
-    send_json(r, "{\"status\":\"ok\",\"message\":\"SPIFFS updated, rebooting...\"}");
+    ESP_LOGI(TAG, "LittleFS updated: %d bytes written", written);
+    send_json(r, "{\"status\":\"ok\",\"message\":\"LittleFS updated, rebooting...\"}");
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
     return ESP_OK;
@@ -627,8 +630,8 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     FILE *f = fopen(spiffs_path, "wb");
     if (!f) {
         size_t total = 0, used = 0;
-        esp_spiffs_info("spiffs", &total, &used);
-        ESP_LOGE(TAG, "fopen(%s, wb) failed: errno=%d (%s)  spiffs total=%u used=%u free=%u",
+        esp_littlefs_info("littlefs", &total, &used);
+        ESP_LOGE(TAG, "fopen(%s, wb) failed: errno=%d (%s)  littlefs total=%u used=%u free=%u",
                  spiffs_path, errno, strerror(errno),
                  (unsigned)total, (unsigned)used, (unsigned)(total - used));
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create file"), ESP_FAIL;
@@ -651,9 +654,8 @@ static esp_err_t api_file_upload(httpd_req_t *r)
 }
 
 /* POST /api/file/mkdir?path=/images/themes/MyTheme/Numbers
- * Creates a hidden .keep placeholder so the directory becomes visible in the
- * file browser.  SPIFFS has no real directories; a file with this path prefix
- * is enough to make readdir() return the directory entry.               */
+ * Creates a real directory on the LittleFS partition.
+ * LittleFS (unlike SPIFFS) supports true directories via mkdir(). */
 static esp_err_t api_file_mkdir(httpd_req_t *r)
 {
     char q[256], p[256] = {0}, spiffs_path[320];
@@ -664,15 +666,13 @@ static esp_err_t api_file_mkdir(httpd_req_t *r)
     if (strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
 
-    /* Strip trailing slash, then append /.keep */
+    /* Strip trailing slash */
     size_t plen = strlen(p);
     if (plen > 0 && p[plen - 1] == '/') p[--plen] = '\0';
-    snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s/.keep", p);
+    snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
 
-    FILE *f = fopen(spiffs_path, "wb");
-    if (!f)
+    if (mkdir(spiffs_path, 0755) != 0 && errno != EEXIST)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create dir"), ESP_FAIL;
-    fclose(f);
     ESP_LOGI(TAG, "mkdir: %s", spiffs_path);
     return send_json(r, "{\"status\":\"ok\"}");
 }
@@ -823,7 +823,8 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/audio/play",      api_audio_play),
     R(HTTP_GET,  "/api/status",          api_status),
     R(HTTP_POST, "/api/update_firmware", api_ota),
-    R(HTTP_POST, "/api/update_spiffs",   api_spiffs_ota),
+    R(HTTP_POST, "/api/update_fs",       api_fs_ota),
+    R(HTTP_POST, "/api/update_spiffs",   api_fs_ota),  /* backward-compat alias */
     R(HTTP_GET,    "/api/file/ls",         api_file_ls),
     R(HTTP_GET,    "/api/file/download",  api_file_download),
     R(HTTP_POST,   "/api/file/upload",    api_file_upload),
@@ -866,7 +867,7 @@ void web_server_start(void)
     if (s_server) return;   /* already running */
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 26;
+    cfg.max_uri_handlers = 27;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.stack_size = 8192;
 

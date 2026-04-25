@@ -62,8 +62,8 @@ select option{background:var(--accent);color:var(--text)}
 </header>
 
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
-  ⚠️ <strong>Web UI update required</strong> — this firmware expects SPIFFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
-  Go to <strong>System → Web UI Update</strong> and flash the matching <code>spiffs.bin</code>.
+  ⚠️ <strong>Web UI update required</strong> — this firmware expects LittleFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
+  Go to <strong>System → Web UI Update</strong> and flash the matching <code>littlefs.bin</code>.
 </div>
 <div id="unsaved-banner">
   <span>⚠ You have unsaved changes.</span>
@@ -103,6 +103,7 @@ select option{background:var(--accent);color:var(--text)}
       <button class="btn btn-outline" onclick="setMode('Date')">Date</button>
       <button class="btn btn-outline" onclick="setMode('Album')">Album</button>
       <button class="btn btn-outline" onclick="setMode('Weather')">Weather</button>
+      <button class="btn btn-outline" onclick="setMode('Spectrum')">Spectrum</button>
     </div>
   </div>
 </div>
@@ -165,6 +166,15 @@ select option{background:var(--accent);color:var(--text)}
     </div>
   </div>
   <div class="card">
+    <h2>Spectrum Mode</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Audio visualiser using the onboard electret microphone. Each tube displays a digit 0–9 proportional to the energy in its frequency band.</p>
+    <div class="field" style="display:flex;align-items:center;gap:1rem">
+      <label style="min-width:90px">Band Colour</label>
+      <input type="color" id="f-spec-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
+      <span style="color:var(--dim);font-size:.82rem">LED glow colour for the visualiser</span>
+    </div>
+  </div>
+  <div class="card">
     <h2>Enabled Modes</h2>
     <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Choose which modes are accessible via the touch buttons. Clock and Date can both be enabled at the same time.</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem">
@@ -176,6 +186,7 @@ select option{background:var(--accent);color:var(--text)}
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-date"> Date <span style="font-size:.73rem;color:var(--dim)">(full date)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album"> Album</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather"> Weather</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum"> Spectrum <span style="color:var(--dim);font-size:.78rem">(mic required)</span></label>
     </div>
   </div>
   <!-- Mode Rotation -->
@@ -428,7 +439,7 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <div class="card">
     <h2>Backup & Restore</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">Download your current configuration to a file or restore it from a backup. Useful before flashing SPIFFS.</p>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">Download your current configuration to a file or restore it from a backup. Useful before flashing LittleFS.</p>
     <div class="btn-group">
       <button class="btn btn-outline" onclick="exportSettings()">Download config.json</button>
       <button class="btn btn-outline" onclick="$('f-import').click()">Restore from File</button>
@@ -436,18 +447,18 @@ select option{background:var(--accent);color:var(--text)}
     </div>
   </div>
   <div class="card">
-    <h2>Web UI Update (SPIFFS)</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>spiffs.bin</strong> to update the web interface and built-in assets without a USB flash. Required when the release notes mention web UI changes.</p>
+    <h2>Web UI Update (LittleFS)</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>littlefs.bin</strong> to update the web interface and built-in assets without a USB flash. Required when the release notes mention web UI changes.</p>
     <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5">
-      ⚠️ <strong>Warning:</strong> this overwrites <em>all</em> SPIFFS flash — including any custom themes or images you have uploaded to the device. Built-in themes will be restored from the new image. Back up custom files first using the SPIFFS Files list below.
+      ⚠️ <strong>Warning:</strong> this overwrites <em>all</em> LittleFS flash — including any custom themes or images you have uploaded to the device. Built-in themes will be restored from the new image. Back up custom files first using the LittleFS Files list below.
     </div>
     <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
     <div class="progress" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
     <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doSPIFFSOTA()">Upload & Flash</button></div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doFSOTA()">Upload & Flash</button></div>
   </div>
   <div class="card">
-    <h2>SPIFFS Files</h2>
+    <h2>LittleFS Files</h2>
     <div id="file-breadcrumb" style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem;min-height:1.2em"></div>
     <div id="file-list" style="font-size:.85rem;max-height:320px;overflow-y:auto;border:1px solid rgba(255,255,255,.07);border-radius:6px"></div>
     <input type="file" id="upload-input" multiple style="display:none" onchange="uploadFiles(this.files, false)">
@@ -668,6 +679,11 @@ async function loadSettings() {
   $('m-date').checked = !!(em & (1 << 5));
   $('m-album').checked       = !!(em & (1 << 6));
   $('m-weather').checked     = !!(em & (1 << 7));
+  $('m-spectrum').checked    = !!(em & (1 << 8));
+
+  /* Spectrum colour */
+  const sc = cfg.spectrum_RGB || [50, 80, 100];
+  $('f-spec-color').value = '#' + sc.map(v => v.toString(16).padStart(2,'0')).join('');
 
   /* Mode rotation */
   const rotEnabled = cfg.rotation_enabled === true;
@@ -748,7 +764,8 @@ async function saveSettings() {
     ($('m-youtube').checked     ? (1 << 4) : 0) |
     ($('m-date').checked ? (1 << 5) : 0) |
     ($('m-album').checked       ? (1 << 6) : 0) |
-    ($('m-weather').checked     ? (1 << 7) : 0);
+    ($('m-weather').checked     ? (1 << 7) : 0) |
+    ($('m-spectrum').checked    ? (1 << 8) : 0);
   const body = {
     apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value, clock_tube5: $('f-tube5').value }],
     lcd_brightness: +$('f-lcdbr').value,
@@ -759,6 +776,7 @@ async function saveSettings() {
     night_end_hour: +$('f-nighteh').value,
     backlight_mode: $('f-blmode').value,
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
+    spectrum_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-color').value.replace('#','')),
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,
     rotation_interval_s: +$('rot-interval').value,
@@ -841,15 +859,15 @@ async function doOTA() {
   xhr.send(file);
 }
 
-/* ── SPIFFS OTA ─────────────────────────────────────── */
-function doSPIFFSOTA() {
+/* ── LittleFS OTA ────────────────────────────────────── */
+function doFSOTA() {
   const file = $('spiffs-file').files[0];
-  if (!file) return toast('Select spiffs.bin first', true);
-  if (!file.name.toLowerCase().includes('spiffs')) {
-    if (!confirm('File name doesn\'t look like spiffs.bin — upload anyway?')) return;
+  if (!file) return toast('Select a LittleFS .bin file first', true);
+  if (!file.name.toLowerCase().includes('littlefs')) {
+    if (!confirm('File name doesn\'t look like a LittleFS image — upload anyway?')) return;
   }
   if (!confirm(
-    'This will overwrite ALL SPIFFS flash including any uploaded custom files.\n\n' +
+    'This will overwrite ALL LittleFS flash including any uploaded custom files.\n\n' +
     'Built-in themes will be restored. Custom themes/images will be erased.\n\n' +
     'Continue?'
   )) return;
@@ -874,22 +892,22 @@ function doSPIFFSOTA() {
     if (xhr.status === 200) {
       bar.style.width = '100%';
       stat.textContent = 'Done! Device is rebooting — page will reload in 15 s…';
-      toast('SPIFFS updated! Rebooting…');
+      toast('LittleFS updated! Rebooting…');
       setTimeout(() => location.reload(), 15000);
     } else {
       stat.textContent = 'Failed: ' + (xhr.responseText || xhr.statusText);
-      toast('SPIFFS update failed: ' + (xhr.responseText || xhr.statusText), true);
+      toast('LittleFS update failed: ' + (xhr.responseText || xhr.statusText), true);
     }
   };
   xhr.onerror = () => {
     stat.textContent = 'Network error during upload.';
-    toast('SPIFFS update failed: network error', true);
+    toast('LittleFS update failed: network error', true);
   };
-  xhr.open('POST', '/api/update_spiffs');
+  xhr.open('POST', '/api/update_fs');
   xhr.send(file);
 }
 
-/* ── SPIFFS file browser ───────────────────────────── */
+/* ── LittleFS file browser ─────────────────────────── */
 let s_filePath = '/';
 
 async function browseDir(dir) {
@@ -925,7 +943,6 @@ async function browseDir(dir) {
     rows += '<div style="padding:.6rem .8rem;color:var(--dim);font-style:italic">No files</div>';
   } else {
     files.forEach(f => {
-      if (f.name === '.keep') return;   /* hidden placeholder — skip */
       const isDir = f.type === 'dir';
       const sizeStr = isDir ? 'folder' : (f.size < 1024 ? f.size + ' B' : (f.size/1024).toFixed(1) + ' K');
       const icon = isDir ? '📁' : '📄';
@@ -972,7 +989,7 @@ async function mkdirFolder() {
 /* Keep backward-compat alias used by auto-load on tab switch */
 function loadFiles() { browseDir(s_filePath); }
 
-/* ── Delete a SPIFFS file ──────────────────────────── */
+/* ── Delete a LittleFS file ────────────────────────── */
 async function deleteFile(path) {
   const name = path.split('/').pop();
   if (!confirm(`Delete ${name}?`)) return;
@@ -984,7 +1001,7 @@ async function deleteFile(path) {
   } catch(e) { toast('Delete error: ' + e.message, true); }
 }
 
-/* ── Upload files / folder to current SPIFFS directory ─ */
+/* ── Upload files / folder to current LittleFS directory  */
 async function uploadFiles(files, preservePath) {
   if (!files || !files.length) return;
   const total = files.length;
@@ -1078,13 +1095,13 @@ async function refreshStatus() {
   $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
   $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';
   $('s-fwver').textContent = s.firmware || '--';
-  if ($('s-spver')) $('s-spver').textContent = s.spiffs_version || '--';
+  if ($('s-spver')) $('s-spver').textContent = s.fs_version || '--';
 
-  /* Version mismatch banner — compare the SPIFFS version the firmware was
-   * built to expect (expected_spiffs) against what's actually on the device
-   * (spiffs_version).  This decouples the firmware version number from the
-   * SPIFFS version number so they can increment independently. */
-  const expected = s.expected_spiffs, sp = s.spiffs_version;
+  /* Version mismatch banner — compare the LittleFS version the firmware was
+   * built to expect (expected_fs) against what's actually on the device
+   * (fs_version).  This decouples the firmware version number from the
+   * LittleFS version number so they can increment independently. */
+  const expected = s.expected_fs, sp = s.fs_version;
   if (expected && sp && sp !== 'unknown' && expected !== sp) {
     $('vm-fw').textContent = expected;
     $('vm-sp').textContent = sp;

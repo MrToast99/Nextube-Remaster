@@ -14,6 +14,7 @@
 #include "leds.h"
 #include "board_pins.h"
 #include "config_mgr.h"
+#include "microphone.h"
 #include "esp_log.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
@@ -181,6 +182,22 @@ static void led_task(void *arg)
         const nextube_config_t *cfg = config_get();
         /* led_brightness is 0=off, 100=full bright — use directly. */
         leds_set_brightness(cfg->led_brightness);
+
+        /* ── Spectrum mode: drive each LED at per-band audio brightness ── */
+        if (cfg->current_mode == APP_MODE_SPECTRUM) {
+            float bands[6];
+            mic_get_bands(bands);
+            for (int i = 0; i < LED_COUNT; i++) {
+                float v = bands[i];
+                leds_set_color(i,
+                    (uint8_t)(cfg->spectrum_rgb[0] * v),
+                    (uint8_t)(cfg->spectrum_rgb[1] * v),
+                    (uint8_t)(cfg->spectrum_rgb[2] * v));
+            }
+            leds_update();
+            vTaskDelay(pdMS_TO_TICKS(50));  /* 20 Hz refresh in spectrum mode */
+            continue;
+        }
 
         switch (cfg->backlight_mode) {
         case BL_MODE_STATIC: {

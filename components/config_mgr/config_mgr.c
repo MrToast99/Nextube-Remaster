@@ -38,7 +38,12 @@ static void set_defaults(void)
     s_cfg.backlight_on    = true;
     /* All modes enabled by default. Clock and Date are independent — both
      * can be active simultaneously in the touch cycle. */
-    s_cfg.enabled_modes   = 0xFF;
+    s_cfg.enabled_modes   = 0x1FF;   /* all 9 modes (bits 0–8) */
+
+    /* Spectrum mode LED colour — matches stock firmware spectrum_RGB default */
+    s_cfg.spectrum_rgb[0] = 50;
+    s_cfg.spectrum_rgb[1] = 80;
+    s_cfg.spectrum_rgb[2] = 100;
 
     /* Default rainbow-ish backlight colours */
     uint8_t defaults[6][3] = {
@@ -138,6 +143,7 @@ static void parse_json(const char *json, size_t len)
         else if (strcmp(app_name, "CustomClock") == 0) s_cfg.current_mode = APP_MODE_CUSTOM_CLOCK; /* legacy alias */
         else if (strcmp(app_name, "Album")       == 0) s_cfg.current_mode = APP_MODE_ALBUM;
         else if (strcmp(app_name, "Weather")     == 0) s_cfg.current_mode = APP_MODE_WEATHER;
+        else if (strcmp(app_name, "Spectrum")    == 0) s_cfg.current_mode = APP_MODE_SPECTRUM;
 
         json_read_str(app0, "theme", s_cfg.theme, sizeof(s_cfg.theme));
         json_read_str(app0, "type",  s_cfg.time_type, sizeof(s_cfg.time_type));
@@ -257,7 +263,11 @@ static void parse_json(const char *json, size_t len)
         s_cfg.backlight_on = (strcmp(bl_onoff, "OFF") != 0);
     }
 
-    json_read_u8(root, "enabled_modes", &s_cfg.enabled_modes);
+    /* enabled_modes — uint16_t (was uint8_t); old value 0xFF = 255 parses correctly */
+    {
+        cJSON *em = cJSON_GetObjectItem(root, "enabled_modes");
+        if (cJSON_IsNumber(em)) s_cfg.enabled_modes = (uint16_t)em->valueint;
+    }
     /* Clock and Date are independent — both may be enabled simultaneously.
      * Safety fallback: if the user has disabled every time-display mode,
      * re-enable Clock so the device can always show the time. */
@@ -293,6 +303,17 @@ static void parse_json(const char *json, size_t len)
                     s_cfg.backlight_rgb[i][1] = (uint8_t)g->valueint;
                     s_cfg.backlight_rgb[i][2] = (uint8_t)b->valueint;
                 }
+            }
+        }
+    }
+
+    /* spectrum_RGB — [R, G, B] array (matches stock firmware config.json key) */
+    {
+        cJSON *sp = cJSON_GetObjectItem(root, "spectrum_RGB");
+        if (cJSON_IsArray(sp) && cJSON_GetArraySize(sp) >= 3) {
+            for (int i = 0; i < 3; i++) {
+                cJSON *v = cJSON_GetArrayItem(sp, i);
+                if (cJSON_IsNumber(v)) s_cfg.spectrum_rgb[i] = (uint8_t)v->valueint;
             }
         }
     }
@@ -446,6 +467,12 @@ char *config_to_json(void)
         cJSON_AddItemToArray(bl_rgb, c);
     }
 
+    {
+        cJSON *sp = cJSON_AddArrayToObject(root, "spectrum_RGB");
+        for (int i = 0; i < 3; i++)
+            cJSON_AddItemToArray(sp, cJSON_CreateNumber(s_cfg.spectrum_rgb[i]));
+    }
+
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     xSemaphoreGiveRecursive(s_mutex);
@@ -511,6 +538,7 @@ const char *app_mode_name(app_mode_t mode)
         [APP_MODE_CUSTOM_CLOCK] = "Date",
         [APP_MODE_ALBUM]        = "Album",
         [APP_MODE_WEATHER]      = "Weather",
+        [APP_MODE_SPECTRUM]     = "Spectrum",
     };
     if ((unsigned)mode >= APP_MODE_MAX) return names[APP_MODE_CLOCK];
     return names[mode];

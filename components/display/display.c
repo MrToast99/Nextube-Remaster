@@ -548,6 +548,7 @@ void display_show_ampm(int tube, const char *name, const char *theme)
 #include "ntp_time.h"
 #include "weather.h"
 #include "youtube_bili.h"
+#include "microphone.h"
 #include "freertos/semphr.h"
 
 /* ── Mode render helpers ────────────────────────────────────────────── */
@@ -724,6 +725,21 @@ static void render_scoreboard(const nextube_config_t *cfg)
 {
     /* Show 6 zeros until score data is driven via a future API. */
     for (int i = 0; i < 6; i++) display_show_number(i, 0, cfg->theme);
+}
+
+/* render_spectrum – audio visualiser using mic Goertzel band energies.
+ * Each tube shows a digit 0–9 proportional to that band's energy level.
+ * Bands: 125, 250, 500, 1000, 2000, 4000 Hz (tube 0 = lowest). */
+static void render_spectrum(const nextube_config_t *cfg)
+{
+    float bands[6];
+    mic_get_bands(bands);
+    for (int i = 0; i < LCD_COUNT; i++) {
+        int level = (int)(bands[i] * 9.0f + 0.5f);
+        if (level > 9) level = 9;
+        if (level < 0) level = 0;
+        display_show_number(i, level, cfg->theme);
+    }
 }
 
 /* Album: cycle through /images/album/ (jpg) files */
@@ -1154,6 +1170,11 @@ static void display_task(void *arg)
         case APP_MODE_SCOREBOARD:
             if (first || mode_changed || theme_changed)
                 render_scoreboard(cfg);
+            break;
+
+        case APP_MODE_SPECTRUM:
+            /* Audio changes every frame — always re-render at the display task rate. */
+            render_spectrum(cfg);
             break;
 
         case APP_MODE_ALBUM:

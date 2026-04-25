@@ -6,6 +6,7 @@ idf_component_register(
         config_mgr
         display
         audio
+        microphone
         leds
         touch
         rtc
