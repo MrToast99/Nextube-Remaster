@@ -789,9 +789,11 @@ static void render_album(const nextube_config_t *cfg,
     TickType_t now = xTaskGetTickCount();
     if (force || (now - *last_switch) >= pdMS_TO_TICKS(interval_ms)) {
         *last_switch = now;
-        /* Same image on all 6 tubes (each tube shows a crop / the full image). */
+        /* Each tube shows a different image offset by its position, creating a
+         * sliding-window effect.  With fewer images than tubes the list wraps
+         * naturally so some images repeat — no special-casing needed. */
         for (int i = 0; i < LCD_COUNT; i++)
-            display_show_image(i, s_album_files[s_album_index]);
+            display_show_image(i, s_album_files[(s_album_index + i) % s_album_count]);
         s_album_index = (s_album_index + 1) % s_album_count;
     }
 }

@@ -129,7 +129,7 @@ void mic_init(void)
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &s_adc));
 
     adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten    = ADC_ATTEN_DB_11,   /* 0–3.3 V full-scale */
+        .atten    = ADC_ATTEN_DB_12,    /* 0–3.3 V full-scale */
         .bitwidth = ADC_BITWIDTH_12,
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, PIN_MIC_ADC_CHAN, &chan_cfg));
