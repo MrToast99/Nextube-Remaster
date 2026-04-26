@@ -76,6 +76,7 @@ static void set_defaults(void)
     s_cfg.button_sound  = true;
     s_cfg.audio_enabled = true;
     s_cfg.volume = 20;
+    s_cfg.mic_enabled   = true;
 
     s_cfg.countdown_minutes = 1;
     s_cfg.pomodoro_work     = 25;
@@ -174,6 +175,10 @@ static void parse_json(const char *json, size_t len)
     {
         cJSON *ae = cJSON_GetObjectItem(root, "audio_enabled");
         if (cJSON_IsBool(ae)) s_cfg.audio_enabled = cJSON_IsTrue(ae);
+    }
+    {
+        cJSON *me = cJSON_GetObjectItem(root, "mic_enabled");
+        if (cJSON_IsBool(me)) s_cfg.mic_enabled = cJSON_IsTrue(me);
     }
     {
         cJSON *lz = cJSON_GetObjectItem(root, "leading_zero");
@@ -433,6 +438,7 @@ char *config_to_json(void)
     }
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
+    cJSON_AddBoolToObject  (root, "mic_enabled",      s_cfg.mic_enabled);
     cJSON_AddBoolToObject  (root, "leading_zero",     s_cfg.leading_zero);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);

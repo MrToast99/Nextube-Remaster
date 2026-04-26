@@ -677,8 +677,36 @@ static esp_err_t api_file_mkdir(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* fs_remove_recursive – delete a file or a directory tree rooted at `path`.
+ * Works on LittleFS real directories.  Returns 0 on success, -1 on error. */
+static int fs_remove_recursive(const char *path)
+{
+    /* Try removing as a file (or empty dir) first — fast path. */
+    if (remove(path) == 0) return 0;
+
+    /* If that failed because it is a non-empty directory, recurse. */
+    DIR *dp = opendir(path);
+    if (!dp) return -1;
+
+    struct dirent *e;
+    char child[320];
+    int err = 0;
+    while ((e = readdir(dp)) != NULL && err == 0) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        err = fs_remove_recursive(child);
+    }
+    closedir(dp);
+
+    /* Remove now-empty directory */
+    if (err == 0)
+        err = (rmdir(path) == 0) ? 0 : -1;
+    return err;
+}
+
 /* DELETE /api/file/delete?path=/audio/click.wav
- * Removes the file.  config.json is protected. */
+ * Removes a file or a directory tree.  config.json is protected. */
 static esp_err_t api_file_delete(httpd_req_t *r)
 {
     char q[256], p[256] = {0}, spiffs_path[320];
@@ -692,8 +720,8 @@ static esp_err_t api_file_delete(httpd_req_t *r)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Protected file"), ESP_FAIL;
 
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
-    if (remove(spiffs_path) != 0)
-        return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found"), ESP_FAIL;
+    if (fs_remove_recursive(spiffs_path) != 0)
+        return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found or delete failed"), ESP_FAIL;
     ESP_LOGI(TAG, "Deleted: %s", spiffs_path);
     if (strncmp(p, "/images/album/", 14) == 0)
         display_album_invalidate();

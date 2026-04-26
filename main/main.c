@@ -181,8 +181,14 @@ void app_main(void)
     audio_set_volume(cfg->volume);          /* restore saved volume level   */
     audio_set_enabled(cfg->audio_enabled);  /* tear down DAC if disabled    */
 
-    mic_init();
-    mic_task_start();
+    /* Microphone: only initialise the ADC and start the sampling task when
+     * mic is enabled.  The task self-gates anyway (checks config each frame),
+     * but skipping init entirely avoids touching ADC1 when the user has
+     * permanently disabled the mic (e.g. no mic fitted). */
+    if (cfg->mic_enabled) {
+        mic_init();
+        mic_task_start();
+    }
 
     leds_init();
     leds_task_start();

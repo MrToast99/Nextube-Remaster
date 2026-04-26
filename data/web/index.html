@@ -447,6 +447,17 @@ select option{background:var(--accent);color:var(--text)}
     </div>
   </div>
   <div class="card">
+    <h2>Hardware Settings</h2>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-mic-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
+        <label for="f-mic-en" style="margin:0;cursor:pointer;font-weight:normal">Enable microphone</label>
+      </div>
+      <p style="color:var(--dim);font-size:.8rem;margin:.4rem 0 0 24px">Required for Spectrum mode. Disable if no microphone is fitted on GPIO36 (ADC1_CH0). When disabled the ADC is not initialised and Spectrum mode shows silence. Takes effect after reboot.</p>
+    </div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Hardware Settings</button></div>
+  </div>
+  <div class="card">
     <h2>Web UI Update (LittleFS)</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>littlefs.bin</strong> to update the web interface and built-in assets without a USB flash. Required when the release notes mention web UI changes.</p>
     <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5">
@@ -662,6 +673,7 @@ async function loadSettings() {
   $('f-click').value = cfg.click_file || '';
   $('f-btn-sound').checked = cfg.button_sound !== false;
   $('f-audio-en').checked  = cfg.audio_enabled !== false;
+  $('f-mic-en').checked    = cfg.mic_enabled !== false;
   $('f-countdown').value  = cfg.default_countdown_time || 1;
   $('f-pomo-work').value  = cfg.pomodoro_work  || 25;
   $('f-pomo-break').value = cfg.pomodoro_break || 5;
@@ -786,7 +798,7 @@ async function saveSettings() {
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
-    click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked,
+    click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: $('f-mic-en').checked,
     leading_zero: $('f-leading-zero').checked,
     default_countdown_time: +$('f-countdown').value,
     pomodoro_work:  +$('f-pomo-work').value,
@@ -950,9 +962,13 @@ async function browseDir(dir) {
       const safeName = esc(f.name);
       const encPath = encodeURIComponent(fullPath);
       if (isDir) {
-        rows += `<div class="file-row" onclick="browseDir(decodeURIComponent('${encPath}'))" style="cursor:pointer">
-          <span>${icon} ${safeName}</span>
-          <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
+        rows += `<div class="file-row">
+          <span onclick="browseDir(decodeURIComponent('${encPath}'))" style="cursor:pointer;flex:1">${icon} ${safeName}</span>
+          <span style="display:flex;align-items:center;gap:.5rem">
+            <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
+            <button onclick="deleteFolder(decodeURIComponent('${encPath}'))"
+               style="font-size:.75rem;color:var(--hi);background:none;border:1px solid var(--hi);border-radius:4px;padding:.15rem .4rem;cursor:pointer">✕</button>
+          </span>
         </div>`;
       } else {
         rows += `<div class="file-row">
@@ -993,6 +1009,17 @@ function loadFiles() { browseDir(s_filePath); }
 async function deleteFile(path) {
   const name = path.split('/').pop();
   if (!confirm(`Delete ${name}?`)) return;
+  try {
+    const r = await fetch('/api/file/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
+    const d = await r.json();
+    if (d.status === 'ok') { toast('Deleted ' + name); browseDir(s_filePath); }
+    else toast('Delete failed', true);
+  } catch(e) { toast('Delete error: ' + e.message, true); }
+}
+
+async function deleteFolder(path) {
+  const name = path.split('/').pop();
+  if (!confirm(`Delete folder "${name}" and all its contents?`)) return;
   try {
     const r = await fetch('/api/file/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
     const d = await r.json();

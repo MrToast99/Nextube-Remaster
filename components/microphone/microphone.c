@@ -18,6 +18,7 @@
  */
 
 #include "microphone.h"
+#include "config_mgr.h"
 #include "board_pins.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_timer.h"
@@ -81,6 +82,22 @@ static void mic_task(void *arg)
     ESP_LOGI(TAG, "Mic task started – sampling at %d Hz, %d bands", SAMPLE_RATE, BAND_COUNT);
 
     while (1) {
+        /* ── Gate: only sample when mic is enabled AND Spectrum mode is active ── */
+        {
+            const nextube_config_t *cfg = config_get();
+            bool spectrum_enabled = (cfg->enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
+            if (!cfg->mic_enabled ||
+                !spectrum_enabled ||
+                cfg->current_mode != APP_MODE_SPECTRUM) {
+                /* Clear the published bands so Spectrum mode shows silence */
+                taskENTER_CRITICAL(&s_mux);
+                memset(s_bands, 0, sizeof(s_bands));
+                taskEXIT_CRITICAL(&s_mux);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+        }
+
         /* ── Collect FRAME_SIZE samples at exactly SAMPLE_RATE ── */
         int64_t t = esp_timer_get_time();
         for (int i = 0; i < FRAME_SIZE; i++) {

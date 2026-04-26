@@ -84,6 +84,7 @@ typedef struct {
     bool             button_sound;       /* enable/disable button click sound */
     bool             audio_enabled;      /* false = DAC off, complete silence  */
     uint8_t          volume;             /* 0-100 */
+    bool             mic_enabled;        /* false = mic task idles; Spectrum mode shows silence */
 
     /* Countdown / Pomodoro */
     uint16_t         countdown_minutes;
