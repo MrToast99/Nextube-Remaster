@@ -28,8 +28,8 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | REST API (backward-compatible + extensions) | ✅ Working |
 | mDNS (`http://nextube-remaster.local`) | ✅ Working |
 | OTA firmware updates via web UI | ✅ Working |
-| OTA web UI / SPIFFS updates via web UI | ✅ Working |
-| Firmware + SPIFFS version mismatch detection | ✅ Working |
+| OTA web UI / LittleFS updates via web UI | ✅ Working |
+| Firmware + LittleFS version mismatch detection | ✅ Working |
 | Weather display (temp, humidity, condition icon) | ✅ Working |
 | wttr.in weather (free, no key) | ✅ Working |
 | Open-Meteo weather (free, no key) | ✅ Working |
@@ -40,11 +40,12 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | DAC audio playback (LTK8002D amp, WAV files) | ✅ Working |
 | Clock themes (Nixie/Digital/Flip art) | ✅ Working |
 | Countdown / Pomodoro timer modes | ✅ Working |
-| Album/slideshow mode | ✅ Working (place JPEGs in `/images/album/`) |
+| Album/slideshow mode (sliding window — each tube shows a different image) | ✅ Working |
 | Date mode (date display, DD/MM/YY) | ✅ Working |
+| Spectrum mode (microphone audio visualiser — 6 Goertzel bands → LED + display) | 🚧 In Progress |
 | Per-mode enable/disable toggles | ✅ Working |
 | Auto mode rotation with configurable interval | ✅ Working |
-| SPIFFS file browser with upload/delete | ✅ Working |
+| LittleFS file browser with upload/delete/mkdir | ✅ Working |
 | Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
 
 ## Hardware
@@ -60,6 +61,7 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 | **Touch** | 3× capacitive pads | LEFT=GPIO4(pad0), MIDDLE=GPIO2(pad2), RIGHT=GPIO15(pad3) |
 | **RTC** | PCF8563 | I²C: SCL=22, SDA=23 (addr 0x51) |
 | **Audio** | LTK8002D amplifier | DAC=GPIO25 |
+| **Microphone** | CMEJ-0413-42-SMT-TR electret | ADC=GPIO36 (ADC1_CH0 / SENSOR_VP) |
 
 > **Note on GPIO2 (MIDDLE touch):** GPIO2 is a strapping pin with an internal pull-down. It functions correctly as touch pad channel 2 in normal operation but must not be held LOW during boot.
 
@@ -204,15 +206,35 @@ possible without a hardware modification:
 > `board_pins.h` and call it from `audio_set_enabled()` alongside the DAC
 > Hi-Z sequence.
 
+### Microphone Notes
+
+Spectrum mode samples the built-in CMEJ-0413-42-SMT-TR electret condenser
+microphone via GPIO36 (ADC1_CH0, `SENSOR_VP`) using the ESP-IDF `adc_oneshot`
+API at **8 kHz** with 12-bit resolution and 12 dB attenuation (0–3.3 V full
+scale).
+
+Six frequency bands (125 / 250 / 500 / 1000 / 2000 / 4000 Hz) are computed
+per 128-sample frame using the **Goertzel algorithm** — far cheaper than FFT
+for a fixed set of target frequencies. Each band uses a peak-hold envelope
+with instant attack and exponential decay (`peak × 0.85` per frame) for
+smooth VU-style response.
+
+`adc_oneshot` is used specifically to avoid I²S bus contention — the audio
+driver occupies I²S0 in DAC mode, so the old I²S built-in-ADC approach is
+unavailable. `esp_timer_get_time()` busy-waits provide the precise 125 µs
+inter-sample spacing the FreeRTOS 1 ms tick cannot achieve.
+
 ### Original Firmware Analysis
 
 The stock firmware was built with **ESP-IDF v4.4** + **Arduino framework** via PlatformIO by developer `HERRY0812`. It uses:
 - **AutoConnect** library for WiFi provisioning
 - **FreeRTOS** tasks: `TaskDisplay`, `TaskWifiServer`, `TaskNtp`, `TaskWeather`, `TaskYoutubeAndBili`, `TaskIIC`, `TaskLed`, `TaskAudio`, `TaskConfigs`
-- **LittleFS/SPIFFS** for theme images and config.json
+- **SPIFFS** for theme images and config.json
 - **cJSON** for configuration
 - Theme images stored under `/images/themes/`
 - Weather icons under `/MutiInfo/Weather/`
+
+> **This project has migrated from SPIFFS to LittleFS.** The original firmware used SPIFFS (partition subtype `0x82`). Nextube-Remaster uses LittleFS (`joltwallet/littlefs`, subtype `0x83`) to gain real directory support, power-loss resilience (copy-on-write), and removal of the 64-character filename limit. The VFS mount point is kept as `/spiffs` so all existing path strings in the firmware, config, and web UI are unchanged. A one-time full USB re-flash is required when upgrading from any SPIFFS-based build because the partition table subtype must change.
 
 ### Flash Layout (16MB)
 
@@ -224,7 +246,7 @@ The stock firmware was built with **ESP-IDF v4.4** + **Arduino framework** via P
 | 0x00E000 | 8K | OTA data |
 | 0x010000 | 4.5M | app0 (OTA slot 0) |
 | 0x490000 | 4.5M | app1 (OTA slot 1) |
-| 0x910000 | 6.9M | SPIFFS |
+| 0x910000 | 7M | LittleFS |
 
 ## Building
 
@@ -248,12 +270,12 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ### Versioning
 
-Firmware and SPIFFS/Web UI versions are tracked independently in `version.json`:
+Firmware and LittleFS/Web UI versions are tracked independently in `version.json`:
 
 ```json
 {
-  "firmware_version": "1.0.2",
-  "spiffs_version":   "1.0.2",
+  "firmware_version": "1.0.10",
+  "fs_version":       "1.0.9",
   "name": "Nextube-Remaster",
   "description": "..."
 }
@@ -262,15 +284,15 @@ Firmware and SPIFFS/Web UI versions are tracked independently in `version.json`:
 | Key | Controls | When to bump |
 |---|---|---|
 | `firmware_version` | `nextube-fw-*-ota.bin` / `nextube-fw-*-full.bin` | Any change to `main/`, `components/`, `CMakeLists.txt`, etc. |
-| `spiffs_version` | `nextube-spiffs-*.bin` | Any change to `data/` (web UI, theme images, audio) |
+| `fs_version` | `nextube-littlefs-*.bin` | Any change to `data/` (web UI, theme images, audio) |
 
-CMake reads `firmware_version` and injects it as `FW_VERSION_STR` into all components via `target_compile_definitions(PUBLIC)` in `components/config_mgr/CMakeLists.txt`. `spiffs_version` is written to `data/web/version.txt` and bundled into the SPIFFS image — the web UI reads it at runtime to detect mismatches. Bumping only `spiffs_version` never triggers the mismatch banner. Bumping only `firmware_version` will show the banner until the matching `spiffs.bin` is flashed.
+CMake reads `firmware_version` and injects it as `FW_VERSION_STR` into all components via `target_compile_definitions(PUBLIC)` in `components/config_mgr/CMakeLists.txt`. `fs_version` is written to `data/web/version.txt` and bundled into the LittleFS image — the web UI reads it at runtime to detect mismatches. Bumping only `fs_version` never triggers the mismatch banner. Bumping only `firmware_version` will show the banner until the matching `littlefs.bin` is flashed.
 
 To release a new version, update `version.json` and tag the commit.
 
 ### CI Build
 
-Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) automatically create a GitHub Release with downloadable firmware binaries and generated release notes that identify which partitions changed (firmware-only OTA, SPIFFS-only, or full re-flash) by comparing changed files against the previous tag.
+Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) automatically create a GitHub Release with downloadable firmware binaries and generated release notes that identify which partitions changed (firmware-only OTA, LittleFS-only, or full re-flash) by comparing changed files against the previous tag.
 
 ## Flashing
 
@@ -284,7 +306,7 @@ Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) aut
 4. Set baud rate to **460800**
 5. Flash `nextube-fw-full.bin` at offset `0x0`
 
-> **Note:** Web Serial requires Chrome or Edge. Firefox is not supported. Use USB-A to USB-C, C-C cables don't seeem to work.
+> **Note:** Web Serial requires Chrome or Edge. Firefox is not supported. Use USB-A to USB-C, C-C cables don't seem to work.
 
 ### Option B — First-time / Full Flash (esptool CLI)
 
@@ -308,7 +330,7 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
   0x1000   bootloader.bin \
   0x8000   partition-table.bin \
   0x10000  nextube-fw-ota.bin \
-  0x910000 spiffs.bin
+  0x910000 littlefs.bin
 ```
 
 ### Over-the-Air (OTA)
@@ -318,15 +340,19 @@ The web UI provides two separate OTA upload paths under **System**:
 | Update type | File | When to use |
 |---|---|---|
 | **Firmware Update** | `nextube-fw-v{ver}-ota.bin` | New firmware, bug fixes |
-| **Web UI Update** | `nextube-spiffs-v{ver}.bin` | New web interface, weather sources, theme changes |
+| **Web UI Update** | `nextube-littlefs-v{ver}.bin` | New web interface, weather sources, theme changes |
 
 > **Do not** upload `nextube-fw-full.bin` via OTA — it is the merged USB-flash image, not a valid OTA app image.
 
 #### Version mismatch detection
 
-After a firmware-only OTA, the web UI shows a warning banner if the SPIFFS web UI version doesn't match the new firmware version. Follow the prompt to upload the matching `spiffs.bin` via **System → Web UI Update**.
+After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web UI version doesn't match the new firmware's expected version. Follow the prompt to upload the matching `littlefs.bin` via **System → Web UI Update**.
 
-**SPIFFS update warning:** flashing `spiffs.bin` overwrites all SPIFFS flash, including any custom themes or images you have uploaded. Back up custom files using the SPIFFS file browser (System tab) before updating.
+**LittleFS update warning:** flashing `littlefs.bin` overwrites all LittleFS flash, including any custom themes or images you have uploaded. Back up custom files using the LittleFS file browser (**System → LittleFS Files**) before updating.
+
+#### Migrating from an older SPIFFS build
+
+Changing the partition subtype from `spiffs` to `littlefs` requires re-flashing the partition table — a firmware-only OTA is **not** sufficient. Perform a full USB re-flash using `nextube-fw-full.bin` (Option A or B above) once, then all subsequent OTA updates work normally.
 
 ## Web Management UI
 
@@ -346,11 +372,11 @@ After setup, access the management interface via:
 
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
-- **Display** — theme (populated dynamically from SPIFFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation
+- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, Spectrum colour
 - **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
-- **System** — firmware OTA, web UI / SPIFFS OTA, SPIFFS file browser (browse/upload/delete), device log viewer, firmware update check (compares against latest GitHub release), factory reset, about (shows firmware + web UI versions independently)
+- **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder), device log viewer, firmware update check (compares against latest GitHub release), factory reset, about (shows firmware + web UI versions independently)
 
 ## Modes
 
@@ -362,7 +388,8 @@ The web UI provides:
 | **Pomodoro** | Work/break timer with configurable work and break durations. Middle touch pauses/resumes. Automatically flips between work and break phases. |
 | **YouTube** | Live subscriber/follower count |
 | **Weather** | Two panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon. Either panel can be disabled (but not both). Temperatures rounded to whole degrees; leading zeros suppressed; minus sign position shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
-| **Album** | Slideshow of JPEGs from `/images/album/` |
+| **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
+| **Spectrum** 🚧 | Microphone audio visualiser. Six Goertzel frequency bands (125 / 250 / 500 / 1000 / 2000 / 4000 Hz) drive both the LED accent lighting and the tube displays (bar-graph 0–9). Requires the onboard CMEJ-0413-42-SMT-TR microphone (GPIO36). Colour is configurable in **Display → Spectrum Colour**. |
 | **Scoreboard** | Stub — displays zeros |
 
 ### Mode Rotation
@@ -415,7 +442,7 @@ e.g. −23°C:  _   −   2   3   °C  ☁
 [·] [·] [·] [·] [·] [·]   (all tubes show dot.jpg until first fetch)
 ```
 
-Required SPIFFS image files — see the **Themes** section for the full folder structure. Key files for weather:
+Required LittleFS image files — see the **Themes** section for the full folder structure. Key files for weather:
 
 ```
 AMPM/              blank.jpg   dot.jpg
@@ -429,11 +456,11 @@ MutiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
 
 ### Adding a Custom Theme
 
-The web UI theme dropdown is populated dynamically by scanning `/images/themes/` on SPIFFS at runtime (via `/api/themes`). Any folder you upload there with the required file structure will appear in the dropdown automatically — no firmware update needed.
+The web UI theme dropdown is populated dynamically by scanning `/images/themes/` on LittleFS at runtime (via `/api/themes`). Any folder you upload there with the required file structure will appear in the dropdown automatically — no firmware update needed.
 
 #### Option A — File browser (recommended)
 
-Use the built-in SPIFFS file browser under **System → SPIFFS Files**:
+Use the built-in LittleFS file browser under **System → LittleFS Files**:
 
 1. Browse to `/images/themes/`
 2. Click **📂 New Folder** → enter your theme name (e.g. `MyTheme`)
@@ -444,7 +471,7 @@ Use the built-in SPIFFS file browser under **System → SPIFFS Files**:
 
 #### Option B — Bulk folder upload
 
-Prepare the full folder structure locally first, then go to **System → SPIFFS Files**, browse to `/images/themes/`, and click **📁 Upload Folder**. Select your local theme directory. All files are uploaded in one pass with paths preserved.
+Prepare the full folder structure locally first, then go to **System → LittleFS Files**, browse to `/images/themes/`, and click **📁 Upload Folder**. Select your local theme directory. All files are uploaded in one pass with paths preserved.
 
 ### Required Folder Structure
 
@@ -471,6 +498,8 @@ All paths are relative to `/images/themes/{ThemeName}/`.
 │   │   ├── degreec.jpg  ← °C symbol
 │   │   ├── degreef.jpg  ← °F symbol
 │   │   └── minus.jpg    ← negative temperature sign
+│   ├── Humidity/
+│   │   └── humidity.jpg ← % symbol
 │   ├── Weather/
 │   │   ├── sun.jpg           overcastClouds.jpg   fewClouds.jpg
 │   │   ├── fog.jpg           rain.jpg             snow.jpg
@@ -498,7 +527,24 @@ All tube images must be exactly **80 × 160 pixels** (portrait), saved as JPEG. 
 | Format | JPEG (any quality; 80–90 % is a good balance of size vs. artefacts) |
 | Colour space | RGB (no CMYK) |
 
-> **Tip:** Keep individual JPEGs under ~15 KB where possible. A full theme with all required images typically sits between 500 KB and 2 MB, well within the 6.9 MB SPIFFS partition.
+> **Tip:** Keep individual JPEGs under ~15 KB where possible. A full theme with all required images typically sits between 500 KB and 2 MB, well within the 7 MB LittleFS partition.
+
+### Image Converter Helper
+
+`helpers/nextube_image_converter.py` is a standalone Python tool for preparing images for the device. Run it with:
+
+```bash
+python helpers/nextube_image_converter.py
+```
+
+A browser UI opens at **http://localhost:5000**. Features:
+- Drag-and-drop individual images **or** click **📁 Browse Folder** to upload a whole directory at once
+- Interactive crop editor with aspect-ratio-locked drag box and live 80×160 preview
+- Auto center-crop and stretch modes
+- JPEG or PNG output
+- **Folder upload preserves the source directory structure and original filenames** in the output ZIP — ready to drag straight into the LittleFS file browser
+
+Requires Python 3 and Pillow (`pip install Pillow` — auto-installed on first run).
 
 ## REST API
 
@@ -508,13 +554,15 @@ All endpoints return JSON. The API is backward-compatible with the original firm
 GET  /api/ping              → {"status":"ok"}
 GET  /api/settings          → full configuration JSON
 POST /api/settings          → update config (JSON body)
-GET  /api/status            → live status: time, wifi, weather, heap, firmware, spiffs_version
+GET  /api/status            → live status: time, wifi, weather, heap, firmware, fs_version
 GET  /api/firmwareVersion   → {"version":"1.0.0"}
 GET  /api/hardwareVersion   → {"version":"1.31"}
 POST /api/reset             → factory reset + reboot
 POST /api/update_firmware   → OTA firmware upload (binary body, nextube-fw-ota.bin)
-POST /api/update_spiffs     → OTA SPIFFS upload (binary body, spiffs.bin)
-GET  /api/file/ls?dir=/     → SPIFFS directory listing
+POST /api/update_fs         → OTA LittleFS upload (binary body, nextube-littlefs-*.bin)
+POST /api/update_spiffs     → alias for /api/update_fs (backward-compatible)
+GET  /api/themes            → {"themes":["ThemeA","ThemeB",...]} — scanned from LittleFS at runtime
+GET  /api/file/ls?dir=/     → LittleFS directory listing
 POST /api/wifi/scan         → trigger WiFi scan
 GET  /api/wifi/scan         → scan results
 GET  /api/logs              → in-RAM device log (last 64 lines)
@@ -528,14 +576,16 @@ nextube-fw/
 ├── .github/workflows/build.yml    # CI/CD
 ├── main/
 │   ├── main.c                     # Application entry point + touch handler
+│   ├── idf_component.yml          # Managed component dependencies (joltwallet/littlefs, etc.)
 │   └── fw_version.h.in            # Version header template (processed by CMake)
 ├── components/
-│   ├── board/include/board_pins.h # Hardware pin & display constants
-│   ├── config_mgr/                # JSON config persistence (NVS + SPIFFS)
-│   │   ├── CMakeLists.txt         # Injects FW_VERSION_STR to all consumers
+│   ├── board/include/board_pins.h # Hardware pin & display constants (incl. PIN_MIC_ADC_CHAN)
+│   ├── config_mgr/                # JSON config persistence (NVS + LittleFS)
+│   │   ├── CMakeLists.txt         # Injects FW_VERSION_STR / FS_VERSION_STR to all consumers
 │   │   └── include/fw_version.h  # Auto-generated by CMake — do not edit manually
 │   ├── display/                   # 6× ST7735 SPI display driver + mode renderer
 │   ├── leds/                      # WS2812 RGB LED accent lighting task
+│   ├── microphone/                # ADC mic sampling, Goertzel band analysis, peak-hold envelope
 │   ├── touch/                     # Capacitive touch input (L/R = mode cycle, M = pause/resume or backlight)
 │   ├── rtc/                       # PCF8563 RTC driver
 │   ├── audio/                     # DAC audio playback (WAV)
@@ -544,11 +594,13 @@ nextube-fw/
 │   ├── ntp_time/                  # NTP synchronisation
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
 │   └── youtube_bili/              # YouTube/Bilibili API client
-├── data/web/                      # Web UI source (bundled into SPIFFS)
+├── data/web/                      # Web UI source (bundled into LittleFS)
 │   ├── index.html                 # Self-contained SPA
 │   └── version.txt                # Auto-generated by CMake — do not edit manually
-├── version.json                   # Single source of truth for firmware version number
-├── partitions.csv                 # Flash partition layout
+├── helpers/
+│   └── nextube_image_converter.py # Standalone Python tool: convert & crop images to 80×160 JPEG/PNG
+├── version.json                   # Single source of truth for firmware + LittleFS version numbers
+├── partitions.csv                 # Flash partition layout (LittleFS at 0x910000, 7 MB)
 ├── sdkconfig.defaults             # ESP-IDF SDK config overrides
 └── CMakeLists.txt                 # Project build file
 ```
