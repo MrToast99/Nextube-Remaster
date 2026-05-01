@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "microphone.h"
 #include "config_mgr.h"
 #include "wifi_manager.h"
 #include "ntp_time.h"
@@ -728,6 +729,37 @@ static esp_err_t api_file_delete(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* ── Hardware debug API ────────────────────────────────────────────── */
+/* GET /api/debug/adc
+ * Reads one raw 12-bit ADC sample from the currently configured mic channel.
+ * Intended for the hidden debug panel — use while NOT in Spectrum mode so
+ * the mic_task is gated and not simultaneously reading the ADC.
+ * Response: {"channel":0,"gpio":36,"raw":2048,"voltage_mv":1650} */
+static esp_err_t api_debug_adc(httpd_req_t *r)
+{
+    const nextube_config_t *cfg = config_get();
+    uint8_t ch  = cfg->mic_adc_channel < 8 ? cfg->mic_adc_channel : 0;
+    int     gpio = mic_gpio_num();
+    int     raw  = mic_read_raw();   /* -1 if mic not initialised */
+
+    /* Convert 12-bit reading to millivolts (ADC_ATTEN_DB_12 → 0-3300 mV) */
+    int mv = (raw >= 0) ? (int)((raw * 3300L) / 4095) : -1;
+
+    char buf[96];
+    if (raw < 0)
+        snprintf(buf, sizeof(buf),
+                 "{\"channel\":%d,\"gpio\":%d,\"raw\":null,\"voltage_mv\":null,"
+                 "\"error\":\"mic not initialised — enable mic and reboot\"}",
+                 ch, gpio);
+    else
+        snprintf(buf, sizeof(buf),
+                 "{\"channel\":%d,\"gpio\":%d,\"raw\":%d,\"voltage_mv\":%d}",
+                 ch, gpio, raw, mv);
+
+    httpd_resp_set_type(r, "application/json");
+    return httpd_resp_sendstr(r, buf);
+}
+
 /* ── Log ring API ──────────────────────────────────────────────────── */
 /* GET /api/logs  → {"lines":["I (12) tag: msg", ...]}  chronological  */
 static esp_err_t api_get_logs(httpd_req_t *r)
@@ -862,6 +894,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/wifi/scan",       api_wifi_scan_get),
     R(HTTP_GET,  "/api/logs",            api_get_logs),
     R(HTTP_POST, "/api/logs/clear",      api_clear_logs),
+    R(HTTP_GET,  "/api/debug/adc",       api_debug_adc),
     R(HTTP_OPTIONS, "/api/*",            api_cors),
 };
 

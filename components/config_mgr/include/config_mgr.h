@@ -85,6 +85,9 @@ typedef struct {
     bool             audio_enabled;      /* false = DAC off, complete silence  */
     uint8_t          volume;             /* 0-100 */
     bool             mic_enabled;        /* false = mic task idles; Spectrum mode shows silence */
+    uint8_t          mic_adc_channel;    /* ADC1 channel 0-7 (0=GPIO36, 1=GPIO37, 2=GPIO38, 3=GPIO39,
+                                           4=GPIO32, 5=GPIO33, 6=GPIO34, 7=GPIO35). Runtime-changeable
+                                           via the debug panel without a rebuild. */
 
     /* Countdown / Pomodoro */
     uint16_t         countdown_minutes;

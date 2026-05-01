@@ -46,8 +46,16 @@ static const float BAND_FREQS[BAND_COUNT] = {125.0f, 250.0f, 500.0f,
 static float        s_bands[BAND_COUNT];
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
-/* ── ADC handle ──────────────────────────────────────────────────────── */
+/* ── ADC1 channel → GPIO mapping ─────────────────────────────────────── */
+static const adc_channel_t ADC1_CHAN_MAP[8] = {
+    ADC_CHANNEL_0, ADC_CHANNEL_1, ADC_CHANNEL_2, ADC_CHANNEL_3,
+    ADC_CHANNEL_4, ADC_CHANNEL_5, ADC_CHANNEL_6, ADC_CHANNEL_7,
+};
+static const int ADC1_GPIO_MAP[8] = { 36, 37, 38, 39, 32, 33, 34, 35 };
+
+/* ── ADC handle + currently configured channel ───────────────────────── */
 static adc_oneshot_unit_handle_t s_adc;
+static adc_channel_t             s_active_chan = ADC_CHANNEL_0;
 
 /* ── Goertzel single-bin DFT energy ─────────────────────────────────── */
 /**
@@ -98,11 +106,29 @@ static void mic_task(void *arg)
             }
         }
 
+        /* ── Switch ADC channel if config changed since last frame ── */
+        {
+            uint8_t cfg_ch = config_get()->mic_adc_channel;
+            if (cfg_ch > 7) cfg_ch = 0;
+            adc_channel_t want = ADC1_CHAN_MAP[cfg_ch];
+            if (want != s_active_chan) {
+                adc_oneshot_chan_cfg_t ccfg = {
+                    .atten    = ADC_ATTEN_DB_12,
+                    .bitwidth = ADC_BITWIDTH_12,
+                };
+                if (adc_oneshot_config_channel(s_adc, want, &ccfg) == ESP_OK) {
+                    ESP_LOGI(TAG, "ADC channel switched to CH%d (GPIO%d)",
+                             cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
+                    s_active_chan = want;
+                }
+            }
+        }
+
         /* ── Collect FRAME_SIZE samples at exactly SAMPLE_RATE ── */
         int64_t t = esp_timer_get_time();
         for (int i = 0; i < FRAME_SIZE; i++) {
             int raw = 2048;
-            adc_oneshot_read(s_adc, PIN_MIC_ADC_CHAN, &raw);
+            adc_oneshot_read(s_adc, s_active_chan, &raw);
             /* Exponential moving average DC removal */
             dc        = DC_ALPHA * dc + (1.0f - DC_ALPHA) * (float)raw;
             samples[i] = (float)raw - dc;
@@ -137,7 +163,12 @@ static void mic_task(void *arg)
 
 void mic_init(void)
 {
-    ESP_LOGI(TAG, "Initialising ADC1/CH0 for electret mic on GPIO%d", PIN_MIC_ADC);
+    uint8_t cfg_ch = config_get()->mic_adc_channel;
+    if (cfg_ch > 7) cfg_ch = 0;
+    s_active_chan = ADC1_CHAN_MAP[cfg_ch];
+
+    ESP_LOGI(TAG, "Initialising ADC1/CH%d for mic on GPIO%d",
+             cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
 
     adc_oneshot_unit_init_cfg_t unit_cfg = {
         .unit_id  = ADC_UNIT_1,
@@ -149,7 +180,35 @@ void mic_init(void)
         .atten    = ADC_ATTEN_DB_12,    /* 0–3.3 V full-scale */
         .bitwidth = ADC_BITWIDTH_12,
     };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, PIN_MIC_ADC_CHAN, &chan_cfg));
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, s_active_chan, &chan_cfg));
+}
+
+int mic_read_raw(void)
+{
+    if (!s_adc) return -1;
+    /* Ensure the active channel matches config (in case channel changed while
+     * mic was gated and mic_task hasn't re-entered the active loop yet). */
+    uint8_t cfg_ch = config_get()->mic_adc_channel;
+    if (cfg_ch > 7) cfg_ch = 0;
+    adc_channel_t want = ADC1_CHAN_MAP[cfg_ch];
+    if (want != s_active_chan) {
+        adc_oneshot_chan_cfg_t ccfg = {
+            .atten    = ADC_ATTEN_DB_12,
+            .bitwidth = ADC_BITWIDTH_12,
+        };
+        if (adc_oneshot_config_channel(s_adc, want, &ccfg) == ESP_OK)
+            s_active_chan = want;
+    }
+    int raw = 2048;
+    adc_oneshot_read(s_adc, s_active_chan, &raw);
+    return raw;
+}
+
+int mic_gpio_num(void)
+{
+    uint8_t cfg_ch = config_get()->mic_adc_channel;
+    if (cfg_ch > 7) cfg_ch = 0;
+    return ADC1_GPIO_MAP[cfg_ch];
 }
 
 void mic_task_start(void)

@@ -2,13 +2,17 @@
  * @file microphone.h
  * @brief CMEJ-0413-42-SMT-TR electret condenser microphone – public API
  *
- * Connected on GPIO36 / ADC1_CH0 (SENSOR_VP).
+ * The ADC1 channel used for sampling is runtime-configurable via
+ * cfg->mic_adc_channel (0-7), allowing GPIO selection without a rebuild.
+ * ADC1 channel → GPIO map: 0=36, 1=37, 2=38, 3=39, 4=32, 5=33, 6=34, 7=35.
  * Provides Goertzel-based 6-band audio energy values used by Spectrum mode.
  */
 #pragma once
 
+#include <stdint.h>
+
 /**
- * Initialise the ADC1 unit and configure channel 0 for mic input.
+ * Initialise the ADC1 unit and configure the channel from cfg->mic_adc_channel.
  * Must be called before mic_task_start().
  */
 void mic_init(void);
@@ -27,3 +31,17 @@ void mic_task_start(void);
  * Bands correspond to: 125, 250, 500, 1000, 2000, 4000 Hz.
  */
 void mic_get_bands(float out[6]);
+
+/**
+ * Read one raw 12-bit ADC sample (0-4095) from the currently configured
+ * channel. Intended for the hardware debug panel — call when NOT in active
+ * Spectrum sampling (i.e. when mic_task is gated/sleeping) to avoid
+ * contention. Returns -1 if the ADC unit is not initialised.
+ */
+int mic_read_raw(void);
+
+/**
+ * Return the GPIO number for the currently active ADC1 channel.
+ * Useful for displaying the pin label in the debug UI.
+ */
+int mic_gpio_num(void);
