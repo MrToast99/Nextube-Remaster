@@ -77,7 +77,7 @@ static void set_defaults(void)
     s_cfg.audio_enabled = true;
     s_cfg.volume = 20;
     s_cfg.mic_enabled     = true;
-    s_cfg.mic_adc_channel = 0;   /* ADC1_CH0 = GPIO36 (SENSOR_VP) — schematic default */
+    s_cfg.mic_adc_channel = 7;   /* ADC1_CH7 = GPIO35 — confirmed via hardware debug */
 
     s_cfg.countdown_minutes = 1;
     s_cfg.pomodoro_work     = 25;

@@ -43,8 +43,8 @@
 #define PIN_AUDIO_DAC     25   /* DAC_CHANNEL_1 */
 
 /* ── Microphone (CMEJ-0413-42-SMT-TR electret, Spectrum mode input) ─── */
-#define PIN_MIC_ADC      36   /* ADC1_CH0 (SENSOR_VP) – GPIO input only */
-#define PIN_MIC_ADC_CHAN ADC_CHANNEL_0
+#define PIN_MIC_ADC      35   /* ADC1_CH7 (GPIO35) – confirmed via debug panel */
+#define PIN_MIC_ADC_CHAN ADC_CHANNEL_7
 
 /* ── RTC ───────────────────────────────────────────────────────────── */
 #define RTC_I2C_ADDR      0x51 /* PCF8563 */
