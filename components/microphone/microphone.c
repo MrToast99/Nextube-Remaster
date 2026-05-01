@@ -1,34 +1,37 @@
 /**
  * @file microphone.c
- * @brief Analog microphone input – ADC oneshot + Goertzel 6-band analyser
+ * @brief CMC-4015-25T electret + LMV321IDBVR preamp – ADC continuous (DMA) + Goertzel
  *
- * Hardware: GPIO35 (ADC1_CH7) confirmed via runtime debug panel.
- * Mic type: suspected analog output (electret capsule or analog MEMS).
- *   If the ADC reading barely moves with loud sounds (< ±15 counts), the
- *   module is likely a digital MEMS mic (I²S / PDM) and this driver will
- *   not work — a full I²S/PDM driver rewrite would be required.
- *   Quiescent ADC reading should be ~1800–2750 counts (mid-scale) for an
- *   analog mic biased to ~1.5–2.2 V.
+ * Hardware: CMC-4015-25T electret capsule → LMV321IDBVR op-amp preamp → GPIO35 (ADC1_CH7).
+ * Both components confirmed via hardware inspection and runtime debug panel.
  *
- * NOTE: ADC_ATTEN_DB_12 used (0–3.3 V full-scale range).
+ * PREVIOUS APPROACH (adc_oneshot + busy-wait) — REMOVED:
+ *   The 125 µs busy-wait loop between samples held core 1 at 100% CPU, starving the
+ *   IDLE1 task and triggering the task watchdog (confirmed in hardware testing).
+ *   Additionally, adc_oneshot reads during heavy SPI bus activity (6× ST7735 displays)
+ *   produced corrupted results because the SPI switching noise corrupted the ADC
+ *   supply rail mid-conversion — the raw value appeared stable at 40–50% and did not
+ *   track audio at all.
  *
- * Approach:
- *   • adc_oneshot API – uses the SAR ADC directly, no I2S dependency
- *     (adc_continuous / adc_dma would conflict with dac_continuous on I2S0)
- *   • Dedicated FreeRTOS task on core 1, esp_timer_get_time() busy-wait for
- *     precise 125 µs sample spacing (8 kHz)
- *   • DC removal: exponential moving average subtracted each sample
- *   • Goertzel algorithm: energy at 6 logarithmic centre frequencies
- *   • MIC_GAIN / MIC_NOISE_FLOOR tuneable at top of file for different mic types
- *   • Peak-hold with exponential decay (attack = instant, release per frame)
- *   • Normalised float[6] output published under a portMUX_TYPE spinlock
+ * CURRENT APPROACH (adc_continuous / DMA):
+ *   • ESP-IDF 5.x adc_continuous uses GDMA — does NOT conflict with dac_continuous
+ *     (which uses I2S DMA).  The old "I2S conflict" no longer applies.
+ *   • Hardware clocks samples at exactly SAMPLE_RATE Hz with no CPU involvement.
+ *   • mic_task blocks on adc_continuous_read() (yields to scheduler — no spin).
+ *   • The IDLE1 watchdog is no longer starved.
+ *   • mic_read_raw() returns s_last_raw captured by the DMA stream — safe at all times.
+ *
+ * Sensitivity tuning (compile-time):
+ *   MIC_GAIN        – software multiplier after the op-amp (1.0 = let hardware do it).
+ *   MIC_NOISE_FLOOR – minimum Goertzel normalisation divisor for active frames.
+ * Silence gate (runtime, via web debug panel):
+ *   cfg->mic_silence_gate – frame RMS² threshold; 0 = disabled.  Default 250.
  */
 
 #include "microphone.h"
 #include "config_mgr.h"
 #include "board_pins.h"
-#include "esp_adc/adc_oneshot.h"
-#include "esp_timer.h"
+#include "esp_adc/adc_continuous.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -38,38 +41,25 @@
 static const char *TAG = "mic";
 
 /* ── Sampling parameters ─────────────────────────────────────────────── */
-#define SAMPLE_RATE     8000            /* Hz */
+#define SAMPLE_RATE     8000
 #define FRAME_SIZE      128             /* samples per Goertzel frame → 16 ms */
 #define BAND_COUNT      6
-#define SAMPLE_US       (1000000 / SAMPLE_RATE)   /* 125 µs per sample */
-#define DECAY           0.85f           /* peak-hold per-frame decay multiplier */
-#define DC_ALPHA        0.999f          /* DC removal IIR coefficient */
+#define DECAY           0.85f           /* peak-hold per-frame multiplier */
+#define DC_ALPHA        0.999f          /* DC removal IIR (HPF ~1.3 Hz) */
 
-/* ── Sensitivity tuning ───────────────────────────────────────────────── */
-/*
- * Hardware context: LMV321IDBVR single op-amp on the PCB acts as an analog
- * preamp between the electret capsule and GPIO35.  Hardware gain is already
- * applied; no large software gain is needed or helpful.
- *
- * MIC_GAIN: additional software multiplier after the op-amp.
- *   1.0  = no extra boost   ← default (op-amp does the work)
- *   2.0  = gentle boost     (if op-amp gain resistors are small)
- *
- * MIC_SILENCE_GATE is now runtime-configurable via cfg->mic_silence_gate
- * (set through the web debug panel without a rebuild).  The #define below
- * is kept only as a reference value and is not used in code.
- *   250.0  = gate at ~16 counts RMS  (typical ADC noise floor)
- *   500.0  = stricter (only respond to nearby speech)
- *   100.0  = looser  (shows distant or quiet sounds)
- *     0.0  = disable gate entirely (always run Goertzel)
- *
- * MIC_NOISE_FLOOR: minimum Goertzel normalisation divisor (active frames
- * only — silence-gated frames always output 0.0).
- *   1.0  = bars are relative to the loudest band in each frame  ← default
- *   0.5  = slightly more sensitive within a non-silent frame */
-#define MIC_GAIN          1.0f
-#define MIC_SILENCE_GATE  250.0f   /* reference only — actual value from config */
-#define MIC_NOISE_FLOOR   1.0f
+/* ── Sensitivity (compile-time) ──────────────────────────────────────── */
+/* LMV321 provides hardware gain; software gain stays at 1.0.
+ * Raise MIC_NOISE_FLOOR if bars react to background noise in a quiet room. */
+#define MIC_GAIN        1.0f
+#define MIC_NOISE_FLOOR 1.0f
+
+/* ── DMA buffer sizing ───────────────────────────────────────────────── */
+/* SOC_ADC_DIGI_RESULT_BYTES = 4 on ESP32 (TYPE1 format: 12-bit data + channel).
+ * conv_frame_size must be a multiple of this and sets how many bytes the DMA
+ * transfers per interrupt.  We choose exactly one Goertzel frame per interrupt. */
+#define ADC_BYTES       ((int)sizeof(adc_digi_output_data_t))   /* 4 on ESP32 */
+#define FRAME_BYTES     (FRAME_SIZE * ADC_BYTES)                /* 512 bytes  */
+#define RING_BYTES      (FRAME_BYTES * 8)   /* 8-frame ring — covers gate drain delay */
 
 /* Centre frequencies for the 6 bands (logarithmically spaced, 125 Hz – 4 kHz) */
 static const float BAND_FREQS[BAND_COUNT] = {125.0f, 250.0f, 500.0f,
@@ -79,22 +69,23 @@ static const float BAND_FREQS[BAND_COUNT] = {125.0f, 250.0f, 500.0f,
 static float        s_bands[BAND_COUNT];
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
-/* ── ADC1 channel → GPIO mapping ─────────────────────────────────────── */
+/* Last raw ADC count captured by the DMA stream — exposed to debug panel */
+static volatile int s_last_raw = -1;   /* -1 = not yet sampled */
+
+/* ── ADC1 channel index → GPIO number ───────────────────────────────── */
+static const int ADC1_GPIO_MAP[8] = { 36, 37, 38, 39, 32, 33, 34, 35 };
+
+/* Map config channel index (0-7) → adc_channel_t */
 static const adc_channel_t ADC1_CHAN_MAP[8] = {
     ADC_CHANNEL_0, ADC_CHANNEL_1, ADC_CHANNEL_2, ADC_CHANNEL_3,
     ADC_CHANNEL_4, ADC_CHANNEL_5, ADC_CHANNEL_6, ADC_CHANNEL_7,
 };
-static const int ADC1_GPIO_MAP[8] = { 36, 37, 38, 39, 32, 33, 34, 35 };
 
-/* ── ADC handle + currently configured channel ───────────────────────── */
-static adc_oneshot_unit_handle_t s_adc;
-static adc_channel_t             s_active_chan = ADC_CHANNEL_0;
+/* ── ADC continuous handle ───────────────────────────────────────────── */
+static adc_continuous_handle_t s_adc  = NULL;
+static uint8_t s_active_ch            = 0xFF;  /* sentinel: "not yet configured" */
 
-/* ── Goertzel single-bin DFT energy ─────────────────────────────────── */
-/**
- * Compute the Goertzel energy for a single frequency `freq` over `N` samples.
- * Returns the squared magnitude (not normalised — caller divides by norm factor).
- */
+/* ── Goertzel single-bin energy ──────────────────────────────────────── */
 static float goertzel(const float *buf, int N, float freq)
 {
     float omega = 2.0f * (float)M_PI * freq / (float)SAMPLE_RATE;
@@ -108,73 +99,133 @@ static float goertzel(const float *buf, int N, float freq)
     return s1 * s1 + s2 * s2 - coeff * s1 * s2;
 }
 
-/* ── Microphone sampling task ────────────────────────────────────────── */
+/* ── Start/restart the continuous ADC for a given config channel ─────── */
+static esp_err_t adc_cont_start(uint8_t cfg_ch)
+{
+    if (cfg_ch > 7) cfg_ch = 7;
+
+    /* Release any previous handle */
+    if (s_adc) {
+        adc_continuous_stop(s_adc);
+        adc_continuous_deinit(s_adc);
+        s_adc = NULL;
+    }
+
+    adc_continuous_handle_cfg_t hcfg = {
+        .max_store_buf_size = RING_BYTES,
+        .conv_frame_size    = FRAME_BYTES,  /* one Goertzel frame per DMA xfer */
+    };
+    esp_err_t err = adc_continuous_new_handle(&hcfg, &s_adc);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "adc_continuous_new_handle: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    adc_digi_pattern_config_t pat = {
+        .atten    = ADC_ATTEN_DB_12,        /* 0–3.3 V full-scale */
+        .channel  = ADC1_CHAN_MAP[cfg_ch],
+        .unit     = ADC_UNIT_1,
+        .bit_width = SOC_ADC_DIGI_MAX_BITWIDTH,
+    };
+    adc_continuous_config_t ccfg = {
+        .pattern_num    = 1,
+        .adc_pattern    = &pat,
+        .sample_freq_hz = SAMPLE_RATE,
+        .conv_mode      = ADC_CONV_SINGLE_UNIT_1,
+        .format         = ADC_DIGI_OUTPUT_FORMAT_TYPE1,
+    };
+    err = adc_continuous_config(s_adc, &ccfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "adc_continuous_config: %s", esp_err_to_name(err));
+        adc_continuous_deinit(s_adc);
+        s_adc = NULL;
+        return err;
+    }
+
+    err = adc_continuous_start(s_adc);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "adc_continuous_start: %s", esp_err_to_name(err));
+        adc_continuous_deinit(s_adc);
+        s_adc = NULL;
+        return err;
+    }
+
+    s_active_ch = cfg_ch;
+    ESP_LOGI(TAG, "ADC continuous: CH%u (GPIO%d) @ %u Hz  frame=%u samples  ring=%u B",
+             cfg_ch, ADC1_GPIO_MAP[cfg_ch], SAMPLE_RATE, FRAME_SIZE, RING_BYTES);
+    return ESP_OK;
+}
+
+/* ── Mic sampling task ───────────────────────────────────────────────── */
 static void mic_task(void *arg)
 {
-    float   samples[FRAME_SIZE];
-    float   dc   = 2048.0f;         /* initial DC estimate (mid-scale 12-bit) */
-    float   peak[BAND_COUNT];
+    uint8_t   dma_buf[FRAME_BYTES];
+    float     samples[FRAME_SIZE];
+    float     dc   = 2048.0f;
+    float     peak[BAND_COUNT];
     memset(peak, 0, sizeof(peak));
 
-    /* Goertzel normalisation factor: N² / 4 converts raw Goertzel energy to a
-     * dimensionless power estimate comparable across different frame sizes. */
     const float norm = (float)(FRAME_SIZE * FRAME_SIZE) / 4.0f;
 
-    ESP_LOGI(TAG, "Mic task started – sampling at %d Hz, %d bands", SAMPLE_RATE, BAND_COUNT);
+    ESP_LOGI(TAG, "mic_task running  (adc_continuous / DMA  no busy-wait)");
 
     while (1) {
-        /* ── Gate: only sample when mic is enabled AND Spectrum mode is active ── */
-        {
-            const nextube_config_t *cfg = config_get();
-            bool spectrum_enabled = (cfg->enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
-            if (!cfg->mic_enabled ||
-                !spectrum_enabled ||
-                cfg->current_mode != APP_MODE_SPECTRUM) {
-                /* Clear the published bands so Spectrum mode shows silence */
-                taskENTER_CRITICAL(&s_mux);
-                memset(s_bands, 0, sizeof(s_bands));
-                taskEXIT_CRITICAL(&s_mux);
-                vTaskDelay(pdMS_TO_TICKS(200));
+        const nextube_config_t *cfg = config_get();
+
+        /* ── Reconfigure if the debug panel changed the ADC channel ── */
+        uint8_t want_ch = cfg->mic_adc_channel;
+        if (want_ch > 7) want_ch = 7;
+        if (want_ch != s_active_ch || s_adc == NULL) {
+            ESP_LOGI(TAG, "ADC channel change: CH%u → CH%u", s_active_ch, want_ch);
+            if (adc_cont_start(want_ch) != ESP_OK) {
+                vTaskDelay(pdMS_TO_TICKS(500));
                 continue;
             }
         }
 
-        /* ── Switch ADC channel if config changed since last frame ── */
-        {
-            uint8_t cfg_ch = config_get()->mic_adc_channel;
-            if (cfg_ch > 7) cfg_ch = 0;
-            adc_channel_t want = ADC1_CHAN_MAP[cfg_ch];
-            if (want != s_active_chan) {
-                adc_oneshot_chan_cfg_t ccfg = {
-                    .atten    = ADC_ATTEN_DB_12,
-                    .bitwidth = ADC_BITWIDTH_12,
-                };
-                if (adc_oneshot_config_channel(s_adc, want, &ccfg) == ESP_OK) {
-                    ESP_LOGI(TAG, "ADC channel switched to CH%d (GPIO%d)",
-                             cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
-                    s_active_chan = want;
-                }
+        /* ── Gate: idle when mic disabled or not in Spectrum mode ── */
+        bool spectrum_en = (cfg->enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
+        if (!cfg->mic_enabled || !spectrum_en ||
+            cfg->current_mode != APP_MODE_SPECTRUM) {
+            /* Drain the DMA ring buffer so it never overflows while idling.
+             * This also keeps s_last_raw fresh for the debug panel. */
+            uint32_t out = 0;
+            if (adc_continuous_read(s_adc, dma_buf, FRAME_BYTES, &out,
+                                    pdMS_TO_TICKS(50)) == ESP_OK && out >= (uint32_t)ADC_BYTES) {
+                adc_digi_output_data_t *d = (adc_digi_output_data_t *)dma_buf;
+                s_last_raw = (int)d->type1.data;
             }
+            taskENTER_CRITICAL(&s_mux);
+            memset(s_bands, 0, sizeof(s_bands));
+            taskEXIT_CRITICAL(&s_mux);
+            /* Short yield — keeps IDLE1 fed and the ring buffer from overflowing. */
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
         }
 
-        /* ── Collect FRAME_SIZE samples at exactly SAMPLE_RATE ── */
-        int64_t t = esp_timer_get_time();
+        /* ── Blocking read: wait up to 50 ms for one full Goertzel frame ── */
+        uint32_t out_len = 0;
+        esp_err_t ret = adc_continuous_read(s_adc, dma_buf, FRAME_BYTES,
+                                            &out_len, pdMS_TO_TICKS(50));
+        if (ret != ESP_OK || out_len < (uint32_t)FRAME_BYTES) {
+            /* Ring buffer underrun — skip frame, yield to avoid tight loop */
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        /* ── Unpack DMA results → float samples with DC removal ── */
         for (int i = 0; i < FRAME_SIZE; i++) {
-            int raw = 2048;
-            adc_oneshot_read(s_adc, s_active_chan, &raw);
-            /* Exponential moving average DC removal */
-            dc        = DC_ALPHA * dc + (1.0f - DC_ALPHA) * (float)raw;
-            samples[i] = (float)raw - dc;
-            /* Advance deadline and busy-wait */
-            t += SAMPLE_US;
-            while (esp_timer_get_time() < t) { /* spin – < 125 µs */ }
+            adc_digi_output_data_t *d =
+                (adc_digi_output_data_t *)&dma_buf[i * ADC_BYTES];
+            float raw = (float)d->type1.data;
+            dc          = DC_ALPHA * dc + (1.0f - DC_ALPHA) * raw;
+            samples[i]  = raw - dc;
         }
+        /* Expose the last sample of the frame for the debug panel */
+        s_last_raw = (int)((adc_digi_output_data_t *)
+                           &dma_buf[(FRAME_SIZE - 1) * ADC_BYTES])->type1.data;
 
-        /* ── Silence gate: skip Goertzel if frame energy is below noise floor ──
-         * Computes per-sample RMS² (mean squared amplitude after DC removal).
-         * ADC board noise on ESP32 is typically 10–20 counts RMS (RMS²≈100–400).
-         * Threshold read from config each frame so the web debug panel takes
-         * effect immediately without a rebuild or reboot. */
+        /* ── Silence gate (threshold from config — tuneable at runtime) ── */
         float rms_sq = 0.0f;
         for (int i = 0; i < FRAME_SIZE; i++)
             rms_sq += samples[i] * samples[i];
@@ -182,27 +233,21 @@ static void mic_task(void *arg)
 
         const float gate = config_get()->mic_silence_gate;
         if (gate > 0.0f && rms_sq < gate) {
-            /* Silent frame — decay peaks but publish zeros */
-            for (int b = 0; b < BAND_COUNT; b++)
-                peak[b] *= DECAY;
+            for (int b = 0; b < BAND_COUNT; b++) peak[b] *= DECAY;
             taskENTER_CRITICAL(&s_mux);
             memset(s_bands, 0, sizeof(s_bands));
             taskEXIT_CRITICAL(&s_mux);
             continue;
         }
 
-        /* ── Goertzel energy + peak-hold per band (active frames only) ── */
+        /* ── Goertzel energy + peak-hold per band ── */
         float max_power = MIC_NOISE_FLOOR;
         float power[BAND_COUNT];
         for (int b = 0; b < BAND_COUNT; b++) {
-            power[b] = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]) / norm
-                       * MIC_GAIN;
-            if (power[b] > peak[b])
-                peak[b]  = power[b];              /* instant attack */
-            else
-                peak[b] *= DECAY;                 /* slow decay */
-            if (peak[b] > max_power)
-                max_power = peak[b];
+            power[b] = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]) / norm * MIC_GAIN;
+            if (power[b] > peak[b])  peak[b]  = power[b];
+            else                     peak[b] *= DECAY;
+            if (peak[b] > max_power) max_power = peak[b];
         }
 
         /* ── Publish normalised 0.0–1.0 values ── */
@@ -210,7 +255,7 @@ static void mic_task(void *arg)
         for (int b = 0; b < BAND_COUNT; b++)
             s_bands[b] = peak[b] / max_power;
         taskEXIT_CRITICAL(&s_mux);
-        /* No vTaskDelay — the busy-wait loop above sets the frame rate */
+        /* No delay needed — adc_continuous_read() already slept while waiting for DMA */
     }
 }
 
@@ -219,58 +264,35 @@ static void mic_task(void *arg)
 void mic_init(void)
 {
     uint8_t cfg_ch = config_get()->mic_adc_channel;
-    if (cfg_ch > 7) cfg_ch = 0;
-    s_active_chan = ADC1_CHAN_MAP[cfg_ch];
+    if (cfg_ch > 7) cfg_ch = 7;
 
-    ESP_LOGI(TAG, "Initialising ADC1/CH%d for mic on GPIO%d",
-             cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
+    ESP_LOGI(TAG, "mic_init: CH%u (GPIO%d)", cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
 
-    adc_oneshot_unit_init_cfg_t unit_cfg = {
-        .unit_id  = ADC_UNIT_1,
-        .ulp_mode = ADC_ULP_MODE_DISABLE,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &s_adc));
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten    = ADC_ATTEN_DB_12,    /* 0–3.3 V full-scale */
-        .bitwidth = ADC_BITWIDTH_12,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, s_active_chan, &chan_cfg));
+    if (adc_cont_start(cfg_ch) != ESP_OK) {
+        ESP_LOGE(TAG, "mic_init: ADC continuous failed to start");
+    }
 }
 
 int mic_read_raw(void)
 {
-    if (!s_adc) return -1;
-    /* Ensure the active channel matches config (in case channel changed while
-     * mic was gated and mic_task hasn't re-entered the active loop yet). */
-    uint8_t cfg_ch = config_get()->mic_adc_channel;
-    if (cfg_ch > 7) cfg_ch = 0;
-    adc_channel_t want = ADC1_CHAN_MAP[cfg_ch];
-    if (want != s_active_chan) {
-        adc_oneshot_chan_cfg_t ccfg = {
-            .atten    = ADC_ATTEN_DB_12,
-            .bitwidth = ADC_BITWIDTH_12,
-        };
-        if (adc_oneshot_config_channel(s_adc, want, &ccfg) == ESP_OK)
-            s_active_chan = want;
-    }
-    int raw = 2048;
-    adc_oneshot_read(s_adc, s_active_chan, &raw);
-    return raw;
+    /* Returns the last sample captured by the DMA stream.
+     * Valid as soon as mic_task has processed at least one frame.
+     * -1 = mic not yet initialised or no frame received. */
+    return s_last_raw;
 }
 
 int mic_gpio_num(void)
 {
     uint8_t cfg_ch = config_get()->mic_adc_channel;
-    if (cfg_ch > 7) cfg_ch = 0;
+    if (cfg_ch > 7) cfg_ch = 7;
     return ADC1_GPIO_MAP[cfg_ch];
 }
 
 void mic_task_start(void)
 {
-    /* Stack 4096: samples[128] = 512 B, work vars, task overhead < 2 KB */
-    xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 5, NULL, 1);
-    ESP_LOGI(TAG, "Mic sampling task started on core 1");
+    /* Stack 6144: dma_buf[512 B] + samples[512 B] + Goertzel/peak work + overhead */
+    xTaskCreatePinnedToCore(mic_task, "mic", 6144, NULL, 5, NULL, 1);
+    ESP_LOGI(TAG, "mic_task started (core 1, DMA-driven, no busy-wait)");
 }
 
 void mic_get_bands(float out[6])
