@@ -745,11 +745,11 @@ static esp_err_t api_debug_adc(httpd_req_t *r)
     /* Convert 12-bit reading to millivolts (ADC_ATTEN_DB_12 → 0-3300 mV) */
     int mv = (raw >= 0) ? (int)((raw * 3300L) / 4095) : -1;
 
-    char buf[96];
+    char buf[128];
     if (raw < 0)
         snprintf(buf, sizeof(buf),
                  "{\"channel\":%d,\"gpio\":%d,\"raw\":null,\"voltage_mv\":null,"
-                 "\"error\":\"mic not initialised — enable mic and reboot\"}",
+                 "\"error\":\"mic not initialised - enable mic and reboot\"}",
                  ch, gpio);
     else
         snprintf(buf, sizeof(buf),
