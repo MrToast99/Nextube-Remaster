@@ -502,7 +502,7 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>About</h2>
     <p style="font-size:.85rem;color:var(--dim)">
-      Firmware &nbsp;v<span id="s-fwver">--</span><br>
+      Firmware &nbsp;v<span id="s-fwver" onclick="dbgTap()" style="cursor:default" title=""></span><br>
       Web UI &nbsp;&nbsp;&nbsp;v<span id="s-spver">--</span><br>
       Hardware Rev <span id="s-hwver">1.31</span><br>
       ESP32-WROVER-E · 16MB Flash · 8MB PSRAM<br>
@@ -514,6 +514,53 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <div class="btn-group" style="margin-top:.5rem">
       <button id="check-updates-btn" class="btn btn-outline" onclick="checkForUpdates()">Check for Updates</button>
+    </div>
+  </div>
+
+  <!-- Hidden debug panel — toggle by clicking firmware version 5× or #debug in URL -->
+  <div id="debug-panel" style="display:none">
+    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
+      <h2 style="color:#ffa000">&#x1F527; Hardware Debug</h2>
+      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.8rem">
+        Runtime ADC pin selection — change takes effect immediately without a rebuild.
+        Switch out of Spectrum mode before reading to avoid ADC contention with the mic task.
+      </p>
+
+      <div class="field">
+        <label>Microphone ADC1 Channel</label>
+        <select id="dbg-adc-ch" onchange="dbgChannelChange()">
+          <option value="0">CH0 — GPIO 36 (SENSOR_VP, schematic default)</option>
+          <option value="1">CH1 — GPIO 37 (SENSOR_CAPP, input-only)</option>
+          <option value="2">CH2 — GPIO 38 (SENSOR_CAPN, input-only)</option>
+          <option value="3">CH3 — GPIO 39 (SENSOR_VN, input-only)</option>
+          <option value="4">CH4 — GPIO 32</option>
+          <option value="5">CH5 — GPIO 33</option>
+          <option value="6">CH6 — GPIO 34 (input-only)</option>
+          <option value="7">CH7 — GPIO 35 (input-only)</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Live ADC Reading</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="dbgReadAdc()">Read once</button>
+          <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin:0">
+            <input type="checkbox" id="dbg-auto" onchange="dbgAutoToggle()"> Auto (500 ms)
+          </label>
+          <span id="dbg-result" style="font-family:monospace;font-size:.9rem;color:var(--dim)">—</span>
+        </div>
+        <div style="margin-top:.5rem;height:10px;border-radius:5px;background:var(--surface);overflow:hidden">
+          <div id="dbg-bar" style="height:100%;width:0%;background:#ffa000;transition:width .2s"></div>
+        </div>
+        <p style="font-size:.75rem;color:var(--dim);margin:.3rem 0 0">
+          Idle electret output is ~1500–2200 mV. Significantly lower or higher may indicate wrong pin.
+        </p>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-primary" style="background:#ffa000;border-color:#ffa000" onclick="dbgSave()">Save Channel to Config</button>
+        <button class="btn btn-outline" onclick="dbgHide()">Close Debug Panel</button>
+      </div>
     </div>
   </div>
 </div>
@@ -674,6 +721,8 @@ async function loadSettings() {
   $('f-btn-sound').checked = cfg.button_sound !== false;
   $('f-audio-en').checked  = cfg.audio_enabled !== false;
   $('f-mic-en').checked    = cfg.mic_enabled !== false;
+  if (cfg.mic_adc_channel != null && $('dbg-adc-ch'))
+    $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
   $('f-countdown').value  = cfg.default_countdown_time || 1;
   $('f-pomo-work').value  = cfg.pomodoro_work  || 25;
   $('f-pomo-break').value = cfg.pomodoro_break || 5;
@@ -1016,6 +1065,67 @@ async function deleteFile(path) {
     else toast('Delete failed', true);
   } catch(e) { toast('Delete error: ' + e.message, true); }
 }
+
+/* ── Hidden debug panel ─────────────────────────────────────────────── */
+let _dbgTaps = 0, _dbgTimer = null, _dbgPollId = null;
+
+function dbgTap() {
+  clearTimeout(_dbgTimer);
+  _dbgTaps++;
+  if (_dbgTaps >= 5) { _dbgTaps = 0; dbgShow(); return; }
+  _dbgTimer = setTimeout(() => { _dbgTaps = 0; }, 1500);
+}
+
+function dbgShow() {
+  $('debug-panel').style.display = '';
+  $('debug-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  /* Sync dropdown to current config */
+  if (cfg && cfg.mic_adc_channel != null)
+    $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
+}
+
+function dbgHide() {
+  $('debug-panel').style.display = 'none';
+  dbgAutoToggle(true);   /* stop polling */
+}
+
+function dbgChannelChange() { /* visual only — saved on button press */ }
+
+async function dbgReadAdc() {
+  try {
+    const d = await api('debug/adc');
+    if (d.raw == null) {
+      $('dbg-result').textContent = d.error || 'mic not initialised';
+      $('dbg-bar').style.width = '0%';
+      return;
+    }
+    const pct = Math.round(d.raw / 40.95);   /* 0-4095 → 0-100% */
+    $('dbg-result').textContent =
+      `GPIO ${d.gpio}  raw=${d.raw}  ${d.voltage_mv} mV  (${pct}%)`;
+    $('dbg-bar').style.width = pct + '%';
+  } catch(e) {
+    $('dbg-result').textContent = 'Error: ' + e.message;
+  }
+}
+
+function dbgAutoToggle(forceOff) {
+  const on = !forceOff && $('dbg-auto').checked;
+  clearInterval(_dbgPollId);
+  _dbgPollId = on ? setInterval(dbgReadAdc, 500) : null;
+}
+
+async function dbgSave() {
+  const ch = parseInt($('dbg-adc-ch').value, 10);
+  const ok = await api('settings', { method: 'POST',
+    body: JSON.stringify({ mic_adc_channel: ch }) });
+  if (ok) {
+    cfg.mic_adc_channel = ch;
+    toast('ADC channel saved — active immediately, persisted to config');
+  } else toast('Save failed', true);
+}
+
+/* Auto-show when URL contains #debug */
+if (location.hash === '#debug') addEventListener('DOMContentLoaded', dbgShow);
 
 async function deleteFolder(path) {
   const name = path.split('/').pop();
