@@ -1,10 +1,16 @@
 /**
  * @file microphone.c
- * @brief CMEJ-0413-42-SMT-TR electret condenser microphone – ADC + Goertzel analyser
+ * @brief Analog microphone input – ADC oneshot + Goertzel 6-band analyser
  *
- * Hardware: GPIO36 (ADC1_CH0 / SENSOR_VP) with external 2.2 kΩ bias resistor to 3.3 V.
- * The mic quiescent output is ~1.5–2.2 V; with ADC_ATTEN_DB_11 the full 0–3.3 V range
- * is captured, giving a 12-bit idle reading of roughly 1800–2750 counts.
+ * Hardware: GPIO35 (ADC1_CH7) confirmed via runtime debug panel.
+ * Mic type: suspected analog output (electret capsule or analog MEMS).
+ *   If the ADC reading barely moves with loud sounds (< ±15 counts), the
+ *   module is likely a digital MEMS mic (I²S / PDM) and this driver will
+ *   not work — a full I²S/PDM driver rewrite would be required.
+ *   Quiescent ADC reading should be ~1800–2750 counts (mid-scale) for an
+ *   analog mic biased to ~1.5–2.2 V.
+ *
+ * NOTE: ADC_ATTEN_DB_12 used (0–3.3 V full-scale range).
  *
  * Approach:
  *   • adc_oneshot API – uses the SAR ADC directly, no I2S dependency
@@ -13,6 +19,7 @@
  *     precise 125 µs sample spacing (8 kHz)
  *   • DC removal: exponential moving average subtracted each sample
  *   • Goertzel algorithm: energy at 6 logarithmic centre frequencies
+ *   • MIC_GAIN / MIC_NOISE_FLOOR tuneable at top of file for different mic types
  *   • Peak-hold with exponential decay (attack = instant, release per frame)
  *   • Normalised float[6] output published under a portMUX_TYPE spinlock
  */
@@ -37,6 +44,21 @@ static const char *TAG = "mic";
 #define SAMPLE_US       (1000000 / SAMPLE_RATE)   /* 125 µs per sample */
 #define DECAY           0.85f           /* peak-hold per-frame decay multiplier */
 #define DC_ALPHA        0.999f          /* DC removal IIR coefficient */
+
+/* ── Sensitivity tuning ───────────────────────────────────────────────── */
+/* MIC_GAIN: linear multiplier applied before normalisation.
+ *   1.0  = no boost   (amplified module, e.g. MAX4466)
+ *   4.0  = moderate   (MEMS analog mic, no external amp)  ← default
+ *   8.0  = high gain  (bare electret capsule, no preamp)
+ *
+ * MIC_NOISE_FLOOR: minimum normalisation divisor.  Setting this lower than
+ * the ambient-noise power lets quiet sounds still move the bars; setting it
+ * higher keeps the display dark in silence.  Tune together with MIC_GAIN.
+ *   0.05  = very sensitive (reacts to whispers)
+ *   0.25  = moderate       ← default
+ *   1.0   = original value (only responds to loud sounds near the mic)  */
+#define MIC_GAIN        4.0f
+#define MIC_NOISE_FLOOR 0.25f
 
 /* Centre frequencies for the 6 bands (logarithmically spaced, 125 Hz – 4 kHz) */
 static const float BAND_FREQS[BAND_COUNT] = {125.0f, 250.0f, 500.0f,
@@ -138,10 +160,13 @@ static void mic_task(void *arg)
         }
 
         /* ── Goertzel energy + peak-hold per band ── */
-        float max_power = 1.0f;   /* avoid divide-by-zero; floor at 1 */
+        /* MIC_NOISE_FLOOR keeps the divisor above background noise so the
+         * bars stay dark in silence while still responding to quiet sounds. */
+        float max_power = MIC_NOISE_FLOOR;
         float power[BAND_COUNT];
         for (int b = 0; b < BAND_COUNT; b++) {
-            power[b] = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]) / norm;
+            power[b] = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]) / norm
+                       * MIC_GAIN;               /* software gain boost */
             if (power[b] > peak[b])
                 peak[b]  = power[b];              /* instant attack */
             else
