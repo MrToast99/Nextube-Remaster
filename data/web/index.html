@@ -557,8 +557,26 @@ select option{background:var(--accent);color:var(--text)}
         </p>
       </div>
 
+      <div class="field">
+        <label>Silence Gate (RMS²)
+          <span style="font-weight:normal;color:var(--dim);font-size:.8rem">
+            — frames below this are forced to zero; raise to squelch board noise, lower to catch quiet sounds
+          </span>
+        </label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="range" id="dbg-gate-slider" min="0" max="2000" step="10" value="250"
+                 style="flex:1;min-width:160px" oninput="dbgGateSync()">
+          <input type="number" id="dbg-gate-num" min="0" max="16777216" step="10" value="250"
+                 style="width:90px" oninput="dbgGateSync(true)">
+        </div>
+        <p style="font-size:.75rem;color:var(--dim);margin:.3rem 0 0">
+          0 = gate disabled (always run). Default 250 (~16 counts RMS). Typical range 50–1000.
+          Slider caps at 2000 for convenience; type a value directly for anything higher.
+        </p>
+      </div>
+
       <div class="btn-group">
-        <button class="btn btn-primary" style="background:#ffa000;border-color:#ffa000" onclick="dbgSave()">Save Channel to Config</button>
+        <button class="btn btn-primary" style="background:#ffa000;border-color:#ffa000" onclick="dbgSave()">Save to Config</button>
         <button class="btn btn-outline" onclick="dbgHide()">Close Debug Panel</button>
       </div>
     </div>
@@ -723,6 +741,8 @@ async function loadSettings() {
   $('f-mic-en').checked    = cfg.mic_enabled !== false;
   if (cfg.mic_adc_channel != null && $('dbg-adc-ch'))
     $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
+  if (cfg.mic_silence_gate != null && $('dbg-gate-num'))
+    dbgSetGate(cfg.mic_silence_gate);
   $('f-countdown').value  = cfg.default_countdown_time || 1;
   $('f-pomo-work').value  = cfg.pomodoro_work  || 25;
   $('f-pomo-break').value = cfg.pomodoro_break || 5;
@@ -1079,9 +1099,11 @@ function dbgTap() {
 function dbgShow() {
   $('debug-panel').style.display = '';
   $('debug-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  /* Sync dropdown to current config */
+  /* Sync controls to current config */
   if (cfg && cfg.mic_adc_channel != null)
     $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
+  if (cfg && cfg.mic_silence_gate != null)
+    dbgSetGate(cfg.mic_silence_gate);
 }
 
 function dbgHide() {
@@ -1090,6 +1112,20 @@ function dbgHide() {
 }
 
 function dbgChannelChange() { /* visual only — saved on button press */ }
+
+function dbgSetGate(v) {
+  const val = parseFloat(v) || 0;
+  $('dbg-gate-slider').value = Math.min(val, 2000);
+  $('dbg-gate-num').value    = val;
+}
+/* Called when slider or number input changes — keep both in sync */
+function dbgGateSync(fromNum) {
+  if (fromNum) {
+    $('dbg-gate-slider').value = Math.min(parseFloat($('dbg-gate-num').value) || 0, 2000);
+  } else {
+    $('dbg-gate-num').value = $('dbg-gate-slider').value;
+  }
+}
 
 async function dbgReadAdc() {
   try {
@@ -1115,12 +1151,14 @@ function dbgAutoToggle(forceOff) {
 }
 
 async function dbgSave() {
-  const ch = parseInt($('dbg-adc-ch').value, 10);
+  const ch   = parseInt($('dbg-adc-ch').value, 10);
+  const gate = parseFloat($('dbg-gate-num').value) || 0;
   const ok = await api('settings', { method: 'POST',
-    body: JSON.stringify({ mic_adc_channel: ch }) });
+    body: JSON.stringify({ mic_adc_channel: ch, mic_silence_gate: gate }) });
   if (ok) {
-    cfg.mic_adc_channel = ch;
-    toast('ADC channel saved — active immediately, persisted to config');
+    cfg.mic_adc_channel  = ch;
+    cfg.mic_silence_gate = gate;
+    toast('Debug settings saved — active immediately, persisted to config');
   } else toast('Save failed', true);
 }
 

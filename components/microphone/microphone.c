@@ -46,19 +46,30 @@ static const char *TAG = "mic";
 #define DC_ALPHA        0.999f          /* DC removal IIR coefficient */
 
 /* ── Sensitivity tuning ───────────────────────────────────────────────── */
-/* MIC_GAIN: linear multiplier applied before normalisation.
- *   1.0  = no boost   (amplified module, e.g. MAX4466)
- *   4.0  = moderate   (MEMS analog mic, no external amp)  ← default
- *   8.0  = high gain  (bare electret capsule, no preamp)
+/*
+ * Hardware context: LMV321IDBVR single op-amp on the PCB acts as an analog
+ * preamp between the electret capsule and GPIO35.  Hardware gain is already
+ * applied; no large software gain is needed or helpful.
  *
- * MIC_NOISE_FLOOR: minimum normalisation divisor.  Setting this lower than
- * the ambient-noise power lets quiet sounds still move the bars; setting it
- * higher keeps the display dark in silence.  Tune together with MIC_GAIN.
- *   0.05  = very sensitive (reacts to whispers)
- *   0.25  = moderate       ← default
- *   1.0   = original value (only responds to loud sounds near the mic)  */
-#define MIC_GAIN        4.0f
-#define MIC_NOISE_FLOOR 0.25f
+ * MIC_GAIN: additional software multiplier after the op-amp.
+ *   1.0  = no extra boost   ← default (op-amp does the work)
+ *   2.0  = gentle boost     (if op-amp gain resistors are small)
+ *
+ * MIC_SILENCE_GATE is now runtime-configurable via cfg->mic_silence_gate
+ * (set through the web debug panel without a rebuild).  The #define below
+ * is kept only as a reference value and is not used in code.
+ *   250.0  = gate at ~16 counts RMS  (typical ADC noise floor)
+ *   500.0  = stricter (only respond to nearby speech)
+ *   100.0  = looser  (shows distant or quiet sounds)
+ *     0.0  = disable gate entirely (always run Goertzel)
+ *
+ * MIC_NOISE_FLOOR: minimum Goertzel normalisation divisor (active frames
+ * only — silence-gated frames always output 0.0).
+ *   1.0  = bars are relative to the loudest band in each frame  ← default
+ *   0.5  = slightly more sensitive within a non-silent frame */
+#define MIC_GAIN          1.0f
+#define MIC_SILENCE_GATE  250.0f   /* reference only — actual value from config */
+#define MIC_NOISE_FLOOR   1.0f
 
 /* Centre frequencies for the 6 bands (logarithmically spaced, 125 Hz – 4 kHz) */
 static const float BAND_FREQS[BAND_COUNT] = {125.0f, 250.0f, 500.0f,
@@ -159,14 +170,33 @@ static void mic_task(void *arg)
             while (esp_timer_get_time() < t) { /* spin – < 125 µs */ }
         }
 
-        /* ── Goertzel energy + peak-hold per band ── */
-        /* MIC_NOISE_FLOOR keeps the divisor above background noise so the
-         * bars stay dark in silence while still responding to quiet sounds. */
+        /* ── Silence gate: skip Goertzel if frame energy is below noise floor ──
+         * Computes per-sample RMS² (mean squared amplitude after DC removal).
+         * ADC board noise on ESP32 is typically 10–20 counts RMS (RMS²≈100–400).
+         * Threshold read from config each frame so the web debug panel takes
+         * effect immediately without a rebuild or reboot. */
+        float rms_sq = 0.0f;
+        for (int i = 0; i < FRAME_SIZE; i++)
+            rms_sq += samples[i] * samples[i];
+        rms_sq /= (float)FRAME_SIZE;
+
+        const float gate = config_get()->mic_silence_gate;
+        if (gate > 0.0f && rms_sq < gate) {
+            /* Silent frame — decay peaks but publish zeros */
+            for (int b = 0; b < BAND_COUNT; b++)
+                peak[b] *= DECAY;
+            taskENTER_CRITICAL(&s_mux);
+            memset(s_bands, 0, sizeof(s_bands));
+            taskEXIT_CRITICAL(&s_mux);
+            continue;
+        }
+
+        /* ── Goertzel energy + peak-hold per band (active frames only) ── */
         float max_power = MIC_NOISE_FLOOR;
         float power[BAND_COUNT];
         for (int b = 0; b < BAND_COUNT; b++) {
             power[b] = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]) / norm
-                       * MIC_GAIN;               /* software gain boost */
+                       * MIC_GAIN;
             if (power[b] > peak[b])
                 peak[b]  = power[b];              /* instant attack */
             else

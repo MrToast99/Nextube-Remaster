@@ -88,6 +88,9 @@ typedef struct {
     uint8_t          mic_adc_channel;    /* ADC1 channel 0-7 (0=GPIO36, 1=GPIO37, 2=GPIO38, 3=GPIO39,
                                            4=GPIO32, 5=GPIO33, 6=GPIO34, 7=GPIO35). Runtime-changeable
                                            via the debug panel without a rebuild. */
+    float            mic_silence_gate;   /* Frame RMS² silence threshold (0–4096²).
+                                           Frames below this value publish all-zero bands.
+                                           Runtime-tuneable via the debug panel. Default 250. */
 
     /* Countdown / Pomodoro */
     uint16_t         countdown_minutes;

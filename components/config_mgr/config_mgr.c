@@ -76,8 +76,9 @@ static void set_defaults(void)
     s_cfg.button_sound  = true;
     s_cfg.audio_enabled = true;
     s_cfg.volume = 20;
-    s_cfg.mic_enabled     = true;
-    s_cfg.mic_adc_channel = 7;   /* ADC1_CH7 = GPIO35 — confirmed via hardware debug */
+    s_cfg.mic_enabled      = true;
+    s_cfg.mic_adc_channel  = 7;      /* ADC1_CH7 = GPIO35 — confirmed via hardware debug */
+    s_cfg.mic_silence_gate = 250.0f; /* ~16 counts RMS — above ADC noise, below real audio */
 
     s_cfg.countdown_minutes = 1;
     s_cfg.pomodoro_work     = 25;
@@ -120,6 +121,12 @@ static void json_read_u16(cJSON *root, const char *key, uint16_t *dst)
     int v = *dst;
     json_read_int(root, key, &v);
     *dst = (uint16_t)v;
+}
+
+static void json_read_float(cJSON *root, const char *key, float *dst)
+{
+    cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item)) *dst = (float)item->valuedouble;
 }
 
 static void parse_json(const char *json, size_t len)
@@ -183,6 +190,8 @@ static void parse_json(const char *json, size_t len)
     }
     json_read_u8(root, "mic_adc_channel", &s_cfg.mic_adc_channel);
     if (s_cfg.mic_adc_channel > 7) s_cfg.mic_adc_channel = 0; /* clamp to valid ADC1 range */
+    json_read_float(root, "mic_silence_gate", &s_cfg.mic_silence_gate);
+    if (s_cfg.mic_silence_gate < 0.0f) s_cfg.mic_silence_gate = 0.0f; /* no negative gate */
     {
         cJSON *lz = cJSON_GetObjectItem(root, "leading_zero");
         if (cJSON_IsBool(lz)) s_cfg.leading_zero = cJSON_IsTrue(lz);
@@ -441,8 +450,9 @@ char *config_to_json(void)
     }
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
-    cJSON_AddBoolToObject  (root, "mic_enabled",      s_cfg.mic_enabled);
-    cJSON_AddNumberToObject(root, "mic_adc_channel",  s_cfg.mic_adc_channel);
+    cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);
+    cJSON_AddNumberToObject(root, "mic_adc_channel",   s_cfg.mic_adc_channel);
+    cJSON_AddNumberToObject(root, "mic_silence_gate",  (double)s_cfg.mic_silence_gate);
     cJSON_AddBoolToObject  (root, "leading_zero",     s_cfg.leading_zero);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
