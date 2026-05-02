@@ -86,14 +86,10 @@ CONFIG_SPI_MASTER_ISR_IN_IRAM=n
 CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
 CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
 
-# ── Microphone ISR sampling ───────────────────────────────────────────
-# adc_oneshot_read_isr() is only declared/available when this option is set.
-# It places the ISR-safe ADC read path in IRAM (~300 B) so the ISR can call
-# it without risking a flash cache miss stall.
-CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM=y
-
-# ESP_TIMER_ISR dispatch method: lets esp_timer callbacks run directly in
-# the hardware timer ISR instead of in the esp_timer task.  Required for
-# the mic sampling timer which calls adc_oneshot_read_isr() at 8 kHz.
-CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
+# ── Microphone sampling ───────────────────────────────────────────────
+# The mic driver uses ESP_TIMER_TASK dispatch + adc_oneshot_read().
+# No ISR-safe ADC variant is needed (adc_oneshot_read_isr is not available
+# on the original ESP32 in IDF 5.x), and no IRAM placement is required.
+# ESP_TIMER_TASK callbacks run in the esp_timer service task (priority 22),
+# where the normal mutex-based adc_oneshot_read() is perfectly safe.
 

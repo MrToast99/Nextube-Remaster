@@ -92,12 +92,14 @@ static volatile int s_last_raw = -1;
 /* ── Timer handle ────────────────────────────────────────────────────── */
 static esp_timer_handle_t s_timer = NULL;
 
-/* ── ISR: fired every SAMPLE_US by esp_timer in ISR dispatch mode ─────── */
-static void IRAM_ATTR mic_sample_isr(void *arg)
+/* ── Timer callback: fired every SAMPLE_US by esp_timer (ESP_TIMER_TASK) ── */
+/* Runs in the esp_timer service task (priority 22, FreeRTOS task context).
+ * adc_oneshot_read() is safe here — task context, no ISR-safe variant needed.
+ * xSemaphoreGiveFromISR is safe from a high-priority task too (no harm using it). */
+static void mic_sample_cb(void *arg)
 {
     int raw = 2048;
-    /* adc_oneshot_read_isr: no lock, safe in ISR context */
-    adc_oneshot_read_isr(s_adc, s_active_chan, &raw);
+    adc_oneshot_read(s_adc, s_active_chan, &raw);
 
     s_last_raw = raw;
     s_raw[s_isr_write][s_isr_pos] = (int16_t)raw;
@@ -260,18 +262,20 @@ void mic_init(void)
     s_frame_sem = xSemaphoreCreateBinary();
     configASSERT(s_frame_sem);
 
-    /* Create ISR-dispatched periodic timer — no busy-wait, no task involved */
+    /* Periodic timer — fires every SAMPLE_US in the esp_timer service task.
+     * Task dispatch (default) lets us call adc_oneshot_read() safely.
+     * No ISR-safe ADC variant needed; no busy-wait; watchdog stays happy. */
     esp_timer_create_args_t targs = {
-        .callback        = mic_sample_isr,
-        .arg             = NULL,
-        .dispatch_method = ESP_TIMER_ISR,
-        .name            = "mic_samp",
+        .callback              = mic_sample_cb,
+        .arg                   = NULL,
+        .dispatch_method       = ESP_TIMER_TASK,
+        .name                  = "mic_samp",
         .skip_unhandled_events = true,
     };
     ESP_ERROR_CHECK(esp_timer_create(&targs, &s_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_timer, SAMPLE_US));
 
-    ESP_LOGI(TAG, "ISR timer started: %u µs period  (%.0f Hz)", SAMPLE_US, (float)SAMPLE_RATE);
+    ESP_LOGI(TAG, "Sampling timer started: %u µs period  (%.0f Hz, TASK dispatch)", SAMPLE_US, (float)SAMPLE_RATE);
 }
 
 int mic_read_raw(void)
