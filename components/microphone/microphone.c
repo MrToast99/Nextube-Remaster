@@ -46,7 +46,7 @@ static const char *TAG = "mic";
 /* ── Sampling parameters ─────────────────────────────────────────────── */
 #define SAMPLE_RATE     8000
 #define FRAME_SIZE      128             /* samples per Goertzel frame (16 ms) */
-#define BAND_COUNT      6
+#define BAND_COUNT      MIC_BAND_COUNT   /* 24 — must equal MIC_BAND_COUNT in microphone.h */
 #define SAMPLE_US       (1000000 / SAMPLE_RATE)   /* 125 µs */
 #define DECAY           0.85f
 #define DC_ALPHA        0.999f
@@ -56,12 +56,28 @@ static const char *TAG = "mic";
 #define MIC_NOISE_FLOOR 1.0f   /* Goertzel normalisation floor for active frames */
 
 /* ── Frequency bands ─────────────────────────────────────────────────── */
-/* Log-spaced bands: 300 Hz → 4 kHz (Nyquist at 8 kHz sample rate).
- * Ratio ≈ 1.68× per step — avoids the 125/250 Hz range that attracts
- * SPI switching noise and mains hum on this hardware.
- *   T0=300  T1=500  T2=850  T3=1400  T4=2400  T5=4000 Hz */
+/* 24 log-spaced bands: 280 Hz → 3800 Hz (Nyquist at 8 kHz sample rate).
+ * Ratio ≈ 1.12× per step — grouped 4 per tube for a richer spectrum display.
+ * Avoids the 125–250 Hz range (SPI switching noise / mains hum on this hardware).
+ *   Tube 0 (bass):     280  315  350  395 Hz
+ *   Tube 1 (u.bass):   440  495  555  620 Hz
+ *   Tube 2 (lo.mid):   695  780  870  975 Hz
+ *   Tube 3 (mid):     1095 1225 1370 1535 Hz
+ *   Tube 4 (presence):1720 1925 2160 2420 Hz
+ *   Tube 5 (treble):  2710 3030 3395 3800 Hz */
 static const float BAND_FREQS[BAND_COUNT] = {
-    300.0f, 500.0f, 850.0f, 1400.0f, 2400.0f, 4000.0f
+    /* Tube 0 — low bass */
+     280.0f,  315.0f,  350.0f,  395.0f,
+    /* Tube 1 — upper bass */
+     440.0f,  495.0f,  555.0f,  620.0f,
+    /* Tube 2 — lower mid */
+     695.0f,  780.0f,  870.0f,  975.0f,
+    /* Tube 3 — midrange */
+    1095.0f, 1225.0f, 1370.0f, 1535.0f,
+    /* Tube 4 — presence */
+    1720.0f, 1925.0f, 2160.0f, 2420.0f,
+    /* Tube 5 — treble */
+    2710.0f, 3030.0f, 3395.0f, 3800.0f,
 };
 
 /* ── ADC mappings ────────────────────────────────────────────────────── */

@@ -51,7 +51,8 @@ typedef struct {
     backlight_mode_t backlight_mode;
     bool             backlight_on;
     uint8_t          backlight_rgb[6][3];
-    uint8_t          spectrum_rgb[3];    /* LED colour for Spectrum mode [R, G, B] */
+    uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
+    uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
     uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0x1FF (all 9) */
 
     /* Network */

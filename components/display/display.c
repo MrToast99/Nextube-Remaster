@@ -747,46 +747,51 @@ static void render_scoreboard(const nextube_config_t *cfg)
 
 /* ── Spectrum bar visualiser ─────────────────────────────────────────── *
  *                                                                         *
- * Each of the 6 ST7735 displays shows a segmented LED bar proportional    *
- * to its Goertzel band energy.  Layout (160 px tall):                     *
+ * Each of the 6 ST7735 displays shows 4 segmented mini-bars (one per     *
+ * Goertzel band), side by side.  Layout (80 px wide, 160 px tall):       *
  *                                                                         *
- *   3 px  top padding                                                     *
- *   13 ×  10 px segment + 2 px gap  (= 154 px content)                   *
- *   3 px  bottom padding                                                  *
+ *   Width:  1px pad | 18px bar | 2px gap | ... × 4 | 1px pad = 80 ✓     *
+ *   Height: 3px top + 13 × (10px seg + 2px gap) − 2px + 3px bot = 160 ✓ *
  *                                                                         *
- * Colour: green (low) → yellow (mid) → red (high).                       *
- * Peak dot: bright-white 10 px segment that holds then decays (~2 s).    *
- * Unlit segments: dim ghost so the full bar range is always visible.      */
-#define SPEC_SEGS      13   /* number of LED segments per tube             */
-#define SPEC_SEG_H     10   /* segment height (px)                         */
-#define SPEC_GAP_H      2   /* gap between segments (px)                   */
-#define SPEC_PAD_TOP    3   /* blank rows at top  of screen                */
-#define SPEC_PAD_BOT    3   /* blank rows at bottom of screen              */
-/* Total: 3 + 13*(10+2) − 2 + 3 = 160 ✓ */
+ * Colour: user-configurable single base colour (spectrum_lcd_RGB config). *
+ * Brightness ramp 0.75→1.00 bottom-to-top for visual depth.              *
+ * Peak dot: bright-white segment that holds then decays (~1 s at 20 Hz). *
+ * Unlit segments: ~6% ghost so the full bar outline is always visible.    */
+#define SPEC_SEGS           13   /* segments per bar                              */
+#define SPEC_SEG_H          10   /* segment height (px)                           */
+#define SPEC_GAP_H           2   /* gap between segments (px)                     */
+#define SPEC_PAD_TOP         3   /* blank rows at top of screen                   */
+#define SPEC_PAD_BOT         3   /* blank rows at bottom of screen                */
+/* Total height: 3 + 13*(10+2) − 2 + 3 = 160 ✓ */
 
-static uint8_t *s_spec_buf          = NULL;   /* single shared PSRAM framebuffer */
-static float    s_spec_peak[LCD_COUNT];        /* visual peak hold per tube       */
+#define SPEC_BARS_PER_TUBE   4   /* mini-bars per tube                            */
+#define SPEC_BAR_W          18   /* bar width (px)                                */
+#define SPEC_BAR_GAP         2   /* horizontal gap between bars (px)              */
+#define SPEC_BAR_PAD         1   /* outer left/right padding (px)                 */
+/* Total width: 1 + (18+2)*4 − 2 + 1 = 80 ✓ */
 
-/* Segment colour: classic VU green→yellow→red, full or ghost brightness. */
+_Static_assert(LCD_COUNT * SPEC_BARS_PER_TUBE == MIC_BAND_COUNT,
+               "SPEC_BARS_PER_TUBE x LCD_COUNT must equal MIC_BAND_COUNT");
+
+static uint8_t *s_spec_buf = NULL;                              /* shared PSRAM framebuffer */
+static float    s_spec_peak[LCD_COUNT * SPEC_BARS_PER_TUBE];    /* visual peak hold per band */
+
+/* Segment colour: user base colour with brightness ramp, or ghost at ~6%. */
 static void spec_seg_color(int s, bool lit,
+                            uint8_t br, uint8_t bg, uint8_t bb,
                             uint8_t *r, uint8_t *g, uint8_t *b)
 {
-    uint8_t fr, fg, fb;
-    if      (s <  5) { fr =  30; fg = 220; fb =  30; }   /* green  */
-    else if (s <  9) { fr = 220; fg = 200; fb =   0; }   /* yellow */
-    else             { fr = 230; fg =  40; fb =   0; }   /* red    */
-
     if (lit) {
-        /* Slight brightness ramp toward the top for visual depth */
+        /* Brightness ramp 0.75 -> 1.00 bottom-to-top for visual depth */
         float bright = 0.75f + 0.25f * ((float)s / (float)(SPEC_SEGS - 1));
-        *r = (uint8_t)((float)fr * bright);
-        *g = (uint8_t)((float)fg * bright);
-        *b = (uint8_t)((float)fb * bright);
+        *r = (uint8_t)((float)br * bright);
+        *g = (uint8_t)((float)bg * bright);
+        *b = (uint8_t)((float)bb * bright);
     } else {
         /* Ghost: ~6% brightness so the full bar outline is always visible */
-        *r = fr >> 4;
-        *g = fg >> 4;
-        *b = fb >> 4;
+        *r = br >> 4;
+        *g = bg >> 4;
+        *b = bb >> 4;
     }
 }
 
@@ -804,16 +809,20 @@ static inline void spec_put_pixel(uint8_t *buf, int x, int y,
 
 static void render_spectrum(const nextube_config_t *cfg)
 {
-    float bands[LCD_COUNT];
+    float bands[LCD_COUNT * SPEC_BARS_PER_TUBE];
     mic_get_bands(bands);
+
+    const uint8_t br = cfg->spectrum_lcd_rgb[0];
+    const uint8_t bg = cfg->spectrum_lcd_rgb[1];
+    const uint8_t bb = cfg->spectrum_lcd_rgb[2];
 
     /* Lazy-allocate single shared PSRAM framebuffer on first Spectrum frame. */
     if (!s_spec_buf) {
         s_spec_buf = PSRAM_MALLOC((size_t)LCD_WIDTH * LCD_HEIGHT * 2);
         if (!s_spec_buf) {
-            /* PSRAM not available — fall back to digit display. */
+            /* PSRAM not available — fall back to digit display (1 digit per tube). */
             for (int i = 0; i < LCD_COUNT; i++) {
-                int lv = (int)(bands[i] * 9.0f + 0.5f);
+                int lv = (int)(bands[i * SPEC_BARS_PER_TUBE] * 9.0f + 0.5f);
                 if (lv < 0) lv = 0;
                 if (lv > 9) lv = 9;
                 display_show_number(i, lv, cfg->theme);
@@ -824,50 +833,55 @@ static void render_spectrum(const nextube_config_t *cfg)
     }
 
     for (int tube = 0; tube < LCD_COUNT; tube++) {
-        float energy = bands[tube];
-        if (energy < 0.0f) energy = 0.0f;
-        if (energy > 1.0f) energy = 1.0f;
 
-        /* Peak-dot hold: instant attack, ~1 s decay at 20 Hz display rate.
-         * The mic already exports peak-held band values; this second layer
-         * is purely cosmetic — it keeps the white dot visible briefly after
-         * the bar drops.  0.05/frame × 20 Hz = 1.0/s fall from full scale. */
-        if (energy >= s_spec_peak[tube]) {
-            s_spec_peak[tube] = energy;
-        } else {
-            s_spec_peak[tube] -= 0.05f;
-            if (s_spec_peak[tube] < 0.0f) s_spec_peak[tube] = 0.0f;
-        }
-
-        int lit_segs = (int)(energy             * (float)SPEC_SEGS + 0.5f);
-        int peak_seg = (int)(s_spec_peak[tube]  * (float)(SPEC_SEGS - 1) + 0.5f);
-        if (lit_segs > SPEC_SEGS)   lit_segs = SPEC_SEGS;
-        if (peak_seg >= SPEC_SEGS)  peak_seg = SPEC_SEGS - 1;
-
-        /* Clear to black. */
+        /* Clear tube framebuffer to black. */
         memset(s_spec_buf, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
 
-        for (int s = 0; s < SPEC_SEGS; s++) {
-            /* Segment s row range in the LCD buffer (row 0 = screen top).
-             * Segment 0 is at the bottom; segment SPEC_SEGS-1 is at the top. */
-            int row_top = LCD_HEIGHT - SPEC_PAD_BOT - SPEC_SEG_H
-                          - s * (SPEC_SEG_H + SPEC_GAP_H);
-            int row_bot = row_top + SPEC_SEG_H - 1;
+        for (int bar = 0; bar < SPEC_BARS_PER_TUBE; bar++) {
+            int   bidx   = tube * SPEC_BARS_PER_TUBE + bar;
+            float energy = bands[bidx];
+            if (energy < 0.0f) energy = 0.0f;
+            if (energy > 1.0f) energy = 1.0f;
 
-            bool is_lit  = (s < lit_segs);
-            bool is_peak = (s == peak_seg && s_spec_peak[tube] > 0.02f);
-
-            uint8_t sr, sg, sb;
-            if (is_peak) {
-                sr = 255; sg = 255; sb = 255;   /* white peak indicator */
+            /* Peak-dot hold: instant attack, ~1 s decay at 20 Hz display rate.
+             * 0.05/frame × 20 Hz = 1.0/s fall from full scale. */
+            if (energy >= s_spec_peak[bidx]) {
+                s_spec_peak[bidx] = energy;
             } else {
-                spec_seg_color(s, is_lit, &sr, &sg, &sb);
+                s_spec_peak[bidx] -= 0.05f;
+                if (s_spec_peak[bidx] < 0.0f) s_spec_peak[bidx] = 0.0f;
             }
 
-            for (int row = row_top; row <= row_bot; row++) {
-                if (row < 0 || row >= LCD_HEIGHT) continue;
-                for (int col = 0; col < LCD_WIDTH; col++)
-                    spec_put_pixel(s_spec_buf, col, row, sr, sg, sb);
+            int lit_segs = (int)(energy            * (float)SPEC_SEGS + 0.5f);
+            int peak_seg = (int)(s_spec_peak[bidx] * (float)(SPEC_SEGS - 1) + 0.5f);
+            if (lit_segs > SPEC_SEGS)  lit_segs = SPEC_SEGS;
+            if (peak_seg >= SPEC_SEGS) peak_seg = SPEC_SEGS - 1;
+
+            /* Column range for this mini-bar. */
+            int col_l = SPEC_BAR_PAD + bar * (SPEC_BAR_W + SPEC_BAR_GAP);
+            int col_r = col_l + SPEC_BAR_W - 1;
+
+            for (int s = 0; s < SPEC_SEGS; s++) {
+                /* Segment s row range (row 0 = screen top; seg 0 = bar bottom). */
+                int row_top = LCD_HEIGHT - SPEC_PAD_BOT - SPEC_SEG_H
+                              - s * (SPEC_SEG_H + SPEC_GAP_H);
+                int row_bot = row_top + SPEC_SEG_H - 1;
+
+                bool is_lit  = (s < lit_segs);
+                bool is_peak = (s == peak_seg && s_spec_peak[bidx] > 0.02f);
+
+                uint8_t sr, sg, sb;
+                if (is_peak) {
+                    sr = 255; sg = 255; sb = 255;   /* white peak dot */
+                } else {
+                    spec_seg_color(s, is_lit, br, bg, bb, &sr, &sg, &sb);
+                }
+
+                for (int row = row_top; row <= row_bot; row++) {
+                    if (row < 0 || row >= LCD_HEIGHT) continue;
+                    for (int col = col_l; col <= col_r; col++)
+                        spec_put_pixel(s_spec_buf, col, row, sr, sg, sb);
+                }
             }
         }
 

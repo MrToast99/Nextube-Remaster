@@ -172,11 +172,16 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <div class="card">
     <h2>Spectrum Mode</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Audio visualiser using the onboard electret microphone. Each tube displays a digit 0–9 proportional to the energy in its frequency band.</p>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left &rarr; treble right).</p>
     <div class="field" style="display:flex;align-items:center;gap:1rem">
-      <label style="min-width:90px">Band Colour</label>
+      <label style="min-width:90px">LED Glow Colour</label>
       <input type="color" id="f-spec-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
-      <span style="color:var(--dim);font-size:.82rem">LED glow colour for the visualiser</span>
+      <span style="color:var(--dim);font-size:.82rem">Ambient LED ring colour</span>
+    </div>
+    <div class="field" style="display:flex;align-items:center;gap:1rem">
+      <label style="min-width:90px">LCD Bar Colour</label>
+      <input type="color" id="f-spec-lcd-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
+      <span style="color:var(--dim);font-size:.82rem">Bar colour for the LCD spectrum display</span>
     </div>
   </div>
   <div class="card">
@@ -770,6 +775,8 @@ async function loadSettings() {
   /* Spectrum colour */
   const sc = cfg.spectrum_RGB || [50, 80, 100];
   $('f-spec-color').value = '#' + sc.map(v => v.toString(16).padStart(2,'0')).join('');
+  const slc = cfg.spectrum_lcd_RGB || [30, 220, 30];
+  $('f-spec-lcd-color').value = '#' + slc.map(v => v.toString(16).padStart(2,'0')).join('');
 
   /* Mode rotation */
   const rotEnabled = cfg.rotation_enabled === true;
@@ -863,6 +870,7 @@ async function saveSettings() {
     backlight_mode: $('f-blmode').value,
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     spectrum_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-color').value.replace('#','')),
+    spectrum_lcd_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-lcd-color').value.replace('#','')),
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,
     rotation_interval_s: +$('rot-interval').value,

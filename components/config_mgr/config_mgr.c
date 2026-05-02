@@ -45,6 +45,11 @@ static void set_defaults(void)
     s_cfg.spectrum_rgb[1] = 80;
     s_cfg.spectrum_rgb[2] = 100;
 
+    /* Spectrum mode LCD bar colour — classic green matches old hardcoded default */
+    s_cfg.spectrum_lcd_rgb[0] = 30;
+    s_cfg.spectrum_lcd_rgb[1] = 220;
+    s_cfg.spectrum_lcd_rgb[2] = 30;
+
     /* Default rainbow-ish backlight colours */
     uint8_t defaults[6][3] = {
         {200,0,0}, {0,200,0}, {0,0,200},
@@ -335,6 +340,17 @@ static void parse_json(const char *json, size_t len)
         }
     }
 
+    /* spectrum_lcd_RGB — LCD bar colour for Spectrum mode */
+    {
+        cJSON *sp = cJSON_GetObjectItem(root, "spectrum_lcd_RGB");
+        if (cJSON_IsArray(sp) && cJSON_GetArraySize(sp) >= 3) {
+            for (int i = 0; i < 3; i++) {
+                cJSON *v = cJSON_GetArrayItem(sp, i);
+                if (cJSON_IsNumber(v)) s_cfg.spectrum_lcd_rgb[i] = (uint8_t)v->valueint;
+            }
+        }
+    }
+
     cJSON_Delete(root);
 }
 
@@ -491,6 +507,12 @@ char *config_to_json(void)
         cJSON *sp = cJSON_AddArrayToObject(root, "spectrum_RGB");
         for (int i = 0; i < 3; i++)
             cJSON_AddItemToArray(sp, cJSON_CreateNumber(s_cfg.spectrum_rgb[i]));
+    }
+
+    {
+        cJSON *sp = cJSON_AddArrayToObject(root, "spectrum_lcd_RGB");
+        for (int i = 0; i < 3; i++)
+            cJSON_AddItemToArray(sp, cJSON_CreateNumber(s_cfg.spectrum_lcd_rgb[i]));
     }
 
     char *out = cJSON_PrintUnformatted(root);
