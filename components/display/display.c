@@ -185,7 +185,8 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
  * Holds the path of the last image that failed to decode (e.g. wrong size,
  * truncated JPEG).  Exposed via display_get_theme_error() → api/status →
  * web UI banner.  Cleared automatically when the theme changes. */
-static char s_theme_error[192] = {0};
+/* Buffer: IMG_CACHE_PATH_MAX (320) + " (65535x65535 decoded, need 80x160)" (~36) + NUL */
+static char s_theme_error[384] = {0};
 
 const char *display_get_theme_error(void)
 {
@@ -307,7 +308,7 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
         /* Record for the web UI banner — strip the /spiffs prefix for brevity */
         const char *rel = (strncmp(full, "/spiffs", 7) == 0) ? full + 7 : full;
         snprintf(s_theme_error, sizeof(s_theme_error),
-                 "%s (%ux%u decoded, need %ux%u)",
+                 "%.320s (%ux%u decoded, need %ux%u)",
                  rel, out_img.width, out_img.height, LCD_WIDTH, LCD_HEIGHT);
         s_img_cache[slot].path[0] = '\0';   /* slot data is allocated but invalid */
         return NULL;
