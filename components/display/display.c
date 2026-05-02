@@ -828,11 +828,14 @@ static void render_spectrum(const nextube_config_t *cfg)
         if (energy < 0.0f) energy = 0.0f;
         if (energy > 1.0f) energy = 1.0f;
 
-        /* Peak hold: instant attack, ~2 s decay at 5 Hz display rate. */
+        /* Peak-dot hold: instant attack, ~1 s decay at 20 Hz display rate.
+         * The mic already exports peak-held band values; this second layer
+         * is purely cosmetic — it keeps the white dot visible briefly after
+         * the bar drops.  0.05/frame × 20 Hz = 1.0/s fall from full scale. */
         if (energy >= s_spec_peak[tube]) {
             s_spec_peak[tube] = energy;
         } else {
-            s_spec_peak[tube] -= 0.010f;
+            s_spec_peak[tube] -= 0.05f;
             if (s_spec_peak[tube] < 0.0f) s_spec_peak[tube] = 0.0f;
         }
 
@@ -1380,17 +1383,24 @@ static void display_task(void *arg)
         strncpy(last_theme, cfg->theme, sizeof(last_theme) - 1);
         first = false;
 
-        /* Re-sync wake timer when we've fallen behind by more than one
-         * render period (e.g. blocked on SPIFFS while audio pre-buffers).
-         * Without this vTaskDelayUntil fires ~60 times in a row to catch
-         * up after a 12 s SPIFFS stall, repainting all LCDs in a rapid
-         * burst that looks like a "screen reset". */
+        /* Spectrum mode runs at 20 Hz (50 ms) to match the LED task refresh
+         * rate and give snappy bar response.  All other modes use 5 Hz
+         * (200 ms) — enough for clock/weather/album and avoids unnecessary
+         * SPI redraws that would add rail noise during static content. */
+        TickType_t tick_ms = (mode == APP_MODE_SPECTRUM)
+                             ? pdMS_TO_TICKS(50)
+                             : pdMS_TO_TICKS(200);
+
+        /* Re-sync wake timer when we've fallen behind (e.g. blocked on
+         * SPIFFS while audio pre-buffers).  Cap at 200 ms regardless of
+         * tick_ms so a spectrum stall doesn't cause a catch-up burst in
+         * a slower mode after switching. */
         {
             TickType_t now_tick = xTaskGetTickCount();
             if ((TickType_t)(now_tick - wake) > pdMS_TO_TICKS(200))
                 wake = now_tick;
         }
-        vTaskDelayUntil(&wake, pdMS_TO_TICKS(200)); /* 5 Hz */
+        vTaskDelayUntil(&wake, tick_ms);
     }
 }
 

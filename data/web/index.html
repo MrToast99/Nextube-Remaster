@@ -1040,8 +1040,10 @@ async function browseDir(dir) {
           <span onclick="browseDir(decodeURIComponent('${encPath}'))" style="cursor:pointer;flex:1">${icon} ${safeName}</span>
           <span style="display:flex;align-items:center;gap:.5rem">
             <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
-            <button onclick="deleteFolder(decodeURIComponent('${encPath}'))"
-               style="font-size:.75rem;color:var(--hi);background:none;border:1px solid var(--hi);border-radius:4px;padding:.15rem .4rem;cursor:pointer">✕</button>
+            <button onclick="renameFolder(decodeURIComponent('${encPath}'))"
+               style="font-size:.75rem;color:var(--accent);background:none;border:1px solid var(--accent);border-radius:4px;padding:.15rem .4rem;cursor:pointer" title="Rename folder">✎</button>
+            <button onclick="deleteFile(decodeURIComponent('${encPath}'))"
+               style="font-size:.75rem;color:var(--hi);background:none;border:1px solid var(--hi);border-radius:4px;padding:.15rem .4rem;cursor:pointer" title="Delete folder">✕</button>
           </span>
         </div>`;
       } else {
@@ -1073,6 +1075,25 @@ async function mkdirFolder() {
     browseDir(path);
   } else {
     toast('Failed to create folder', true);
+  }
+}
+
+/* ── Rename a LittleFS folder ──────────────────────── */
+async function renameFolder(path) {
+  const oldName = path.split('/').pop();
+  const newName = prompt('Rename folder:', oldName);
+  if (!newName || !newName.trim() || newName.trim() === oldName) return;
+  const cleaned = newName.trim().replace(/[/\\:*?"<>|]/g, '');
+  if (!cleaned) return;
+  const parent = path.replace(/\/[^\/]+$/, '') || '/';
+  const toPath = (parent === '/' ? '' : parent) + '/' + cleaned;
+  const r = await api('file/rename?from=' + encodeURIComponent(path) +
+                               '&to='   + encodeURIComponent(toPath), { method: 'POST' });
+  if (r?.status === 'ok') {
+    toast('Renamed to ' + cleaned);
+    browseDir(s_filePath);
+  } else {
+    toast('Rename failed', true);
   }
 }
 

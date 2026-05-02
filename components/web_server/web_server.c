@@ -712,6 +712,45 @@ static int fs_remove_recursive(const char *path)
     return err;
 }
 
+/* POST /api/file/rename?from=/images/themes/OldName&to=/images/themes/NewName
+ * Renames (moves) a file or directory within the LittleFS partition.
+ * Both paths are relative to the SPIFFS root (no leading /spiffs).
+ * LittleFS supports rename() for both files and directories via VFS. */
+static esp_err_t api_file_rename(httpd_req_t *r)
+{
+    char q[512], from[256] = {0}, to[256] = {0};
+    char from_path[320], to_path[320];
+
+    if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, "from", from, sizeof(from)) != ESP_OK ||
+        httpd_query_key_value(q, "to",   to,   sizeof(to))   != ESP_OK ||
+        from[0] == '\0' || to[0] == '\0')
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing from/to"), ESP_FAIL;
+
+    url_decode_inplace(from);
+    url_decode_inplace(to);
+
+    if (strstr(from, "..") || strstr(to, ".."))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
+    if (strcmp(from, "/config.json") == 0)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Protected file"), ESP_FAIL;
+
+    snprintf(from_path, sizeof(from_path), "/spiffs%s", from);
+    snprintf(to_path,   sizeof(to_path),   "/spiffs%s", to);
+
+    if (rename(from_path, to_path) != 0) {
+        ESP_LOGW(TAG, "rename(%s → %s) failed: %s", from_path, to_path, strerror(errno));
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Rename failed"), ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "renamed: %s → %s", from_path, to_path);
+    if (strncmp(from, "/images/album/", 14) == 0 ||
+        strncmp(to,   "/images/album/", 14) == 0)
+        display_album_invalidate();
+
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* DELETE /api/file/delete?path=/audio/click.wav
  * Removes a file or a directory tree.  config.json is protected. */
 static esp_err_t api_file_delete(httpd_req_t *r)
@@ -895,6 +934,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,    "/api/file/download",  api_file_download),
     R(HTTP_POST,   "/api/file/upload",    api_file_upload),
     R(HTTP_POST,   "/api/file/mkdir",     api_file_mkdir),
+    R(HTTP_POST,   "/api/file/rename",    api_file_rename),
     R(HTTP_DELETE, "/api/file/delete",    api_file_delete),
     R(HTTP_POST,   "/api/wifi/scan",      api_wifi_scan_post),
     R(HTTP_GET,  "/api/wifi/scan",       api_wifi_scan_get),
