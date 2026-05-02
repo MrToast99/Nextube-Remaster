@@ -185,10 +185,14 @@ static void led_task(void *arg)
 
         /* ── Spectrum mode: drive each LED at per-band audio brightness ── */
         if (cfg->current_mode == APP_MODE_SPECTRUM) {
-            float bands[6];
+            float bands[MIC_BAND_COUNT];
             mic_get_bands(bands);
+            /* Average the 4 frequency bands assigned to each tube/LED */
+            const int bpl = MIC_BAND_COUNT / LED_COUNT;
             for (int i = 0; i < LED_COUNT; i++) {
-                float v = bands[i];
+                float v = 0.0f;
+                for (int b = 0; b < bpl; b++) v += bands[i * bpl + b];
+                v /= (float)bpl;
                 leds_set_color(i,
                     (uint8_t)(cfg->spectrum_rgb[0] * v),
                     (uint8_t)(cfg->spectrum_rgb[1] * v),
