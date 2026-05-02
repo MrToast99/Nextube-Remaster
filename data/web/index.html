@@ -65,6 +65,11 @@ select option{background:var(--accent);color:var(--text)}
   ⚠️ <strong>Web UI update required</strong> — this firmware expects LittleFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
   Go to <strong>System → Web UI Update</strong> and flash the matching <code>littlefs.bin</code>.
 </div>
+<div id="theme-error-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
+  <span style="flex:1">⚠️ <strong>Theme image error</strong> — JPEG decode failed for <code id="te-path"></code>.
+  Images must be exactly <strong>80 × 160 px</strong> RGB JPEG. Check <strong>System → Device Log</strong> for details or upload a corrected file via <strong>System → LittleFS Files</strong>.</span>
+  <button onclick="$('theme-error-banner').style.display='none'" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.1rem;line-height:1;padding:0 .2rem" title="Dismiss">✕</button>
+</div>
 <div id="unsaved-banner">
   <span>⚠ You have unsaved changes.</span>
   <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveSettings()">Save Now</button>
@@ -1283,6 +1288,15 @@ async function refreshStatus() {
     $('ver-mismatch').style.display = 'block';
   } else {
     $('ver-mismatch').style.display = 'none';
+  }
+
+  /* Theme JPEG decode error banner */
+  const teBanner = $('theme-error-banner');
+  if (s.theme_error) {
+    $('te-path').textContent = s.theme_error;
+    teBanner.style.display = 'flex';
+  } else {
+    teBanner.style.display = 'none';
   }
 }
 

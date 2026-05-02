@@ -42,6 +42,11 @@ void display_show_digit(int tube, const uint8_t *rgb565_data, int w, int h);
  *  black fill on any error.  Uses 8 MB PSRAM decode buffer. */
 void display_show_image(int tube, const char *path);
 
+/** Returns a human-readable description of the last JPEG decode failure
+ *  (path + decoded dimensions), or NULL if no error has occurred since
+ *  the last theme change.  String is valid until the next theme switch. */
+const char *display_get_theme_error(void);
+
 /* ── Path builders ─────────────────────────────────────────────────── */
 void display_path_number     (char *buf, size_t n, const char *theme, int digit);
 void display_path_ampm       (char *buf, size_t n, const char *theme, const char *name);

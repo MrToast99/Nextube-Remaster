@@ -259,6 +259,12 @@ static esp_err_t api_status(httpd_req_t *r)
      * The UI shows a mismatch banner when these two differ — i.e. the LittleFS
      * image on the device is not the one this firmware expects. */
     cJSON_AddStringToObject(root, "expected_fs", FS_VERSION_STR);
+    /* Theme JPEG decode error — non-null when the active theme has an image
+     * that couldn't be decoded (wrong size, truncated file, etc.).
+     * Cleared automatically when the theme changes. */
+    const char *te = display_get_theme_error();
+    if (te) cJSON_AddStringToObject(root, "theme_error", te);
+    else    cJSON_AddNullToObject  (root, "theme_error");
     char fs_ver[32] = "unknown";
     FILE *vf = fopen("/spiffs/web/version.txt", "r");
     if (vf) {

@@ -59,12 +59,12 @@ def process_image(image_data, filename, width, height, output_fmt, crop_box=None
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=80, optimize=True)
         out_bytes = buf.getvalue()
-        out_name = f"{stem}_{width}x{height}.jpg"
+        out_name = f"{stem}.jpg"
     else:
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
         out_bytes = buf.getvalue()
-        out_name = f"{stem}_{width}x{height}.png"
+        out_name = f"{stem}.png"
 
     prev_buf = io.BytesIO()
     img.convert("RGB").save(prev_buf, format="JPEG", quality=75)
@@ -871,10 +871,10 @@ class Handler(BaseHTTPRequestHandler):
                 stem = Path(filename).stem
                 if fmt == "jpeg":
                     buf = io.BytesIO(); img.convert("RGB").save(buf, "JPEG", quality=80)
-                    out_bytes = buf.getvalue(); out_name = f"{stem}_{width}x{height}.jpg"
+                    out_bytes = buf.getvalue(); out_name = f"{stem}.jpg"
                 else:
                     buf = io.BytesIO(); img.save(buf, "PNG", optimize=True)
-                    out_bytes = buf.getvalue(); out_name = f"{stem}_{width}x{height}.png"
+                    out_bytes = buf.getvalue(); out_name = f"{stem}.png"
                 prev = io.BytesIO(); img.convert("RGB").save(prev, "JPEG", quality=72)
                 result = {"out_name":out_name,"out_bytes":out_bytes,
                           "preview_b64":base64.b64encode(prev.getvalue()).decode(),

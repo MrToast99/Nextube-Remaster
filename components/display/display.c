@@ -181,6 +181,17 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 /* TJpgDec workspace: ~3100 bytes for JD_FASTDECODE=0 – round up with margin. */
 #define JPEG_WORK_BUF_SIZE  3200
 
+/* ── Theme error tracking ────────────────────────────────────────────────
+ * Holds the path of the last image that failed to decode (e.g. wrong size,
+ * truncated JPEG).  Exposed via display_get_theme_error() → api/status →
+ * web UI banner.  Cleared automatically when the theme changes. */
+static char s_theme_error[192] = {0};
+
+const char *display_get_theme_error(void)
+{
+    return s_theme_error[0] ? s_theme_error : NULL;
+}
+
 /* ── Image decode cache ─────────────────────────────────────────────────
  * LRU cache of decoded RGB565 frames in PSRAM.  Eliminates re-reading from
  * SPIFFS and re-decoding JPEG for images that have not changed since the
@@ -291,7 +302,13 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
     free(jpeg_buf);
 
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "JPEG decode failed %d: %s", err, full);
+        ESP_LOGW(TAG, "JPEG decode failed (err=%d) decoded=%ux%u buf=%u: %s",
+                 err, out_img.width, out_img.height, LCD_WIDTH * LCD_HEIGHT * 2, full);
+        /* Record for the web UI banner — strip the /spiffs prefix for brevity */
+        const char *rel = (strncmp(full, "/spiffs", 7) == 0) ? full + 7 : full;
+        snprintf(s_theme_error, sizeof(s_theme_error),
+                 "%s (%ux%u decoded, need %ux%u)",
+                 rel, out_img.width, out_img.height, LCD_WIDTH, LCD_HEIGHT);
         s_img_cache[slot].path[0] = '\0';   /* slot data is allocated but invalid */
         return NULL;
     }
@@ -1141,8 +1158,10 @@ static void display_task(void *arg)
             }
         }
 
-        if (theme_changed)
-            img_cache_flush();   /* evict stale paths from the old theme */
+        if (theme_changed) {
+            img_cache_flush();       /* evict stale paths from the old theme */
+            s_theme_error[0] = '\0'; /* clear any decode error from the previous theme */
+        }
 
         if (mode_changed || theme_changed || first) {
             /* Reset album, timer, and weather panel state on mode/theme switch */
