@@ -56,8 +56,12 @@ static const char *TAG = "mic";
 #define MIC_NOISE_FLOOR 1.0f   /* Goertzel normalisation floor for active frames */
 
 /* ── Frequency bands ─────────────────────────────────────────────────── */
+/* Log-spaced bands: 300 Hz → 4 kHz (Nyquist at 8 kHz sample rate).
+ * Ratio ≈ 1.68× per step — avoids the 125/250 Hz range that attracts
+ * SPI switching noise and mains hum on this hardware.
+ *   T0=300  T1=500  T2=850  T3=1400  T4=2400  T5=4000 Hz */
 static const float BAND_FREQS[BAND_COUNT] = {
-    125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f
+    300.0f, 500.0f, 850.0f, 1400.0f, 2400.0f, 4000.0f
 };
 
 /* ── ADC mappings ────────────────────────────────────────────────────── */

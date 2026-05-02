@@ -42,7 +42,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Countdown / Pomodoro timer modes | ✅ Working |
 | Album/slideshow mode (sliding window — each tube shows a different image) | ✅ Working |
 | Date mode (date display, DD/MM/YY) | ✅ Working |
-| Spectrum mode (microphone audio visualiser — 6 Goertzel bands → LED + display) | 🚧 In Progress |
+| Spectrum mode (microphone audio visualiser — 6 Goertzel bands → LED + display) | ✅ Working |
 | Per-mode enable/disable toggles | ✅ Working |
 | Auto mode rotation with configurable interval | ✅ Working |
 | LittleFS file browser with upload/delete/mkdir | ✅ Working |
@@ -61,7 +61,7 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 | **Touch** | 3× capacitive pads | LEFT=GPIO4(pad0), MIDDLE=GPIO2(pad2), RIGHT=GPIO15(pad3) |
 | **RTC** | PCF8563 | I²C: SCL=22, SDA=23 (addr 0x51) |
 | **Audio** | LTK8002D amplifier | DAC=GPIO25 |
-| **Microphone** | CMEJ-0413-42-SMT-TR electret | ADC=GPIO36 (ADC1_CH0 / SENSOR_VP) |
+| **Microphone** | CMC-4015-25T electret capsule + LMV321IDBVR op-amp preamp | ADC=GPIO35 (ADC1_CH7, input-only) |
 
 > **Note on GPIO2 (MIDDLE touch):** GPIO2 is a strapping pin with an internal pull-down. It functions correctly as touch pad channel 2 in normal operation but must not be held LOW during boot.
 
@@ -208,21 +208,57 @@ possible without a hardware modification:
 
 ### Microphone Notes
 
-Spectrum mode samples the built-in CMEJ-0413-42-SMT-TR electret condenser
-microphone via GPIO36 (ADC1_CH0, `SENSOR_VP`) using the ESP-IDF `adc_oneshot`
-API at **8 kHz** with 12-bit resolution and 12 dB attenuation (0–3.3 V full
-scale).
+#### Signal chain
 
-Six frequency bands (125 / 250 / 500 / 1000 / 2000 / 4000 Hz) are computed
-per 128-sample frame using the **Goertzel algorithm** — far cheaper than FFT
-for a fixed set of target frequencies. Each band uses a peak-hold envelope
-with instant attack and exponential decay (`peak × 0.85` per frame) for
-smooth VU-style response.
+```
+CMC-4015-25T electret capsule (top-port SMT, −25 dBV/Pa)
+    → LMV321IDBVR single op-amp (SOT-23-5) — hardware preamp / bias stage
+    → GPIO35 (ADC1_CH7, input-only)
+    → ESP32 ADC1, 12-bit, 12 dB attenuation (0–3.3 V full scale)
+```
 
-`adc_oneshot` is used specifically to avoid I²S bus contention — the audio
-driver occupies I²S0 in DAC mode, so the old I²S built-in-ADC approach is
-unavailable. `esp_timer_get_time()` busy-waits provide the precise 125 µs
-inter-sample spacing the FreeRTOS 1 ms tick cannot achieve.
+The **CMC-4015-25T** is a CUI Devices SMT electret capsule confirmed on PCB Rev 1.31 near the top edge of the board. The **LMV321IDBVR** op-amp (marked `RC1F` on the PCB, located adjacent to the mic) provides the preamp stage between capsule and ADC. Both are analog-only components — no I²S or PDM interface. The correct ADC input is **GPIO35 / ADC1_CH7** (input-only pin). GPIO36 / ADC1_CH0 (`SENSOR_VP`) is **not** connected to the microphone on this hardware revision.
+
+#### Sampling driver — `esp_timer` + `adc_oneshot`
+
+`adc_continuous` is unavailable on the original ESP32 (LX6): on this target the driver uses I²S0 in DMA mode — the same peripheral occupied by `dac_continuous` for audio output. They cannot coexist, producing an `i2s controller 0 has been occupied by dac_dma` abort at boot.
+
+A simple `esp_timer_get_time()` busy-wait at 125 µs intervals holds Core 1 at 100%, starving `IDLE1` and triggering the task watchdog within seconds.
+
+The firmware uses an **`esp_timer` periodic timer** (125 µs period, `ESP_TIMER_TASK` dispatch) that fires the sample callback in the `esp_timer` service task (priority 22). The callback calls `adc_oneshot_read()` — safe in task context — and stores each sample into a **ping-pong `int16_t` buffer**. After `FRAME_SIZE = 128` samples (16 ms) the write buffer is flipped and a binary semaphore wakes the analysis task. Core 1 is idle between frames; no watchdog involvement.
+
+| Parameter | Value |
+|---|---|
+| Sample rate | 8 000 Hz |
+| Frame size | 128 samples (16 ms per Goertzel frame) |
+| Bit depth | 12-bit, ADC_ATTEN_DB_12 |
+| Timer overhead | ~3–8 µs per 125 µs tick ≈ 4–6 % of core time |
+
+#### Frequency bands
+
+Six bands are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Bands are logarithmically spaced across the 300 Hz–4 kHz range (the Nyquist limit at 8 kHz sample rate), avoiding the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
+
+| Tube | Frequency | Responds to |
+|---|---|---|
+| 0 | **300 Hz** | Bass, low voice |
+| 1 | **500 Hz** | Mid-bass, speech body |
+| 2 | **850 Hz** | Lower midrange, vocal warmth |
+| 3 | **1400 Hz** | Midrange, voice clarity |
+| 4 | **2400 Hz** | Upper-mid, presence |
+| 5 | **4000 Hz** | Transients — claps, snaps, consonants |
+
+Ratio between adjacent bands ≈ 1.68× (approximately one musical minor third per step).
+
+#### Noise floor and peak-hold
+
+Because the LMV321 preamp amplifies broadband electrical noise alongside audio, a **two-phase adaptive noise floor estimator** runs per band:
+
+- **Phase 1 (first ~4 s, 250 frames):** fast convergence (α = 0.02, no signal guard) locks the per-band noise floor from zero.
+- **Phase 2 (steady state):** slow drift tracking (α = 0.002) only when the current bin is below 4× the estimated floor — prevents audio signals from biasing the floor upward.
+
+Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual gate tuning. A secondary **silence gate** (`mic_silence_gate` in config, runtime-tunable via the debug panel) blanks all bands if the frame RMS² falls below a threshold — useful for instant suppression rather than waiting for the DECAY envelope.
+
+Peak-hold: instant attack, exponential decay (`peak × 0.85` per frame ≈ 2 s fall from full scale at 5 Hz display rate).
 
 ### Original Firmware Analysis
 
@@ -389,7 +425,7 @@ The web UI provides:
 | **YouTube** | Live subscriber/follower count |
 | **Weather** | Two panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon. Either panel can be disabled (but not both). Temperatures rounded to whole degrees; leading zeros suppressed; minus sign position shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
-| **Spectrum** 🚧 | Microphone audio visualiser. Six Goertzel frequency bands (125 / 250 / 500 / 1000 / 2000 / 4000 Hz) drive both the LED accent lighting and the tube displays (bar-graph 0–9). Requires the onboard CMEJ-0413-42-SMT-TR microphone (GPIO36). Colour is configurable in **Display → Spectrum Colour**. |
+| **Spectrum** | Microphone audio visualiser. Six logarithmically-spaced Goertzel bands (300 / 500 / 850 / 1400 / 2400 / 4000 Hz) drive segmented bar-graph displays with a white peak-dot indicator. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. Colour is configurable in **Display → Spectrum Colour**. |
 | **Scoreboard** | Stub — displays zeros |
 
 ### Mode Rotation
