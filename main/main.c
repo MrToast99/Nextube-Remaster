@@ -47,6 +47,11 @@
 
 static const char *TAG = "main";
 
+/* Verify that the config's band count stays in sync with the mic driver.
+ * main.c includes both headers so this is the natural place for the check. */
+_Static_assert(CFG_MIC_BAND_COUNT == MIC_BAND_COUNT,
+               "CFG_MIC_BAND_COUNT in config_mgr.h must equal MIC_BAND_COUNT in microphone.h");
+
 /* ── WiFi-safe warm-boot ───────────────────────────────────────────────
  * After esptool flashes and hard-resets via the EN pin (ESP_RST_EXT) the
  * WiFi PHY is left in an unclean state and the soft-AP silently fails to
@@ -188,6 +193,11 @@ void app_main(void)
     if (cfg->mic_enabled) {
         mic_init();
         mic_task_start();
+        /* Restore a user-captured noise baseline so Phase 1 is skipped on boot.
+         * This eliminates the ~4 s bar-dance at startup and removes persistent
+         * interference (SPI harmonics, LED PWM) from the display immediately. */
+        if (cfg->mic_calibration_saved)
+            mic_apply_calibration(cfg->mic_noise_floor);
     }
 
     leds_init();

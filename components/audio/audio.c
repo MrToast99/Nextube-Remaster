@@ -521,7 +521,8 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
     } else if (strcmp(mode, "dc") == 0) {
         /* Constant DC — param_a = output level 0-255 */
         int level = param_a;
-        if (level < 0) level = 0; if (level > 255) level = 255;
+        if (level < 0)   level = 0;
+        if (level > 255) level = 255;
         memset(buf, (uint8_t)level, DAC_DMA_BUF_SIZE);
         size_t w;
         for (int i = 0; i < DAC_DESC_NUM; i++)

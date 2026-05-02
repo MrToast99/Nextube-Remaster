@@ -183,6 +183,12 @@ select option{background:var(--accent);color:var(--text)}
       <input type="color" id="f-spec-lcd-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
       <span style="color:var(--dim);font-size:.82rem">Bar colour for the LCD spectrum display</span>
     </div>
+    <div class="field" style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-top:.4rem">
+      <button onclick="micCalibrate()" style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem">📸 Capture Baseline</button>
+      <button onclick="micResetCal()"  style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem">↺ Reset to Auto</button>
+      <span id="mic-cal-msg" style="color:var(--dim);font-size:.82rem"></span>
+    </div>
+    <p style="color:var(--dim);font-size:.78rem;margin-top:.4rem">While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.</p>
   </div>
   <div class="card">
     <h2>Enabled Modes</h2>
@@ -585,6 +591,72 @@ select option{background:var(--accent);color:var(--text)}
         </p>
       </div>
 
+      <!-- ── DAC Output Test ──────────────────────────────────────── -->
+      <hr style="border:none;border-top:1px solid rgba(255,160,0,.25);margin:1rem 0">
+      <h3 style="color:#ffa000;font-size:.95rem;margin:.2rem 0 .5rem">DAC Output Test</h3>
+      <p style="font-size:.78rem;color:var(--dim);margin-bottom:.6rem">
+        Inject a known signal on GPIO25 to measure idle noise without a firmware rebuild.
+        Use with an oscilloscope or audio spectrum analyser on the amp output.
+        <strong>Normal ↩</strong> restores idle operation.
+      </p>
+      <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="dacTest('hiz')">Hi-Z</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="dacTest('silence')">Silence (128)</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="dacTestDc()">DC level ↓</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="dacTestTone()">Sine tone ↓</button>
+        <button class="btn btn-primary" style="padding:.3rem .7rem;font-size:.85rem;background:#ffa000;border-color:#ffa000" onclick="dacTest('normal')">Normal ↩</button>
+        <span id="dac-test-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
+      </div>
+      <div style="display:flex;gap:1.2rem;flex-wrap:wrap;margin-top:.5rem;align-items:center">
+        <label style="font-size:.85rem">DC level (0–255):
+          <input type="number" id="dac-dc-level" min="0" max="255" value="128" style="width:60px;margin-left:4px">
+        </label>
+        <label style="font-size:.85rem">Tone Hz (1–4000):
+          <input type="number" id="dac-tone-freq" min="1" max="4000" value="1000" style="width:70px;margin-left:4px">
+        </label>
+        <label style="font-size:.85rem">Amplitude (0–127):
+          <input type="number" id="dac-tone-amp" min="0" max="127" value="64" style="width:60px;margin-left:4px">
+        </label>
+      </div>
+      <p style="font-size:.75rem;color:var(--dim);margin:.4rem 0 0">
+        <strong>Hi-Z:</strong> GPIO25 = high-impedance input, DAC powered off — maximum isolation from rail noise.
+        <strong>Silence:</strong> constant 128 (mid-rail). <strong>DC:</strong> constant output level.
+        <strong>Tone:</strong> phase-continuous sine across all 8 DMA descriptors (512 ms ring).
+      </p>
+
+      <!-- ── Backlight PWM Test ────────────────────────────────────── -->
+      <hr style="border:none;border-top:1px solid rgba(255,160,0,.25);margin:1rem 0">
+      <h3 style="color:#ffa000;font-size:.95rem;margin:.2rem 0 .5rem">Backlight PWM Test</h3>
+      <p style="font-size:.78rem;color:var(--dim);margin-bottom:.6rem">
+        Change <code>LEDC_TIMER_0</code> frequency (GPIO19 backlight) at runtime to find
+        a setting that minimises DAC noise coupling through the shared 3.3 V rail.
+        Changes are immediate. <strong>Restore</strong> resets to 50 kHz.
+      </p>
+      <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:.85rem">Freq Hz:
+          <input type="number" id="pwm-freq" min="1" max="80000" value="50000" style="width:90px;margin-left:4px">
+        </label>
+        <label style="font-size:.85rem">Brightness %:
+          <input type="number" id="pwm-brt" min="0" max="100" value="80" style="width:60px;margin-left:4px">
+        </label>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="pwmApply()">Apply</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="pwmRestore()">Restore (50 kHz)</button>
+        <span id="pwm-test-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin:.4rem 0">
+        <span style="font-size:.8rem;color:var(--dim);align-self:center">Presets:</span>
+        <button class="btn btn-outline" style="padding:.2rem .5rem;font-size:.78rem" onclick="pwmPreset(1000)">1 kHz</button>
+        <button class="btn btn-outline" style="padding:.2rem .5rem;font-size:.78rem" onclick="pwmPreset(5000)">5 kHz</button>
+        <button class="btn btn-outline" style="padding:.2rem .5rem;font-size:.78rem" onclick="pwmPreset(10000)">10 kHz</button>
+        <button class="btn btn-outline" style="padding:.2rem .5rem;font-size:.78rem" onclick="pwmPreset(20000)">20 kHz</button>
+        <button class="btn btn-outline" style="padding:.2rem .5rem;font-size:.78rem" onclick="pwmPreset(50000)">50 kHz</button>
+        <button class="btn btn-outline" style="padding:.2rem .5rem;font-size:.78rem" onclick="pwmPreset(80000)">80 kHz</button>
+      </div>
+      <p style="font-size:.75rem;color:var(--dim);margin:.2rem 0 0">
+        Changes are immediate. Restore resets to 50 kHz; the display task re-applies the configured brightness within 200 ms.
+        Note: very low frequencies (&lt;1 kHz) will produce visible flicker.
+      </p>
+
       <div class="btn-group">
         <button class="btn btn-primary" style="background:#ffa000;border-color:#ffa000" onclick="dbgSave()">Save to Config</button>
         <button class="btn btn-outline" onclick="dbgHide()">Close Debug Panel</button>
@@ -931,6 +1003,28 @@ async function testAudio(fieldId) {
   toast(res?.status === 'ok' ? '▶ Playing…' : 'Playback failed', res?.status !== 'ok');
 }
 
+/* ── Mic noise baseline calibration ───────────────── */
+async function micCalibrate() {
+  const msg = $('mic-cal-msg');
+  msg.textContent = 'Capturing… (keep room quiet)';
+  try {
+    const r = await fetch('/api/mic/calibrate', { method: 'POST' });
+    if (r.ok) {
+      msg.textContent = '✓ Baseline saved — boots instantly from now on';
+    } else {
+      msg.textContent = '✗ ' + (await r.text());
+    }
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message;
+  }
+}
+
+async function micResetCal() {
+  const msg = $('mic-cal-msg');
+  const r = await fetch('/api/mic/reset_calibration', { method: 'POST' });
+  msg.textContent = r.ok ? '↺ Auto-calibration restarted (~4 s ramp on next boot)' : '✗ Reset failed';
+}
+
 /* ── OTA ───────────────────────────────────────────── */
 async function doOTA() {
   const file = $('ota-file').files[0];
@@ -1196,6 +1290,78 @@ async function dbgSave() {
   } else toast('Save failed', true);
 }
 
+/* ── DAC test ───────────────────────────────────────────────────────── */
+async function dacTest(mode) {
+  const msg = $('dac-test-msg');
+  msg.textContent = 'Sending…';
+  try {
+    const r = await fetch('/api/debug/dac', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mode })
+    });
+    msg.textContent = r.ok ? 'Active: ' + mode : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+async function dacTestDc() {
+  const level = parseInt($('dac-dc-level').value) || 128;
+  const msg = $('dac-test-msg');
+  msg.textContent = 'Sending…';
+  try {
+    const r = await fetch('/api/debug/dac', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mode: 'dc', level })
+    });
+    msg.textContent = r.ok ? 'Active: dc level=' + level : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+async function dacTestTone() {
+  const freq_hz   = parseInt($('dac-tone-freq').value) || 1000;
+  const amplitude = parseInt($('dac-tone-amp').value)  || 64;
+  const msg = $('dac-test-msg');
+  msg.textContent = 'Sending…';
+  try {
+    const r = await fetch('/api/debug/dac', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mode: 'tone', freq_hz, amplitude })
+    });
+    msg.textContent = r.ok
+      ? 'Active: tone ' + freq_hz + ' Hz  amp=' + amplitude
+      : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+
+/* ── PWM test ───────────────────────────────────────────────────────── */
+function pwmPreset(hz) {
+  $('pwm-freq').value = hz;
+  pwmApply();
+}
+async function pwmApply() {
+  const freq_hz        = parseInt($('pwm-freq').value) || 50000;
+  const brightness_pct = parseInt($('pwm-brt').value)  || 80;
+  const msg = $('pwm-test-msg');
+  msg.textContent = 'Sending…';
+  try {
+    const r = await fetch('/api/debug/pwm', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ freq_hz, brightness_pct })
+    });
+    msg.textContent = r.ok
+      ? freq_hz.toLocaleString() + ' Hz @ ' + brightness_pct + '%'
+      : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+async function pwmRestore() {
+  const msg = $('pwm-test-msg');
+  msg.textContent = 'Restoring…';
+  try {
+    const r = await fetch('/api/debug/pwm', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ restore: true })
+    });
+    msg.textContent = r.ok ? '50 kHz restored' : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+
 /* Auto-show when URL contains #debug */
 if (location.hash === '#debug') addEventListener('DOMContentLoaded', dbgShow);
 
@@ -1317,6 +1483,12 @@ async function refreshStatus() {
     $('ver-mismatch').style.display = 'block';
   } else {
     $('ver-mismatch').style.display = 'none';
+  }
+
+  /* Mic calibration status badge — show when a custom baseline is active */
+  const calMsg = $('mic-cal-msg');
+  if (calMsg && calMsg.textContent === '') {
+    calMsg.textContent = s.mic_calibration_saved ? '📸 Custom baseline active' : '';
   }
 
   /* Theme JPEG decode error banner */
