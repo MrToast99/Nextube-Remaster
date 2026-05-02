@@ -110,7 +110,7 @@ body::before{content:'';position:fixed;inset:0;
 
 /* Header */
 header{display:flex;align-items:center;gap:1rem;margin-bottom:2rem;padding-bottom:1.25rem;border-bottom:1px solid var(--border)}
-.logo{width:40px;height:40px;background:var(--accent);clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.6rem;color:#000;font-weight:bold;flex-shrink:0}
+.logo{width:40px;height:40px;background:var(--accent);clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);display:flex;align-items:center;justify-content:center;text-align:center;font-family:var(--mono);font-size:.6rem;color:#000;font-weight:bold;flex-shrink:0}
 h1{font-family:var(--mono);font-size:1.3rem;color:var(--accent);letter-spacing:2px;text-transform:uppercase}
 h1 span{color:var(--accent2)}
 .subtitle{font-size:.7rem;color:var(--dim);letter-spacing:1px;margin-top:.2rem}
@@ -240,7 +240,7 @@ input[type=number]:focus,select:focus{border-color:var(--accent)}
 <body>
 <div class="container">
   <header>
-    <div class="logo">ESP<br>32</div>
+    <div class="logo">Nextube<br>Remaster</div>
     <div>
       <h1>IMAGE <span>CONVERTER</span></h1>
       <div class="subtitle">// JPEG · PNG · INTERACTIVE CROP · BULK</div>
