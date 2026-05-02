@@ -86,6 +86,14 @@ static SemaphoreHandle_t   s_frame_sem = NULL;   /* binary; given by ISR each fr
 static float        s_bands[BAND_COUNT];
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* ── Per-band adaptive noise floor ──────────────────────────────────── */
+/* Long-term exponential average of each band's Goertzel energy.
+ * Subtracted before peak-hold so the display reads zero in silence even
+ * when the ADC / LMV321 preamp has a non-trivial electrical noise floor.
+ * Adapts to the quiet-period baseline within ~8 s of startup. */
+static float s_noise_floor[BAND_COUNT];   /* zero-initialised; adapts automatically */
+#define NOISE_ALPHA  0.002f               /* time constant ≈ 500 frames × 16 ms ≈ 8 s */
+
 /* Last raw ADC count (updated by ISR every sample) for the debug panel */
 static volatile int s_last_raw = -1;
 
@@ -156,6 +164,7 @@ static void mic_task(void *arg)
     float   dc   = 2048.0f;
     float   peak[BAND_COUNT];
     memset(peak, 0, sizeof(peak));
+    int     noise_cal = 0;    /* counts frames toward noise floor calibration */
 
     const float norm = (float)(FRAME_SIZE * FRAME_SIZE) / 4.0f;
 
@@ -216,11 +225,40 @@ static void mic_task(void *arg)
             continue;
         }
 
-        /* ── Goertzel energy + peak-hold ── */
+        /* ── Goertzel energy + adaptive noise floor subtraction ── */
+        /* Two-phase noise floor estimator:
+         *
+         *  Phase 1 — calibration (first 250 frames ≈ 4 s):
+         *    Fast alpha (0.02) with no signal guard.  Needed because the guard
+         *    condition "raw < floor×4" is always false when floor starts at 0 —
+         *    the floor would never adapt otherwise.  With α=0.02 the floor
+         *    reaches 99 % of the noise level within ~250 frames.
+         *
+         *  Phase 2 — steady state:
+         *    Slow alpha (NOISE_ALPHA = 0.002) only when the current bin is NOT
+         *    clearly in signal territory (raw < floor×4).  This lets the floor
+         *    track slow drift (temperature, supply) without chasing audio peaks.
+         *
+         *  In both phases, power[b] = raw − floor, clamped to ≥0.
+         *  Result: bars sit at zero in silence with no manual gate tuning. */
         float max_power = MIC_NOISE_FLOOR;
         float power[BAND_COUNT];
         for (int b = 0; b < BAND_COUNT; b++) {
-            power[b] = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]) / norm * MIC_GAIN;
+            float raw = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]) / norm * MIC_GAIN;
+            if (noise_cal < 250) {
+                /* Phase 1: fast unconstrained convergence */
+                s_noise_floor[b] += 0.02f * (raw - s_noise_floor[b]);
+            } else if (raw < s_noise_floor[b] * 4.0f) {
+                /* Phase 2: slow guarded tracking */
+                s_noise_floor[b] += NOISE_ALPHA * (raw - s_noise_floor[b]);
+            }
+            power[b] = raw - s_noise_floor[b];
+            if (power[b] < 0.0f) power[b] = 0.0f;
+        }
+        if (noise_cal < 250) noise_cal++;
+
+        /* ── Peak-hold ── */
+        for (int b = 0; b < BAND_COUNT; b++) {
             if (power[b] > peak[b])  peak[b]  = power[b];
             else                     peak[b] *= DECAY;
             if (peak[b] > max_power) max_power = peak[b];
