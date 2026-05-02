@@ -357,7 +357,7 @@ void mic_task_start(void)
     ESP_LOGI(TAG, "mic_task started (core 1)");
 }
 
-void mic_get_bands(float out[6])
+void mic_get_bands(float out[MIC_BAND_COUNT])
 {
     taskENTER_CRITICAL(&s_mux);
     memcpy(out, s_bands, BAND_COUNT * sizeof(float));
