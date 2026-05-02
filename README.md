@@ -42,10 +42,10 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Countdown / Pomodoro timer modes | ✅ Working |
 | Album/slideshow mode (sliding window — each tube shows a different image) | ✅ Working |
 | Date mode (date display, DD/MM/YY) | ✅ Working |
-| Spectrum mode (microphone audio visualiser — 6 Goertzel bands → LED + display) | ✅ Working |
+| Spectrum mode (microphone audio visualiser — 24 Goertzel bands, 4 per tube → LED + LCD) | ✅ Working |
 | Per-mode enable/disable toggles | ✅ Working |
 | Auto mode rotation with configurable interval | ✅ Working |
-| LittleFS file browser with upload/delete/mkdir | ✅ Working |
+| LittleFS file browser with upload/delete/mkdir/rename | ✅ Working |
 | Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
 
 ## Hardware
@@ -236,18 +236,18 @@ The firmware uses an **`esp_timer` periodic timer** (125 µs period, `ESP_TIMER_
 
 #### Frequency bands
 
-Six bands are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Bands are logarithmically spaced across the 300 Hz–4 kHz range (the Nyquist limit at 8 kHz sample rate), avoiding the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
+**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Bands are logarithmically spaced across 280 Hz–3800 Hz (safely below the 4 kHz Nyquist limit), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. This avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
 
-| Tube | Frequency | Responds to |
-|---|---|---|
-| 0 | **300 Hz** | Bass, low voice |
-| 1 | **500 Hz** | Mid-bass, speech body |
-| 2 | **850 Hz** | Lower midrange, vocal warmth |
-| 3 | **1400 Hz** | Midrange, voice clarity |
-| 4 | **2400 Hz** | Upper-mid, presence |
-| 5 | **4000 Hz** | Transients — claps, snaps, consonants |
+| Tube | Bar 0 | Bar 1 | Bar 2 | Bar 3 | Range |
+|---|---|---|---|---|---|
+| 0 | 280 Hz | 315 Hz | 350 Hz | 395 Hz | Low bass |
+| 1 | 440 Hz | 495 Hz | 555 Hz | 620 Hz | Upper bass |
+| 2 | 695 Hz | 780 Hz | 870 Hz | 975 Hz | Lower mid |
+| 3 | 1095 Hz | 1225 Hz | 1370 Hz | 1535 Hz | Midrange |
+| 4 | 1720 Hz | 1925 Hz | 2160 Hz | 2420 Hz | Presence |
+| 5 | 2710 Hz | 3030 Hz | 3395 Hz | 3800 Hz | Treble |
 
-Ratio between adjacent bands ≈ 1.68× (approximately one musical minor third per step).
+Ratio between adjacent bands ≈ 1.12× per step. The display reads left-to-right from bass (tube 0) to treble (tube 5).
 
 #### Noise floor and peak-hold
 
@@ -258,7 +258,7 @@ Because the LMV321 preamp amplifies broadband electrical noise alongside audio, 
 
 Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual gate tuning. A secondary **silence gate** (`mic_silence_gate` in config, runtime-tunable via the debug panel) blanks all bands if the frame RMS² falls below a threshold — useful for instant suppression rather than waiting for the DECAY envelope.
 
-Peak-hold: instant attack, exponential decay (`peak × 0.85` per frame ≈ 2 s fall from full scale at 5 Hz display rate).
+Peak-hold: instant attack, exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
 
 ### Original Firmware Analysis
 
@@ -412,7 +412,7 @@ The web UI provides:
 - **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
-- **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder), device log viewer, firmware update check (compares against latest GitHub release), factory reset, about (shows firmware + web UI versions independently)
+- **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (compares against latest GitHub release), factory reset, about (shows firmware + web UI versions independently)
 
 ## Modes
 
@@ -425,7 +425,7 @@ The web UI provides:
 | **YouTube** | Live subscriber/follower count |
 | **Weather** | Two panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon. Either panel can be disabled (but not both). Temperatures rounded to whole degrees; leading zeros suppressed; minus sign position shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
-| **Spectrum** | Microphone audio visualiser. Six logarithmically-spaced Goertzel bands (300 / 500 / 850 / 1400 / 2400 / 4000 Hz) drive segmented bar-graph displays with a white peak-dot indicator. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. Colour is configurable in **Display → Spectrum Colour**. |
+| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED ring colour** and **LCD bar colour** are independently configurable in **Display → Spectrum Mode**. |
 | **Scoreboard** | Stub — displays zeros |
 
 ### Mode Rotation
@@ -599,6 +599,7 @@ POST /api/update_fs         → OTA LittleFS upload (binary body, nextube-little
 POST /api/update_spiffs     → alias for /api/update_fs (backward-compatible)
 GET  /api/themes            → {"themes":["ThemeA","ThemeB",...]} — scanned from LittleFS at runtime
 GET  /api/file/ls?dir=/     → LittleFS directory listing
+POST /api/file/rename       → rename a file or folder (JSON: {"from":"/path","to":"/newpath"})
 POST /api/wifi/scan         → trigger WiFi scan
 GET  /api/wifi/scan         → scan results
 GET  /api/logs              → in-RAM device log (last 64 lines)
