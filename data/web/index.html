@@ -453,7 +453,7 @@ select option{background:var(--accent);color:var(--text)}
         <input type="checkbox" id="f-mic-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
         <label for="f-mic-en" style="margin:0;cursor:pointer;font-weight:normal">Enable microphone</label>
       </div>
-      <p style="color:var(--dim);font-size:.8rem;margin:.4rem 0 0 24px">Required for Spectrum mode. Disable if no microphone is fitted on GPIO36 (ADC1_CH0). When disabled the ADC is not initialised and Spectrum mode shows silence. Takes effect after reboot.</p>
+      <p style="color:var(--dim);font-size:.8rem;margin:.4rem 0 0 24px">Required for Spectrum mode. Disable if no microphone is fitted on GPIO35 (ADC1_CH7). When disabled the ADC is not initialised and Spectrum mode shows silence. Takes effect after reboot.</p>
     </div>
     <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Hardware Settings</button></div>
   </div>
@@ -529,14 +529,14 @@ select option{background:var(--accent);color:var(--text)}
       <div class="field">
         <label>Microphone ADC1 Channel</label>
         <select id="dbg-adc-ch" onchange="dbgChannelChange()">
-          <option value="0">CH0 — GPIO 36 (SENSOR_VP, schematic default)</option>
+          <option value="0">CH0 — GPIO 36 (SENSOR_VP, input-only)</option>
           <option value="1">CH1 — GPIO 37 (SENSOR_CAPP, input-only)</option>
           <option value="2">CH2 — GPIO 38 (SENSOR_CAPN, input-only)</option>
           <option value="3">CH3 — GPIO 39 (SENSOR_VN, input-only)</option>
           <option value="4">CH4 — GPIO 32</option>
           <option value="5">CH5 — GPIO 33</option>
           <option value="6">CH6 — GPIO 34 (input-only)</option>
-          <option value="7">CH7 — GPIO 35 (input-only)</option>
+          <option value="7">CH7 — GPIO 35 (confirmed mic, CMC-4015-25T via LMV321)</option>
         </select>
       </div>
 
