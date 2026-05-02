@@ -61,6 +61,23 @@ void display_path_system     (char *buf, size_t n, const char *cat,   const char
 void display_show_number(int tube, int digit,        const char *theme);
 void display_show_ampm  (int tube, const char *name, const char *theme);
 
+/* ── Debug helpers ─────────────────────────────────────────────────── */
+/**
+ * Override LEDC timer 0 / channel 0 (backlight GPIO) frequency and duty at
+ * runtime for hardware diagnostics.
+ *   freq_hz:    1–80 000 Hz
+ *   duty_pct:   0–100 (note active-LOW: 0 = fully off, 100 = full bright)
+ * Changes are immediate.  The display task's next render tick (≤200 ms) will
+ * re-write the duty register via display_set_brightness(), overriding any
+ * previous duty_pct — call display_debug_restore_pwm() to reset the frequency
+ * back to 50 kHz and let the task take over.
+ */
+void display_debug_set_pwm(uint32_t freq_hz, uint8_t duty_pct);
+
+/** Restore LEDC timer 0 to 50 kHz.  The display task corrects duty within
+ *  200 ms.  Safe to call from any task. */
+void display_debug_restore_pwm(void);
+
 /* ── Display task ──────────────────────────────────────────────────── */
 /** Launch the FreeRTOS display task (core 1, 5 Hz).  Re-renders
  *  whenever mode / time / weather / subscriber count changes.

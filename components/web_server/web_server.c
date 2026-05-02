@@ -275,6 +275,7 @@ static esp_err_t api_status(httpd_req_t *r)
     cJSON_AddStringToObject(root, "fs_version", fs_ver);
     const nextube_config_t *cfg = config_get();
     cJSON_AddStringToObject(root, "mode", app_mode_name(cfg->current_mode));
+    cJSON_AddBoolToObject(root, "mic_calibration_saved", cfg->mic_calibration_saved);
     char *json = cJSON_PrintUnformatted(root);
     esp_err_t ret = send_json(r, json);
     free(json); cJSON_Delete(root);
@@ -774,6 +775,63 @@ static esp_err_t api_file_delete(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* ── Mic calibration API ───────────────────────────────────────────── */
+
+/* POST /api/mic/calibrate
+ * Runs a MIC_CAL_FRAMES-frame baseline capture (~320 ms) and persists the
+ * captured noise floor to config.  Returns the 24 floor values as JSON so
+ * the UI can confirm receipt.
+ * The mic task must be running (mic_enabled = true).  The capture works from
+ * any mode — the mic task bypasses the Spectrum-mode gate when calibrating. */
+static esp_err_t api_mic_calibrate(httpd_req_t *r)
+{
+    float floor_vals[MIC_BAND_COUNT];
+    if (!mic_calibrate(floor_vals, 1500)) {
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Calibration timeout — ensure mic is enabled and try again"), ESP_FAIL;
+    }
+
+    /* Build a minimal JSON patch and persist it via config_set_json() so the
+     * baseline survives reboots without touching the rest of the config. */
+    cJSON *patch = cJSON_CreateObject();
+    cJSON *arr   = cJSON_AddArrayToObject(patch, "mic_noise_floor");
+    for (int i = 0; i < MIC_BAND_COUNT; i++)
+        cJSON_AddItemToArray(arr, cJSON_CreateNumber((double)floor_vals[i]));
+    cJSON_AddBoolToObject(patch, "mic_calibration_saved", true);
+    char *js = cJSON_PrintUnformatted(patch);
+    cJSON_Delete(patch);
+    if (js) { config_set_json(js, strlen(js)); free(js); }
+
+    /* Return the captured values so the browser can inspect them */
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "status", "ok");
+    cJSON *ra = cJSON_AddArrayToObject(resp, "floor");
+    for (int i = 0; i < MIC_BAND_COUNT; i++)
+        cJSON_AddItemToArray(ra, cJSON_CreateNumber((double)floor_vals[i]));
+    char *out = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(r, "application/json");
+    httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
+    esp_err_t ret = httpd_resp_sendstr(r, out ? out : "{\"status\":\"ok\"}");
+    free(out);
+    return ret;
+}
+
+/* POST /api/mic/reset_calibration
+ * Zeroes the noise floor and restarts Phase 1 auto-calibration (~4 s ramp).
+ * Clears the mic_calibration_saved flag so the baseline is not re-applied
+ * on the next boot. */
+static esp_err_t api_mic_reset_calibration(httpd_req_t *r)
+{
+    mic_reset_calibration();
+    cJSON *patch = cJSON_CreateObject();
+    cJSON_AddBoolToObject(patch, "mic_calibration_saved", false);
+    char *js = cJSON_PrintUnformatted(patch);
+    cJSON_Delete(patch);
+    if (js) { config_set_json(js, strlen(js)); free(js); }
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* ── Hardware debug API ────────────────────────────────────────────── */
 /* GET /api/debug/adc
  * Reads one raw 12-bit ADC sample from the currently configured mic channel.
@@ -803,6 +861,78 @@ static esp_err_t api_debug_adc(httpd_req_t *r)
 
     httpd_resp_set_type(r, "application/json");
     return httpd_resp_sendstr(r, buf);
+}
+
+/* POST /api/debug/dac
+ * Body: {"mode":"tone","freq_hz":1000,"amplitude":64}
+ *       {"mode":"dc","level":200}
+ *       {"mode":"silence"}  |  {"mode":"hiz"}  |  {"mode":"normal"}
+ *
+ * Injects a test signal on GPIO25 (DAC CH0) for hardware noise diagnostics.
+ * "normal" restores idle behaviour.  Any active audio playback is stopped. */
+static esp_err_t api_debug_dac(httpd_req_t *r)
+{
+    char body[256] = {0};
+    int  blen = (int)r->content_len;
+    if (blen <= 0 || blen >= (int)sizeof(body))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required (≤255 bytes)");
+    if (httpd_req_recv(r, body, (size_t)blen) != blen)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error");
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+
+    const cJSON *jmode = cJSON_GetObjectItem(root, "mode");
+    const char  *mode  = cJSON_IsString(jmode) ? jmode->valuestring : "normal";
+
+    int param_a = 0, param_b = 0;
+    const cJSON *jfreq = cJSON_GetObjectItem(root, "freq_hz");
+    const cJSON *jamp  = cJSON_GetObjectItem(root, "amplitude");
+    const cJSON *jlev  = cJSON_GetObjectItem(root, "level");
+    if (cJSON_IsNumber(jlev))  param_a = (int)jlev->valueint;   /* "dc" level   */
+    if (cJSON_IsNumber(jfreq)) param_a = (int)jfreq->valueint;  /* "tone" freq  */
+    if (cJSON_IsNumber(jamp))  param_b = (int)jamp->valueint;   /* "tone" amp   */
+    cJSON_Delete(root);
+
+    audio_dac_test_set(mode, param_a, param_b);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
+/* POST /api/debug/pwm
+ * Body: {"freq_hz":10000,"brightness_pct":80}  — apply custom freq + duty
+ *       {"restore":true}                        — restore 50 kHz (task corrects duty)
+ *
+ * Adjusts LEDC_TIMER_0 / LEDC_CHANNEL_0 (backlight GPIO) at runtime to
+ * find a PWM frequency that minimises coupling into the DAC output. */
+static esp_err_t api_debug_pwm(httpd_req_t *r)
+{
+    char body[256] = {0};
+    int  blen = (int)r->content_len;
+    if (blen <= 0 || blen >= (int)sizeof(body))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required (≤255 bytes)");
+    if (httpd_req_recv(r, body, (size_t)blen) != blen)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error");
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+
+    const cJSON *jrestore = cJSON_GetObjectItem(root, "restore");
+    if (cJSON_IsTrue(jrestore)) {
+        cJSON_Delete(root);
+        display_debug_restore_pwm();
+        return send_json(r, "{\"status\":\"ok\",\"action\":\"restored\"}");
+    }
+
+    const cJSON *jfreq = cJSON_GetObjectItem(root, "freq_hz");
+    const cJSON *jbrt  = cJSON_GetObjectItem(root, "brightness_pct");
+    uint32_t freq_hz  = cJSON_IsNumber(jfreq) ? (uint32_t)(int)jfreq->valueint : 50000;
+    uint8_t  duty_pct = cJSON_IsNumber(jbrt)  ? (uint8_t)(int)jbrt->valueint   : 50;
+    cJSON_Delete(root);
+
+    display_debug_set_pwm(freq_hz, duty_pct);
+    return send_json(r, "{\"status\":\"ok\"}");
 }
 
 /* ── Log ring API ──────────────────────────────────────────────────── */
@@ -941,6 +1071,10 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/logs",            api_get_logs),
     R(HTTP_POST, "/api/logs/clear",      api_clear_logs),
     R(HTTP_GET,  "/api/debug/adc",       api_debug_adc),
+    R(HTTP_POST, "/api/debug/dac",       api_debug_dac),
+    R(HTTP_POST, "/api/debug/pwm",       api_debug_pwm),
+    R(HTTP_POST, "/api/mic/calibrate",          api_mic_calibrate),
+    R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_OPTIONS, "/api/*",            api_cors),
 };
 
@@ -974,7 +1108,7 @@ void web_server_start(void)
     if (s_server) return;   /* already running */
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 27;
+    cfg.max_uri_handlers = 31;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.stack_size = 8192;
 

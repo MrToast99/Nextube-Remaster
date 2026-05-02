@@ -123,6 +123,31 @@ void display_set_brightness(uint8_t pct)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
+void display_debug_set_pwm(uint32_t freq_hz, uint8_t duty_pct)
+{
+    /* Clamp to safe LEDC range for 8-bit resolution.
+     * LEDC_AUTO_CLK (80 MHz APB) minimum at 8-bit = 80e6/255 ≈ 314 kHz → cap at 80 kHz. */
+    if (freq_hz < 1)      freq_hz = 1;
+    if (freq_hz > 80000)  freq_hz = 80000;
+    if (duty_pct > 100)   duty_pct = 100;
+
+    ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, freq_hz);
+    /* active-LOW: invert pct so 100 = full bright (duty=0), 0 = off (duty=255) */
+    uint32_t duty = ((uint32_t)(100 - duty_pct) * 255) / 100;
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    ESP_LOGI(TAG, "debug PWM: %lu Hz  duty_pct=%u  register=%lu",
+             (unsigned long)freq_hz, (unsigned)duty_pct, (unsigned long)duty);
+}
+
+void display_debug_restore_pwm(void)
+{
+    /* Restore timer frequency; the display task re-applies the correct duty
+     * on its next render tick (≤200 ms) via display_set_brightness(). */
+    ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, 50000);
+    ESP_LOGI(TAG, "debug PWM: restored to 50 kHz (duty restored by display task)");
+}
+
 void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;

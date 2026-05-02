@@ -114,6 +114,16 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static float s_noise_floor[BAND_COUNT];   /* zero-initialised; adapts automatically */
 #define NOISE_ALPHA  0.002f               /* time constant ≈ 500 frames × 16 ms ≈ 8 s */
 
+/* Phase 1 frame counter — promoted to file scope so mic_reset_calibration()
+ * and mic_apply_calibration() can manipulate it without touching mic_task. */
+static int s_noise_cal = 0;   /* counts frames 0→249 during Phase 1; 250 = steady state */
+
+/* ── Manual baseline calibration state ──────────────────────────────── */
+static volatile bool     s_cal_requested = false;  /* set by mic_calibrate() */
+static int               s_cal_frame_cnt = 0;      /* frames accumulated so far */
+static float             s_cal_accum[BAND_COUNT];  /* raw Goertzel accumulator   */
+static SemaphoreHandle_t s_cal_done      = NULL;   /* binary; given when done    */
+
 /* Last raw ADC count (updated by ISR every sample) for the debug panel */
 static volatile int s_last_raw = -1;
 
@@ -184,7 +194,6 @@ static void mic_task(void *arg)
     float   dc   = 2048.0f;
     float   peak[BAND_COUNT];
     memset(peak, 0, sizeof(peak));
-    int     noise_cal = 0;    /* counts frames toward noise floor calibration */
 
     const float norm = (float)(FRAME_SIZE * FRAME_SIZE) / 4.0f;
 
@@ -207,10 +216,13 @@ static void mic_task(void *arg)
             reconfigure_channel(want_ch);
         }
 
-        /* ── Gate: discard frame when mic disabled or not in Spectrum mode ── */
+        /* ── Gate: discard frame when mic disabled or not in Spectrum mode ──
+         * Exception: when s_cal_requested is set, bypass the mode gate so
+         * calibration works from any mode (the user does not have to switch
+         * to Spectrum first to capture a quiet-room baseline). */
         bool spectrum_en = (cfg->enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
-        if (!cfg->mic_enabled || !spectrum_en ||
-            cfg->current_mode != APP_MODE_SPECTRUM) {
+        if (!cfg->mic_enabled ||
+            ((!spectrum_en || cfg->current_mode != APP_MODE_SPECTRUM) && !s_cal_requested)) {
             taskENTER_CRITICAL(&s_mux);
             memset(s_bands, 0, sizeof(s_bands));
             taskEXIT_CRITICAL(&s_mux);
@@ -237,7 +249,9 @@ static void mic_task(void *arg)
         rms_sq /= (float)FRAME_SIZE;
 
         const float gate = cfg->mic_silence_gate;
-        if (gate > 0.0f && rms_sq < gate) {
+        /* Bypass silence gate during calibration — we need to capture the quiet
+         * noise floor, which by definition is below the silence threshold. */
+        if (gate > 0.0f && rms_sq < gate && !s_cal_requested) {
             for (int b = 0; b < BAND_COUNT; b++) peak[b] *= DECAY;
             taskENTER_CRITICAL(&s_mux);
             memset(s_bands, 0, sizeof(s_bands));
@@ -265,7 +279,11 @@ static void mic_task(void *arg)
         float power[BAND_COUNT];
         for (int b = 0; b < BAND_COUNT; b++) {
             float raw = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]) / norm * MIC_GAIN;
-            if (noise_cal < 250) {
+
+            /* Accumulate raw (pre-floor) energy for manual baseline capture */
+            if (s_cal_requested) s_cal_accum[b] += raw;
+
+            if (s_noise_cal < 250) {
                 /* Phase 1: fast unconstrained convergence */
                 s_noise_floor[b] += 0.02f * (raw - s_noise_floor[b]);
             } else if (raw < s_noise_floor[b] * 4.0f) {
@@ -275,7 +293,22 @@ static void mic_task(void *arg)
             power[b] = raw - s_noise_floor[b];
             if (power[b] < 0.0f) power[b] = 0.0f;
         }
-        if (noise_cal < 250) noise_cal++;
+        if (s_noise_cal < 250) s_noise_cal++;
+
+        /* ── Manual calibration completion ── */
+        if (s_cal_requested) {
+            s_cal_frame_cnt++;
+            if (s_cal_frame_cnt >= MIC_CAL_FRAMES) {
+                /* Average the accumulated raw energy into the noise floor */
+                taskENTER_CRITICAL(&s_mux);
+                for (int b = 0; b < BAND_COUNT; b++)
+                    s_noise_floor[b] = s_cal_accum[b] / (float)MIC_CAL_FRAMES;
+                s_noise_cal = 250;   /* skip Phase 1 — floor is now precisely set */
+                taskEXIT_CRITICAL(&s_mux);
+                s_cal_requested = false;
+                xSemaphoreGive(s_cal_done);
+            }
+        }
 
         /* ── Peak-hold ── */
         for (int b = 0; b < BAND_COUNT; b++) {
@@ -352,6 +385,11 @@ int mic_gpio_num(void)
 
 void mic_task_start(void)
 {
+    /* Create the calibration-done semaphore before starting the task so
+     * mic_calibrate() can safely block on it from another task. */
+    s_cal_done = xSemaphoreCreateBinary();
+    configASSERT(s_cal_done);
+
     /* Stack 4096: samples[512 B] + Goertzel locals + overhead */
     xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 5, NULL, 1);
     ESP_LOGI(TAG, "mic_task started (core 1)");
@@ -362,4 +400,53 @@ void mic_get_bands(float out[MIC_BAND_COUNT])
     taskENTER_CRITICAL(&s_mux);
     memcpy(out, s_bands, BAND_COUNT * sizeof(float));
     taskEXIT_CRITICAL(&s_mux);
+}
+
+bool mic_calibrate(float out[MIC_BAND_COUNT], uint32_t timeout_ms)
+{
+    if (!s_cal_done) {
+        ESP_LOGW(TAG, "mic_calibrate: mic not started");
+        return false;
+    }
+
+    /* Reset accumulators and request calibration atomically */
+    taskENTER_CRITICAL(&s_mux);
+    memset(s_cal_accum, 0, sizeof(s_cal_accum));
+    s_cal_frame_cnt = 0;
+    s_cal_requested = true;
+    taskEXIT_CRITICAL(&s_mux);
+
+    /* Block until mic_task signals completion (or timeout) */
+    if (xSemaphoreTake(s_cal_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        s_cal_requested = false;
+        ESP_LOGW(TAG, "mic_calibrate: timeout after %u ms", (unsigned)timeout_ms);
+        return false;
+    }
+
+    /* Copy the captured floor values if the caller wants them */
+    if (out) {
+        taskENTER_CRITICAL(&s_mux);
+        memcpy(out, s_noise_floor, BAND_COUNT * sizeof(float));
+        taskEXIT_CRITICAL(&s_mux);
+    }
+    ESP_LOGI(TAG, "mic_calibrate: baseline captured (%d frames)", MIC_CAL_FRAMES);
+    return true;
+}
+
+void mic_reset_calibration(void)
+{
+    taskENTER_CRITICAL(&s_mux);
+    memset(s_noise_floor, 0, sizeof(s_noise_floor));
+    s_noise_cal = 0;   /* restart Phase 1 (~4 s convergence) */
+    taskEXIT_CRITICAL(&s_mux);
+    ESP_LOGI(TAG, "mic_reset_calibration: noise floor cleared, Phase 1 restarted");
+}
+
+void mic_apply_calibration(const float floor[MIC_BAND_COUNT])
+{
+    taskENTER_CRITICAL(&s_mux);
+    memcpy(s_noise_floor, floor, BAND_COUNT * sizeof(float));
+    s_noise_cal = 250;   /* skip Phase 1 — saved floor is already accurate */
+    taskEXIT_CRITICAL(&s_mux);
+    ESP_LOGI(TAG, "mic_apply_calibration: saved baseline applied, Phase 1 skipped");
 }

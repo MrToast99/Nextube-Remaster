@@ -8,6 +8,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/** Number of frequency bands stored in the mic noise baseline.
+ *  Must equal MIC_BAND_COUNT in components/microphone/include/microphone.h.
+ *  Kept as a local constant to avoid a circular header dependency between
+ *  config_mgr and microphone (microphone already REQUIRES config_mgr).
+ *  A _Static_assert in main.c enforces that the two constants stay in sync. */
+#define CFG_MIC_BAND_COUNT  24
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -92,6 +99,12 @@ typedef struct {
     float            mic_silence_gate;   /* Frame RMS² silence threshold (0–4096²).
                                            Frames below this value publish all-zero bands.
                                            Runtime-tuneable via the debug panel. Default 250. */
+    float            mic_noise_floor[CFG_MIC_BAND_COUNT]; /* Saved per-band noise baseline
+                                           captured via "Capture Baseline" in the web UI.
+                                           Applied at boot when mic_calibration_saved is true,
+                                           skipping the ~4 s Phase 1 auto-calibration ramp. */
+    bool             mic_calibration_saved;            /* true = mic_noise_floor[] is valid
+                                           and should be applied on the next boot. */
 
     /* Countdown / Pomodoro */
     uint16_t         countdown_minutes;

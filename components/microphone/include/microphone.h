@@ -11,6 +11,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * Initialise the ADC1 unit and configure the channel from cfg->mic_adc_channel.
@@ -50,3 +51,29 @@ int mic_read_raw(void);
  * Useful for displaying the pin label in the debug UI.
  */
 int mic_gpio_num(void);
+
+/** Number of frames averaged during a manual baseline capture (~320 ms at 8 kHz/128-sample frames). */
+#define MIC_CAL_FRAMES 20
+
+/**
+ * Capture a noise baseline: averages MIC_CAL_FRAMES raw Goertzel frames and
+ * writes the result into the active noise floor.  Blocks the caller for up to
+ * timeout_ms milliseconds.  Returns true on success, false on timeout (mic
+ * task not running or not processing frames).
+ * out[MIC_BAND_COUNT] receives the captured floor values (may be NULL).
+ * Works from any mode — bypasses the Spectrum-mode gate automatically.
+ */
+bool mic_calibrate(float out[MIC_BAND_COUNT], uint32_t timeout_ms);
+
+/**
+ * Reset the noise floor to zero and restart the Phase 1 auto-calibration
+ * (~4 s ramp-up).  Thread-safe; call from any task.
+ */
+void mic_reset_calibration(void);
+
+/**
+ * Apply a previously-saved noise floor directly, skipping Phase 1 entirely.
+ * Call after mic_init() / mic_task_start() to restore a persisted baseline.
+ * Thread-safe.
+ */
+void mic_apply_calibration(const float floor[MIC_BAND_COUNT]);

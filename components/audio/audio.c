@@ -59,8 +59,10 @@ static TaskHandle_t      s_audio_task  = NULL;
 static SemaphoreHandle_t s_play_mutex  = NULL;
 
 /* DAC handle – running when audio is enabled, NULL when disabled / Hi-Z */
-static dac_continuous_handle_t s_dac_cont    = NULL;
-static volatile bool           s_audio_enabled = true;
+static dac_continuous_handle_t s_dac_cont      = NULL;
+static volatile bool           s_audio_enabled  = true;
+/* Set while a DAC test mode is active — blocks audio_play_file(). */
+static volatile bool           s_dac_test_active = false;
 
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
 #define FIXED_DAC_RATE     32000
@@ -395,7 +397,8 @@ void audio_set_enabled(bool enabled)
 
 void audio_play_file(const char *path)
 {
-    if (!s_audio_enabled) return;
+    if (!s_audio_enabled)  return;
+    if (s_dac_test_active) return;   /* a DAC test owns the output — skip playback */
     if (!path || path[0] == '\0') return;
 
     const char *ext = strrchr(path, '.');
@@ -435,4 +438,126 @@ void audio_stop(void)
     for (int i = 0; i < 30 && s_audio_task != NULL; i++) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+}
+
+/* ── DAC test API ────────────────────────────────────────────────────── */
+
+void audio_dac_test_set(const char *mode, int param_a, int param_b)
+{
+    if (!mode) return;
+
+    /* Stop any active playback so we have exclusive access to s_dac_cont. */
+    if (s_audio_task) {
+        s_stop_flag = true;
+        for (int i = 0; i < 50 && s_audio_task != NULL; i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+        s_stop_flag = false;
+    }
+
+    /* ── "normal" — restore idle operation ──────────────────────────── */
+    if (strcmp(mode, "normal") == 0) {
+        s_dac_test_active = false;
+        /* If DAC was torn down (Hi-Z test), bring it back up. */
+        if (s_audio_enabled && !s_dac_cont)
+            dac_restart();
+        /* Refill ring with silence so the DMA idles at mid-rail. */
+        if (s_dac_cont) {
+            uint8_t sil[DAC_DMA_BUF_SIZE];
+            memset(sil, 128, sizeof(sil));
+            size_t w;
+            for (int i = 0; i < DAC_DESC_NUM; i++)
+                dac_continuous_write(s_dac_cont, sil, sizeof(sil), &w, pdMS_TO_TICKS(500));
+        }
+        ESP_LOGI(TAG, "DAC test: restored to normal idle");
+        return;
+    }
+
+    /* ── "hiz" — power the DAC fully off ────────────────────────────── */
+    if (strcmp(mode, "hiz") == 0) {
+        if (s_dac_cont) {
+            dac_continuous_disable(s_dac_cont);
+            dac_continuous_del_channels(s_dac_cont);
+            s_dac_cont = NULL;
+        }
+        gpio_reset_pin(PIN_AUDIO_DAC);
+        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
+        s_dac_test_active = true;
+        ESP_LOGI(TAG, "DAC test: Hi-Z (GPIO%d = input)", PIN_AUDIO_DAC);
+        return;
+    }
+
+    /* ── "silence" / "dc" / "tone" — DMA ring test patterns ─────────
+     * Ensure the DAC is running before we write to it.  If we were in
+     * Hi-Z mode s_dac_cont == NULL; start the DAC without a boot fade
+     * so the transition is fast for a debug tool. */
+    if (!s_dac_cont) {
+        dac_continuous_config_t dcfg = {
+            .chan_mask = DAC_CHANNEL_MASK_CH0,
+            .desc_num  = DAC_DESC_NUM,
+            .buf_size  = DAC_DMA_BUF_SIZE,
+            .freq_hz   = FIXED_DAC_RATE,
+            .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
+            .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
+        };
+        if (dac_continuous_new_channels(&dcfg, &s_dac_cont) != ESP_OK ||
+            dac_continuous_enable(s_dac_cont) != ESP_OK) {
+            ESP_LOGE(TAG, "DAC test: failed to start DAC for test mode '%s'", mode);
+            if (s_dac_cont) { dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL; }
+            return;
+        }
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(DAC_DMA_BUF_SIZE);
+    if (!buf) { ESP_LOGE(TAG, "DAC test: OOM"); return; }
+
+    if (strcmp(mode, "silence") == 0) {
+        /* Constant 128 — mid-rail, amplifier bias point */
+        memset(buf, 128, DAC_DMA_BUF_SIZE);
+        size_t w;
+        for (int i = 0; i < DAC_DESC_NUM; i++)
+            dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE, &w, pdMS_TO_TICKS(500));
+        ESP_LOGI(TAG, "DAC test: silence (constant 128)");
+
+    } else if (strcmp(mode, "dc") == 0) {
+        /* Constant DC — param_a = output level 0-255 */
+        int level = param_a;
+        if (level < 0) level = 0; if (level > 255) level = 255;
+        memset(buf, (uint8_t)level, DAC_DMA_BUF_SIZE);
+        size_t w;
+        for (int i = 0; i < DAC_DESC_NUM; i++)
+            dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE, &w, pdMS_TO_TICKS(500));
+        ESP_LOGI(TAG, "DAC test: DC level=%d", level);
+
+    } else if (strcmp(mode, "tone") == 0) {
+        /* Sine tone — param_a = freq Hz (1-4000), param_b = amplitude (0-127).
+         * Write phase-continuous data across all DMA descriptors so the ring
+         * plays a smooth sine (one small click per 512 ms at the ring wrap
+         * if the period doesn't divide 16384 evenly — acceptable for debug). */
+        int freq = (param_a > 0 && param_a <= 4000) ? param_a : 1000;
+        int amp  = (param_b >= 0 && param_b <= 127) ? param_b : 64;
+        size_t w;
+        for (int d = 0; d < DAC_DESC_NUM; d++) {
+            int base = d * DAC_DMA_BUF_SIZE;
+            for (int i = 0; i < DAC_DMA_BUF_SIZE; i++) {
+                float phase = 2.0f * (float)M_PI * (float)freq
+                              * (float)(base + i) / (float)FIXED_DAC_RATE;
+                buf[i] = (uint8_t)(128 + (int)(sinf(phase) * (float)amp));
+            }
+            dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE, &w, pdMS_TO_TICKS(500));
+        }
+        ESP_LOGI(TAG, "DAC test: tone %d Hz amplitude=%d", freq, amp);
+
+    } else {
+        free(buf);
+        ESP_LOGW(TAG, "DAC test: unknown mode '%s'", mode);
+        return;
+    }
+
+    free(buf);
+    s_dac_test_active = true;
+}
+
+void audio_dac_test_stop(void)
+{
+    audio_dac_test_set("normal", 0, 0);
 }
