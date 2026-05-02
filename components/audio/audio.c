@@ -500,47 +500,44 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         s_stop_flag = false;
     }
 
-    /* Tear down whatever driver is currently active before switching mode. */
-    dac_test_teardown();
-
-    /* ── "normal" — restore idle silence ────────────────────────────── */
+    /* ── "normal" — restore idle operation ──────────────────────────────
+     * IMPORTANT: dac_test_teardown() is NOT called here unconditionally.
+     * Calling it when no test is active would destroy the working idle DMA
+     * channel, leaving s_dac_cont = NULL so subsequent audio_play_file()
+     * calls write to a null handle.
+     * Only tear down if a test is actually running (s_dac_test_active). */
     if (strcmp(mode, "normal") == 0) {
+        if (!s_dac_test_active) {
+            /* Already in normal idle — nothing to do. */
+            ESP_LOGI(TAG, "DAC test: already in normal idle, no-op");
+            return;
+        }
+        /* Tear down whichever test driver is active (oneshot or continuous). */
+        dac_test_teardown();
         s_dac_test_active = false;
+
         if (s_audio_enabled) {
-            /* Restart the continuous DMA with silence — same as boot path
-             * but without the 500 ms boot fade (fast restore for debug). */
-            dac_continuous_config_t dcfg = {
-                .chan_mask = DAC_CHANNEL_MASK_CH0,
-                .desc_num  = DAC_DESC_NUM,
-                .buf_size  = DAC_DMA_BUF_SIZE,
-                .freq_hz   = FIXED_DAC_RATE,
-                .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
-                .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
-            };
-            if (dac_continuous_new_channels(&dcfg, &s_dac_cont) == ESP_OK &&
-                dac_continuous_enable(s_dac_cont) == ESP_OK) {
-                uint8_t sil[DAC_DMA_BUF_SIZE];
-                memset(sil, 128, sizeof(sil));
-                size_t w;
-                for (int i = 0; i < DAC_DESC_NUM; i++)
-                    dac_continuous_write(s_dac_cont, sil, sizeof(sil), &w, portMAX_DELAY);
-                ESP_LOGI(TAG, "DAC test: restored to silence idle");
-            } else {
-                ESP_LOGE(TAG, "DAC test: restore failed — DAC hardware busy?");
-                if (s_dac_cont) { dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL; }
-            }
+            /* dac_restart() is the proven boot path: new_channels + enable +
+             * anti-pop fade + silence pre-fill.  Reuse it here so the restore
+             * goes through exactly the same initialisation as app_main(). */
+            dac_restart();
+            ESP_LOGI(TAG, "DAC test: normal idle restored via dac_restart()");
         } else {
-            /* Audio globally disabled — leave GPIO25 as Hi-Z input. */
+            /* Audio disabled in config — leave GPIO25 as Hi-Z input. */
             gpio_reset_pin(PIN_AUDIO_DAC);
             gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
-            ESP_LOGI(TAG, "DAC test: restored to Hi-Z (audio disabled in config)");
+            ESP_LOGI(TAG, "DAC test: restored to Hi-Z (audio_enabled=false)");
         }
         return;
     }
 
-    /* ── "hiz" — power the DAC fully off ────────────────────────────── */
+    /* ── All other test modes ────────────────────────────────────────────
+     * Tear down any currently active driver (idle DMA, previous test) so
+     * each mode starts from a clean slate. */
+    dac_test_teardown();
+
+    /* ── "hiz" — full DAC power-off ─────────────────────────────────── */
     if (strcmp(mode, "hiz") == 0) {
-        /* dac_test_teardown() already stopped both drivers above */
         gpio_reset_pin(PIN_AUDIO_DAC);
         gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
         s_dac_test_active = true;
@@ -571,8 +568,8 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         int freq = (param_a > 0 && param_a <= 4000) ? param_a : 1000;
         int amp  = (param_b >= 0 && param_b <= 127) ? param_b : 64;
 
-        /* Start a fresh continuous channel.  The ring starts empty so
-         * dac_continuous_write does not block waiting for DMA slots. */
+        /* Start a fresh continuous channel — ring starts empty so writes
+         * complete immediately (no blocking waiting for DMA slots). */
         dac_continuous_config_t dcfg = {
             .chan_mask = DAC_CHANNEL_MASK_CH0,
             .desc_num  = DAC_DESC_NUM,
@@ -583,7 +580,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         };
         if (dac_continuous_new_channels(&dcfg, &s_dac_cont) != ESP_OK ||
             dac_continuous_enable(s_dac_cont) != ESP_OK) {
-            ESP_LOGE(TAG, "DAC test: tone — failed to start DMA channel");
+            ESP_LOGE(TAG, "DAC test: tone — DMA channel init failed");
             if (s_dac_cont) { dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL; }
             return;
         }
@@ -591,8 +588,6 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         uint8_t *buf = (uint8_t *)malloc(DAC_DMA_BUF_SIZE);
         if (!buf) { ESP_LOGE(TAG, "DAC test: tone OOM"); return; }
 
-        /* Write phase-continuous sine across all descriptors.
-         * Fresh ring → no blocking.  DMA loops the filled ring. */
         size_t w;
         for (int d = 0; d < DAC_DESC_NUM; d++) {
             int base = d * DAC_DMA_BUF_SIZE;
