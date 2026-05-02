@@ -189,6 +189,7 @@ select option{background:var(--accent);color:var(--text)}
       <span id="mic-cal-msg" style="color:var(--dim);font-size:.82rem"></span>
     </div>
     <p style="color:var(--dim);font-size:.78rem;margin-top:.4rem">While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.</p>
+    <p style="color:#ffa000;font-size:.78rem;margin-top:.3rem">⚠️ <strong>Switch away from Spectrum mode before capturing.</strong> In Spectrum mode the mic is continuously processing live audio — this interferes with baseline capture and will cause a timeout error. Switch to Clock or any other mode first, then capture.</p>
   </div>
   <div class="card">
     <h2>Enabled Modes</h2>
@@ -620,8 +621,8 @@ select option{background:var(--accent);color:var(--text)}
       </div>
       <p style="font-size:.75rem;color:var(--dim);margin:.4rem 0 0">
         <strong>Hi-Z:</strong> GPIO25 = high-impedance input, DAC powered off — maximum isolation from rail noise.
-        <strong>Silence:</strong> constant 128 (mid-rail). <strong>DC:</strong> constant output level.
-        <strong>Tone:</strong> phase-continuous sine across all 8 DMA descriptors (512 ms ring).
+        <strong>Silence / DC:</strong> direct register write (no DMA) — level appears on the output immediately.
+        <strong>Tone:</strong> fresh DMA ring filled with phase-continuous sine — loops until Normal is pressed.
       </p>
 
       <!-- ── Backlight PWM Test ────────────────────────────────────── -->
