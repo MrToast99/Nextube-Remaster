@@ -621,9 +621,9 @@ select option{background:var(--accent);color:var(--text)}
       </div>
       <p style="font-size:.75rem;color:var(--dim);margin:.4rem 0 0">
         <strong>Hi-Z:</strong> GPIO25 = high-impedance input, DAC powered off — maximum isolation from rail noise.
-        <strong>Silence / DC:</strong> direct register write via dac_oneshot (no DMA) — level appears immediately.
+        <strong>Silence / DC:</strong> fresh DMA ring pre-filled with a constant level — same approach as Tone, no driver switching.
         <strong>Tone:</strong> fresh DMA ring pre-filled with phase-continuous sine — loops until Normal is pressed.
-        <strong>Normal ↩:</strong> tears down the test driver, waits 50 ms for I2S hardware to settle, then restores idle silence.
+        <strong>Normal ↩:</strong> tears down the test channel, then restores idle silence (retries up to 300 ms for I2S hardware to settle).
       </p>
 
       <!-- ── Backlight PWM Test ────────────────────────────────────── -->
