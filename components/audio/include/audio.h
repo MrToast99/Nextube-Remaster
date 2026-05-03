@@ -6,7 +6,7 @@ extern "C" {
 void audio_init(void);
 void audio_play_file(const char *path);
 void audio_set_volume(int vol);
-void audio_set_enabled(bool enabled);   /* false = DAC off (Hi-Z), zero noise floor */
+void audio_set_enabled(bool enabled);   /* false = DAC off, GPIO25 driven 0 V (clamped, low static) */
 void audio_stop(void);
 
 /**

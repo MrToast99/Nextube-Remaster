@@ -14,12 +14,15 @@
  * immediately.  A mutex serialises concurrent play requests.
  *
  * DAC mode lifecycle:
- *   idle    – GPIO25 configured as Hi-Z input (GPIO_MODE_INPUT).
+ *   idle    – GPIO25 driven LOW (GPIO_MODE_OUTPUT, 0 V).
  *             The DAC analog output buffer is completely powered down.
- *             WS2812 current spikes on the shared 3.3 V rail have no
- *             coupling path into the amp — only thermal noise remains.
- *             The amp's internal bias resistors hold its input at VDD/2
- *             through the AC cap; V_cap = 0.
+ *             The 0 V output clamps the amp's AC-coupled input at a stable,
+ *             low-impedance reference (~50 Ω GPIO source resistance), so
+ *             WS2812/SPI rail switching cannot couple into the input node.
+ *             The AC coupling cap charges to V_cap = +1.65 V (VDD/2) within
+ *             a few RC time constants; thereafter the amp sees 0 V AC → near
+ *             silence.  Hi-Z was tried but leaves the input floating, which
+ *             allows rail noise to couple in and be amplified as audible hiss.
  *
  *   playing – leds_set_audio_active(true) pauses WS2812 RMT first.
  *             A 15 ms oneshot-at-128 pre-charges the AC cap to V_cap = 0
@@ -399,9 +402,16 @@ void audio_set_enabled(bool enabled)
             dac_continuous_del_channels(s_dac_cont);
             s_dac_cont = NULL;
         }
+        /* Drive GPIO25 LOW rather than Hi-Z.
+         * With Hi-Z, the amp's AC-coupled input floats and the bias network
+         * slowly charges the cap; in the meantime WS2812/SPI rail switching
+         * couples into the high-impedance node and gets amplified as static.
+         * Driving 0 V (GPIO output, ~50 Ω source) clamps the amp input to a
+         * stable reference — rail noise cannot couple in → near silence. */
         gpio_reset_pin(PIN_AUDIO_DAC);
-        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
-        ESP_LOGI(TAG, "Audio disabled – DAC Hi-Z");
+        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+        gpio_set_level(PIN_AUDIO_DAC, 0);
+        ESP_LOGI(TAG, "Audio disabled – GPIO25 = 0 V (amp input clamped)");
     } else {
         /* Re-start the DAC with boot fade so the re-enable is pop-free. */
         dac_restart();
@@ -516,8 +526,9 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             ESP_LOGI(TAG, "DAC test: normal idle restored");
         } else {
             gpio_reset_pin(PIN_AUDIO_DAC);
-            gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
-            ESP_LOGI(TAG, "DAC test: restored to Hi-Z (audio_enabled=false)");
+            gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+            gpio_set_level(PIN_AUDIO_DAC, 0);
+            ESP_LOGI(TAG, "DAC test: restored to 0 V (audio_enabled=false)");
         }
         return;
     }
