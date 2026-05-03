@@ -884,7 +884,10 @@ static esp_err_t api_debug_dac(httpd_req_t *r)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON");
 
     const cJSON *jmode = cJSON_GetObjectItem(root, "mode");
-    const char  *mode  = cJSON_IsString(jmode) ? jmode->valuestring : "normal";
+    /* Copy mode string NOW — cJSON_Delete(root) below frees jmode->valuestring */
+    char mode_buf[32] = "normal";
+    if (cJSON_IsString(jmode))
+        snprintf(mode_buf, sizeof(mode_buf), "%s", jmode->valuestring);
 
     int param_a = 0, param_b = 0;
     const cJSON *jfreq = cJSON_GetObjectItem(root, "freq_hz");
@@ -895,7 +898,7 @@ static esp_err_t api_debug_dac(httpd_req_t *r)
     if (cJSON_IsNumber(jamp))  param_b = (int)jamp->valueint;   /* "tone" amp   */
     cJSON_Delete(root);
 
-    audio_dac_test_set(mode, param_a, param_b);
+    audio_dac_test_set(mode_buf, param_a, param_b);
     return send_json(r, "{\"status\":\"ok\"}");
 }
 

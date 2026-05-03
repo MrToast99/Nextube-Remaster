@@ -38,7 +38,6 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
-#include "driver/dac_oneshot.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -61,11 +60,6 @@ static SemaphoreHandle_t s_play_mutex  = NULL;
 
 /* DAC handle – running when audio is enabled, NULL when disabled / Hi-Z */
 static dac_continuous_handle_t s_dac_cont        = NULL;
-/* Oneshot handle – used only during "silence" / "dc" test modes.
- * dac_oneshot writes directly to the DAC voltage register (no DMA),
- * which is the only reliable way to set a static level at idle.
- * Cannot coexist with dac_continuous on the same channel. */
-static dac_oneshot_handle_t    s_dac_oneshot     = NULL;
 static volatile bool           s_audio_enabled   = true;
 /* Set while a DAC test mode is active — blocks audio_play_file(). */
 static volatile bool           s_dac_test_active = false;
@@ -114,8 +108,22 @@ static void dac_restart(void)
         .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
         .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
     };
-    if (dac_continuous_new_channels(&cfg, &s_dac_cont) != ESP_OK) {
-        ESP_LOGE(TAG, "dac_restart: new_channels failed");
+    /* Retry up to 3 times with 100 ms gaps.
+     * The I2S0 DMA controller can take >50 ms to fully release its internal
+     * state after dac_continuous_del_channels(); without a gap,
+     * new_channels() may return an error (I2S0 still occupied). */
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 3 && err != ESP_OK; attempt++) {
+        if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(100));
+        err = dac_continuous_new_channels(&cfg, &s_dac_cont);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "dac_restart: attempt %d failed: %s",
+                     attempt + 1, esp_err_to_name(err));
+            s_dac_cont = NULL;
+        }
+    }
+    if (!s_dac_cont) {
+        ESP_LOGE(TAG, "dac_restart: all attempts failed — audio silenced");
         return;
     }
     if (dac_continuous_enable(s_dac_cont) != ESP_OK) {
@@ -386,10 +394,6 @@ void audio_set_enabled(bool enabled)
 
         /* Cancel any active DAC test and tear down all DAC drivers → Hi-Z */
         s_dac_test_active = false;
-        if (s_dac_oneshot) {
-            dac_oneshot_del_channel(s_dac_oneshot);
-            s_dac_oneshot = NULL;
-        }
         if (s_dac_cont) {
             dac_continuous_disable(s_dac_cont);
             dac_continuous_del_channels(s_dac_cont);
@@ -458,34 +462,27 @@ void audio_stop(void)
  * "hiz"     : tear down dac_continuous → GPIO25 = Hi-Z input.
  *             The DAC output buffer is completely powered down.
  *
- * "silence" / "dc" : use dac_oneshot (direct DAC voltage register, no DMA).
- *   dac_continuous is a *streaming* driver; its idle ring loops silence and
- *   the DMA does NOT signal descriptor-done events back to the write caller
- *   while idling.  dac_continuous_write(portMAX_DELAY) on an idle ring
- *   therefore BLOCKS FOREVER, hanging the web-server task.
- *   dac_oneshot bypasses DMA entirely and sets the register immediately.
+ * "silence" / "dc" : fresh dac_continuous ring pre-filled with a constant
+ *   level (same approach as "tone").  dac_oneshot was previously used here
+ *   but the dac_oneshot → dac_continuous transition is unreliable on the
+ *   original ESP32: del_channel() leaves the RTC/DAC hardware in a state
+ *   that blocks dac_continuous_new_channels() even with a 50 ms delay.
+ *   A fresh empty ring has all descriptors immediately available, so
+ *   filling with a constant level completes without blocking.
  *
  * "tone"    : fresh dac_continuous ring (empty at start).
  *   An empty ring makes all descriptors immediately available, so writes
  *   complete without blocking.  Phase-continuous sine fills all descriptors
  *   and the DMA loops them.
  *
- * "normal"  : tear down whichever test driver is active, then call
- *   dac_restart() to restore the idle silence channel.
- *   CRITICAL: a 50 ms vTaskDelay is required between the teardown and
- *   dac_restart().  The I2S0 DMA controller needs ~50 ms to fully release
- *   its internal state after dac_continuous_del_channels() or
- *   dac_oneshot_del_channel(); without the gap, dac_continuous_new_channels()
- *   inside dac_restart() silently fails, leaving s_dac_cont = NULL.
+ * "normal"  : tear down the test dac_continuous channel, then call
+ *   dac_restart() to restore the idle silence channel.  dac_restart()
+ *   retries up to 3 × 100 ms to handle I2S0 settling.
  */
 
-/* Helper: tear down whichever test driver is currently active. */
+/* Helper: tear down the active test dac_continuous channel. */
 static void dac_test_teardown(void)
 {
-    if (s_dac_oneshot) {
-        dac_oneshot_del_channel(s_dac_oneshot);
-        s_dac_oneshot = NULL;
-    }
     if (s_dac_cont) {
         dac_continuous_disable(s_dac_cont);
         dac_continuous_del_channels(s_dac_cont);
@@ -515,10 +512,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         s_dac_test_active = false;
 
         if (s_audio_enabled) {
-            /* 50 ms settling time: the I2S0 controller must fully release
-             * before dac_continuous_new_channels() can reclaim it. */
-            vTaskDelay(pdMS_TO_TICKS(50));
-            dac_restart();
+            dac_restart();   /* retry loop in dac_restart() handles I2S0 settling */
             ESP_LOGI(TAG, "DAC test: normal idle restored");
         } else {
             gpio_reset_pin(PIN_AUDIO_DAC);
@@ -540,21 +534,39 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         return;
     }
 
-    /* ── "silence" / "dc" — direct register via dac_oneshot ─────────── */
+    /* ── "silence" / "dc" — fresh DMA ring pre-filled with a constant level */
     if (strcmp(mode, "silence") == 0 || strcmp(mode, "dc") == 0) {
         int level = (strcmp(mode, "dc") == 0) ? param_a : 128;
         if (level < 0)   level = 0;
         if (level > 255) level = 255;
 
-        dac_oneshot_config_t ocfg = { .chan_id = DAC_CHAN_0 };
-        if (dac_oneshot_new_channel(&ocfg, &s_dac_oneshot) == ESP_OK) {
-            dac_oneshot_output_voltage(s_dac_oneshot, (uint8_t)level);
-            s_dac_test_active = true;
-            ESP_LOGI(TAG, "DAC test: %s level=%d (~%.0fmV)",
-                     mode, level, level * 3300.0f / 255.0f);
-        } else {
-            ESP_LOGE(TAG, "DAC test: dac_oneshot_new_channel failed");
+        /* Use a fresh dac_continuous channel (same pattern as "tone").
+         * A fresh empty ring has all 8 descriptors immediately available so
+         * filling with a constant level completes without blocking. */
+        dac_continuous_config_t dcfg = {
+            .chan_mask = DAC_CHANNEL_MASK_CH0,
+            .desc_num  = DAC_DESC_NUM,
+            .buf_size  = DAC_DMA_BUF_SIZE,
+            .freq_hz   = FIXED_DAC_RATE,
+            .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
+            .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
+        };
+        if (dac_continuous_new_channels(&dcfg, &s_dac_cont) != ESP_OK ||
+            dac_continuous_enable(s_dac_cont) != ESP_OK) {
+            ESP_LOGE(TAG, "DAC test: %s — DMA init failed", mode);
+            if (s_dac_cont) { dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL; }
+            return;
         }
+        uint8_t *buf = (uint8_t *)malloc(DAC_DMA_BUF_SIZE);
+        if (!buf) { ESP_LOGE(TAG, "DAC test: OOM"); return; }
+        memset(buf, (uint8_t)level, DAC_DMA_BUF_SIZE);
+        size_t w;
+        for (int i = 0; i < DAC_DESC_NUM; i++)
+            dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE, &w, portMAX_DELAY);
+        free(buf);
+        s_dac_test_active = true;
+        ESP_LOGI(TAG, "DAC test: %s level=%d (~%.0fmV)",
+                 mode, level, level * 3300.0f / 255.0f);
         return;
     }
 
