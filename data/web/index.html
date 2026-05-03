@@ -621,8 +621,9 @@ select option{background:var(--accent);color:var(--text)}
       </div>
       <p style="font-size:.75rem;color:var(--dim);margin:.4rem 0 0">
         <strong>Hi-Z:</strong> GPIO25 = high-impedance input, DAC powered off — maximum isolation from rail noise.
-        <strong>Silence / DC / Tone:</strong> fills all DMA descriptors with the test signal (~512 ms to settle); the existing DMA channel stays alive so <em>Normal ↩</em> reliably restores audio.
-        <strong>Normal ↩:</strong> after Silence/DC/Tone — refills ring with silence, no driver restart; after Hi-Z — calls dac_restart().
+        <strong>Silence / DC:</strong> direct register write via dac_oneshot (no DMA) — level appears immediately.
+        <strong>Tone:</strong> fresh DMA ring pre-filled with phase-continuous sine — loops until Normal is pressed.
+        <strong>Normal ↩:</strong> tears down the test driver, waits 50 ms for I2S hardware to settle, then restores idle silence.
       </p>
 
       <!-- ── Backlight PWM Test ────────────────────────────────────── -->
