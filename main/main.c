@@ -67,26 +67,40 @@ RTC_DATA_ATTR static uint32_t s_warm_boot;
 /* ── Touch handler ─────────────────────────────────────────────────── */
 static void on_touch(touch_pad_id_t pad)
 {
+    app_mode_t  current_mode;
+    uint16_t    enabled_modes;
+    bool        backlight_on;
+    bool        button_sound;
+    char        click_file[64];
+
+    config_lock();
     const nextube_config_t *cfg = config_get();
+    current_mode  = cfg->current_mode;
+    enabled_modes = cfg->enabled_modes;
+    backlight_on  = cfg->backlight_on;
+    button_sound  = cfg->button_sound;
+    strncpy(click_file, cfg->click_file, sizeof(click_file) - 1);
+    click_file[sizeof(click_file) - 1] = '\0';
+    config_unlock();
 
     switch (pad) {
     case TOUCH_LEFT: {
         /* Step backward; skip modes disabled in enabled_modes bitmask.
          * config_set_mode() updates RAM only — no flash write per button press. */
-        int m = (int)cfg->current_mode;
+        int m = (int)current_mode;
         for (int tries = 0; tries < APP_MODE_MAX; tries++) {
             m = (m - 1 + APP_MODE_MAX) % APP_MODE_MAX;
-            if (cfg->enabled_modes & (1 << m)) break;
+            if (enabled_modes & (1 << m)) break;
         }
         config_set_mode((app_mode_t)m);
         break;
     }
     case TOUCH_RIGHT: {
         /* Step forward; skip modes disabled in enabled_modes bitmask. */
-        int m = (int)cfg->current_mode;
+        int m = (int)current_mode;
         for (int tries = 0; tries < APP_MODE_MAX; tries++) {
             m = (m + 1) % APP_MODE_MAX;
-            if (cfg->enabled_modes & (1 << m)) break;
+            if (enabled_modes & (1 << m)) break;
         }
         config_set_mode((app_mode_t)m);
         break;
@@ -94,11 +108,10 @@ static void on_touch(touch_pad_id_t pad)
     case TOUCH_MIDDLE: {
         /* In countdown / pomodoro: start / stop the timer.
          * In all other modes: toggle backlight on/off. */
-        app_mode_t mode = cfg->current_mode;
-        if (mode == APP_MODE_COUNTDOWN || mode == APP_MODE_POMODORO) {
+        if (current_mode == APP_MODE_COUNTDOWN || current_mode == APP_MODE_POMODORO) {
             display_timer_toggle();
         } else {
-            const char *j = cfg->backlight_on
+            const char *j = backlight_on
                 ? "{\"backlight_onoff\":\"OFF\"}"
                 : "{\"backlight_onoff\":\"ON\"}";
             config_set_json(j, strlen(j));
@@ -110,8 +123,8 @@ static void on_touch(touch_pad_id_t pad)
     /* Play button-click sound (fires after every touch event).
      * audio_play_file() returns immediately if the path is empty so no
      * sound plays until the user configures a click file. */
-    if (cfg->button_sound && cfg->click_file[0] != '\0')
-        audio_play_file(cfg->click_file);
+    if (button_sound && click_file[0] != '\0')
+        audio_play_file(click_file);
 }
 
 /* ── LittleFS mount ────────────────────────────────────────────────── */
@@ -176,28 +189,43 @@ void app_main(void)
 
     /* Load configuration from /spiffs/config.json (or defaults) — /spiffs is the LittleFS mount point */
     config_mgr_init();
-    const nextube_config_t *cfg = config_get();
+
+    /* Read the small boot-time scalars under the config lock. */
+    uint8_t boot_volume;
+    bool    boot_audio_enabled;
+    bool    boot_mic_enabled;
+    bool    boot_mic_cal_saved;
+    config_lock();
+    const nextube_config_t *cfg_boot = config_get();
+    boot_volume        = cfg_boot->volume;
+    boot_audio_enabled = cfg_boot->audio_enabled;
+    boot_mic_enabled   = cfg_boot->mic_enabled;
+    boot_mic_cal_saved = cfg_boot->mic_calibration_saved;
+    config_unlock();
 
     /* Hardware drivers */
     display_init();
     display_task_start();          /* launch 5 Hz FreeRTOS display task */
 
     audio_init();
-    audio_set_volume(cfg->volume);          /* restore saved volume level   */
-    audio_set_enabled(cfg->audio_enabled);  /* tear down DAC if disabled    */
+    audio_set_volume(boot_volume);          /* restore saved volume level   */
+    audio_set_enabled(boot_audio_enabled);  /* tear down DAC if disabled    */
 
     /* Microphone: only initialise the ADC and start the sampling task when
      * mic is enabled.  The task self-gates anyway (checks config each frame),
      * but skipping init entirely avoids touching ADC1 when the user has
      * permanently disabled the mic (e.g. no mic fitted). */
-    if (cfg->mic_enabled) {
+    if (boot_mic_enabled) {
         mic_init();
         mic_task_start();
         /* Restore a user-captured noise baseline so Phase 1 is skipped on boot.
-         * This eliminates the ~4 s bar-dance at startup and removes persistent
-         * interference (SPI harmonics, LED PWM) from the display immediately. */
-        if (cfg->mic_calibration_saved)
-            mic_apply_calibration(cfg->mic_noise_floor);
+         * mic_apply_calibration() only does a memcpy internally, so passing the
+         * locked config pointer is safe — no blocking or recursive lock needed. */
+        if (boot_mic_cal_saved) {
+            config_lock();
+            mic_apply_calibration(config_get()->mic_noise_floor);
+            config_unlock();
+        }
     }
 
     leds_init();

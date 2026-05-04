@@ -174,17 +174,18 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
     lcd_cmd(0x2C);
     gpio_set_level(PIN_LCD_DC, 1);
     /* `data` may be in PSRAM; ESP32 SPI DMA cannot access PSRAM directly.
-     * Sending the whole frame in one transaction forces the SPI driver to
-     * allocate a temporary DMA-capable SRAM copy (25 600 B), which fails
-     * under memory pressure and logs "Failed to allocate priv TX buffer".
-     * Fix: copy one row at a time into a stack-allocated SRAM line buffer
-     * and send via polling transmit — no per-call heap allocation needed. */
-    uint8_t line[LCD_WIDTH * 2];    /* 160 B — always in SRAM, always DMA-safe */
-    for (int y = 0; y < h; y++) {
-        memcpy(line, data + y * w * 2, (size_t)(w * 2));
-        spi_transaction_t t = { .length = (size_t)(w * 2) * 8, .tx_buffer = line };
+     * Copy 8 rows at a time into a stack SRAM chunk buffer and send via
+     * polling transmit.  8 rows reduces transaction count 160→20 per tube,
+     * cutting per-transaction GPIO/controller overhead by ~8×. */
+#define DISP_CHUNK_ROWS 8
+    uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];  /* 1280 B — always SRAM */
+    for (int y = 0; y < h; y += DISP_CHUNK_ROWS) {
+        int rows = (y + DISP_CHUNK_ROWS <= h) ? DISP_CHUNK_ROWS : h - y;
+        memcpy(chunk, data + y * w * 2, (size_t)(rows * w * 2));
+        spi_transaction_t t = { .length = (size_t)(rows * w * 2) * 8, .tx_buffer = chunk };
         spi_device_polling_transmit(spi_dev, &t);
     }
+#undef DISP_CHUNK_ROWS
     deselect_all();
 }
 
@@ -798,8 +799,7 @@ static void render_scoreboard(const nextube_config_t *cfg)
 _Static_assert(LCD_COUNT * SPEC_BARS_PER_TUBE == MIC_BAND_COUNT,
                "SPEC_BARS_PER_TUBE x LCD_COUNT must equal MIC_BAND_COUNT");
 
-static uint8_t *s_spec_buf = NULL;                              /* shared PSRAM framebuffer */
-static float    s_spec_peak[LCD_COUNT * SPEC_BARS_PER_TUBE];    /* visual peak hold per band */
+static float s_spec_peak[LCD_COUNT * SPEC_BARS_PER_TUBE];   /* visual peak hold per band */
 
 /* Segment colour: user base colour with brightness ramp, or ghost at ~6%. */
 static void spec_seg_color(int s, bool lit,
@@ -820,18 +820,6 @@ static void spec_seg_color(int s, bool lit,
     }
 }
 
-/* Write one big-endian RGB565 pixel into the framebuffer. */
-static inline void spec_put_pixel(uint8_t *buf, int x, int y,
-                                   uint8_t r, uint8_t g, uint8_t b)
-{
-    uint16_t c = ((uint16_t)(r & 0xF8) << 8)
-               | ((uint16_t)(g & 0xFC) << 3)
-               |  (          b         >> 3);
-    int off    = (y * LCD_WIDTH + x) * 2;
-    buf[off]   = (uint8_t)(c >> 8);
-    buf[off+1] = (uint8_t)(c);
-}
-
 static void render_spectrum(const nextube_config_t *cfg)
 {
     float bands[LCD_COUNT * SPEC_BARS_PER_TUBE];
@@ -841,76 +829,108 @@ static void render_spectrum(const nextube_config_t *cfg)
     const uint8_t bg = cfg->spectrum_lcd_rgb[1];
     const uint8_t bb = cfg->spectrum_lcd_rgb[2];
 
-    /* Lazy-allocate single shared PSRAM framebuffer on first Spectrum frame. */
-    if (!s_spec_buf) {
-        s_spec_buf = PSRAM_MALLOC((size_t)LCD_WIDTH * LCD_HEIGHT * 2);
-        if (!s_spec_buf) {
-            /* PSRAM not available — fall back to digit display (1 digit per tube). */
-            for (int i = 0; i < LCD_COUNT; i++) {
-                int lv = (int)(bands[i * SPEC_BARS_PER_TUBE] * 9.0f + 0.5f);
-                if (lv < 0) lv = 0;
-                if (lv > 9) lv = 9;
-                display_show_number(i, lv, cfg->theme);
-            }
-            return;
+    /* Update peak-hold and precompute lit segment count + peak dot for every band. */
+    int  lit_count[LCD_COUNT * SPEC_BARS_PER_TUBE];
+    int  peak_dot [LCD_COUNT * SPEC_BARS_PER_TUBE];
+    bool peak_vis [LCD_COUNT * SPEC_BARS_PER_TUBE];
+    for (int i = 0; i < LCD_COUNT * SPEC_BARS_PER_TUBE; i++) {
+        float e = bands[i];
+        if (e < 0.0f) e = 0.0f; else if (e > 1.0f) e = 1.0f;
+        if (e >= s_spec_peak[i]) {
+            s_spec_peak[i] = e;
+        } else {
+            s_spec_peak[i] -= 0.05f;
+            if (s_spec_peak[i] < 0.0f) s_spec_peak[i] = 0.0f;
         }
-        memset(s_spec_peak, 0, sizeof(s_spec_peak));
+        lit_count[i] = (int)(e              * (float)SPEC_SEGS       + 0.5f);
+        if (lit_count[i] > SPEC_SEGS)  lit_count[i] = SPEC_SEGS;
+        peak_dot [i] = (int)(s_spec_peak[i] * (float)(SPEC_SEGS - 1) + 0.5f);
+        if (peak_dot[i] >= SPEC_SEGS)  peak_dot[i]  = SPEC_SEGS - 1;
+        peak_vis [i] = (s_spec_peak[i] > 0.02f);
     }
+
+    /* Row-driven render — no PSRAM framebuffer.
+     *
+     * PSRAM was: 6 tubes × memset(25 600 B) + pixel writes + memcpy-to-SPI
+     *   ≈ 150 KB PSRAM writes + 150 KB PSRAM reads per frame → ~25 ms/frame.
+     *
+     * New path: for each tube, precompute the 52 (4 bars × 13 segs) RGB565
+     * colours once, then fill a 160-byte SRAM line buffer per row and transmit
+     * immediately.  No PSRAM touched; line buffer is always DMA-safe. */
+    uint8_t line[LCD_WIDTH * 2];   /* 160 B SRAM line buffer */
 
     for (int tube = 0; tube < LCD_COUNT; tube++) {
 
-        /* Clear tube framebuffer to black. */
-        memset(s_spec_buf, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
-
+        /* Precompute RGB565 colour for every (bar, segment) on this tube.
+         * 52 spec_seg_color() calls here replace 640 calls inside the row loop. */
+        uint16_t seg_color[SPEC_BARS_PER_TUBE][SPEC_SEGS];
         for (int bar = 0; bar < SPEC_BARS_PER_TUBE; bar++) {
-            int   bidx   = tube * SPEC_BARS_PER_TUBE + bar;
-            float energy = bands[bidx];
-            if (energy < 0.0f) energy = 0.0f;
-            if (energy > 1.0f) energy = 1.0f;
-
-            /* Peak-dot hold: instant attack, ~1 s decay at 20 Hz display rate.
-             * 0.05/frame × 20 Hz = 1.0/s fall from full scale. */
-            if (energy >= s_spec_peak[bidx]) {
-                s_spec_peak[bidx] = energy;
-            } else {
-                s_spec_peak[bidx] -= 0.05f;
-                if (s_spec_peak[bidx] < 0.0f) s_spec_peak[bidx] = 0.0f;
-            }
-
-            int lit_segs = (int)(energy            * (float)SPEC_SEGS + 0.5f);
-            int peak_seg = (int)(s_spec_peak[bidx] * (float)(SPEC_SEGS - 1) + 0.5f);
-            if (lit_segs > SPEC_SEGS)  lit_segs = SPEC_SEGS;
-            if (peak_seg >= SPEC_SEGS) peak_seg = SPEC_SEGS - 1;
-
-            /* Column range for this mini-bar. */
-            int col_l = SPEC_BAR_PAD + bar * (SPEC_BAR_W + SPEC_BAR_GAP);
-            int col_r = col_l + SPEC_BAR_W - 1;
-
+            int bidx = tube * SPEC_BARS_PER_TUBE + bar;
             for (int s = 0; s < SPEC_SEGS; s++) {
-                /* Segment s row range (row 0 = screen top; seg 0 = bar bottom). */
-                int row_top = LCD_HEIGHT - SPEC_PAD_BOT - SPEC_SEG_H
-                              - s * (SPEC_SEG_H + SPEC_GAP_H);
-                int row_bot = row_top + SPEC_SEG_H - 1;
-
-                bool is_lit  = (s < lit_segs);
-                bool is_peak = (s == peak_seg && s_spec_peak[bidx] > 0.02f);
-
-                uint8_t sr, sg, sb;
-                if (is_peak) {
-                    sr = 255; sg = 255; sb = 255;   /* white peak dot */
+                uint8_t r, g, b;
+                if (peak_vis[bidx] && s == peak_dot[bidx]) {
+                    r = g = b = 255;
                 } else {
-                    spec_seg_color(s, is_lit, br, bg, bb, &sr, &sg, &sb);
+                    spec_seg_color(s, s < lit_count[bidx], br, bg, bb, &r, &g, &b);
                 }
-
-                for (int row = row_top; row <= row_bot; row++) {
-                    if (row < 0 || row >= LCD_HEIGHT) continue;
-                    for (int col = col_l; col <= col_r; col++)
-                        spec_put_pixel(s_spec_buf, col, row, sr, sg, sb);
-                }
+                seg_color[bar][s] = ((uint16_t)(r & 0xF8) << 8)
+                                  | ((uint16_t)(g & 0xFC) << 3)
+                                  |             (b >> 3);
             }
         }
 
-        display_show_digit(tube, s_spec_buf, LCD_WIDTH, LCD_HEIGHT);
+        /* Open SPI window — identical to display_show_digit() preamble. */
+        select_tube(tube);
+        lcd_cmd(0x2A);
+        uint8_t ca[] = {0, LCD_OFFSET_X, 0, LCD_OFFSET_X + LCD_WIDTH - 1};
+        lcd_data(ca, 4);
+        lcd_cmd(0x2B);
+        uint8_t ra[] = {0, LCD_OFFSET_Y, 0, LCD_OFFSET_Y + LCD_HEIGHT - 1};
+        lcd_data(ra, 4);
+        lcd_cmd(0x2C);
+        gpio_set_level(PIN_LCD_DC, 1);
+
+        for (int y = 0; y < LCD_HEIGHT; y++) {
+            /* Map row y → segment index (or -1 for a black gap/pad row).
+             *
+             * dist=0 is the bottom pixel of segment 0; increases going up.
+             * Each 12-pixel cycle = SPEC_SEG_H(10) pixels + SPEC_GAP_H(2) gap.
+             * Segments with seg_index ≥ SPEC_SEGS, or gap positions, → black. */
+            int dist      = (LCD_HEIGHT - SPEC_PAD_BOT - 1) - y;   /* 156 − y */
+            int seg_index = -1;
+            if (dist >= 0) {
+                int s   = dist / (SPEC_SEG_H + SPEC_GAP_H);
+                int pos = dist % (SPEC_SEG_H + SPEC_GAP_H);
+                if (s < SPEC_SEGS && pos < SPEC_SEG_H) seg_index = s;
+            }
+
+            /* Fill 80-pixel line:
+             *   [1 pad][18 bar0][2 gap][18 bar1][2 gap][18 bar2][2 gap][18 bar3][1 trail]
+             * Total: 1 + (18+2)×3 + 18 + 1 = 80 ✓ */
+            uint8_t *px = line;
+            *px++ = 0; *px++ = 0;                            /* left pad */
+            for (int bar = 0; bar < SPEC_BARS_PER_TUBE; bar++) {
+                uint8_t hi = 0, lo = 0;
+                if (seg_index >= 0) {
+                    uint16_t c = seg_color[bar][seg_index];
+                    hi = (uint8_t)(c >> 8);
+                    lo = (uint8_t)(c);
+                }
+                for (int x = 0; x < SPEC_BAR_W; x++) { *px++ = hi; *px++ = lo; }
+                if (bar < SPEC_BARS_PER_TUBE - 1) {
+                    *px++ = 0; *px++ = 0;                    /* inter-bar gap (first byte) */
+                    *px++ = 0; *px++ = 0;                    /* inter-bar gap (second byte) */
+                }
+            }
+            *px++ = 0; *px++ = 0;                            /* trailing pad */
+
+            spi_transaction_t t = {
+                .length    = LCD_WIDTH * 2 * 8,
+                .tx_buffer = line,
+            };
+            spi_device_polling_transmit(spi_dev, &t);
+        }
+        deselect_all();
     }
 }
 
@@ -1180,7 +1200,11 @@ static void display_task(void *arg)
     rotation_tick = wake;
 
     while (1) {
-        const nextube_config_t *cfg = config_get();
+        nextube_config_t cfg_snap;
+        config_lock();
+        cfg_snap = *config_get();
+        config_unlock();
+        const nextube_config_t *cfg = &cfg_snap;
         app_mode_t mode = cfg->current_mode;
         bool mode_changed  = (mode != last_mode);
         bool theme_changed = (strcmp(cfg->theme, last_theme) != 0);

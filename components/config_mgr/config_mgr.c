@@ -176,7 +176,10 @@ static void parse_json(const char *json, size_t len)
     json_read_str(root, "weather_source",   s_cfg.weather_source,  sizeof(s_cfg.weather_source));
     json_read_str(root, "weather_api_key",  s_cfg.weather_api_key, sizeof(s_cfg.weather_api_key));
     json_read_str(root, "City",             s_cfg.city,            sizeof(s_cfg.city));
-    json_read_str(root, "temperature_formate", s_cfg.temp_format,  sizeof(s_cfg.temp_format));
+    /* Accept the old misspelled key first, then the corrected one so that
+     * new configs with the fixed key take precedence over legacy files. */
+    json_read_str(root, "temperature_formate", s_cfg.temp_format, sizeof(s_cfg.temp_format));
+    json_read_str(root, "temperature_format",  s_cfg.temp_format, sizeof(s_cfg.temp_format));
     json_read_str(root, "music_file",       s_cfg.music_file,      sizeof(s_cfg.music_file));
     json_read_str(root, "bell_file",        s_cfg.bell_file,       sizeof(s_cfg.bell_file));
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
@@ -260,13 +263,17 @@ static void parse_json(const char *json, size_t len)
     }
 
     json_read_u8(root, "volume",         &s_cfg.volume);
+    if (s_cfg.volume > 100) s_cfg.volume = 100;
     json_read_u8(root, "led_brightness", &s_cfg.led_brightness);
+    if (s_cfg.led_brightness > 100) s_cfg.led_brightness = 100;
     json_read_u8(root, "lcd_brightness", &s_cfg.lcd_brightness);
+    if (s_cfg.lcd_brightness > 100) s_cfg.lcd_brightness = 100;
     {
         cJSON *ab = cJSON_GetObjectItem(root, "auto_brightness");
         if (cJSON_IsBool(ab)) s_cfg.auto_brightness = cJSON_IsTrue(ab);
     }
     json_read_u8(root, "night_brightness", &s_cfg.night_brightness);
+    if (s_cfg.night_brightness > 100) s_cfg.night_brightness = 100;
     json_read_u8(root, "night_start_hour", &s_cfg.night_start_hour);
     json_read_u8(root, "night_end_hour",   &s_cfg.night_end_hour);
 
@@ -275,7 +282,7 @@ static void parse_json(const char *json, size_t len)
     json_read_u16(root, "pomodoro_break",         &s_cfg.pomodoro_break);
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
     json_read_u16(root, "weather_panel_ms",       &s_cfg.weather_panel_ms);
-    if (s_cfg.weather_panel_ms < 1000) s_cfg.weather_panel_ms = 5000; /* floor: 1 s */
+    if (s_cfg.weather_panel_ms < 1000) s_cfg.weather_panel_ms = 5000; /* resets to default 5 s if below 1 s */
     /* Panel enable flags — default true; force true if both would be false */
     cJSON *p0 = cJSON_GetObjectItem(root, "weather_panel0_en");
     cJSON *p1 = cJSON_GetObjectItem(root, "weather_panel1_en");
@@ -386,9 +393,10 @@ static bool load_from_flash(void)
 
     char *buf = malloc(sz + 1);
     if (!buf) { fclose(f); return false; }
-    fread(buf, 1, sz, f);
-    buf[sz] = '\0';
+    size_t rd = fread(buf, 1, sz, f);
     fclose(f);
+    if (rd != (size_t)sz) { free(buf); return false; }
+    buf[sz] = '\0';
 
     parse_json(buf, (size_t)sz);
     free(buf);
@@ -403,9 +411,13 @@ static void save_to_flash(void)
 
     FILE *f = fopen(CONFIG_PATH, "w");
     if (f) {
-        fwrite(json, 1, strlen(json), f);
+        size_t len = strlen(json);
+        size_t wr  = fwrite(json, 1, len, f);
         fclose(f);
-        ESP_LOGI(TAG, "Config saved to flash (%u bytes)", (unsigned)strlen(json));
+        if (wr != len)
+            ESP_LOGE(TAG, "Config write truncated (%u of %u bytes)", (unsigned)wr, (unsigned)len);
+        else
+            ESP_LOGI(TAG, "Config saved to flash (%u bytes)", (unsigned)len);
     } else {
         ESP_LOGE(TAG, "Failed to open config for writing");
     }
@@ -423,6 +435,9 @@ void config_mgr_init(void)
     set_defaults();
     load_from_flash();
 }
+
+void config_lock(void)   { xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY); }
+void config_unlock(void) { xSemaphoreGiveRecursive(s_mutex); }
 
 const nextube_config_t *config_get(void)
 {
@@ -468,7 +483,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "weather_source",   s_cfg.weather_source);
     cJSON_AddStringToObject(root, "weather_api_key",  s_cfg.weather_api_key);
     cJSON_AddStringToObject(root, "City",             s_cfg.city);
-    cJSON_AddStringToObject(root, "temperature_formate", s_cfg.temp_format);
+    cJSON_AddStringToObject(root, "temperature_format",  s_cfg.temp_format);
     cJSON_AddStringToObject(root, "music_file",       s_cfg.music_file);
     cJSON_AddStringToObject(root, "bell_file",        s_cfg.bell_file);
     cJSON_AddStringToObject(root, "tone_file",        s_cfg.tone_file);

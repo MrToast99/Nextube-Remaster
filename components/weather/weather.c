@@ -16,6 +16,14 @@ static const char *TAG = "weather";
 static weather_data_t s_weather = {0};
 static SemaphoreHandle_t s_wx_mutex = NULL;
 
+/* Snapshot of the weather-relevant config fields, copied under config_lock()
+ * before any blocking HTTP call so we never hold a pointer into s_cfg across
+ * a network operation. */
+typedef struct {
+    char city[64];
+    char api_key[48];
+} wx_cfg_snap_t;
+
 /* ── HTTP helper ────────────────────────────────────────────────────── */
 /* Returns heap-allocated NUL-terminated body (up to 4 KB), or NULL on error.
  * Uses open/fetch_headers/read loop so chunked-encoded responses (no
@@ -82,9 +90,9 @@ static char *http_get(const char *url)
  *       "weatherDesc": [{"value": "Partly cloudy"}]
  *   }] }
  */
-static void fetch_wttr(const nextube_config_t *cfg)
+static void fetch_wttr(const wx_cfg_snap_t *cfg)
 {
-    if (strlen(cfg->city) == 0) return;
+    if (cfg->city[0] == '\0') return;
 
     char url[256];
     snprintf(url, sizeof(url), "https://wttr.in/%s?format=j1", cfg->city);
@@ -157,9 +165,9 @@ static void fetch_wttr(const nextube_config_t *cfg)
 }
 
 /* ── OpenWeatherMap  (free-tier API key required) ───────────────────── */
-static void fetch_openweather(const nextube_config_t *cfg)
+static void fetch_openweather(const wx_cfg_snap_t *cfg)
 {
-    if (strlen(cfg->weather_api_key) == 0 || strlen(cfg->city) == 0) {
+    if (cfg->api_key[0] == '\0' || cfg->city[0] == '\0') {
         ESP_LOGW(TAG, "OpenWeatherMap: no API key or city configured");
         return;
     }
@@ -168,7 +176,7 @@ static void fetch_openweather(const nextube_config_t *cfg)
     snprintf(url, sizeof(url),
              "https://api.openweathermap.org/data/2.5/weather"
              "?q=%s&appid=%s&units=metric",
-             cfg->city, cfg->weather_api_key);
+             cfg->city, cfg->api_key);
 
     char *body = http_get(url);
     if (!body) return;
@@ -362,9 +370,9 @@ static bool geocode_open_meteo(const char *city, float *lat, float *lon, int *al
     return ok;
 }
 
-static void fetch_open_meteo(const nextube_config_t *cfg)
+static void fetch_open_meteo(const wx_cfg_snap_t *cfg)
 {
-    if (strlen(cfg->city) == 0) {
+    if (cfg->city[0] == '\0') {
         ESP_LOGW(TAG, "Open-Meteo: no city configured"); return;
     }
 
@@ -553,9 +561,9 @@ static bool json_extract_string(const char *buf, const char *key,
     return i > 0;
 }
 
-static void fetch_met_no(const nextube_config_t *cfg)
+static void fetch_met_no(const wx_cfg_snap_t *cfg)
 {
-    if (strlen(cfg->city) == 0) {
+    if (cfg->city[0] == '\0') {
         ESP_LOGW(TAG, "Met.no: no city configured"); return;
     }
 
@@ -617,17 +625,24 @@ static void fetch_met_no(const nextube_config_t *cfg)
 /* ── Task ───────────────────────────────────────────────────────────── */
 static void fetch_weather(void)
 {
-    const nextube_config_t *cfg = config_get();
+    wx_cfg_snap_t snap;
+    char source[16];
 
-    if (strcmp(cfg->weather_source, "openmeteo") == 0) {
-        fetch_open_meteo(cfg);
-    } else if (strcmp(cfg->weather_source, "metno") == 0) {
-        fetch_met_no(cfg);
-    } else if (strcmp(cfg->weather_source, "openweather") == 0 &&
-               strlen(cfg->weather_api_key) > 0) {
-        fetch_openweather(cfg);
+    config_lock();
+    const nextube_config_t *cfg = config_get();
+    strncpy(source,        cfg->weather_source,  sizeof(source)        - 1); source[sizeof(source)              - 1] = '\0';
+    strncpy(snap.city,     cfg->city,             sizeof(snap.city)     - 1); snap.city[sizeof(snap.city)        - 1] = '\0';
+    strncpy(snap.api_key,  cfg->weather_api_key,  sizeof(snap.api_key)  - 1); snap.api_key[sizeof(snap.api_key)  - 1] = '\0';
+    config_unlock();
+
+    if (strcmp(source, "openmeteo") == 0) {
+        fetch_open_meteo(&snap);
+    } else if (strcmp(source, "metno") == 0) {
+        fetch_met_no(&snap);
+    } else if (strcmp(source, "openweather") == 0 && snap.api_key[0] != '\0') {
+        fetch_openweather(&snap);
     } else {
-        fetch_wttr(cfg);   /* default: wttr.in, no key needed */
+        fetch_wttr(&snap);   /* default: wttr.in, no key needed */
     }
 }
 

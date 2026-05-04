@@ -14,26 +14,21 @@
  * immediately.  A mutex serialises concurrent play requests.
  *
  * DAC mode lifecycle:
- *   idle    – GPIO25 driven LOW (GPIO_MODE_OUTPUT, 0 V).
- *             The DAC analog output buffer is completely powered down.
- *             The 0 V output clamps the amp's AC-coupled input at a stable,
- *             low-impedance reference (~50 Ω GPIO source resistance), so
- *             WS2812/SPI rail switching cannot couple into the input node.
- *             The AC coupling cap charges to V_cap = +1.65 V (VDD/2) within
- *             a few RC time constants; thereafter the amp sees 0 V AC → near
- *             silence.  Hi-Z was tried but leaves the input floating, which
- *             allows rail noise to couple in and be amplified as audible hiss.
+ *   disabled – dac_continuous ring held at level 0 (DAC driver stays live).
+ *             The output buffer remains active and presents a low-impedance
+ *             termination (~50 Ω resistor-string) to the amp's AC-coupled
+ *             input, preventing WS2812/SPI rail noise from coupling in.
+ *             Hi-Z and GPIO OUTPUT LOW both leave a higher-impedance node
+ *             that acts as an antenna and produces audible hiss.
+ *             The AC cap charges to the amp-bias voltage (~0.9 V) and
+ *             thereafter the amp sees 0 V AC → near silence.
+ *             On re-enable a 500 ms cosine fade (0 → 128) tracks the cap
+ *             voltage back to VDD/2 without a pop.
  *
  *   playing – leds_set_audio_active(true) pauses WS2812 RMT first.
- *             A 15 ms oneshot-at-128 pre-charges the AC cap to V_cap = 0
- *             while the rail is quiet.  GPIO25 is then reclaimed by
- *             dac_continuous_new_channels().  A flat-128 prime buffer
- *             (pre-filled before enable) is written immediately after
- *             dac_continuous_enable() to minimise the DMA zero-init
- *             window.  With V_cap = 0 and DAC at 128, V_amp_in = VDD/2
- *             = silence throughout the transition — no pop, no chirp.
- *             On exit the ring is flushed with 128, DAC stopped, GPIO25
- *             returns to Hi-Z, and LEDs resume.
+ *             A flat-128 prime buffer fills the ring before playback so
+ *             V_amp_in = 0 V from the first sample — no pop, no chirp.
+ *             On exit the ring is flushed with 128 and LEDs resume.
  */
 
 #include "audio.h"
@@ -137,7 +132,7 @@ static void dac_restart(void)
     }
 
     /* Anti-Pop Boot Fade: 0 → 128 over 500 ms via cosine S-curve.
-     * Keeps the transition sub-audible on first start.               */
+     * Gradually charges the AC cap so V_amp_in stays near 0 throughout. */
     size_t fade_samples = (FIXED_DAC_RATE * 500) / 1000;
     fade_samples = (fade_samples + 3) & ~3;
     uint8_t *boot_fade = (uint8_t *)calloc(1, fade_samples);
@@ -390,31 +385,51 @@ void audio_set_enabled(bool enabled)
     s_audio_enabled = enabled;
 
     if (!enabled) {
-        /* Stop any active playback task first */
+        /* Stop any active playback task first. */
         s_stop_flag = true;
         for (int i = 0; i < 30 && s_audio_task != NULL; i++)
             vTaskDelay(pdMS_TO_TICKS(10));
 
-        /* Cancel any active DAC test and tear down all DAC drivers → Hi-Z */
         s_dac_test_active = false;
+
+        /* Keep the DAC continuous driver alive but fill the ring with level 0.
+         * A live low-impedance output (~50 Ω DAC resistor string) prevents
+         * rail-switching noise from coupling into the amp's AC-coupled input.
+         * Hi-Z and GPIO OUTPUT LOW both leave a higher-impedance node that
+         * acts as an antenna for WS2812/SPI transients → audible hiss. */
         if (s_dac_cont) {
-            dac_continuous_disable(s_dac_cont);
-            dac_continuous_del_channels(s_dac_cont);
-            s_dac_cont = NULL;
+            uint8_t zero[DAC_DMA_BUF_SIZE];
+            memset(zero, 0, sizeof(zero));
+            size_t w;
+            for (int i = 0; i < DAC_DESC_NUM; i++)
+                dac_continuous_write(s_dac_cont, zero, sizeof(zero), &w, pdMS_TO_TICKS(200));
         }
-        /* Drive GPIO25 LOW rather than Hi-Z.
-         * With Hi-Z, the amp's AC-coupled input floats and the bias network
-         * slowly charges the cap; in the meantime WS2812/SPI rail switching
-         * couples into the high-impedance node and gets amplified as static.
-         * Driving 0 V (GPIO output, ~50 Ω source) clamps the amp input to a
-         * stable reference — rail noise cannot couple in → near silence. */
-        gpio_reset_pin(PIN_AUDIO_DAC);
-        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-        gpio_set_level(PIN_AUDIO_DAC, 0);
-        ESP_LOGI(TAG, "Audio disabled – GPIO25 = 0 V (amp input clamped)");
+        /* If the DAC was torn down by a test mode (s_dac_cont == NULL),
+         * it will be restarted lazily on audio_set_enabled(true). */
+        ESP_LOGI(TAG, "Audio disabled – DAC ring at 0 (low-impedance idle)");
     } else {
-        /* Re-start the DAC with boot fade so the re-enable is pop-free. */
-        dac_restart();
+        if (s_dac_cont) {
+            /* DAC running at 0; fade 0 → 128 so the AC cap tracks back to
+             * VDD/2 without a pop, then settle to mid-rail silence. */
+            size_t n = ((FIXED_DAC_RATE * 500) / 1000 + 3) & ~3;
+            uint8_t *fade = (uint8_t *)calloc(1, n);
+            if (fade) {
+                for (size_t i = 0; i < n; i++) {
+                    float t = (float)i / (float)n;
+                    fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
+                }
+                size_t w;
+                dac_continuous_write(s_dac_cont, fade, n, &w, portMAX_DELAY);
+                free(fade);
+            }
+            uint8_t silence[DAC_DMA_BUF_SIZE];
+            memset(silence, 128, sizeof(silence));
+            size_t w;
+            for (int i = 0; i < DAC_DESC_NUM; i++)
+                dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
+        } else {
+            dac_restart();   /* DAC was torn down by a test mode; full restart */
+        }
         ESP_LOGI(TAG, "Audio enabled");
     }
 }
@@ -525,10 +540,16 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             dac_restart();   /* retry loop in dac_restart() handles I2S0 settling */
             ESP_LOGI(TAG, "DAC test: normal idle restored");
         } else {
-            gpio_reset_pin(PIN_AUDIO_DAC);
-            gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-            gpio_set_level(PIN_AUDIO_DAC, 0);
-            ESP_LOGI(TAG, "DAC test: restored to 0 V (audio_enabled=false)");
+            /* Audio disabled: restart DAC then immediately fill with 0. */
+            dac_restart();
+            if (s_dac_cont) {
+                uint8_t zero[DAC_DMA_BUF_SIZE];
+                memset(zero, 0, sizeof(zero));
+                size_t w;
+                for (int i = 0; i < DAC_DESC_NUM; i++)
+                    dac_continuous_write(s_dac_cont, zero, sizeof(zero), &w, pdMS_TO_TICKS(200));
+            }
+            ESP_LOGI(TAG, "DAC test: restored to level-0 idle (audio_enabled=false)");
         }
         return;
     }
@@ -536,7 +557,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
     /* ── All other modes: tear down current driver first ────────────── */
     dac_test_teardown();
 
-    /* ── "hiz" — power off DAC output buffer entirely ───────────────── */
+    /* ── "hiz" — power off DAC output buffer entirely (test/diagnostic only) */
     if (strcmp(mode, "hiz") == 0) {
         gpio_reset_pin(PIN_AUDIO_DAC);
         gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);

@@ -129,7 +129,15 @@ typedef struct {
 /** Initialise config module – loads from flash or sets defaults. */
 void config_mgr_init(void);
 
-/** Get pointer to the live (thread-safe read) config. */
+/** Acquire / release the config mutex.
+ *  Must bracket any code that reads multiple fields from config_get() to
+ *  prevent torn reads when config_set_json() writes concurrently.
+ *  The underlying mutex is recursive: the same task may call config_lock()
+ *  while already holding it (e.g. on_touch() → config_set_json()). */
+void config_lock(void);
+void config_unlock(void);
+
+/** Get pointer to the live config.  Call only while holding config_lock(). */
 const nextube_config_t *config_get(void);
 
 /** Update config from a JSON string, save to flash, and broadcast. */

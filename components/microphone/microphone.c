@@ -207,11 +207,22 @@ static void mic_task(void *arg)
             continue;
         }
 
+        uint8_t want_ch;
+        bool    mic_enabled;
+        bool    spectrum_en;
+        app_mode_t cur_mode;
+        float   silence_gate;
+
+        config_lock();
         const nextube_config_t *cfg = config_get();
+        want_ch      = cfg->mic_adc_channel < 8 ? cfg->mic_adc_channel : 7;
+        mic_enabled  = cfg->mic_enabled;
+        spectrum_en  = (cfg->enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
+        cur_mode     = cfg->current_mode;
+        silence_gate = cfg->mic_silence_gate;
+        config_unlock();
 
         /* ── Reconfigure ADC channel if debug panel changed it ── */
-        uint8_t want_ch = cfg->mic_adc_channel;
-        if (want_ch > 7) want_ch = 7;
         if (want_ch != s_active_ch) {
             reconfigure_channel(want_ch);
         }
@@ -220,9 +231,8 @@ static void mic_task(void *arg)
          * Exception: when s_cal_requested is set, bypass the mode gate so
          * calibration works from any mode (the user does not have to switch
          * to Spectrum first to capture a quiet-room baseline). */
-        bool spectrum_en = (cfg->enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
-        if (!cfg->mic_enabled ||
-            ((!spectrum_en || cfg->current_mode != APP_MODE_SPECTRUM) && !s_cal_requested)) {
+        if (!mic_enabled ||
+            ((!spectrum_en || cur_mode != APP_MODE_SPECTRUM) && !s_cal_requested)) {
             taskENTER_CRITICAL(&s_mux);
             memset(s_bands, 0, sizeof(s_bands));
             taskEXIT_CRITICAL(&s_mux);
@@ -248,7 +258,7 @@ static void mic_task(void *arg)
             rms_sq += samples[i] * samples[i];
         rms_sq /= (float)FRAME_SIZE;
 
-        const float gate = cfg->mic_silence_gate;
+        const float gate = silence_gate;
         /* Bypass silence gate during calibration — we need to capture the quiet
          * noise floor, which by definition is below the silence threshold. */
         if (gate > 0.0f && rms_sq < gate && !s_cal_requested) {
@@ -329,7 +339,9 @@ static void mic_task(void *arg)
 
 void mic_init(void)
 {
+    config_lock();
     uint8_t cfg_ch = config_get()->mic_adc_channel;
+    config_unlock();
     if (cfg_ch > 7) cfg_ch = 7;
     s_active_ch   = cfg_ch;
     s_active_chan  = ADC1_CHAN_MAP[cfg_ch];
@@ -378,7 +390,9 @@ int mic_read_raw(void)
 
 int mic_gpio_num(void)
 {
+    config_lock();
     uint8_t cfg_ch = config_get()->mic_adc_channel;
+    config_unlock();
     if (cfg_ch > 7) cfg_ch = 7;
     return ADC1_GPIO_MAP[cfg_ch];
 }
@@ -391,8 +405,8 @@ void mic_task_start(void)
     configASSERT(s_cal_done);
 
     /* Stack 4096: samples[512 B] + Goertzel locals + overhead */
-    xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 5, NULL, 1);
-    ESP_LOGI(TAG, "mic_task started (core 1)");
+    xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 5, NULL, 0);
+    ESP_LOGI(TAG, "mic_task started (core 0)");
 }
 
 void mic_get_bands(float out[MIC_BAND_COUNT])

@@ -125,7 +125,13 @@ static void start_mdns(void)
 
 void wifi_manager_start(void)
 {
+    char ssid[64], password[64];
+    config_lock();
     const nextube_config_t *cfg = config_get();
+    strncpy(ssid,     cfg->ssid,     sizeof(ssid)     - 1); ssid[sizeof(ssid)         - 1] = '\0';
+    strncpy(password, cfg->password, sizeof(password) - 1); password[sizeof(password) - 1] = '\0';
+    config_unlock();
+
     s_wifi_events = xEventGroupCreate();
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
@@ -160,12 +166,12 @@ void wifi_manager_start(void)
      * immediately active and avoids stale NVS data on first boot after a
      * SPIFFS-only update that wiped config.json. */
     wifi_config_t sta_cfg = {0};
-    strncpy((char *)sta_cfg.sta.ssid, cfg->ssid, sizeof(sta_cfg.sta.ssid) - 1);
-    strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
+    strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
+    strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
 
-    if (strlen(cfg->ssid) > 0) {
-        ESP_LOGI(TAG, "STA: connecting to \"%s\"", cfg->ssid);
+    if (strlen(ssid) > 0) {
+        ESP_LOGI(TAG, "STA: connecting to \"%s\"", ssid);
         /* Start the boot-window timer.  If STA does not obtain an IP within
          * AP_BOOT_TIMEOUT_US the setup AP is closed to avoid broadcasting
          * "Nextube-Setup" indefinitely on a deployed device. */
@@ -180,8 +186,14 @@ void wifi_manager_start(void)
 
 void wifi_manager_reconnect_sta(void)
 {
+    char ssid[64], password[64];
+    config_lock();
     const nextube_config_t *cfg = config_get();
-    if (strlen(cfg->ssid) == 0) return;
+    strncpy(ssid,     cfg->ssid,     sizeof(ssid)     - 1); ssid[sizeof(ssid)         - 1] = '\0';
+    strncpy(password, cfg->password, sizeof(password) - 1); password[sizeof(password) - 1] = '\0';
+    config_unlock();
+
+    if (strlen(ssid) == 0) return;
 
     /* New credentials were saved — reset the boot-timeout state so the AP
      * stays visible while the user waits for the new credentials to work.
@@ -194,8 +206,8 @@ void wifi_manager_reconnect_sta(void)
     esp_wifi_set_mode(WIFI_MODE_APSTA);
 
     wifi_config_t sta_cfg = {0};
-    strncpy((char *)sta_cfg.sta.ssid,     cfg->ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
-    strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
+    strncpy((char *)sta_cfg.sta.ssid,     ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
+    strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
 
@@ -211,7 +223,7 @@ void wifi_manager_reconnect_sta(void)
      * rather than relying on the event handler to do it. */
     esp_wifi_disconnect();
     esp_wifi_connect();
-    ESP_LOGI(TAG, "STA: connecting to \"%s\"", cfg->ssid);
+    ESP_LOGI(TAG, "STA: connecting to \"%s\"", ssid);
 }
 
 bool wifi_manager_is_connected(void)
@@ -220,6 +232,23 @@ bool wifi_manager_is_connected(void)
 }
 
 const char *wifi_manager_get_ip(void) { return s_ip_str; }
+
+void wifi_manager_apply_sta_credentials(void)
+{
+    char ssid[64], password[64];
+    config_lock();
+    const nextube_config_t *cfg = config_get();
+    strncpy(ssid,     cfg->ssid,     sizeof(ssid)     - 1); ssid[sizeof(ssid)         - 1] = '\0';
+    strncpy(password, cfg->password, sizeof(password) - 1); password[sizeof(password) - 1] = '\0';
+    config_unlock();
+
+    if (strlen(ssid) == 0) return;
+    wifi_config_t sta_cfg = {0};
+    strncpy((char *)sta_cfg.sta.ssid,     ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
+    strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
+    esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+    ESP_LOGI(TAG, "STA credentials updated (no reconnect)");
+}
 
 void wifi_manager_scan_start(void)
 {

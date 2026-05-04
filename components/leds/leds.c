@@ -179,12 +179,28 @@ static void led_task(void *arg)
             continue;
         }
 
+        /* Copy all config fields needed for this iteration under the lock so
+         * no task switch between struct member reads can produce a torn read. */
+        uint8_t led_brightness;
+        app_mode_t current_mode;
+        uint8_t spectrum_rgb[3];
+        backlight_mode_t backlight_mode;
+        uint8_t backlight_rgb[LED_COUNT][3];
+
+        config_lock();
         const nextube_config_t *cfg = config_get();
+        led_brightness = cfg->led_brightness;
+        current_mode   = cfg->current_mode;
+        memcpy(spectrum_rgb,  cfg->spectrum_rgb,  sizeof(spectrum_rgb));
+        backlight_mode = cfg->backlight_mode;
+        memcpy(backlight_rgb, cfg->backlight_rgb, sizeof(backlight_rgb));
+        config_unlock();
+
         /* led_brightness is 0=off, 100=full bright — use directly. */
-        leds_set_brightness(cfg->led_brightness);
+        leds_set_brightness(led_brightness);
 
         /* ── Spectrum mode: drive each LED at per-band audio brightness ── */
-        if (cfg->current_mode == APP_MODE_SPECTRUM) {
+        if (current_mode == APP_MODE_SPECTRUM) {
             float bands[MIC_BAND_COUNT];
             mic_get_bands(bands);
             /* Average the 4 frequency bands assigned to each tube/LED */
@@ -194,16 +210,16 @@ static void led_task(void *arg)
                 for (int b = 0; b < bpl; b++) v += bands[i * bpl + b];
                 v /= (float)bpl;
                 leds_set_color(i,
-                    (uint8_t)(cfg->spectrum_rgb[0] * v),
-                    (uint8_t)(cfg->spectrum_rgb[1] * v),
-                    (uint8_t)(cfg->spectrum_rgb[2] * v));
+                    (uint8_t)(spectrum_rgb[0] * v),
+                    (uint8_t)(spectrum_rgb[1] * v),
+                    (uint8_t)(spectrum_rgb[2] * v));
             }
             leds_update();
             vTaskDelay(pdMS_TO_TICKS(50));  /* 20 Hz refresh in spectrum mode */
             continue;
         }
 
-        switch (cfg->backlight_mode) {
+        switch (backlight_mode) {
         case BL_MODE_STATIC: {
             /* In static mode, transmit once when colour/brightness changes
              * then stop.  WS2812 latch their last colour indefinitely —
@@ -211,20 +227,20 @@ static void led_task(void *arg)
              * bursts reduces periodic noise spikes on the 3.3 V rail. */
             static uint8_t last_rgb[LED_COUNT][3];
             static uint8_t last_brt = 0xFF;
-            bool changed = (cfg->led_brightness != last_brt);
+            bool changed = (led_brightness != last_brt);
             if (!changed) {
                 for (int i = 0; i < LED_COUNT && !changed; i++)
-                    changed = memcmp(last_rgb[i], cfg->backlight_rgb[i], 3) != 0;
+                    changed = memcmp(last_rgb[i], backlight_rgb[i], 3) != 0;
             }
             if (changed) {
                 for (int i = 0; i < LED_COUNT; i++) {
                     leds_set_color(i,
-                        cfg->backlight_rgb[i][0],
-                        cfg->backlight_rgb[i][1],
-                        cfg->backlight_rgb[i][2]);
-                    memcpy(last_rgb[i], cfg->backlight_rgb[i], 3);
+                        backlight_rgb[i][0],
+                        backlight_rgb[i][1],
+                        backlight_rgb[i][2]);
+                    memcpy(last_rgb[i], backlight_rgb[i], 3);
                 }
-                last_brt = cfg->led_brightness;
+                last_brt = led_brightness;
                 leds_update();
             }
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -246,9 +262,9 @@ static void led_task(void *arg)
             float val = (sinf(breath_phase) + 1.0f) / 2.0f;  /* 0.0 – 1.0 */
             for (int i = 0; i < LED_COUNT; i++) {
                 leds_set_color(i,
-                    (uint8_t)(cfg->backlight_rgb[i][0] * val),
-                    (uint8_t)(cfg->backlight_rgb[i][1] * val),
-                    (uint8_t)(cfg->backlight_rgb[i][2] * val));
+                    (uint8_t)(backlight_rgb[i][0] * val),
+                    (uint8_t)(backlight_rgb[i][1] * val),
+                    (uint8_t)(backlight_rgb[i][2] * val));
             }
             leds_update();
             vTaskDelay(pdMS_TO_TICKS(100));

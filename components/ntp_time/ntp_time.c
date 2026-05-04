@@ -36,16 +36,26 @@ static void time_sync_cb(struct timeval *tv)
 
 static void ntp_task(void *arg)
 {
-    const nextube_config_t *cfg = config_get();
-
-    /* Wait for WiFi */
+    /* Wait for WiFi before reading config — any settings change during this
+     * delay would otherwise be read through a stale pointer held since boot. */
     vTaskDelay(pdMS_TO_TICKS(5000));
 
-    /* Apply POSIX TZ string — newlib handles DST transition rules natively.
-     * The string is stored verbatim in cfg->timezone, e.g. "EST5EDT,M3.2.0,M11.1.0". */
-    setenv("TZ", cfg->timezone, 1);
+    char timezone[64];
+    char ntp_servers[4][64];
+    config_lock();
+    const nextube_config_t *cfg = config_get();
+    strncpy(timezone, cfg->timezone, sizeof(timezone) - 1);
+    timezone[sizeof(timezone) - 1] = '\0';
+    for (int i = 0; i < 4; i++) {
+        strncpy(ntp_servers[i], cfg->ntp_servers[i], sizeof(ntp_servers[i]) - 1);
+        ntp_servers[i][sizeof(ntp_servers[i]) - 1] = '\0';
+    }
+    config_unlock();
+
+    /* Apply POSIX TZ string — newlib handles DST transition rules natively. */
+    setenv("TZ", timezone, 1);
     tzset();
-    ESP_LOGI(TAG, "Timezone set: %s", cfg->timezone);
+    ESP_LOGI(TAG, "Timezone set: %s", timezone);
 
     /* Seed the system clock from the battery-backed RTC so the display shows
      * a reasonable time immediately, before the first NTP sync completes.
@@ -74,8 +84,8 @@ static void ntp_task(void *arg)
 
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     for (int i = 0; i < 4; i++) {
-        if (cfg->ntp_servers[i][0] != '\0')
-            esp_sntp_setservername(i, cfg->ntp_servers[i]);
+        if (ntp_servers[i][0] != '\0')
+            esp_sntp_setservername(i, ntp_servers[i]);
     }
     sntp_set_time_sync_notification_cb(time_sync_cb);
     esp_sntp_init();
@@ -87,21 +97,31 @@ static void ntp_task(void *arg)
 
 void ntp_apply_timezone(void)
 {
-    const nextube_config_t *cfg = config_get();
-    setenv("TZ", cfg->timezone, 1);
+    char tz[64];
+    config_lock();
+    strncpy(tz, config_get()->timezone, sizeof(tz) - 1);
+    tz[sizeof(tz) - 1] = '\0';
+    config_unlock();
+    setenv("TZ", tz, 1);
     tzset();
-    ESP_LOGI(TAG, "Timezone updated: %s", cfg->timezone);
+    ESP_LOGI(TAG, "Timezone updated: %s", tz);
 }
 
 void ntp_apply_servers(void)
 {
+    char servers[4][64];
+    config_lock();
     const nextube_config_t *cfg = config_get();
+    for (int i = 0; i < 4; i++) {
+        strncpy(servers[i], cfg->ntp_servers[i], sizeof(servers[i]) - 1);
+        servers[i][sizeof(servers[i]) - 1] = '\0';
+    }
+    config_unlock();
     /* Stop SNTP before changing servers — lwIP setservername is not
      * thread-safe while the SNTP polling timer is live. */
     esp_sntp_stop();
     for (int i = 0; i < 4; i++) {
-        esp_sntp_setservername(i,
-            cfg->ntp_servers[i][0] ? cfg->ntp_servers[i] : NULL);
+        esp_sntp_setservername(i, servers[i][0] ? servers[i] : NULL);
     }
     esp_sntp_init();
     ESP_LOGI(TAG, "NTP servers updated");

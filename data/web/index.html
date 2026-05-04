@@ -797,7 +797,8 @@ async function loadSettings() {
   $('f-ledbr').value = cfg.led_brightness || 60; $('v-ledbr').textContent = cfg.led_brightness || 60;
   $('f-blmode').value = cfg.backlight_mode || 'Breath'; onBlModeChange();
   $('f-ssid').value = cfg.ssid || '';
-  $('f-pass').value = cfg.password || '';
+  $('f-pass').value = '';
+  $('f-pass').placeholder = cfg.has_password ? '(saved — leave blank to keep)' : 'Enter password';
   $('f-hostname').value = cfg.hostname || 'nextube-remaster';
   const tzStr = cfg.timezone || 'UTC0';
   $('f-tz').value = tzStr;
@@ -948,7 +949,7 @@ async function saveSettings() {
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,
     rotation_interval_s: +$('rot-interval').value,
-    ssid: $('f-ssid').value, password: $('f-pass').value, hostname: $('f-hostname').value,
+    ssid: $('f-ssid').value, ...($('f-pass').value ? {password: $('f-pass').value} : {}), hostname: $('f-hostname').value,
     timezone: $('f-tz').value,
     ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
@@ -1553,8 +1554,9 @@ async function checkForUpdates() {
 
 /* ── Backup & Restore ──────────────────────────────── */
 async function exportSettings() {
-  const c = await api('settings');
-  if (!c) return toast('Could not fetch settings', true);
+  const r = await fetch('/api/backup');
+  if (!r.ok) return toast('Could not fetch settings', true);
+  const c = await r.json();
   const blob = new Blob([JSON.stringify(c, null, 2)], {type: 'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

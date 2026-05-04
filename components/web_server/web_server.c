@@ -126,6 +126,35 @@ static esp_err_t api_audio_play(httpd_req_t *r)
 static esp_err_t api_get_settings(httpd_req_t *r)
 {
     char *j = config_to_json();
+    if (!j) return send_json(r, "{}");
+    /* Strip WiFi password — it must never travel over the wire on a GET.
+     * POST /api/settings accepts a new password only when the caller supplies
+     * an explicit non-empty value, so the UI never needs to read it back. */
+    cJSON *root = cJSON_Parse(j);
+    free(j);
+    if (root) {
+        /* Replace the plaintext password with a boolean indicator so the UI
+         * can show a masked placeholder without exposing the actual value. */
+        const cJSON *pw = cJSON_GetObjectItem(root, "password");
+        bool has_pw = cJSON_IsString(pw) && pw->valuestring && pw->valuestring[0] != '\0';
+        cJSON_DeleteItemFromObject(root, "password");
+        cJSON_AddBoolToObject(root, "has_password", has_pw);
+        j = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+    } else {
+        j = NULL;
+    }
+    esp_err_t ret = send_json(r, j ? j : "{}");
+    free(j);
+    return ret;
+}
+
+/* GET /api/backup — full config including WiFi password, for explicit user backup.
+ * Separate from GET /api/settings so the password is not exposed on the general
+ * settings endpoint but IS preserved in backup/restore round-trips. */
+static esp_err_t api_backup(httpd_req_t *r)
+{
+    char *j = config_to_json();
     esp_err_t ret = send_json(r, j ? j : "{}");
     free(j);
     return ret;
@@ -174,31 +203,55 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     char *buf = malloc(len + 1);
     if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
     int rx = 0;
-    while (rx < len) { int n = httpd_req_recv(r, buf+rx, len-rx); if (n<=0){free(buf);return ESP_FAIL;} rx+=n; }
-    buf[len] = 0;
+    while (rx < len) {
+        int n = httpd_req_recv(r, buf + rx, len - rx);
+        if (n <= 0) { free(buf); return ESP_FAIL; }
+        rx += n;
+    }
+    buf[len] = '\0';
 
     /* Snapshot credentials BEFORE applying the new config so we can detect
      * whether WiFi needs to reconnect.  Only reconnect when SSID or password
      * actually changed — reconnecting on every display/theme/volume save
      * stops the HTTP server 1500 ms later and drops the browser connection. */
-    const nextube_config_t *old = config_get();
     char old_ssid[64], old_pass[64];
-    strlcpy(old_ssid, old->ssid,     sizeof(old_ssid));
-    strlcpy(old_pass, old->password, sizeof(old_pass));
+    config_lock();
+    const nextube_config_t *old_cfg = config_get();
+    strlcpy(old_ssid, old_cfg->ssid,     sizeof(old_ssid));
+    strlcpy(old_pass, old_cfg->password, sizeof(old_pass));
+    config_unlock();
 
     bool ok = config_set_json(buf, len);
     free(buf);
 
-    const nextube_config_t *cfg = config_get();
-    leds_set_brightness(cfg->led_brightness);
+    uint8_t new_brightness;
+    bool    new_audio_enabled;
+    char    new_ssid[64], new_pass[64];
+    config_lock();
+    const nextube_config_t *new_cfg = config_get();
+    new_brightness    = new_cfg->led_brightness;
+    new_audio_enabled = new_cfg->audio_enabled;
+    strlcpy(new_ssid, new_cfg->ssid,     sizeof(new_ssid));
+    strlcpy(new_pass, new_cfg->password, sizeof(new_pass));
+    config_unlock();
+
+    leds_set_brightness(new_brightness);
     ntp_apply_timezone();
     ntp_apply_servers();
-    audio_set_enabled(cfg->audio_enabled);
+    audio_set_enabled(new_audio_enabled);
 
-    bool creds_changed = (strcmp(old_ssid, cfg->ssid)    != 0 ||
-                          strcmp(old_pass, cfg->password) != 0);
-    if (creds_changed) {
-        schedule_wifi_reconnect(); /* stop server + reconnect AFTER response is sent */
+    bool ssid_changed = (strcmp(old_ssid, new_ssid) != 0);
+    bool pass_changed = (strcmp(old_pass, new_pass)  != 0);
+
+    if (ssid_changed && strlen(new_ssid) > 0) {
+        /* SSID changed — need to switch networks; full disconnect + reconnect */
+        schedule_wifi_reconnect();
+    } else if (pass_changed) {
+        /* Password-only change — update the driver config silently so the new
+         * password is used on the next natural reconnect, without dropping the
+         * live connection.  Avoids ~60 s of downtime on a config restore where
+         * the backup omits or blanks the password field. */
+        wifi_manager_apply_sta_credentials();
     }
 
     return send_json(r, ok ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}");
@@ -273,9 +326,15 @@ static esp_err_t api_status(httpd_req_t *r)
         fclose(vf);
     }
     cJSON_AddStringToObject(root, "fs_version", fs_ver);
-    const nextube_config_t *cfg = config_get();
-    cJSON_AddStringToObject(root, "mode", app_mode_name(cfg->current_mode));
-    cJSON_AddBoolToObject(root, "mic_calibration_saved", cfg->mic_calibration_saved);
+    app_mode_t status_mode;
+    bool       status_mic_cal;
+    config_lock();
+    const nextube_config_t *scfg = config_get();
+    status_mode    = scfg->current_mode;
+    status_mic_cal = scfg->mic_calibration_saved;
+    config_unlock();
+    cJSON_AddStringToObject(root, "mode", app_mode_name(status_mode));
+    cJSON_AddBoolToObject(root, "mic_calibration_saved", status_mic_cal);
     char *json = cJSON_PrintUnformatted(root);
     esp_err_t ret = send_json(r, json);
     free(json); cJSON_Delete(root);
@@ -284,6 +343,8 @@ static esp_err_t api_status(httpd_req_t *r)
 
 static esp_err_t api_ota(httpd_req_t *r)
 {
+    if (r->content_len <= 0)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Content-Length required"), ESP_FAIL;
     const esp_partition_t *upd = esp_ota_get_next_update_partition(NULL);
     if (!upd) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition"), ESP_FAIL;
     esp_ota_handle_t h;
@@ -545,13 +606,16 @@ static esp_err_t api_themes(httpd_req_t *r)
     /* Insertion sort (small list — no need for qsort overhead) */
     for (int i = 1; i < count; i++) {
         char tmp[THEME_NAME_MAX];
-        strncpy(tmp, names[i], THEME_NAME_MAX);
+        strncpy(tmp, names[i], THEME_NAME_MAX - 1);
+        tmp[THEME_NAME_MAX - 1] = '\0';
         int j = i - 1;
         while (j >= 0 && strcmp(names[j], tmp) > 0) {
-            strncpy(names[j + 1], names[j], THEME_NAME_MAX);
+            strncpy(names[j + 1], names[j], THEME_NAME_MAX - 1);
+            names[j + 1][THEME_NAME_MAX - 1] = '\0';
             j--;
         }
-        strncpy(names[j + 1], tmp, THEME_NAME_MAX);
+        strncpy(names[j + 1], tmp, THEME_NAME_MAX - 1);
+        names[j + 1][THEME_NAME_MAX - 1] = '\0';
     }
 
     /* Build JSON: {"themes":["A","B",...]} */
@@ -635,6 +699,15 @@ static esp_err_t api_file_upload(httpd_req_t *r)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
 
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
+
+    /* Reject the upload if the declared size exceeds available free space. */
+    if (r->content_len > 0) {
+        size_t total = 0, used = 0;
+        esp_littlefs_info("littlefs", &total, &used);
+        if ((size_t)r->content_len > (total - used))
+            return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Not enough space"), ESP_FAIL;
+    }
+
     FILE *f = fopen(spiffs_path, "wb");
     if (!f) {
         size_t total = 0, used = 0;
@@ -840,8 +913,10 @@ static esp_err_t api_mic_reset_calibration(httpd_req_t *r)
  * Response: {"channel":0,"gpio":36,"raw":2048,"voltage_mv":1650} */
 static esp_err_t api_debug_adc(httpd_req_t *r)
 {
-    const nextube_config_t *cfg = config_get();
-    uint8_t ch  = cfg->mic_adc_channel < 8 ? cfg->mic_adc_channel : 0;
+    config_lock();
+    uint8_t ch = config_get()->mic_adc_channel;
+    config_unlock();
+    if (ch >= 8) ch = 0;
     int     gpio = mic_gpio_num();
     int     raw  = mic_read_raw();   /* -1 if mic not initialised */
 
@@ -983,8 +1058,10 @@ static esp_err_t api_wifi_scan_get(httpd_req_t *r)
 {
     uint16_t cnt = 0;
     esp_wifi_scan_get_ap_num(&cnt);
+    if (cnt == 0) return send_json(r, "[]");
     if (cnt > 20) cnt = 20;
     wifi_ap_record_t *list = calloc(cnt, sizeof(wifi_ap_record_t));
+    if (!list) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
     esp_wifi_scan_get_ap_records(&cnt, list);
     cJSON *arr = cJSON_CreateArray();
     for (int i = 0; i < cnt; i++) {
@@ -1003,8 +1080,11 @@ static esp_err_t api_wifi_scan_get(httpd_req_t *r)
 
 static esp_err_t api_cors(httpd_req_t *r)
 {
+    /* Restrict cross-origin mutation: only GET is allowed from foreign origins.
+     * POST/DELETE/PUT preflights from a malicious site will not receive an
+     * Allow header for those methods and the browser will block the request. */
     httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(r, "Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    httpd_resp_set_hdr(r, "Access-Control-Allow-Methods", "GET");
     httpd_resp_set_hdr(r, "Access-Control-Allow-Headers", "Content-Type");
     httpd_resp_send(r, NULL, 0);
     return ESP_OK;
@@ -1032,8 +1112,8 @@ static esp_err_t serve_static(httpd_req_t *r)
     else snprintf(fp,sizeof(fp),"/spiffs/web%s",uri);
     if (strstr(fp,"..")) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad path"), ESP_FAIL;
 
-    FILE *f = fopen(fp, "r");
-    if (!f) { f = fopen("/spiffs/web/index.html","r"); }
+    FILE *f = fopen(fp, "rb");
+    if (!f) { f = fopen("/spiffs/web/index.html","rb"); }
     if (!f) return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found"), ESP_FAIL;
 
     httpd_resp_set_type(r, content_type(fp));
@@ -1053,6 +1133,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/ping",             api_ping),
     R(HTTP_GET,  "/api/themes",           api_themes),
     R(HTTP_GET,  "/api/settings",        api_get_settings),
+    R(HTTP_GET,  "/api/backup",          api_backup),
     R(HTTP_POST, "/api/settings",        api_post_settings),
     R(HTTP_GET,  "/api/firmwareVersion", api_fw_ver),
     R(HTTP_GET,  "/api/hardwareVersion", api_hw_ver),

@@ -28,13 +28,18 @@ static esp_err_t http_event(esp_http_client_event_t *evt)
 
 static void fetch_youtube(void)
 {
+    char youtube_id[48], youtube_key[48];
+    config_lock();
     const nextube_config_t *cfg = config_get();
-    if (strlen(cfg->youtube_key) == 0 || strlen(cfg->youtube_id) == 0) return;
+    strncpy(youtube_id, cfg->youtube_id,  sizeof(youtube_id)  - 1); youtube_id[sizeof(youtube_id)   - 1] = '\0';
+    strncpy(youtube_key, cfg->youtube_key, sizeof(youtube_key) - 1); youtube_key[sizeof(youtube_key) - 1] = '\0';
+    config_unlock();
+    if (youtube_key[0] == '\0' || youtube_id[0] == '\0') return;
 
     char url[512];
     snprintf(url, sizeof(url),
         "https://www.googleapis.com/youtube/v3/channels?part=statistics&id=%s&key=%s",
-        cfg->youtube_id, cfg->youtube_key);
+        youtube_id, youtube_key);
 
     s_http_buf_len = 0;
     esp_http_client_config_t http_cfg = {
@@ -68,12 +73,16 @@ static void fetch_youtube(void)
 
 static void fetch_bilibili(void)
 {
-    const nextube_config_t *cfg = config_get();
-    if (strlen(cfg->bili_uid) == 0) return;
+    char bili_uid[24];
+    config_lock();
+    strncpy(bili_uid, config_get()->bili_uid, sizeof(bili_uid) - 1);
+    bili_uid[sizeof(bili_uid) - 1] = '\0';
+    config_unlock();
+    if (bili_uid[0] == '\0') return;
 
     char url[256];
     snprintf(url, sizeof(url),
-        "https://api.bilibili.com/x/web-interface/card?mid=%s", cfg->bili_uid);
+        "https://api.bilibili.com/x/web-interface/card?mid=%s", bili_uid);
 
     s_http_buf_len = 0;
     esp_http_client_config_t http_cfg = {
@@ -106,10 +115,18 @@ static void yt_bili_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(20000));
     while (1) {
+        char video_site[16], bili_uid[24], youtube_id[48], youtube_key[48];
+        config_lock();
         const nextube_config_t *cfg = config_get();
-        bool is_bili = (strcmp(cfg->video_site, "bilibili") == 0);
-        bool configured = is_bili ? (strlen(cfg->bili_uid) > 0)
-                                  : (strlen(cfg->youtube_id) > 0 && strlen(cfg->youtube_key) > 0);
+        strncpy(video_site,  cfg->video_site,  sizeof(video_site)  - 1); video_site[sizeof(video_site)   - 1] = '\0';
+        strncpy(bili_uid,    cfg->bili_uid,    sizeof(bili_uid)    - 1); bili_uid[sizeof(bili_uid)       - 1] = '\0';
+        strncpy(youtube_id,  cfg->youtube_id,  sizeof(youtube_id)  - 1); youtube_id[sizeof(youtube_id)   - 1] = '\0';
+        strncpy(youtube_key, cfg->youtube_key, sizeof(youtube_key) - 1); youtube_key[sizeof(youtube_key) - 1] = '\0';
+        config_unlock();
+
+        bool is_bili    = (strcmp(video_site, "bilibili") == 0);
+        bool configured = is_bili ? (bili_uid[0] != '\0')
+                                  : (youtube_id[0] != '\0' && youtube_key[0] != '\0');
         if (configured) {
             if (is_bili) fetch_bilibili();
             else         fetch_youtube();
