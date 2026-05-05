@@ -149,10 +149,10 @@ print(d['firmware_version'] if fw >= fs else d['fs_version'])
               GUIDANCE="**Update required:** flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**."
               ;;
             spiffs-only)
-              GUIDANCE="**Update required:** flash \`nextube-littlefs-v${SP_VER}.bin\` via **System → Web UI Update**."
+              GUIDANCE="**Update required:** flash \`nextube-littlefs-v${SP_VER}.bin\` via **System → Web UI Update**. ⚠️ **Back up your config first** (System → Backup Config) — flashing LittleFS replaces the entire filesystem. Restore via System → Restore Config after flashing."
               ;;
             full)
-              GUIDANCE="**Both partitions changed.** Flash \`nextube-fw-v${FW_VER}-ota.bin\` then \`nextube-littlefs-v${SP_VER}.bin\` via the web UI, or use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
+              GUIDANCE="**Both partitions changed.** ⚠️ **Back up your config first** (System → Backup Config) — flashing LittleFS replaces the entire filesystem. Flash \`nextube-fw-v${FW_VER}-ota.bin\` via System → Firmware Update, then \`nextube-littlefs-v${SP_VER}.bin\` via System → Web UI Update, then restore your config. Alternatively use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
               ;;
             *)
               GUIDANCE="Refer to the included binaries."
@@ -177,6 +177,9 @@ print(d['firmware_version'] if fw >= fs else d['fs_version'])
           | \`nextube-littlefs-v${SP_VER}.bin\` | Web UI / LittleFS OTA (System → Web UI Update) |
           | \`bootloader.bin\` | Bootloader (USB flash only) |
           | \`partition-table.bin\` | Partition table (USB flash only) |
+
+          > **Config backup reminder:** flashing \`nextube-littlefs-v${SP_VER}.bin\` or the full image replaces the entire LittleFS partition and will erase your saved settings.
+          > Use **System → Backup Config** before flashing and **System → Restore Config** afterwards to preserve your WiFi, theme, and display preferences.
           EOF
 
           echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
