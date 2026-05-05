@@ -1523,10 +1523,50 @@ async function refreshStatus() {
 }
 
 /* ── Firmware update check (browser → GitHub API) ─── */
-async function checkForUpdates() {
+
+/* true = show update toast.
+ * "Dismiss once"    → suppressed for 24 h, then re-nags.
+ * "Dismiss version" → permanently suppressed for this version tag.
+ * A newer version always overrides either dismiss. */
+function shouldToastUpdate(latest) {
+  try {
+    const d = JSON.parse(localStorage.getItem('update_dismissed') || 'null');
+    if (!d) return true;
+    if (d.version !== latest) return true;       // newer release — always show
+    if (d.permanent) return false;               // version permanently dismissed
+    return (Date.now() - d.at) >= 86400000;      // once-dismiss expired after 24 h
+  } catch { return true; }
+}
+
+function showUpdateToast(version, url) {
+  $('ut-version').textContent = version;
+  $('ut-url').href = url || '#';
+  $('update-toast').style.display = 'flex';
+}
+
+/* "Dismiss once" — hides toast for 24 h (reappears next interval or for a newer version) */
+function dismissUpdateToast() {
+  const v = ($('ut-version').textContent || '').trim();
+  if (v) localStorage.setItem('update_dismissed',
+                               JSON.stringify({ version: v, at: Date.now() }));
+  $('update-toast').style.display = 'none';
+}
+
+/* "Dismiss version" — permanently suppresses this version tag (still shows for newer releases) */
+function dismissUpdateVersion() {
+  const v = ($('ut-version').textContent || '').trim();
+  if (v) localStorage.setItem('update_dismissed',
+                               JSON.stringify({ version: v, permanent: true }));
+  $('update-toast').style.display = 'none';
+}
+
+/* silent=true: suppress "up to date" toast (used for automatic checks).
+ * silent=false (default): show button spinner, toast result, and always
+ * show update toast if an update is found regardless of dismiss state. */
+async function checkForUpdates(silent = false) {
   const btn = $('check-updates-btn');
   const prevLabel = btn ? btn.textContent : '';
-  if (btn) btn.textContent = 'Checking…';
+  if (!silent && btn) btn.textContent = 'Checking…';
   try {
     const r = await fetch(
       'https://api.github.com/repos/MrToast99/Nextube-Remaster/releases/latest',
@@ -1535,20 +1575,26 @@ async function checkForUpdates() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     const latest = (data.tag_name || '').replace(/^v/, '');
-    const current = ($('s-fwver').textContent || '').trim();
-    if (btn) btn.textContent = prevLabel;
+    const current = ($('s-fwver').textContent || '').replace(/^v/, '').trim();
+    if (!silent && btn) btn.textContent = prevLabel;
     if (!latest) throw new Error('No release found');
+    /* Skip comparison if device version hasn't loaded yet */
+    if (!current || current === '--') return;
     if (latest !== current) {
       $('update-available').style.display = 'block';
       $('update-version').textContent = latest;
       $('update-url').href = data.html_url || '#';
+      /* Manual check always toasts; auto-check respects dismiss */
+      if (!silent || shouldToastUpdate(latest))
+        showUpdateToast(latest, data.html_url);
     } else {
       $('update-available').style.display = 'none';
-      toast('Firmware is up to date (v' + current + ')');
+      $('update-toast').style.display = 'none';
+      if (!silent) toast('Firmware is up to date (v' + current + ')');
     }
   } catch(e) {
-    if (btn) btn.textContent = prevLabel;
-    toast('Update check failed: ' + e.message, true);
+    if (!silent && btn) btn.textContent = prevLabel;
+    if (!silent) toast('Update check failed: ' + e.message, true);
   }
 }
 
@@ -1583,8 +1629,25 @@ async function importSettings(input) {
 
 /* ── Init ──────────────────────────────────────────── */
 loadSettings();
-refreshStatus();
+refreshStatus().then(() => checkForUpdates(true));   /* check once s-fwver is populated */
 setInterval(refreshStatus, 5000);
+setInterval(() => checkForUpdates(true), 86400000);  /* re-check every 24 h */
 </script>
+
+<!-- ── Dismissable update toast (persistent, not auto-close) ─────── -->
+<div id="update-toast" style="display:none;position:fixed;bottom:1rem;right:1rem;
+  background:rgba(78,204,163,.92);color:#000;padding:.55rem 1rem;border-radius:8px;
+  font-size:.85rem;z-index:201;align-items:center;gap:.75rem;flex-wrap:wrap;
+  box-shadow:0 2px 8px rgba(0,0,0,.3)">
+  <span>🆕 Update available: <strong>v<span id="ut-version"></span></strong></span>
+  <a id="ut-url" href="#" target="_blank"
+     style="color:#000;font-weight:600;white-space:nowrap;text-decoration:underline">See what's new ↗</a>
+  <button onclick="dismissUpdateToast()"
+     style="background:rgba(0,0,0,.15);border:none;cursor:pointer;padding:.2rem .6rem;
+            border-radius:4px;font-size:.8rem;color:#000;white-space:nowrap">Dismiss once</button>
+  <button onclick="dismissUpdateVersion()"
+     style="background:rgba(0,0,0,.15);border:none;cursor:pointer;padding:.2rem .6rem;
+            border-radius:4px;font-size:.8rem;color:#000;white-space:nowrap">Dismiss version</button>
+</div>
 </body>
 </html>
