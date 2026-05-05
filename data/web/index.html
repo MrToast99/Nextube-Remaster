@@ -134,7 +134,7 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-notify-update" style="width:16px;height:16px;cursor:pointer" onchange="onNotifyUpdateChange()">
+        <input type="checkbox" id="f-notify-update" style="width:16px;height:16px;cursor:pointer" onchange="onNotifyUpdateChange()" checked>
         <label for="f-notify-update" style="margin:0;cursor:pointer;font-weight:normal">Enable clock face update notification <span style="color:var(--dim);font-size:.82rem">(shows a 2-row red indicator at the bottom of tube 6 when a firmware update is available)</span></label>
       </div>
     </div>
@@ -900,10 +900,10 @@ async function loadSettings() {
   $('rot-interval-wrap').style.opacity = rotEnabled ? '1' : '0.4';
 
   /* Clock-face update notification */
-  $('f-notify-update').checked = cfg.notify_update_on_display === true;
+  const notifyOn = cfg.notify_update_on_display !== false;
+  $('f-notify-update').checked = notifyOn;
   /* If settings load while an update is already showing, arm the indicator */
-  if (cfg.notify_update_on_display && _latestUpdate &&
-      $('update-toast').style.display !== 'none')
+  if (notifyOn && _latestUpdate && $('update-toast').style.display !== 'none')
     setClockFaceUpdateIndicator(true);
 
   /* Colour swatches — one labelled column per tube */
@@ -1095,23 +1095,53 @@ async function micResetCal() {
 }
 
 /* ── OTA ───────────────────────────────────────────── */
+/* Tracks whether an OTA upload is in progress.  While true:
+ *  - refreshStatus polling is suppressed (reduces competing connections)
+ *  - setClockFaceUpdateIndicator calls are skipped (device is busy)
+ * Reset to false on completion, error, or page unload. */
+let _otaInProgress = false;
+
 async function doOTA() {
   const file = $('ota-file').files[0];
   if (!file) return toast('Select a .bin file first', true);
-  $('ota-progress').style.display = 'block';
   if (file.name.toLowerCase().includes('full')) {
     return toast('Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin', true);
   }
+  $('ota-progress').style.display = 'block';
+  _otaInProgress = true;
+
+  let uploadPct = 0;   /* track upload % so onerror can distinguish "upload done vs. mid-upload" */
   const xhr = new XMLHttpRequest();
-  xhr.upload.onprogress = e => { if(e.lengthComputable) $('ota-bar').style.width = (e.loaded/e.total*100)+'%'; };
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      uploadPct = (e.loaded / e.total * 100);
+      $('ota-bar').style.width = uploadPct + '%';
+    }
+  };
   xhr.onload = () => {
+    _otaInProgress = false;
     if (xhr.status === 200) {
-      toast('OTA complete! Rebooting...'); setTimeout(() => location.reload(), 15000);
+      $('ota-bar').style.width = '100%';
+      toast('OTA complete! Rebooting…');
+      setTimeout(() => location.reload(), 15000);
     } else {
       toast('OTA failed: ' + (xhr.responseText || xhr.statusText), true);
     }
   };
-  xhr.onerror = () => toast('OTA failed: network error', true);
+  xhr.onerror = () => {
+    _otaInProgress = false;
+    /* When the upload is 100% complete, the device reboots and tears down the
+     * TCP connection before the browser has received the HTTP response.  The
+     * browser fires onerror ("network error") even though the OTA succeeded.
+     * Treat this as a successful reboot rather than a failure. */
+    if (uploadPct >= 99.9) {
+      $('ota-bar').style.width = '100%';
+      toast('OTA complete — device rebooting…');
+      setTimeout(() => location.reload(), 18000);
+    } else {
+      toast('OTA failed: network error (upload stalled at ' + Math.round(uploadPct) + '%)', true);
+    }
+  };
   xhr.open('POST', '/api/update_firmware');
   xhr.send(file);
 }
@@ -1590,6 +1620,9 @@ async function clearLogs() {
 
 /* ── Status polling ────────────────────────────────── */
 async function refreshStatus() {
+  /* Suppress status polls during OTA — reduces competing TCP connections to
+   * the device while the httpd task is busy streaming the firmware binary. */
+  if (_otaInProgress) return;
   const s = await api('status');
   if (!s) {
     $('conn-status').innerHTML = '<span class="status-dot err"></span>Offline';
@@ -1673,8 +1706,11 @@ let _latestUpdate = null;
 
 /* Fire-and-forget helper: tells the firmware to activate or clear the red
  * clock-face update indicator on tube 6.  Network errors are silently ignored
- * — the indicator is cosmetic and not safety-critical. */
+ * — the indicator is cosmetic and not safety-critical.
+ * Skipped during OTA to avoid adding competing TCP connections while the
+ * httpd task is fully occupied streaming the firmware binary. */
 function setClockFaceUpdateIndicator(active) {
+  if (_otaInProgress) return;
   fetch('/api/update_notify', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1696,7 +1732,7 @@ function showUpdateToast(version, url) {
   $('ut-url').href = url || '#';
   $('update-toast').style.display = 'flex';
   /* Activate clock-face indicator if the user has opted in */
-  if (cfg && cfg.notify_update_on_display)
+  if ($('f-notify-update').checked)
     setClockFaceUpdateIndicator(true);
 }
 

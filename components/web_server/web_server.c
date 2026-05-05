@@ -29,6 +29,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include "esp_heap_caps.h"  /* heap_caps_malloc — PSRAM allocation for hotpatch buffer */
+#include "lwip/sockets.h"   /* setsockopt / SO_RCVTIMEO — OTA recv timeout extension */
 
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
@@ -346,6 +347,27 @@ static esp_err_t api_ota(httpd_req_t *r)
 {
     if (r->content_len <= 0)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Content-Length required"), ESP_FAIL;
+
+    /* Extend the socket recv timeout for the duration of this OTA upload.
+     *
+     * The default httpd recv timeout (CONFIG_HTTPD_RECV_WAIT_TIMEOUT = 5 s) is
+     * too short for large firmware binaries.  Each esp_ota_write() call erases
+     * and programs a 4 KB flash sector (~25 ms total), which briefly disables
+     * the ESP32 data cache.  Cache-disable windows can cause the WiFi driver to
+     * drop packets, requiring TCP retransmission.  With multiple drops in a row,
+     * the cumulative retransmission delay can exceed 5 s and cause httpd_req_recv
+     * to time out mid-transfer, aborting the OTA.
+     *
+     * 60 s gives ample headroom for a 1.5 MB upload over a congested WiFi link
+     * without requiring changes to the global CONFIG_HTTPD_RECV_WAIT_TIMEOUT. */
+    {
+        int sock = httpd_req_to_sockfd(r);
+        if (sock >= 0) {
+            struct timeval tv = { .tv_sec = 60, .tv_usec = 0 };
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
+    }
+
     const esp_partition_t *upd = esp_ota_get_next_update_partition(NULL);
     if (!upd) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition"), ESP_FAIL;
     esp_ota_handle_t h;
