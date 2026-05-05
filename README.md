@@ -46,6 +46,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Per-mode enable/disable toggles | ✅ Working |
 | Auto mode rotation with configurable interval | ✅ Working |
 | LittleFS file browser with upload/delete/mkdir/rename | ✅ Working |
+| Automatic firmware update check (compares against latest GitHub release) | ✅ Working |
 | Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
 
 ## Hardware
@@ -157,12 +158,9 @@ When the **Enable audio output** checkbox in the web UI is unchecked:
 
 1. Any in-progress playback is stopped
 2. `dac_continuous_disable()` + `dac_continuous_del_channels()` tears down the DMA ring
-3. `gpio_reset_pin(GPIO25)` + `GPIO_MODE_INPUT` puts the DAC output pin into Hi-Z
+3. `gpio_reset_pin(GPIO25)` + `GPIO_MODE_OUTPUT` + `gpio_set_level(GPIO25, 0)` drives the pin **LOW (0 V)**
 
-This removes the DAC's active output buffer from the signal chain, breaking
-the coupling path to the amplifier. **Note:** the LTK8002D itself remains
-powered (SD pin tied high), so its self-noise floor is still present even with
-audio output disabled — just no longer driven by the DAC.
+Driving 0 V (rather than floating Hi-Z) clamps the amplifier's AC-coupled input at a stable, low-impedance reference (~50 Ω GPIO source resistance). The AC coupling cap charges to +VDD/2 differential within a few RC time constants and the amplifier input thereafter sees 0 V AC — near silence. A floating Hi-Z node acts as an antenna: WS2812 and SPI rail-switching transients couple into the high-impedance input and are amplified as audible hiss. **Note:** the LTK8002D itself remains powered (SD pin tied high), so its thermal self-noise floor is still present, but at a much lower level than with a floating input.
 
 Re-enabling runs the full `dac_restart()` sequence including the boot fade.
 
@@ -177,7 +175,7 @@ input.
 
 | Mitigation | Effect |
 |---|---|
-| DAC Hi-Z when audio disabled (`Audio → Enable audio output` unchecked) | DAC buffer fully powered off; coupling path removed |
+| GPIO25 driven 0 V when audio disabled (`Audio → Enable audio output` unchecked) | DAC buffer powered off; 0 V clamps the amp's AC-coupled input — rail-switching noise cannot couple into the high-impedance node |
 | RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
 | Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
 
@@ -194,17 +192,20 @@ they can reach the DAC buffer.
 
 #### Residual noise floor with everything off
 
-Even with audio output disabled (DAC Hi-Z), LEDs off, and LCD brightness at 0,
-a faint baseline hiss is audible. Root cause: the LTK8002D SD pin is tied to
-VDD_5V with no GPIO control. The amp remains fully powered and amplifies its
-own thermal noise (~3× gain into a 4 Ω speaker). No software mitigation is
-possible without a hardware modification:
+Even with audio output disabled, LEDs off, and LCD brightness at 0, a very
+faint baseline hiss may still be audible. Root cause: the LTK8002D SD pin is
+tied to VDD_5V with no GPIO control — the amp remains fully powered and
+amplifies its own thermal noise (~3× gain into a 4 Ω speaker).
+
+Driving GPIO25 LOW (0 V) when audio is disabled (see above) greatly reduces
+this hiss by providing a stable, low-impedance reference to the amp input.
+For complete silence a hardware modification is required:
 
 > **Hardware mod:** Cut the SD pull-up resistor and wire the SD pin to a free
 > ESP32 GPIO. `gpio_set_level(PIN_AMP_SHDN, 0)` will draw the amp's shutdown
 > current to < 0.5 µA — complete silence. Define `PIN_AMP_SHDN` in
-> `board_pins.h` and call it from `audio_set_enabled()` alongside the DAC
-> Hi-Z sequence.
+> `board_pins.h` and call it from `audio_set_enabled()` to assert shutdown
+> alongside the DAC teardown.
 
 ### Microphone Notes
 
@@ -256,7 +257,7 @@ Because the LMV321 preamp amplifies broadband electrical noise alongside audio, 
 - **Phase 1 (first ~4 s, 250 frames):** fast convergence (α = 0.02, no signal guard) locks the per-band noise floor from zero.
 - **Phase 2 (steady state):** slow drift tracking (α = 0.002) only when the current bin is below 4× the estimated floor — prevents audio signals from biasing the floor upward.
 
-Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual gate tuning. A secondary **silence gate** (`mic_silence_gate` in config, runtime-tunable via the debug panel) blanks all bands if the frame RMS² falls below a threshold — useful for instant suppression rather than waiting for the DECAY envelope.
+Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** threshold (`mic_silence_gate` in config, adjustable under **Display → Spectrum Mode → Noise Floor**) blanks all bands if the frame RMS² falls below a set level — useful for immediate suppression of board noise rather than waiting for the adaptive envelope to converge. The default of 250 (≈16 counts RMS) sits above ADC noise but below real audio; raise it to squelch persistent interference, lower it to catch very quiet sounds.
 
 Peak-hold: instant attack, exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
 
@@ -408,11 +409,11 @@ After setup, access the management interface via:
 
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
-- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, Spectrum colour
+- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, Spectrum LED glow colour, Spectrum LCD bar colour, Spectrum noise floor threshold
 - **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
-- **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (compares against latest GitHub release), factory reset, about (shows firmware + web UI versions independently)
+- **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (automatic on page load and every 24 h; compares against latest GitHub release with dismissable toast notification), factory reset, about (shows firmware + web UI versions independently)
 
 ## Modes
 
@@ -425,7 +426,7 @@ The web UI provides:
 | **YouTube** | Live subscriber/follower count |
 | **Weather** | Two panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon. Either panel can be disabled (but not both). Temperatures rounded to whole degrees; leading zeros suppressed; minus sign position shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
-| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED ring colour** and **LCD bar colour** are independently configurable in **Display → Spectrum Mode**. |
+| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
 | **Scoreboard** | Stub — displays zeros |
 
 ### Mode Rotation

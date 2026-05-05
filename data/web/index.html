@@ -173,13 +173,11 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>Spectrum Mode</h2>
     <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left &rarr; treble right).</p>
-    <div class="field" style="display:flex;align-items:center;gap:1rem">
-      <label style="min-width:90px">LED Glow Colour</label>
+    <div class="field" style="display:grid;grid-template-columns:max-content 44px 1fr;gap:.6rem 1rem;align-items:center">
+      <label>LED Glow Colour</label>
       <input type="color" id="f-spec-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
       <span style="color:var(--dim);font-size:.82rem">Ambient LED ring colour</span>
-    </div>
-    <div class="field" style="display:flex;align-items:center;gap:1rem">
-      <label style="min-width:90px">LCD Bar Colour</label>
+      <label>LCD Bar Colour</label>
       <input type="color" id="f-spec-lcd-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
       <span style="color:var(--dim);font-size:.82rem">Bar colour for the LCD spectrum display</span>
     </div>
@@ -190,6 +188,22 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <p style="color:var(--dim);font-size:.78rem;margin-top:.4rem">While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.</p>
     <p style="color:#ffa000;font-size:.78rem;margin-top:.3rem">⚠️ <strong>Switch away from Spectrum mode before capturing.</strong> In Spectrum mode the mic is continuously processing live audio — this interferes with baseline capture and will cause a timeout error. Switch to Clock or any other mode first, then capture.</p>
+    <div class="field" style="margin-top:1.4rem">
+      <label>Noise Floor
+        <span style="font-weight:normal;color:var(--dim);font-size:.8rem">
+          — raise to ignore board noise and room hum; lower to catch quieter sounds
+        </span>
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="range" id="f-gate-slider" min="0" max="1000" step="10" value="250"
+               style="flex:1;min-width:160px" oninput="specGateSync()">
+        <input type="number" id="f-gate-num" min="0" max="16777216" step="10" value="250"
+               style="width:90px" oninput="specGateSync(true)">
+      </div>
+      <p style="font-size:.75rem;color:var(--dim);margin:.3rem 0 0">
+        0 = gate off (always display). Default 250. Slider caps at 1000; type directly for higher values.
+      </p>
+    </div>
   </div>
   <div class="card">
     <h2>Enabled Modes</h2>
@@ -575,7 +589,7 @@ select option{background:var(--accent);color:var(--text)}
       </div>
 
       <div class="field">
-        <label>Silence Gate (RMS²)
+        <label>Noise Floor (RMS²)
           <span style="font-weight:normal;color:var(--dim);font-size:.8rem">
             — frames below this are forced to zero; raise to squelch board noise, lower to catch quiet sounds
           </span>
@@ -956,6 +970,7 @@ async function saveSettings() {
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: $('f-mic-en').checked,
+    mic_silence_gate: parseFloat($('f-gate-num').value) || 0,
     leading_zero: $('f-leading-zero').checked,
     default_countdown_time: +$('f-countdown').value,
     pomodoro_work:  +$('f-pomo-work').value,
@@ -1262,18 +1277,33 @@ function dbgHide() {
 
 function dbgChannelChange() { /* visual only — saved on button press */ }
 
+/* Set all gate controls (debug + user-facing Spectrum card) to value v */
 function dbgSetGate(v) {
   const val = parseFloat(v) || 0;
   $('dbg-gate-slider').value = Math.min(val, 2000);
   $('dbg-gate-num').value    = val;
+  if ($('f-gate-slider')) $('f-gate-slider').value = Math.min(val, 1000);
+  if ($('f-gate-num'))    $('f-gate-num').value    = val;
 }
-/* Called when slider or number input changes — keep both in sync */
+/* Called when debug slider or number input changes — keep all controls in sync */
 function dbgGateSync(fromNum) {
-  if (fromNum) {
-    $('dbg-gate-slider').value = Math.min(parseFloat($('dbg-gate-num').value) || 0, 2000);
-  } else {
-    $('dbg-gate-num').value = $('dbg-gate-slider').value;
-  }
+  const val = fromNum
+    ? (parseFloat($('dbg-gate-num').value) || 0)
+    : (parseFloat($('dbg-gate-slider').value) || 0);
+  $('dbg-gate-slider').value = Math.min(val, 2000);
+  $('dbg-gate-num').value    = val;
+  if ($('f-gate-slider')) $('f-gate-slider').value = Math.min(val, 1000);
+  if ($('f-gate-num'))    $('f-gate-num').value    = val;
+}
+/* Called when user-facing Spectrum card slider or number input changes */
+function specGateSync(fromNum) {
+  const val = fromNum
+    ? (parseFloat($('f-gate-num').value) || 0)
+    : (parseFloat($('f-gate-slider').value) || 0);
+  $('f-gate-slider').value = Math.min(val, 1000);
+  $('f-gate-num').value    = val;
+  if ($('dbg-gate-slider')) $('dbg-gate-slider').value = Math.min(val, 2000);
+  if ($('dbg-gate-num'))    $('dbg-gate-num').value    = val;
 }
 
 async function dbgReadAdc() {
