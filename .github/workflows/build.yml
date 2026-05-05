@@ -111,57 +111,16 @@ jobs:
 
       - name: Generate hot patch ZIP
         run: |
-          BUILD_VER=${{ steps.version.outputs.build_version }}
           SP_VER=${{ steps.version.outputs.fs_version }}
+          export BUILD_VER=${{ steps.version.outputs.build_version }}
 
           # Always stamp the current LittleFS version into web/version.txt so the
           # firmware's version-mismatch banner clears after the patch is applied.
           printf '%s' "$SP_VER" > data/web/version.txt
 
-          export BUILD_VER
-
-          # Use Python's built-in zipfile (ZIP_STORED = no compression, required by
-          # the firmware's minimal ZIP parser). The 'zip' CLI is not guaranteed to be
-          # present in the espressif/idf container.
-          #
-          # The hotpatch always contains the complete data/web/ tree (index.html +
-          # version.txt).  That is sufficient for web-UI-only changes, which is the
-          # common case.  No git diff is used: diffing against a previous tag is
-          # unreliable because many prior releases predate hotpatching entirely and
-          # the diff would be arbitrarily large or meaningless.
-          python3 <<'PYEOF'
-import os, zipfile
-
-build_ver = os.environ['BUILD_VER']
-zip_path  = f'artifacts/nextube-hotpatch-v{build_ver}.zip'
-
-to_include = []
-
-# Walk the entire data/web/ directory — always ship the complete web UI tree.
-# data/web/index.html  — committed to the repo.
-# data/web/version.txt — not committed; written by the 'printf' line above
-#                        (and also by CMake during idf.py build).  os.walk is
-#                        a filesystem scan so it picks it up from disk regardless.
-for root, _dirs, files in os.walk('data/web'):
-    for fn in sorted(files):
-        abs_path = os.path.join(root, fn)
-        rel = os.path.relpath(abs_path, 'data').replace(os.sep, '/')
-        to_include.append(rel)
-
-to_include.sort()
-
-print(f'Hot patch contents ({len(to_include)} files):')
-for f in to_include:
-    print(f'  {f}')
-
-os.makedirs('artifacts', exist_ok=True)
-with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_STORED) as zf:
-    for rel in to_include:
-        zf.write(os.path.join('data', rel), rel)
-
-sz = os.path.getsize(zip_path)
-print(f'Hot patch ZIP written: {zip_path} ({sz:,} bytes)')
-PYEOF
+          # Script lives in .github/scripts/ to avoid embedding Python inside the
+          # YAML run block (heredoc content at column 0 breaks YAML block scalars).
+          python3 .github/scripts/make_hotpatch.py
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
