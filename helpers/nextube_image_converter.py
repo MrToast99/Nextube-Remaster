@@ -243,7 +243,7 @@ input[type=number]:focus,select:focus{border-color:var(--accent)}
     <div class="logo">Nextube<br>Remaster</div>
     <div>
       <h1>IMAGE <span>CONVERTER</span></h1>
-      <div class="subtitle">// JPEG · PNG · INTERACTIVE CROP · BULK</div>
+      <div class="subtitle">// JPEG OUTPUT · INTERACTIVE CROP · BULK</div>
     </div>
   </header>
 
@@ -257,12 +257,6 @@ input[type=number]:focus,select:focus{border-color:var(--accent)}
         <input type="number" id="width" value="80" min="1" max="4096">
         <div class="dim-sep">×</div>
         <input type="number" id="height" value="160" min="1" max="4096">
-      </div>
-
-      <lbl>Output Format</lbl>
-      <div class="radio-group">
-        <div class="radio-btn"><input type="radio" name="fmt" id="fmt-jpeg" value="jpeg" checked><label for="fmt-jpeg">JPEG<br><span style="color:var(--dim);font-size:.55rem">.jpg</span></label></div>
-        <div class="radio-btn"><input type="radio" name="fmt" id="fmt-png"  value="png"><label for="fmt-png">PNG<br><span style="color:var(--dim);font-size:.55rem">.png</span></label></div>
       </div>
 
       <lbl>Crop Mode</lbl>
@@ -303,6 +297,16 @@ input[type=number]:focus,select:focus{border-color:var(--accent)}
             <button class="btn btn-reset" id="btn-prev">◀</button>
             <button class="btn btn-reset" id="btn-next">▶</button>
             <button class="btn btn-reset" id="btn-reset-crop">Reset</button>
+            <button class="btn btn-reset" id="btn-apply-all" style="display:none"
+              title="Copy this crop box to every image in the batch">Apply to All</button>
+            <label id="lock-crop-label"
+              style="display:none;align-items:center;gap:.3rem;font-family:var(--mono);
+                     font-size:.62rem;color:var(--dim);cursor:pointer;white-space:nowrap;
+                     user-select:none;padding:.3rem .5rem;border:1px solid var(--border);border-radius:3px"
+              title="Mirror every crop adjustment to all images automatically">
+              <input type="checkbox" id="lock-crop" style="accent-color:var(--accent);cursor:pointer">
+              Lock to all
+            </label>
           </div>
         </div>
 
@@ -358,6 +362,7 @@ let fileRelPaths = [];   // webkitRelativePath per file ('' for individually-add
 let cropData = {};       // { fileIndex: {x,y,w,h} } — in original image coords
 let results = [];
 let currentIdx = 0;
+let lockCrop = false;    // When true, every crop change propagates to all images
 
 // Loaded image natural dimensions
 let natW = 0, natH = 0;
@@ -393,7 +398,7 @@ const imgNav      = document.getElementById('img-nav');
 function getMode()    { return document.querySelector('input[name=cropmode]:checked').value; }
 function getOutW()    { return parseInt(document.getElementById('width').value)||80; }
 function getOutH()    { return parseInt(document.getElementById('height').value)||160; }
-function getFmt()     { return document.querySelector('input[name=fmt]:checked').value; }
+function getFmt()     { return 'jpeg'; }  /* firmware only supports JPEG */
 function formatBytes(b){ return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'; }
 
 // ═══════════════════════════════════════════════════════════════
@@ -423,6 +428,7 @@ function addFiles(newFiles, relPaths){
   convertBtn.disabled = files.length===0;
   hideErr();
   if(files.length>0 && start===0) loadCropEditor(0);
+  updateBatchCropUI();
 }
 
 function renderQueue(){
@@ -499,6 +505,12 @@ function saveNat(){
   document.getElementById('cy-val').textContent = d.y;
   document.getElementById('cw-val').textContent = d.w;
   document.getElementById('ch-val').textContent = d.h;
+  // If lock is active, mirror this crop to every other image in the batch
+  if(lockCrop){
+    for(let i=0; i<files.length; i++){
+      if(i!==currentIdx) cropData[i] = {...d};
+    }
+  }
 }
 
 function drawBox(){
@@ -602,6 +614,26 @@ window.addEventListener('pointermove', e=>{
 
 window.addEventListener('pointerup', ()=>{ drag=null; });
 
+// Arrow-key nudge — moves the crop box 1 px (or 10 px with Shift)
+// Ignored when focus is inside a text input or crop mode is not manual.
+window.addEventListener('keydown', e=>{
+  if(getMode()!=='manual') return;
+  if(cropPanel.style.display==='none') return;
+  const tag = document.activeElement && document.activeElement.tagName;
+  if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA') return;
+
+  const step = e.shiftKey ? 10 : 1;
+  let moved = false;
+  if(e.key==='ArrowLeft' ){box.x-=step;moved=true;}
+  if(e.key==='ArrowRight'){box.x+=step;moved=true;}
+  if(e.key==='ArrowUp'   ){box.y-=step;moved=true;}
+  if(e.key==='ArrowDown' ){box.y+=step;moved=true;}
+  if(moved){
+    e.preventDefault();   /* stop page scroll */
+    clampBox(); drawBox(); saveNat(); updatePreview();
+  }
+});
+
 // Recalc on window resize
 window.addEventListener('resize', ()=>{
   if(!files[currentIdx]) return;
@@ -617,6 +649,39 @@ document.getElementById('btn-prev').addEventListener('click',()=>{ if(currentIdx
 document.getElementById('btn-next').addEventListener('click',()=>{ if(currentIdx<files.length-1) loadCropEditor(currentIdx+1); });
 document.getElementById('btn-reset-crop').addEventListener('click',()=>{ delete cropData[currentIdx]; defaultBox(); drawBox(); saveNat(); updatePreview(); });
 
+// Apply to All — one-shot copy of current crop to every file
+document.getElementById('btn-apply-all').addEventListener('click',()=>{
+  if(!cropData[currentIdx]) saveNat();
+  const src = cropData[currentIdx];
+  if(!src) return;
+  for(let i=0; i<files.length; i++) cropData[i] = {...src};
+  const btn = document.getElementById('btn-apply-all');
+  const orig = btn.textContent;
+  btn.textContent = '✓ Applied!';
+  btn.style.color = 'var(--success)';
+  btn.style.borderColor = 'var(--success)';
+  setTimeout(()=>{ btn.textContent=orig; btn.style.color=''; btn.style.borderColor=''; }, 1500);
+});
+
+// Lock crop — mirror every adjustment to all images in real time
+document.getElementById('lock-crop').addEventListener('change', e=>{
+  lockCrop = e.target.checked;
+  if(lockCrop && files.length>0){
+    // Immediately apply current crop to all on enable
+    if(!cropData[currentIdx]) saveNat();
+    const src = cropData[currentIdx];
+    for(let i=0; i<files.length; i++) cropData[i] = {...src};
+  }
+});
+
+// Show batch crop controls only when >1 file is queued and mode is manual
+function updateBatchCropUI(){
+  const show = files.length>1 && getMode()==='manual';
+  document.getElementById('btn-apply-all').style.display    = show ? 'inline-flex' : 'none';
+  document.getElementById('lock-crop-label').style.display  = show ? 'flex' : 'none';
+  if(!show){ lockCrop=false; document.getElementById('lock-crop').checked=false; }
+}
+
 // Re-run default when dimensions change
 document.getElementById('width').addEventListener('change',  ()=>{ if(files.length) { delete cropData[currentIdx]; defaultBox(); drawBox(); saveNat(); updatePreview(); }});
 document.getElementById('height').addEventListener('change', ()=>{ if(files.length) { delete cropData[currentIdx]; defaultBox(); drawBox(); saveNat(); updatePreview(); }});
@@ -626,6 +691,7 @@ document.querySelectorAll('input[name=cropmode]').forEach(r=>r.addEventListener(
   const visible = getMode()==='manual';
   cropBox.style.pointerEvents = visible ? 'all':'none';
   cropBox.style.opacity = visible ? '1':'0.3';
+  updateBatchCropUI();
 }));
 
 // ── Preview canvas ────────────────────────────────────────────
@@ -724,7 +790,9 @@ convertBtn.addEventListener('click', async ()=>{
   }
   convertBtn.disabled=false;
   files=[]; fileRelPaths=[]; cropData={}; renderQueue(); fileInput.value='';
+  lockCrop=false; document.getElementById('lock-crop').checked=false;
   cropPanel.style.display='none';
+  updateBatchCropUI();
 });
 
 function addCard(r){
