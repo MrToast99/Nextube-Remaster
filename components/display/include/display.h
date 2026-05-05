@@ -61,6 +61,17 @@ void display_path_system     (char *buf, size_t n, const char *cat,   const char
 void display_show_number(int tube, int digit,        const char *theme);
 void display_show_ampm  (int tube, const char *name, const char *theme);
 
+/* ── Update indicator ──────────────────────────────────────────────── */
+/** Activate or clear the clock-face firmware-update indicator.
+ *  When active, a 2-row red bar is drawn at the physical bottom of tube 6
+ *  (LCD_COUNT-1) on every display frame, on top of whatever mode is shown.
+ *  Intended to be driven by the web UI's update-check logic:
+ *    - set true  when an update is available and the user has enabled
+ *                "clock face update notification" in Display settings
+ *    - set false when the update toast is dismissed or the feature disabled
+ *  Thread-safe: safe to call from any task. */
+void display_set_update_indicator(bool active);
+
 /* ── Debug helpers ─────────────────────────────────────────────────── */
 /**
  * Override LEDC timer 0 / channel 0 (backlight GPIO) frequency and duty at

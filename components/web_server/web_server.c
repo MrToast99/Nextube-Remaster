@@ -1080,6 +1080,38 @@ static esp_err_t api_mic_reset_calibration(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/update_notify
+ * Body: {"active":true}  — draw the 2-row red update indicator on tube 6
+ *       {"active":false} — clear the indicator
+ *
+ * Called by the web UI's update-check logic when:
+ *   - an update is detected AND the user has enabled "clock face update
+ *     notification" in Display settings  → active=true
+ *   - the update toast is dismissed or the feature is disabled → active=false
+ *
+ * The indicator is rendered by display_show_digit() on every frame; it does
+ * not require a display-task restart.  The state is volatile in RAM only —
+ * it resets to false on reboot (expected, since a new boot re-runs the
+ * update check). */
+static esp_err_t api_update_notify(httpd_req_t *r)
+{
+    char body[64] = {0};
+    int blen = (int)r->content_len;
+    if (blen <= 0 || blen >= (int)sizeof(body))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required (≤63 bytes)"), ESP_FAIL;
+    if (httpd_req_recv(r, body, (size_t)blen) != blen)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error"), ESP_FAIL;
+    cJSON *root = cJSON_Parse(body);
+    if (!root)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON"), ESP_FAIL;
+    const cJSON *ja = cJSON_GetObjectItem(root, "active");
+    bool active = cJSON_IsTrue(ja);
+    cJSON_Delete(root);
+    display_set_update_indicator(active);
+    ESP_LOGI(TAG, "update_notify: clock-face indicator %s", active ? "ON" : "OFF");
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* ── Hardware debug API ────────────────────────────────────────────── */
 /* GET /api/debug/adc
  * Reads one raw 12-bit ADC sample from the currently configured mic channel.
@@ -1335,6 +1367,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/debug/pwm",       api_debug_pwm),
     R(HTTP_POST, "/api/mic/calibrate",          api_mic_calibrate),
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
+    R(HTTP_POST, "/api/update_notify",          api_update_notify),
     R(HTTP_OPTIONS, "/api/*",            api_cors),
 };
 
@@ -1368,7 +1401,7 @@ void web_server_start(void)
     if (s_server) return;   /* already running */
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 32;
+    cfg.max_uri_handlers = 33;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.stack_size = 8192;
 

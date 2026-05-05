@@ -18,6 +18,11 @@ static const int cs_pins[LCD_COUNT] = {
 };
 static spi_device_handle_t spi_dev;
 
+/* Update indicator flag — set true to overlay 2 red rows at the physical
+ * bottom of tube 5 on every frame.  Declared here (before display_show_digit)
+ * so the function can read it.  Implementation: display_set_update_indicator(). */
+static volatile bool s_update_indicator = false;
+
 static void lcd_cmd(uint8_t cmd)
 {
     gpio_set_level(PIN_LCD_DC, 0);
@@ -186,7 +191,40 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
         spi_device_polling_transmit(spi_dev, &t);
     }
 #undef DISP_CHUNK_ROWS
+
+    /* ── Update indicator overlay ──────────────────────────────────────── */
+    /* When s_update_indicator is set, paint 2 rows of solid red at the
+     * physical bottom of tube 5.  Physical bottom = memory rows 0-1 because
+     * MADCTL 0xC8 (MY|MX|BGR) applies a 180° rotation: row 0 in the address
+     * window appears at the physical bottom-right corner of the display.
+     * Red in RGB565 big-endian = 0xF800 → bytes {0xF8, 0x00}.
+     * The SPI device is still selected (cs low) so no extra select call is
+     * needed — we simply reissue CASET/RASET for the 2-row window. */
+    if (tube == LCD_COUNT - 1 && s_update_indicator) {
+        uint8_t ca2[] = {0, LCD_OFFSET_X, 0, (uint8_t)(LCD_OFFSET_X + w - 1)};
+        lcd_cmd(0x2A); lcd_data(ca2, 4);
+        uint8_t ra2[] = {0, LCD_OFFSET_Y, 0, LCD_OFFSET_Y + 1};
+        lcd_cmd(0x2B); lcd_data(ra2, 4);
+        lcd_cmd(0x2C);
+        gpio_set_level(PIN_LCD_DC, 1);
+        uint8_t redline[LCD_WIDTH * 2];
+        for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
+        for (int row = 0; row < 2; row++) {
+            spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
+            spi_device_polling_transmit(spi_dev, &tr);
+        }
+    }
+
     deselect_all();
+}
+
+/* ── Update indicator API ────────────────────────────────────────────
+ * Called by the web-server task via POST /api/update_notify.
+ * s_update_indicator is declared near the top of this file so that
+ * display_show_digit() (which runs in the display task) can read it. */
+void display_set_update_indicator(bool active)
+{
+    s_update_indicator = active;
 }
 
 /* ════════════════════════════════════════════════════════════════════

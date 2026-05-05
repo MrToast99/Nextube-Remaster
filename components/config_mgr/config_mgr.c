@@ -50,6 +50,9 @@ static void set_defaults(void)
     s_cfg.spectrum_lcd_rgb[1] = 220;
     s_cfg.spectrum_lcd_rgb[2] = 30;
 
+    /* Clock-face update indicator — opt-in (off by default) */
+    s_cfg.notify_update_on_display = false;
+
     /* Default rainbow-ish backlight colours */
     uint8_t defaults[6][3] = {
         {200,0,0}, {0,200,0}, {0,0,200},
@@ -375,6 +378,12 @@ static void parse_json(const char *json, size_t len)
         }
     }
 
+    /* notify_update_on_display — opt-in clock-face update indicator */
+    {
+        cJSON *nu = cJSON_GetObjectItem(root, "notify_update_on_display");
+        if (cJSON_IsBool(nu)) s_cfg.notify_update_on_display = cJSON_IsTrue(nu);
+    }
+
     cJSON_Delete(root);
 }
 
@@ -552,6 +561,8 @@ char *config_to_json(void)
         for (int i = 0; i < 3; i++)
             cJSON_AddItemToArray(sp, cJSON_CreateNumber(s_cfg.spectrum_lcd_rgb[i]));
     }
+
+    cJSON_AddBoolToObject(root, "notify_update_on_display", s_cfg.notify_update_on_display);
 
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

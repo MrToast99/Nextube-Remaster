@@ -60,6 +60,9 @@ typedef struct {
     uint8_t          backlight_rgb[6][3];
     uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
     uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
+    bool             notify_update_on_display; /* true = draw red indicator on tube 6 when a
+                                                  firmware update is available.  Driven by the
+                                                  web UI via POST /api/update_notify. */
     uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0x1FF (all 9) */
 
     /* Network */

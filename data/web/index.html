@@ -132,6 +132,12 @@ select option{background:var(--accent);color:var(--text)}
         <label for="f-leading-zero" style="margin:0;cursor:pointer;font-weight:normal">Show leading zero <span style="color:var(--dim);font-size:.82rem">(e.g. 09:30 instead of 9:30)</span></label>
       </div>
     </div>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-notify-update" style="width:16px;height:16px;cursor:pointer" onchange="onNotifyUpdateChange()">
+        <label for="f-notify-update" style="margin:0;cursor:pointer;font-weight:normal">Enable clock face update notification <span style="color:var(--dim);font-size:.82rem">(shows a 2-row red indicator at the bottom of tube 6 when a firmware update is available)</span></label>
+      </div>
+    </div>
     <div class="field" id="tube5-section" style="display:none"><label>Tube 6 Display</label>
       <select id="f-tube5"><option value="blank">Blank</option><option value="weather">Weather Icon</option></select>
     </div>
@@ -893,6 +899,13 @@ async function loadSettings() {
   rotSel.value = bestOpt.value;
   $('rot-interval-wrap').style.opacity = rotEnabled ? '1' : '0.4';
 
+  /* Clock-face update notification */
+  $('f-notify-update').checked = cfg.notify_update_on_display === true;
+  /* If settings load while an update is already showing, arm the indicator */
+  if (cfg.notify_update_on_display && _latestUpdate &&
+      $('update-toast').style.display !== 'none')
+    setClockFaceUpdateIndicator(true);
+
   /* Colour swatches — one labelled column per tube */
   const sw = $('color-swatches'); sw.innerHTML = '';
   (cfg.backlight_RGB || []).forEach((c,i) => {
@@ -991,10 +1004,17 @@ async function saveSettings() {
     weather_panel_ms:  Math.max(1000, +$('f-wx-panel').value * 1000),
     weather_panel0_en: $('f-wx-p0').checked,
     weather_panel1_en: $('f-wx-p1').checked,
+    notify_update_on_display: $('f-notify-update').checked,
   };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
-  if (res?.status === 'ok') clearDirty();
+  if (res?.status === 'ok') {
+    clearDirty();
+    /* Sync the clock-face indicator to the saved setting */
+    const notifyOn   = $('f-notify-update').checked;
+    const toastShown = $('update-toast').style.display !== 'none';
+    setClockFaceUpdateIndicator(notifyOn && !!_latestUpdate && toastShown);
+  }
 }
 
 /* ── Set mode ──────────────────────────────────────── */
@@ -1647,10 +1667,37 @@ function shouldToastUpdate(latest) {
   } catch { return true; }
 }
 
+/* Tracks the latest available release version (null = up to date / not yet checked).
+ * Read by onNotifyUpdateChange() and saveSettings() to sync the tube-6 indicator. */
+let _latestUpdate = null;
+
+/* Fire-and-forget helper: tells the firmware to activate or clear the red
+ * clock-face update indicator on tube 6.  Network errors are silently ignored
+ * — the indicator is cosmetic and not safety-critical. */
+function setClockFaceUpdateIndicator(active) {
+  fetch('/api/update_notify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ active: !!active })
+  }).catch(() => {});
+}
+
+/* Called when the "Enable clock face update notification" checkbox changes.
+ * Immediately syncs the indicator so the user sees the effect without saving. */
+function onNotifyUpdateChange() {
+  const enabled = $('f-notify-update').checked;
+  const toastVisible = $('update-toast').style.display !== 'none';
+  setClockFaceUpdateIndicator(enabled && !!_latestUpdate && toastVisible);
+}
+
 function showUpdateToast(version, url) {
+  _latestUpdate = version;
   $('ut-version').textContent = version;
   $('ut-url').href = url || '#';
   $('update-toast').style.display = 'flex';
+  /* Activate clock-face indicator if the user has opted in */
+  if (cfg && cfg.notify_update_on_display)
+    setClockFaceUpdateIndicator(true);
 }
 
 /* "Dismiss once" — hides toast for 24 h (reappears next interval or for a newer version) */
@@ -1659,6 +1706,7 @@ function dismissUpdateToast() {
   if (v) localStorage.setItem('update_dismissed',
                                JSON.stringify({ version: v, at: Date.now() }));
   $('update-toast').style.display = 'none';
+  setClockFaceUpdateIndicator(false);
 }
 
 /* "Dismiss version" — permanently suppresses this version tag (still shows for newer releases) */
@@ -1667,6 +1715,7 @@ function dismissUpdateVersion() {
   if (v) localStorage.setItem('update_dismissed',
                                JSON.stringify({ version: v, permanent: true }));
   $('update-toast').style.display = 'none';
+  setClockFaceUpdateIndicator(false);
 }
 
 /* silent=true: suppress "up to date" toast (used for automatic checks).
@@ -1701,8 +1750,10 @@ async function checkForUpdates(silent = false) {
       if (!silent || shouldToastUpdate(latest))
         showUpdateToast(latest, data.html_url);
     } else {
+      _latestUpdate = null;
       $('update-available').style.display = 'none';
       $('update-toast').style.display = 'none';
+      setClockFaceUpdateIndicator(false);
       if (!silent) toast('Firmware is up to date (v' + current + ')');
     }
   } catch(e) {
