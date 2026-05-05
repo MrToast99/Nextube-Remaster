@@ -192,7 +192,7 @@ jobs:
           ### Files
           | File | Purpose |
           |---|---|
-          | \`nextube-fw-v${FW_VER}-full.bin\` | USB full flash (ESPConnect / esptool, offset 0x0) |
+          | \`nextube-fw-v${BUILD_VER}-full.bin\` | USB full flash (ESPConnect / esptool, offset 0x0) |
           | \`nextube-fw-v${FW_VER}-ota.bin\` | Firmware OTA (System → Firmware Update) |
           | \`nextube-littlefs-v${SP_VER}.bin\` | Full Web UI flash (System → Web UI Update) — erases filesystem |
           | \`nextube-hotpatch-v${BUILD_VER}.zip\` | ⚡ Hot Patch — only changed files, config preserved, no reboot (System → Hot Patch) |
