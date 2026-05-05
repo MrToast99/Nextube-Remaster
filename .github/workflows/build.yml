@@ -109,6 +109,32 @@ jobs:
           echo "Build v${BUILD_VER} (Firmware v${FW_VER} / LittleFS v${SP_VER}) / Update type: ${TYPE}" \
             > artifacts/build_info.txt
 
+      - name: Generate hot patch ZIP
+        run: |
+          BUILD_VER=${{ steps.version.outputs.build_version }}
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous tag — skipping hot patch ZIP (use full LittleFS flash for first install)"
+          else
+            # Files changed under data/ since the last release, stripped of the data/ prefix
+            CHANGED=$(git diff --name-only "$PREV_TAG" HEAD -- data/ \
+              | sed 's|^data/||' \
+              | grep -v '^config\.json$')   # config.json is protected — never include it
+
+            if [ -z "$CHANGED" ]; then
+              echo "No data/ changes since $PREV_TAG — no hot patch ZIP needed"
+            else
+              echo "Hot patch contents:"
+              echo "$CHANGED"
+              cd data
+              # -0 = STORE (no compression) — required by the firmware's ZIP parser
+              echo "$CHANGED" | zip -0 -@ "../artifacts/nextube-hotpatch-v${BUILD_VER}.zip"
+              cd ..
+              echo "Hot patch ZIP: artifacts/nextube-hotpatch-v${BUILD_VER}.zip"
+            fi
+          fi
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -168,7 +194,8 @@ jobs:
           |---|---|
           | \`nextube-fw-v${FW_VER}-full.bin\` | USB full flash (ESPConnect / esptool, offset 0x0) |
           | \`nextube-fw-v${FW_VER}-ota.bin\` | Firmware OTA (System → Firmware Update) |
-          | \`nextube-littlefs-v${SP_VER}.bin\` | Web UI / LittleFS OTA (System → Web UI Update) |
+          | \`nextube-littlefs-v${SP_VER}.bin\` | Full Web UI flash (System → Web UI Update) — erases filesystem |
+          | \`nextube-hotpatch-v${BUILD_VER}.zip\` | ⚡ Hot Patch — only changed files, config preserved, no reboot (System → Hot Patch) |
           | \`bootloader.bin\` | Bootloader (USB flash only) |
           | \`partition-table.bin\` | Partition table (USB flash only) |
 

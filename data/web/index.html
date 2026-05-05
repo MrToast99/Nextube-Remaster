@@ -489,6 +489,14 @@ select option{background:var(--accent);color:var(--text)}
     <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Hardware Settings</button></div>
   </div>
   <div class="card">
+    <h2>⚡ Hot Patch (Web UI Delta)</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>nextube-hotpatch-v*.zip</strong> to apply only the changed files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
+    <input type="file" id="hotpatch-file" accept=".zip" style="margin-bottom:.5rem">
+    <div class="progress" id="hotpatch-progress" style="display:none"><div class="progress-bar" id="hotpatch-bar"></div></div>
+    <p id="hotpatch-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;min-height:1.2em"></p>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doHotPatch()">⚡ Apply Hot Patch</button></div>
+  </div>
+  <div class="card">
     <h2>Web UI Update (LittleFS)</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>littlefs.bin</strong> to update the web interface and built-in assets without a USB flash. Required when the release notes mention web UI changes.</p>
     <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5">
@@ -1133,6 +1141,59 @@ function doFSOTA() {
     toast('LittleFS update failed: network error', true);
   };
   xhr.open('POST', '/api/update_fs');
+  xhr.send(file);
+}
+
+/* ── Hot Patch (ZIP delta) ───────────────────────────
+ * Sends the ZIP raw to /api/update_fs_hotpatch.
+ * Firmware writes each STORE entry to /spiffs/ via VFS.
+ * config.json is protected server-side; no reboot needed. */
+function doHotPatch() {
+  const file = $('hotpatch-file').files[0];
+  if (!file) return toast('Select a hotpatch .zip file first', true);
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    if (!confirm('File doesn\'t look like a ZIP — upload anyway?')) return;
+  }
+
+  const prog = $('hotpatch-progress');
+  const bar  = $('hotpatch-bar');
+  const stat = $('hotpatch-status');
+  prog.style.display = 'block';
+  bar.style.width = '0%';
+  stat.textContent = 'Uploading…';
+
+  const xhr = new XMLHttpRequest();
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      bar.style.width = (e.loaded / e.total * 100).toFixed(0) + '%';
+      stat.textContent = 'Uploading… ' + (e.loaded / 1024).toFixed(0) + ' KB';
+    }
+  };
+  xhr.onload = () => {
+    bar.style.width = '100%';
+    try {
+      const d = JSON.parse(xhr.responseText);
+      if (xhr.status === 200 && d.written >= 0) {
+        const names = (d.files || []).join(', ') || '(none)';
+        stat.textContent = `✓ ${d.written} file(s) patched: ${names}`;
+        if (d.skipped) stat.textContent += `  (${d.skipped} skipped)`;
+        if (d.failed)  stat.textContent += `  ⚠️ ${d.failed} failed`;
+        toast(`Hot patch applied — ${d.written} file(s) updated`);
+      } else {
+        stat.textContent = 'Failed: ' + (d.error || xhr.statusText);
+        toast('Hot patch failed: ' + (d.error || xhr.statusText), true);
+      }
+    } catch(e) {
+      stat.textContent = 'Failed: ' + xhr.statusText;
+      toast('Hot patch failed', true);
+    }
+  };
+  xhr.onerror = () => {
+    stat.textContent = 'Network error.';
+    toast('Hot patch failed: network error', true);
+  };
+  xhr.open('POST', '/api/update_fs_hotpatch');
+  xhr.setRequestHeader('Content-Type', 'application/zip');
   xhr.send(file);
 }
 
