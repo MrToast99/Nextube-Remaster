@@ -193,23 +193,22 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
 #undef DISP_CHUNK_ROWS
 
     /* ── Update indicator overlay ──────────────────────────────────────── */
-    /* When s_update_indicator is set, paint 2 rows of solid red at the
-     * physical bottom of tube 5.  Physical bottom = memory rows 0-1 because
-     * MADCTL 0xC8 (MY|MX|BGR) applies a 180° rotation: row 0 in the address
-     * window appears at the physical bottom-right corner of the display.
+    /* When s_update_indicator is set, paint 4 rows of solid red at the
+     * physical bottom of tube 5.  Physical bottom = the last 4 rows of the
+     * address window (LCD_OFFSET_Y + h - 4 .. LCD_OFFSET_Y + h - 1).
      * Red in RGB565 big-endian = 0xF800 → bytes {0xF8, 0x00}.
      * The SPI device is still selected (cs low) so no extra select call is
-     * needed — we simply reissue CASET/RASET for the 2-row window. */
+     * needed — we simply reissue CASET/RASET for the 4-row window. */
     if (tube == LCD_COUNT - 1 && s_update_indicator) {
         uint8_t ca2[] = {0, LCD_OFFSET_X, 0, (uint8_t)(LCD_OFFSET_X + w - 1)};
         lcd_cmd(0x2A); lcd_data(ca2, 4);
-        uint8_t ra2[] = {0, LCD_OFFSET_Y, 0, LCD_OFFSET_Y + 1};
+        uint8_t ra2[] = {0, (uint8_t)(LCD_OFFSET_Y + h - 4), 0, (uint8_t)(LCD_OFFSET_Y + h - 1)};
         lcd_cmd(0x2B); lcd_data(ra2, 4);
         lcd_cmd(0x2C);
         gpio_set_level(PIN_LCD_DC, 1);
         uint8_t redline[LCD_WIDTH * 2];
         for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
-        for (int row = 0; row < 2; row++) {
+        for (int row = 0; row < 4; row++) {
             spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
             spi_device_polling_transmit(spi_dev, &tr);
         }
