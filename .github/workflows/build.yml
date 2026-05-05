@@ -32,13 +32,7 @@ jobs:
           # build_version = whichever of firmware / LittleFS is higher (mirrors the
           # semverCmp logic in index.html so the release tag always matches the
           # version the update-check compares against).
-          BUILD_VER=$(python3 -c "
-import json
-d = json.load(open('version.json'))
-fw = tuple(int(x) for x in d['firmware_version'].split('.'))
-fs = tuple(int(x) for x in d['fs_version'].split('.'))
-print(d['firmware_version'] if fw >= fs else d['fs_version'])
-")
+          BUILD_VER=$(python3 -c "import json; d=json.load(open('version.json')); fw=tuple(int(x) for x in d['firmware_version'].split('.')); fs=tuple(int(x) for x in d['fs_version'].split('.')); print(d['firmware_version'] if fw>=fs else d['fs_version'])")
           echo "fw_version=$FW_VER"       >> $GITHUB_OUTPUT
           echo "fs_version=$SP_VER"       >> $GITHUB_OUTPUT
           echo "build_version=$BUILD_VER" >> $GITHUB_OUTPUT
