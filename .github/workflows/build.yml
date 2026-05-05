@@ -127,6 +127,16 @@ jobs:
             else
               echo "Hot patch contents:"
               echo "$CHANGED"
+
+              # Always write the current fs_version into web/version.txt so the
+              # firmware's version-mismatch banner clears after the patch is applied.
+              # The firmware reads /spiffs/web/version.txt at runtime to populate
+              # fs_version; without this the banner would persist showing the old value.
+              SP_VER=${{ steps.version.outputs.fs_version }}
+              printf '%s' "$SP_VER" > data/web/version.txt
+              # Ensure version.txt is in the file list (deduplicated)
+              CHANGED=$(printf '%s\nweb/version.txt' "$CHANGED" | sort -u)
+
               cd data
               # -0 = STORE (no compression) — required by the firmware's ZIP parser
               echo "$CHANGED" | zip -0 -@ "../artifacts/nextube-hotpatch-v${BUILD_VER}.zip"
