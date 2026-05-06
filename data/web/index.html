@@ -63,7 +63,8 @@ select option{background:var(--accent);color:var(--text)}
 
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
   ⚠️ <strong>Web UI update required</strong> — this firmware expects LittleFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
-  Go to <strong>System → LittleFS Recovery</strong> and flash the matching <code>nextube-littlefs-v*.bin</code>.
+  Upload <code>nextube-WebUI-v*.zip</code> via <strong>System → Web UI Update</strong> (recommended — config preserved, no reboot),
+  or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → LittleFS Recovery</strong> (⚠️ erases filesystem — back up your config first).
 </div>
 <div id="theme-error-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
   <span style="flex:1">⚠️ <strong>Theme image error</strong> — JPEG decode failed for <code id="te-path"></code>.
