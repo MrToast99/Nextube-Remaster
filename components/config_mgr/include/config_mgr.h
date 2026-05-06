@@ -127,6 +127,16 @@ typedef struct {
      * only UI API calls and physical button presses can change it. */
     bool             rotation_enabled;     /* false = manual-only mode switching */
     uint16_t         rotation_interval_s;  /* seconds per mode; 0 treated as 60 */
+
+    /* Scheduled Burn-in – automatic LCD colour-cycle recovery.
+     * Fires at midnight on the configured interval (weekly = every Sunday,
+     * monthly = 1st of month).  Calls display_set_burnin_mask() autonomously
+     * from within the display task — no web UI interaction required. */
+    bool             burnin_auto_enabled;      /* false = disabled (default)         */
+    uint8_t          burnin_auto_mask;         /* tube bitmask; 0x3F = all 6 tubes   */
+    uint32_t         burnin_auto_duration_s;   /* session length, 1–14400 s (default 3600 = 1 hr) */
+    char             burnin_auto_interval[8];  /* "weekly" (Sunday) or "monthly" (1st) */
+    uint8_t          burnin_auto_hour;         /* hour of day to fire, 0-23 (default 0 = midnight) */
 } nextube_config_t;
 
 /** Initialise config module – loads from flash or sets defaults. */

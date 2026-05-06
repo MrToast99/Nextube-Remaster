@@ -253,6 +253,58 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
   </div>
+  <!-- Scheduled Anti Burn-in / LCD Refresh -->
+  <div class="card">
+    <h2>Scheduled Anti Burn-in / LCD Refresh</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
+      Automatically runs the colour-cycle recovery (red → green → blue → white → black, 30 s/step)
+      at the configured schedule, then returns to normal display.  No user action is
+      required — the device fires the session automatically while powered on.
+    </p>
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.8rem">
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
+        <input type="checkbox" id="bi-sched-en" onchange="onBurninSchedToggle()">
+        Enable Scheduled Anti Burn-in / LCD Refresh
+      </label>
+    </div>
+    <div id="bi-sched-cfg" style="opacity:.4;pointer-events:none">
+      <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.7rem">
+        <div style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
+          <label for="bi-interval" style="white-space:nowrap">Schedule:</label>
+          <select id="bi-interval" class="select">
+            <option value="weekly">Weekly — every Sunday</option>
+            <option value="monthly">Monthly — 1st of month</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
+          <label for="bi-hour" style="white-space:nowrap">at</label>
+          <select id="bi-hour" class="select"></select>
+        </div>
+        <div style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
+          <label for="bi-duration" style="white-space:nowrap">Duration:</label>
+          <select id="bi-duration" class="select">
+            <option value="1800">30 minutes</option>
+            <option value="3600" selected>1 hour</option>
+            <option value="7200">2 hours</option>
+            <option value="10800">3 hours</option>
+            <option value="14400">4 hours</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:.82rem;color:var(--dim)">Tubes:</span>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="0" checked> 1</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="1" checked> 2</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="2" checked> 3</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="3" checked> 4</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="4" checked> 5</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="5" checked> 6</label>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="biSchedSelectAll()">All</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="biSchedSelectNone()">None</button>
+      </div>
+    </div>
+  </div>
+
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Display Settings</button></div>
 </div>
 
@@ -691,20 +743,28 @@ select option{background:var(--accent);color:var(--text)}
       <hr style="border:none;border-top:1px solid rgba(255,160,0,.25);margin:1rem 0">
       <h3 style="color:#ffa000;font-size:.95rem;margin:.2rem 0 .5rem">Anti Burn-in</h3>
       <p style="font-size:.78rem;color:var(--dim);margin-bottom:.6rem">
-        Hold selected tubes at solid white with 100% backlight to equalise pixel aging.
-        Stays on until <strong>Restore</strong> is clicked.
-        A ±2 px horizontal pixel shift is also applied automatically every hour in the background.
+        Cycles selected tubes through red → green → blue → white → black (30 s per step)
+        to exercise every sub-pixel at both voltage extremes.  A ±2 px horizontal pixel
+        shift is also applied automatically every hour in the background.
       </p>
-      <div class="field" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
-        <span style="font-size:.82rem;color:var(--dim);margin-right:2px">Tubes:</span>
-        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="0" onchange="burninUpdate()"> 1</label>
-        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="1" onchange="burninUpdate()"> 2</label>
-        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="2" onchange="burninUpdate()"> 3</label>
-        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="3" onchange="burninUpdate()"> 4</label>
-        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="4" onchange="burninUpdate()"> 5</label>
-        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="5" onchange="burninUpdate()"> 6</label>
-        <button class="btn btn-outline" style="padding:.2rem .6rem;font-size:.82rem;margin-left:6px" onclick="burninAll()">All</button>
-        <button class="btn btn-outline" style="padding:.2rem .6rem;font-size:.82rem" onclick="burninRestore()">Restore</button>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+        <span style="font-size:.82rem;color:var(--dim)">Tubes:</span>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="0"> 1</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="1"> 2</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="2"> 3</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="3"> 4</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="4"> 5</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="5"> 6</label>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="burninSelectAll()">All</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="burninSelectNone()">None</button>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:.82rem;color:var(--dim)">Duration:</span>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(3600)">1 hr</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(7200)">2 hr</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(10800)">3 hr</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(14400)">4 hr</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninRestore()">⏹ Stop</button>
         <span id="burnin-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
       </div>
 
@@ -920,6 +980,26 @@ async function loadSettings() {
   rotSel.value = bestOpt.value;
   $('rot-interval-wrap').style.opacity = rotEnabled ? '1' : '0.4';
 
+  /* Scheduled burn-in */
+  {
+    buildBurninHourSelect();
+    const biEn  = cfg.burnin_auto_enabled === true;
+    $('bi-sched-en').checked = biEn;
+    $('bi-interval').value   = cfg.burnin_auto_interval || 'weekly';
+    $('bi-hour').value       = cfg.burnin_auto_hour !== undefined ? cfg.burnin_auto_hour : 0;
+    const biDur = cfg.burnin_auto_duration_s || 3600;
+    const biSel = $('bi-duration');
+    let bestBi  = biSel.options[1]; /* default 1 hr */
+    for (let i = 0; i < biSel.options.length; i++)
+      if (+biSel.options[i].value === biDur) { bestBi = biSel.options[i]; break; }
+    biSel.value = bestBi.value;
+    const biMask = cfg.burnin_auto_mask !== undefined ? cfg.burnin_auto_mask : 0x3F;
+    document.querySelectorAll('.bi-sched-tube').forEach(cb => {
+      cb.checked = !!(biMask & (1 << parseInt(cb.value)));
+    });
+    onBurninSchedToggle();
+  }
+
   /* Clock-face update notification */
   const notifyOn = cfg.notify_update_on_display !== false;
   $('f-notify-update').checked = notifyOn;
@@ -979,6 +1059,38 @@ function onRotToggle() {
   $('rot-interval-wrap').style.opacity = $('rot-enabled').checked ? '1' : '0.4';
 }
 
+/* ── Scheduled burn-in ─────────────────────────────────────────── */
+function buildBurninHourSelect() {
+  const sel = $('bi-hour');
+  if (!sel || sel.options.length === 24) return; /* already built */
+  for (let h = 0; h < 24; h++) {
+    const opt = document.createElement('option');
+    opt.value = h;
+    const ampm = h < 12 ? 'AM' : 'PM';
+    const h12  = h === 0 ? 12 : (h > 12 ? h - 12 : h);
+    let lbl = h12 + ':00 ' + ampm;
+    if (h === 0)  lbl += ' (midnight)';
+    if (h === 12) lbl += ' (noon)';
+    opt.textContent = lbl;
+    sel.appendChild(opt);
+  }
+}
+function onBurninSchedToggle() {
+  const en  = $('bi-sched-en').checked;
+  const box = $('bi-sched-cfg');
+  box.style.opacity      = en ? '1'    : '.4';
+  box.style.pointerEvents = en ? ''    : 'none';
+}
+function biSchedSelectAll()  { document.querySelectorAll('.bi-sched-tube').forEach(cb => cb.checked = true); }
+function biSchedSelectNone() { document.querySelectorAll('.bi-sched-tube').forEach(cb => cb.checked = false); }
+function biSchedMask() {
+  let m = 0;
+  document.querySelectorAll('.bi-sched-tube').forEach(cb => {
+    if (cb.checked) m |= (1 << parseInt(cb.value));
+  });
+  return m || 0x3F; /* default all-tubes if somehow all unchecked */
+}
+
 /* ── Save settings ─────────────────────────────────── */
 async function saveSettings() {
   const colors = [...document.querySelectorAll('#color-swatches input')].map(el => {
@@ -1026,6 +1138,11 @@ async function saveSettings() {
     weather_panel0_en: $('f-wx-p0').checked,
     weather_panel1_en: $('f-wx-p1').checked,
     notify_update_on_display: $('f-notify-update').checked,
+    burnin_auto_enabled:    $('bi-sched-en').checked,
+    burnin_auto_mask:       biSchedMask(),
+    burnin_auto_duration_s: +$('bi-duration').value,
+    burnin_auto_interval:   $('bi-interval').value,
+    burnin_auto_hour:       +$('bi-hour').value,
   };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
@@ -1557,26 +1674,40 @@ function burninMask() {
   });
   return mask;
 }
-async function burninSend(mask) {
+function burninSelectAll()  { document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = true); }
+function burninSelectNone() { document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = false); }
+
+let _burninTimer = null;
+async function burninStart(duration_s) {
+  const mask = burninMask();
+  if (!mask) { $('burnin-msg').textContent = '✗ Select at least one tube'; return; }
   const msg = $('burnin-msg');
   try {
     const r = await fetch('/api/debug/burnin', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ mask })
+      body: JSON.stringify({ mask, duration_s })
     });
-    msg.textContent = r.ok
-      ? (mask ? '⬜ Active — click Restore to stop' : '✓ Restored')
-      : '✗ ' + await r.text();
+    if (!r.ok) { msg.textContent = '✗ ' + await r.text(); return; }
+    const hrs = duration_s / 3600;
+    msg.textContent = `▶ Cycling — ${hrs} hr${hrs > 1 ? 's' : ''} remaining`;
+    if (_burninTimer) clearTimeout(_burninTimer);
+    _burninTimer = setTimeout(() => {
+      msg.textContent = '✓ Complete — display restored';
+      burninSelectNone();
+    }, duration_s * 1000);
   } catch(e) { msg.textContent = '✗ ' + e.message; }
 }
-function burninUpdate() { burninSend(burninMask()); }
-function burninAll() {
-  document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = true);
-  burninSend(0x3F);
-}
-function burninRestore() {
-  document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = false);
-  burninSend(0);
+async function burninRestore() {
+  if (_burninTimer) { clearTimeout(_burninTimer); _burninTimer = null; }
+  burninSelectNone();
+  const msg = $('burnin-msg');
+  try {
+    const r = await fetch('/api/debug/burnin', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mask: 0, duration_s: 0 })
+    });
+    msg.textContent = r.ok ? '✓ Stopped — display restored' : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
 }
 
 /* Auto-show when URL contains #debug */

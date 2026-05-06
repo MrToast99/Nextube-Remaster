@@ -1120,9 +1120,11 @@ static esp_err_t api_debug_burnin(httpd_req_t *r)
     if (!root)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON"), ESP_FAIL;
     cJSON *jm = cJSON_GetObjectItem(root, "mask");
-    uint8_t mask = cJSON_IsNumber(jm) ? (uint8_t)(jm->valueint & 0x3F) : 0;
+    cJSON *jd = cJSON_GetObjectItem(root, "duration_s");
+    uint8_t  mask       = cJSON_IsNumber(jm) ? (uint8_t)(jm->valueint & 0x3F) : 0;
+    uint32_t duration_s = cJSON_IsNumber(jd) ? (uint32_t)jd->valueint : 0;
     cJSON_Delete(root);
-    display_set_burnin_mask(mask);
+    display_set_burnin_mask(mask, duration_s);
     return send_json(r, "{\"status\":\"ok\"}");
 }
 

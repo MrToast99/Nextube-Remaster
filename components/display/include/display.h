@@ -73,18 +73,18 @@ void display_show_ampm  (int tube, const char *name, const char *theme);
 void display_set_update_indicator(bool active);
 
 /* ── Anti burn-in ──────────────────────────────────────────────────── */
-/** Set the per-tube burn-in white mask.
- *  mask: bitmask where bit N = tube N (bit 0 = tube 1 … bit 5 = tube 6).
- *        0x3F = all six tubes white.  0x00 = restore all tubes to normal.
- *  While any bit is set:
- *    - the masked tubes show solid white (RGB565 0xFFFF) on every frame
- *    - the backlight is forced to 100% regardless of configured brightness
- *    - unmasked tubes continue to render normally
- *  The mask persists until explicitly cleared (no timeout).
+/** Start or stop per-tube burn-in colour-cycle mode.
+ *  mask:       bitmask, bit N = tube N.  0x3F = all six.  0x00 = restore all.
+ *  duration_s: 0 = run until manually stopped (mask=0 call required).
+ *              Non-zero = auto-restore after this many seconds
+ *              (3600 = 1 h, 7200 = 2 h, 10800 = 3 h, 14400 = 4 h).
+ *  While any bit is set, masked tubes cycle through red→green→blue→white→black
+ *  (30 s per step) to exercise every sub-pixel at both voltage extremes.
+ *  Unmasked tubes render normally.  Backlight is unchanged.
  *  The display task also shifts the CASET window by ±2 px every hour
- *  automatically to prevent static content burn-in — no API call needed.
+ *  automatically — no API call needed for that.
  *  Thread-safe: safe to call from any task. */
-void display_set_burnin_mask(uint8_t mask);
+void display_set_burnin_mask(uint8_t mask, uint32_t duration_s);
 
 /* ── Debug helpers ─────────────────────────────────────────────────── */
 /**

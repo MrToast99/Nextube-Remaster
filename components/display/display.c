@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <time.h>
 
 static const char *TAG = "display";
 static const int cs_pins[LCD_COUNT] = {
@@ -35,11 +36,24 @@ static volatile bool s_update_indicator = false;
  *         LCD_WIDTH=80 so shift +2 → right edge col 105 (panel is ≥128 wide). */
 static int8_t s_burnin_shift_x = 0;
 
-/* Burn-in white mask: each bit corresponds to a tube (bit 0 = tube 0 … bit 5
- * = tube 5).  When a bit is set, that tube shows solid white at 100% backlight
- * indefinitely until cleared.  Normal rendering still runs for unmasked tubes.
- * Set/cleared via display_set_burnin_mask(); 0 = all tubes restored.          */
-static volatile uint8_t s_burnin_mask = 0;
+/* Burn-in colour-cycle mask: each bit = one tube (bit 0 = tube 0 … bit 5 =
+ * tube 5).  When a bit is set, that tube shows a cycling colour sequence
+ * (red → green → blue → white → black, 30 s per step) to exercise all
+ * sub-pixels at both voltage extremes.  Normal rendering runs for unmasked
+ * tubes.  Set/cleared via display_set_burnin_mask().                          */
+static volatile uint8_t  s_burnin_mask     = 0;
+static volatile time_t   s_burnin_end_time = 0;  /* 0 = no timer; else epoch s */
+
+/* RGB565 colour cycle — drives each sub-pixel high and low in turn. */
+static const uint16_t s_burnin_colors[] = {
+    0xF800,   /* red   — R max, G=0, B=0 */
+    0x07E0,   /* green — R=0, G max, B=0 */
+    0x001F,   /* blue  — R=0, G=0, B max */
+    0xFFFF,   /* white — all max          */
+    0x0000,   /* black — all min          */
+};
+#define BURNIN_COLOR_COUNT  ((int)(sizeof(s_burnin_colors)/sizeof(s_burnin_colors[0])))
+#define BURNIN_COLOR_SECS   30   /* seconds per step in the cycle */
 
 static void lcd_cmd(uint8_t cmd)
 {
@@ -247,15 +261,17 @@ void display_set_update_indicator(bool active)
 }
 
 /* ── Anti burn-in API ────────────────────────────────────────────────
- * display_set_burnin_mask() — select which tubes show solid white.
+ * display_set_burnin_mask() — select which tubes enter colour-cycle mode.
  * mask bit N = tube N.  0x3F = all six tubes.  0x00 = restore all.
- * While any bit is set the backlight is forced to 100% regardless of
- * the configured brightness; normal content is rendered on unmasked
- * tubes unchanged. */
-void display_set_burnin_mask(uint8_t mask)
+ * duration_s: 0 = run until manually stopped; otherwise auto-clears after
+ *             that many seconds (use 3600/7200/10800/14400 for 1–4 h).     */
+void display_set_burnin_mask(uint8_t mask, uint32_t duration_s)
 {
-    s_burnin_mask = mask & 0x3F;   /* clamp to 6 tubes */
-    ESP_LOGI(TAG, "burn-in mask: 0x%02X", (unsigned)s_burnin_mask);
+    s_burnin_mask     = mask & 0x3F;
+    s_burnin_end_time = (mask && duration_s) ? time(NULL) + (time_t)duration_s : 0;
+    ESP_LOGI(TAG, "burn-in mask: 0x%02X  duration: %s",
+             (unsigned)s_burnin_mask,
+             duration_s ? "timed" : "manual");
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1265,7 +1281,8 @@ static void display_task(void *arg)
     int           weather_panel      = 0;      /* 0 = temp, 1 = humidity */
     TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
     bool          first              = true;
-    int           last_hour          = -1;     /* for hourly burn-in shift update */
+    int           last_hour             = -1;  /* for hourly burn-in shift update */
+    int           burnin_last_run_yday  = -1;  /* day-of-year the scheduled burn-in last ran */
 
     TickType_t wake = xTaskGetTickCount();
     rotation_tick = wake;
@@ -1337,26 +1354,56 @@ static void display_task(void *arg)
             last_bl_brt = target_brt;
         }
 
-        /* ── Anti burn-in: hourly pixel shift ───────────────────────────
+        /* ── Anti burn-in: hourly pixel shift + scheduled trigger ──────────
          * Read current hour (NTP local time) and update s_burnin_shift_x
          * whenever it changes.  Formula: hour%5 - 2 → {-2,-1,0,+1,+2}.
          * Self-correcting from NTP; no step counter needed.
-         * Skipped on the very first tick (first==true) so the display
-         * starts at shift 0 and only changes after the first full hour. */
+         * Also checks at midnight whether the scheduled burn-in interval
+         * (weekly = Sunday, monthly = 1st of month) has been met, and
+         * fires display_set_burnin_mask() automatically if so.
+         * Skipped on the very first tick (first==true). */
         if (!first) {
             struct tm burn_tm; ntp_get_local(&burn_tm);
+
+            /* Hourly pixel-shift update */
             if (burn_tm.tm_hour != last_hour) {
                 last_hour        = burn_tm.tm_hour;
                 s_burnin_shift_x = (int8_t)(last_hour % 5 - 2);
                 ESP_LOGI(TAG, "burn-in shift: hour=%d  x=%+d px",
                          last_hour, (int)s_burnin_shift_x);
             }
-        }
 
-        /* ── Anti burn-in: force 100 % backlight when mask is active ───── */
-        if (s_burnin_mask) {
-            display_set_brightness(100);
-            last_bl_brt = 255;   /* sentinel: force re-apply on next normal frame */
+            /* ── Scheduled burn-in: midnight trigger ─────────────────────
+             * Only evaluates at midnight (tm_hour == 0).
+             * burnin_last_run_yday tracks the last day-of-year that was
+             * checked to prevent re-triggering every 200 ms tick while
+             * still within the same midnight window.  Any day stamped as
+             * "checked" is skipped on subsequent ticks that same day, so
+             * only one check per calendar day is ever performed.
+             * An already-active session (s_burnin_mask != 0) is not
+             * interrupted — a manual session takes precedence. */
+            if (cfg->burnin_auto_enabled && !s_burnin_mask &&
+                    burn_tm.tm_hour == (int)cfg->burnin_auto_hour &&
+                    burn_tm.tm_yday != burnin_last_run_yday) {
+
+                burnin_last_run_yday = burn_tm.tm_yday; /* stamp regardless of fire */
+
+                bool should_fire = false;
+                if (strcmp(cfg->burnin_auto_interval, "monthly") == 0)
+                    should_fire = (burn_tm.tm_mday == 1);
+                else                                       /* "weekly" = every Sunday */
+                    should_fire = (burn_tm.tm_wday == 0);
+
+                if (should_fire) {
+                    display_set_burnin_mask(cfg->burnin_auto_mask,
+                                            cfg->burnin_auto_duration_s);
+                    ESP_LOGI(TAG,
+                             "Scheduled burn-in fired (%s): mask=0x%02X  dur=%lus",
+                             cfg->burnin_auto_interval,
+                             (unsigned)cfg->burnin_auto_mask,
+                             (unsigned long)cfg->burnin_auto_duration_s);
+                }
+            }
         }
 
         switch (mode) {
@@ -1537,15 +1584,26 @@ static void display_task(void *arg)
 
         last_mode = mode;
         strncpy(last_theme, cfg->theme, sizeof(last_theme) - 1);
-        /* ── Anti burn-in: overwrite masked tubes with solid white ─────────
-         * Runs after the normal mode render so unmasked tubes show live
-         * content while masked tubes stay white.  Because SPI writes are
-         * sequential and complete before the next vTaskDelayUntil, there is
-         * no perceptible flicker between the mode render and the overwrite. */
+        /* ── Anti burn-in: colour-cycle masked tubes ───────────────────────
+         * Runs after normal mode render; unmasked tubes show live content.
+         * Colour advances every BURNIN_COLOR_SECS seconds, cycling through
+         * red→green→blue→white→black to stress every sub-pixel at both
+         * voltage extremes.  Timer expiry auto-restores all tubes. */
         if (s_burnin_mask) {
-            for (int _t = 0; _t < LCD_COUNT; _t++) {
-                if (s_burnin_mask & (1u << _t))
-                    display_fill(_t, 0xFFFF);
+            time_t now_t = time(NULL);
+
+            /* Auto-restore when the requested duration has elapsed */
+            if (s_burnin_end_time != 0 && now_t >= s_burnin_end_time) {
+                s_burnin_mask     = 0;
+                s_burnin_end_time = 0;
+                ESP_LOGI(TAG, "burn-in timer expired — restoring normal display");
+            } else {
+                uint16_t col = s_burnin_colors[
+                    (size_t)(now_t / BURNIN_COLOR_SECS) % (size_t)BURNIN_COLOR_COUNT];
+                for (int _t = 0; _t < LCD_COUNT; _t++) {
+                    if (s_burnin_mask & (1u << _t))
+                        display_fill(_t, col);
+                }
             }
         }
 

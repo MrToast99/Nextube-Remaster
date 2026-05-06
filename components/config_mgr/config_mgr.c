@@ -101,6 +101,13 @@ static void set_defaults(void)
     /* Rotation off by default; user must explicitly enable it */
     s_cfg.rotation_enabled    = false;
     s_cfg.rotation_interval_s = 60;
+
+    /* Scheduled burn-in — off by default */
+    s_cfg.burnin_auto_enabled    = false;
+    s_cfg.burnin_auto_mask       = 0x3F;   /* all 6 tubes */
+    s_cfg.burnin_auto_duration_s = 3600;   /* 1 hour */
+    strcpy(s_cfg.burnin_auto_interval, "weekly");
+    s_cfg.burnin_auto_hour       = 0;      /* midnight */
 }
 
 /* ── JSON helpers ──────────────────────────────────────────────────── */
@@ -336,6 +343,32 @@ static void parse_json(const char *json, size_t len)
     json_read_u16(root, "rotation_interval_s", &s_cfg.rotation_interval_s);
     if (s_cfg.rotation_interval_s == 0) s_cfg.rotation_interval_s = 60;
 
+    /* Scheduled burn-in */
+    {
+        cJSON *be = cJSON_GetObjectItem(root, "burnin_auto_enabled");
+        if (cJSON_IsBool(be)) s_cfg.burnin_auto_enabled = cJSON_IsTrue(be);
+    }
+    json_read_u8(root, "burnin_auto_mask", &s_cfg.burnin_auto_mask);
+    s_cfg.burnin_auto_mask &= 0x3F;
+    if (s_cfg.burnin_auto_mask == 0) s_cfg.burnin_auto_mask = 0x3F;
+    {
+        cJSON *bd = cJSON_GetObjectItem(root, "burnin_auto_duration_s");
+        if (cJSON_IsNumber(bd)) {
+            s_cfg.burnin_auto_duration_s = (uint32_t)bd->valueint;
+            if (s_cfg.burnin_auto_duration_s < 1800)
+                s_cfg.burnin_auto_duration_s = 1800;   /* minimum 30 min */
+            if (s_cfg.burnin_auto_duration_s > 14400)
+                s_cfg.burnin_auto_duration_s = 14400;  /* maximum 4 hours */
+        }
+    }
+    json_read_str(root, "burnin_auto_interval", s_cfg.burnin_auto_interval,
+                  sizeof(s_cfg.burnin_auto_interval));
+    /* Only "weekly" and "monthly" are valid; default to "weekly" for any other string */
+    if (strcmp(s_cfg.burnin_auto_interval, "monthly") != 0)
+        strcpy(s_cfg.burnin_auto_interval, "weekly");
+    json_read_u8(root, "burnin_auto_hour", &s_cfg.burnin_auto_hour);
+    if (s_cfg.burnin_auto_hour > 23) s_cfg.burnin_auto_hour = 0;
+
     /* Backlight RGB array */
     cJSON *bl_rgb = cJSON_GetObjectItem(root, "backlight_RGB");
     if (cJSON_IsArray(bl_rgb)) {
@@ -540,6 +573,12 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "enabled_modes",      s_cfg.enabled_modes);
     cJSON_AddBoolToObject  (root, "rotation_enabled",   s_cfg.rotation_enabled);
     cJSON_AddNumberToObject(root, "rotation_interval_s", s_cfg.rotation_interval_s);
+
+    cJSON_AddBoolToObject  (root, "burnin_auto_enabled",    s_cfg.burnin_auto_enabled);
+    cJSON_AddNumberToObject(root, "burnin_auto_mask",       s_cfg.burnin_auto_mask);
+    cJSON_AddNumberToObject(root, "burnin_auto_duration_s", s_cfg.burnin_auto_duration_s);
+    cJSON_AddStringToObject(root, "burnin_auto_interval",   s_cfg.burnin_auto_interval);
+    cJSON_AddNumberToObject(root, "burnin_auto_hour",       s_cfg.burnin_auto_hour);
 
     cJSON *bl_rgb = cJSON_AddArrayToObject(root, "backlight_RGB");
     for (int i = 0; i < 6; i++) {
