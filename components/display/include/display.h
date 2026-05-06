@@ -63,7 +63,7 @@ void display_show_ampm  (int tube, const char *name, const char *theme);
 
 /* ── Update indicator ──────────────────────────────────────────────── */
 /** Activate or clear the clock-face firmware-update indicator.
- *  When active, a 2-row red bar is drawn at the physical bottom of tube 6
+ *  When active, a 4-row red bar is drawn at the physical bottom of tube 6
  *  (LCD_COUNT-1) on every display frame, on top of whatever mode is shown.
  *  Intended to be driven by the web UI's update-check logic:
  *    - set true  when an update is available and the user has enabled
@@ -71,6 +71,20 @@ void display_show_ampm  (int tube, const char *name, const char *theme);
  *    - set false when the update toast is dismissed or the feature disabled
  *  Thread-safe: safe to call from any task. */
 void display_set_update_indicator(bool active);
+
+/* ── Anti burn-in ──────────────────────────────────────────────────── */
+/** Set the per-tube burn-in white mask.
+ *  mask: bitmask where bit N = tube N (bit 0 = tube 1 … bit 5 = tube 6).
+ *        0x3F = all six tubes white.  0x00 = restore all tubes to normal.
+ *  While any bit is set:
+ *    - the masked tubes show solid white (RGB565 0xFFFF) on every frame
+ *    - the backlight is forced to 100% regardless of configured brightness
+ *    - unmasked tubes continue to render normally
+ *  The mask persists until explicitly cleared (no timeout).
+ *  The display task also shifts the CASET window by ±2 px every hour
+ *  automatically to prevent static content burn-in — no API call needed.
+ *  Thread-safe: safe to call from any task. */
+void display_set_burnin_mask(uint8_t mask);
 
 /* ── Debug helpers ─────────────────────────────────────────────────── */
 /**

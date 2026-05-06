@@ -18,10 +18,28 @@ static const int cs_pins[LCD_COUNT] = {
 };
 static spi_device_handle_t spi_dev;
 
-/* Update indicator flag — set true to overlay 2 red rows at the physical
+/* Update indicator flag — set true to overlay 4 red rows at the physical
  * bottom of tube 5 on every frame.  Declared here (before display_show_digit)
  * so the function can read it.  Implementation: display_set_update_indicator(). */
 static volatile bool s_update_indicator = false;
+
+/* ── Anti burn-in ────────────────────────────────────────────────────────── */
+/* Hourly pixel shift: the CASET window is offset by s_burnin_shift_x pixels
+ * so the same physical columns are not driven by static content indefinitely.
+ * Value cycles through {-2,-1,0,+1,+2} as hour%5-2 (self-correcting from NTP).
+ * Applied to every CASET command in display_fill, display_show_digit, and
+ * render_spectrum — nowhere else needs it since all rendering goes through one
+ * of those three entry points.
+ *
+ * Safety: LCD_OFFSET_X=24 so shift -2 → col 22 (still on-panel).
+ *         LCD_WIDTH=80 so shift +2 → right edge col 105 (panel is ≥128 wide). */
+static int8_t s_burnin_shift_x = 0;
+
+/* Burn-in white mask: each bit corresponds to a tube (bit 0 = tube 0 … bit 5
+ * = tube 5).  When a bit is set, that tube shows solid white at 100% backlight
+ * indefinitely until cleared.  Normal rendering still runs for unmasked tubes.
+ * Set/cleared via display_set_burnin_mask(); 0 = all tubes restored.          */
+static volatile uint8_t s_burnin_mask = 0;
 
 static void lcd_cmd(uint8_t cmd)
 {
@@ -157,7 +175,8 @@ void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
-    lcd_cmd(0x2A); uint8_t ca[] = {0,LCD_OFFSET_X,0,LCD_OFFSET_X+LCD_WIDTH-1}; lcd_data(ca,4);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
+    lcd_cmd(0x2A); uint8_t ca[] = {0,ox,0,(uint8_t)(ox+LCD_WIDTH-1)}; lcd_data(ca,4);
     lcd_cmd(0x2B); uint8_t ra[] = {0,LCD_OFFSET_Y,0,LCD_OFFSET_Y+LCD_HEIGHT-1}; lcd_data(ra,4);
     lcd_cmd(0x2C);
     gpio_set_level(PIN_LCD_DC, 1);
@@ -174,7 +193,8 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
 {
     if (tube < 0 || tube >= LCD_COUNT || !data) return;
     select_tube(tube);
-    lcd_cmd(0x2A); uint8_t ca[] = {0,LCD_OFFSET_X,0,LCD_OFFSET_X+w-1}; lcd_data(ca,4);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
+    lcd_cmd(0x2A); uint8_t ca[] = {0,ox,0,(uint8_t)(ox+w-1)}; lcd_data(ca,4);
     lcd_cmd(0x2B); uint8_t ra[] = {0,LCD_OFFSET_Y,0,LCD_OFFSET_Y+h-1}; lcd_data(ra,4);
     lcd_cmd(0x2C);
     gpio_set_level(PIN_LCD_DC, 1);
@@ -224,6 +244,18 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
 void display_set_update_indicator(bool active)
 {
     s_update_indicator = active;
+}
+
+/* ── Anti burn-in API ────────────────────────────────────────────────
+ * display_set_burnin_mask() — select which tubes show solid white.
+ * mask bit N = tube N.  0x3F = all six tubes.  0x00 = restore all.
+ * While any bit is set the backlight is forced to 100% regardless of
+ * the configured brightness; normal content is rendered on unmasked
+ * tubes unchanged. */
+void display_set_burnin_mask(uint8_t mask)
+{
+    s_burnin_mask = mask & 0x3F;   /* clamp to 6 tubes */
+    ESP_LOGI(TAG, "burn-in mask: 0x%02X", (unsigned)s_burnin_mask);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -918,8 +950,9 @@ static void render_spectrum(const nextube_config_t *cfg)
 
         /* Open SPI window — identical to display_show_digit() preamble. */
         select_tube(tube);
+        uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
         lcd_cmd(0x2A);
-        uint8_t ca[] = {0, LCD_OFFSET_X, 0, LCD_OFFSET_X + LCD_WIDTH - 1};
+        uint8_t ca[] = {0, ox, 0, (uint8_t)(ox + LCD_WIDTH - 1)};
         lcd_data(ca, 4);
         lcd_cmd(0x2B);
         uint8_t ra[] = {0, LCD_OFFSET_Y, 0, LCD_OFFSET_Y + LCD_HEIGHT - 1};
@@ -1232,6 +1265,7 @@ static void display_task(void *arg)
     int           weather_panel      = 0;      /* 0 = temp, 1 = humidity */
     TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
     bool          first              = true;
+    int           last_hour          = -1;     /* for hourly burn-in shift update */
 
     TickType_t wake = xTaskGetTickCount();
     rotation_tick = wake;
@@ -1301,6 +1335,28 @@ static void display_task(void *arg)
             display_set_brightness(cfg->backlight_on ? target_brt : 0);
             last_bl_on  = cfg->backlight_on;
             last_bl_brt = target_brt;
+        }
+
+        /* ── Anti burn-in: hourly pixel shift ───────────────────────────
+         * Read current hour (NTP local time) and update s_burnin_shift_x
+         * whenever it changes.  Formula: hour%5 - 2 → {-2,-1,0,+1,+2}.
+         * Self-correcting from NTP; no step counter needed.
+         * Skipped on the very first tick (first==true) so the display
+         * starts at shift 0 and only changes after the first full hour. */
+        if (!first) {
+            struct tm burn_tm; ntp_get_local(&burn_tm);
+            if (burn_tm.tm_hour != last_hour) {
+                last_hour        = burn_tm.tm_hour;
+                s_burnin_shift_x = (int8_t)(last_hour % 5 - 2);
+                ESP_LOGI(TAG, "burn-in shift: hour=%d  x=%+d px",
+                         last_hour, (int)s_burnin_shift_x);
+            }
+        }
+
+        /* ── Anti burn-in: force 100 % backlight when mask is active ───── */
+        if (s_burnin_mask) {
+            display_set_brightness(100);
+            last_bl_brt = 255;   /* sentinel: force re-apply on next normal frame */
         }
 
         switch (mode) {
@@ -1481,12 +1537,22 @@ static void display_task(void *arg)
 
         last_mode = mode;
         strncpy(last_theme, cfg->theme, sizeof(last_theme) - 1);
+        /* ── Anti burn-in: overwrite masked tubes with solid white ─────────
+         * Runs after the normal mode render so unmasked tubes show live
+         * content while masked tubes stay white.  Because SPI writes are
+         * sequential and complete before the next vTaskDelayUntil, there is
+         * no perceptible flicker between the mode render and the overwrite. */
+        if (s_burnin_mask) {
+            for (int _t = 0; _t < LCD_COUNT; _t++) {
+                if (s_burnin_mask & (1u << _t))
+                    display_fill(_t, 0xFFFF);
+            }
+        }
+
         first = false;
 
         /* Spectrum mode runs at 20 Hz (50 ms) to match the LED task refresh
-         * rate and give snappy bar response.  All other modes use 5 Hz
-         * (200 ms) — enough for clock/weather/album and avoids unnecessary
-         * SPI redraws that would add rail noise during static content. */
+         * rate and give snappy bar response.  All other modes use 5 Hz (200 ms). */
         TickType_t tick_ms = (mode == APP_MODE_SPECTRUM)
                              ? pdMS_TO_TICKS(50)
                              : pdMS_TO_TICKS(200);

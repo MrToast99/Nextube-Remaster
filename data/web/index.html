@@ -687,6 +687,27 @@ select option{background:var(--accent);color:var(--text)}
         Note: very low frequencies (&lt;1 kHz) will produce visible flicker.
       </p>
 
+      <!-- ── Anti Burn-in ─────────────────────────────────────────────── -->
+      <hr style="border:none;border-top:1px solid rgba(255,160,0,.25);margin:1rem 0">
+      <h3 style="color:#ffa000;font-size:.95rem;margin:.2rem 0 .5rem">Anti Burn-in</h3>
+      <p style="font-size:.78rem;color:var(--dim);margin-bottom:.6rem">
+        Hold selected tubes at solid white with 100% backlight to equalise pixel aging.
+        Stays on until <strong>Restore</strong> is clicked.
+        A ±2 px horizontal pixel shift is also applied automatically every hour in the background.
+      </p>
+      <div class="field" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+        <span style="font-size:.82rem;color:var(--dim);margin-right:2px">Tubes:</span>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="0" onchange="burninUpdate()"> 1</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="1" onchange="burninUpdate()"> 2</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="2" onchange="burninUpdate()"> 3</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="3" onchange="burninUpdate()"> 4</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="4" onchange="burninUpdate()"> 5</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="5" onchange="burninUpdate()"> 6</label>
+        <button class="btn btn-outline" style="padding:.2rem .6rem;font-size:.82rem;margin-left:6px" onclick="burninAll()">All</button>
+        <button class="btn btn-outline" style="padding:.2rem .6rem;font-size:.82rem" onclick="burninRestore()">Restore</button>
+        <span id="burnin-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
+      </div>
+
       <div class="btn-group">
         <button class="btn btn-primary" style="background:#ffa000;border-color:#ffa000" onclick="dbgSave()">Save to Config</button>
         <button class="btn btn-outline" onclick="dbgHide()">Close Debug Panel</button>
@@ -1527,6 +1548,35 @@ async function pwmRestore() {
     });
     msg.textContent = r.ok ? '50 kHz restored' : '✗ ' + await r.text();
   } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+
+function burninMask() {
+  let mask = 0;
+  document.querySelectorAll('.burnin-tube').forEach(cb => {
+    if (cb.checked) mask |= (1 << parseInt(cb.value));
+  });
+  return mask;
+}
+async function burninSend(mask) {
+  const msg = $('burnin-msg');
+  try {
+    const r = await fetch('/api/debug/burnin', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mask })
+    });
+    msg.textContent = r.ok
+      ? (mask ? '⬜ Active — click Restore to stop' : '✓ Restored')
+      : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+function burninUpdate() { burninSend(burninMask()); }
+function burninAll() {
+  document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = true);
+  burninSend(0x3F);
+}
+function burninRestore() {
+  document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = false);
+  burninSend(0);
 }
 
 /* Auto-show when URL contains #debug */
