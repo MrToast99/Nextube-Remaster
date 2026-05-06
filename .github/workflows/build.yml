@@ -205,6 +205,5 @@ jobs:
           body_path: release_notes.md
           files: |
             Nextube-Remaster v${{ needs.build.outputs.build_version }}.zip
-            artifacts/nextube-WebUI-v${{ needs.build.outputs.build_version }}.zip
           draft: false
           prerelease: false
