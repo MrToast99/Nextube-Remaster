@@ -63,7 +63,7 @@ select option{background:var(--accent);color:var(--text)}
 
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
   ⚠️ <strong>Web UI update required</strong> — this firmware expects LittleFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
-  Go to <strong>System → Web UI Update</strong> and flash the matching <code>littlefs.bin</code>.
+  Go to <strong>System → LittleFS Recovery</strong> and flash the matching <code>nextube-littlefs-v*.bin</code>.
 </div>
 <div id="theme-error-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
   <span style="flex:1">⚠️ <strong>Theme image error</strong> — JPEG decode failed for <code id="te-path"></code>.
@@ -474,6 +474,13 @@ select option{background:var(--accent);color:var(--text)}
     <h2>Audio Settings</h2>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-mic-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
+        <label for="f-mic-en" style="margin:0;cursor:pointer;font-weight:normal">Enable microphone</label>
+      </div>
+      <p style="color:var(--dim);font-size:.8rem;margin:.4rem 0 0 24px">Required for Spectrum mode. When disabled the ADC is not initialised and Spectrum mode shows silence. Takes effect after reboot.</p>
+    </div>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-audio-en" style="width:16px;height:16px;cursor:pointer">
         <label for="f-audio-en" style="margin:0;cursor:pointer;font-weight:normal">Enable audio output</label>
       </div>
@@ -527,43 +534,21 @@ select option{background:var(--accent);color:var(--text)}
     <div class="btn-group"><button class="btn btn-primary" onclick="doOTA()">Upload & Flash</button></div>
   </div>
   <div class="card">
-    <h2>Backup & Restore</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">Download your current configuration to a file or restore it from a backup. Useful before flashing LittleFS.</p>
+    <h2>Web UI Update</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>nextube-WebUI-v*.zip</strong> to apply only the changed web UI files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
+    <input type="file" id="hotpatch-file" accept=".zip" style="margin-bottom:.5rem">
+    <div class="progress" id="hotpatch-progress" style="display:none"><div class="progress-bar" id="hotpatch-bar"></div></div>
+    <p id="hotpatch-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doHotPatch()">Upload & Apply</button></div>
+  </div>
+  <div class="card">
+    <h2>Backup &amp; Restore</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">Download your current configuration to a file or restore it from a backup. Recommended before any LittleFS recovery flash.</p>
     <div class="btn-group">
       <button class="btn btn-outline" onclick="exportSettings()">Download config.json</button>
       <button class="btn btn-outline" onclick="$('f-import').click()">Restore from File</button>
       <input type="file" id="f-import" accept=".json" style="display:none" onchange="importSettings(this)">
     </div>
-  </div>
-  <div class="card">
-    <h2>Hardware Settings</h2>
-    <div class="field" style="padding-bottom:4px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-mic-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
-        <label for="f-mic-en" style="margin:0;cursor:pointer;font-weight:normal">Enable microphone</label>
-      </div>
-      <p style="color:var(--dim);font-size:.8rem;margin:.4rem 0 0 24px">Required for Spectrum mode. Disable if no microphone is fitted on GPIO35 (ADC1_CH7). When disabled the ADC is not initialised and Spectrum mode shows silence. Takes effect after reboot.</p>
-    </div>
-    <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Hardware Settings</button></div>
-  </div>
-  <div class="card">
-    <h2>⚡ Hot Patch (Web UI Delta)</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>nextube-hotpatch-v*.zip</strong> to apply only the changed files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
-    <input type="file" id="hotpatch-file" accept=".zip" style="margin-bottom:.5rem">
-    <div class="progress" id="hotpatch-progress" style="display:none"><div class="progress-bar" id="hotpatch-bar"></div></div>
-    <p id="hotpatch-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;min-height:1.2em"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doHotPatch()">⚡ Apply Hot Patch</button></div>
-  </div>
-  <div class="card">
-    <h2>Web UI Update (LittleFS)</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>littlefs.bin</strong> to update the web interface and built-in assets without a USB flash. Required when the release notes mention web UI changes.</p>
-    <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5">
-      ⚠️ <strong>Warning:</strong> this overwrites <em>all</em> LittleFS flash — including any custom themes or images you have uploaded to the device. Built-in themes will be restored from the new image. Back up custom files first using the LittleFS Files list below.
-    </div>
-    <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
-    <div class="progress" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
-    <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doFSOTA()">Upload & Flash</button></div>
   </div>
   <div class="card">
     <h2>LittleFS Files</h2>
@@ -578,6 +563,17 @@ select option{background:var(--accent);color:var(--text)}
       <button class="btn btn-outline" onclick="$('upload-input').click()">⬆ Upload File(s)</button>
       <button class="btn btn-outline" onclick="$('upload-dir-input').click()">📁 Upload Folder</button>
     </div>
+  </div>
+  <div class="card">
+    <h2>LittleFS Recovery</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.</p>
+    <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5">
+      ⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above, and download your config using Backup &amp; Restore before proceeding.
+    </div>
+    <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
+    <div class="progress" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
+    <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doFSOTA()">Upload & Flash</button></div>
   </div>
   <div class="card">
     <h2>Device Logs</h2>
@@ -1338,7 +1334,7 @@ function doFSOTA() {
  * config.json is protected server-side; no reboot needed. */
 function doHotPatch() {
   const file = $('hotpatch-file').files[0];
-  if (!file) return toast('Select a hotpatch .zip file first', true);
+  if (!file) return toast('Select a Web UI .zip file first', true);
   if (!file.name.toLowerCase().endsWith('.zip')) {
     if (!confirm('File doesn\'t look like a ZIP — upload anyway?')) return;
   }
@@ -1348,6 +1344,7 @@ function doHotPatch() {
   const stat = $('hotpatch-status');
   prog.style.display = 'block';
   bar.style.width = '0%';
+  stat.style.display = '';
   stat.textContent = 'Uploading…';
 
   const xhr = new XMLHttpRequest();

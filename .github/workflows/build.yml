@@ -109,7 +109,7 @@ jobs:
           echo "Build v${BUILD_VER} (Firmware v${FW_VER} / LittleFS v${SP_VER}) / Update type: ${TYPE}" \
             > artifacts/build_info.txt
 
-      - name: Generate hot patch ZIP
+      - name: Generate Web UI ZIP
         run: |
           SP_VER=${{ steps.version.outputs.fs_version }}
           export BUILD_VER=${{ steps.version.outputs.build_version }}
@@ -120,7 +120,7 @@ jobs:
 
           # Script lives in .github/scripts/ to avoid embedding Python inside the
           # YAML run block (heredoc content at column 0 breaks YAML block scalars).
-          python3 .github/scripts/make_hotpatch.py
+          python3 .github/scripts/make_Webui_patch.py
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -153,13 +153,13 @@ jobs:
           # Human-readable update guidance
           case "$TYPE" in
             firmware-ota)
-              GUIDANCE="**Update required:** flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**."
+              GUIDANCE="**Firmware changed:** flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**."
               ;;
             spiffs-only)
-              GUIDANCE="**Update required:** flash \`nextube-littlefs-v${SP_VER}.bin\` via **System → Web UI Update**. ⚠️ **Back up your config first** (System → Backup Config) — flashing LittleFS replaces the entire filesystem. Restore via System → Restore Config after flashing."
+              GUIDANCE="**Web UI changed:** upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update** (config-safe, no reboot). If a full filesystem reflash is required it will be noted explicitly — use \`nextube-littlefs-v${SP_VER}.bin\` via **System → LittleFS Recovery** (⚠️ erases filesystem — back up your config first via **System → Backup & Restore**)."
               ;;
             full)
-              GUIDANCE="**Both partitions changed.** ⚠️ **Back up your config first** (System → Backup Config) — flashing LittleFS replaces the entire filesystem. Flash \`nextube-fw-v${FW_VER}-ota.bin\` via System → Firmware Update, then \`nextube-littlefs-v${SP_VER}.bin\` via System → Web UI Update, then restore your config. Alternatively use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
+              GUIDANCE="**Both partitions changed.** Flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**, then upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update**. Alternatively use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
               ;;
             *)
               GUIDANCE="Refer to the included binaries."
@@ -179,15 +179,14 @@ jobs:
           ### Files
           | File | Purpose |
           |---|---|
+          | \`nextube-fw-v${FW_VER}-ota.bin\` | Firmware OTA — **System → Firmware Update** |
+          | \`nextube-WebUI-v${BUILD_VER}.zip\` | Web UI update — **System → Web UI Update** (config-safe, no reboot) |
+          | \`nextube-littlefs-v${SP_VER}.bin\` | LittleFS recovery — **System → LittleFS Recovery** ⚠️ erases filesystem |
           | \`nextube-fw-v${BUILD_VER}-full.bin\` | USB full flash (ESPConnect / esptool, offset 0x0) |
-          | \`nextube-fw-v${FW_VER}-ota.bin\` | Firmware OTA (System → Firmware Update) |
-          | \`nextube-littlefs-v${SP_VER}.bin\` | Full Web UI flash (System → Web UI Update) — erases filesystem |
-          | \`nextube-hotpatch-v${BUILD_VER}.zip\` | ⚡ Hot Patch — only changed files, config preserved, no reboot (System → Hot Patch) |
           | \`bootloader.bin\` | Bootloader (USB flash only) |
           | \`partition-table.bin\` | Partition table (USB flash only) |
 
-          > **Config backup reminder:** flashing \`nextube-littlefs-v${SP_VER}.bin\` or the full image replaces the entire LittleFS partition and will erase your saved settings.
-          > Use **System → Backup Config** before flashing and **System → Restore Config** afterwards to preserve your WiFi, theme, and display preferences.
+          > **Before using LittleFS Recovery or USB full flash:** download your config via **System → Backup & Restore** and re-import it after flashing to preserve your WiFi, theme, and display preferences.
           EOF
 
           echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
@@ -206,6 +205,6 @@ jobs:
           body_path: release_notes.md
           files: |
             Nextube-Remaster v${{ needs.build.outputs.build_version }}.zip
-            artifacts/nextube-hotpatch-v${{ needs.build.outputs.build_version }}.zip
+            artifacts/nextube-WebUI-v${{ needs.build.outputs.build_version }}.zip
           draft: false
           prerelease: false
