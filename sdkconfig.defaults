@@ -52,6 +52,11 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # mDNS
 CONFIG_MDNS_MAX_SERVICES=10
+# Restrict mDNS to the STA interface only.  Without this, the mDNS stack probes
+# on both AP and STA simultaneously, and the brief window where the hostname is
+# still "espressif" (before mdns_hostname_set takes effect) causes a flood of
+# unicast DNS queries for "espressif.<domain>.a" visible on the LAN.
+CONFIG_MDNS_MULTIPLE_INTERFACES=n
 
 # TLS / HTTPS
 # Enable the built-in Mozilla CA certificate bundle so esp_crt_bundle_attach()

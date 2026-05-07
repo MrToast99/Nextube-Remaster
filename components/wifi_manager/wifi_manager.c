@@ -44,6 +44,7 @@ static bool s_ap_boot_expired  = false;
  * two concurrent association requests and leave the TCP/IP stack in an
  * indeterminate state. */
 static bool s_manual_reconnect = false;
+static bool s_mdns_started     = false; /* mDNS init guard — start only once, after first IP */
 
 static void ap_disable_cb(void *arg)
 {
@@ -111,16 +112,34 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             esp_timer_stop(s_ap_disable_timer);
             esp_timer_start_once(s_ap_disable_timer, AP_DISABLE_DELAY_US);
         }
+        /* Start mDNS once — only after the STA interface has a routable IP.
+         * Initialising mDNS earlier (at wifi_start) causes it to probe using
+         * the ESP-IDF default hostname "espressif" on the AP interface before
+         * mdns_hostname_set() takes effect, flooding the LAN with unicast DNS
+         * queries for "espressif.<domain>.a" on every boot and reconnect. */
+        if (!s_mdns_started) {
+            s_mdns_started = true;
+            start_mdns();
+        }
     }
 }
 
 static void start_mdns(void)
 {
+    /* Read the user-configured hostname; fall back to "nextube-remaster"
+     * if the config is empty or unavailable. */
+    char hostname[32] = "nextube-remaster";
+    config_lock();
+    const nextube_config_t *cfg = config_get();
+    if (cfg->hostname[0] != '\0')
+        strncpy(hostname, cfg->hostname, sizeof(hostname) - 1);
+    config_unlock();
+
     mdns_init();
-    mdns_hostname_set("nextube-remaster");
+    mdns_hostname_set(hostname);
     mdns_instance_name_set("Nextube Remaster");
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-    ESP_LOGI(TAG, "mDNS: http://nextube-remaster.local");
+    ESP_LOGI(TAG, "mDNS: http://%s.local", hostname);
 }
 
 void wifi_manager_start(void)
@@ -180,8 +199,7 @@ void wifi_manager_start(void)
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
-    start_mdns();
-    ESP_LOGI(TAG, "WiFi AP+STA started. AP SSID: Nextube-Setup");
+    ESP_LOGI(TAG, "WiFi AP+STA started. AP SSID: Nextube-Setup  (mDNS deferred until STA IP)");
 }
 
 void wifi_manager_reconnect_sta(void)
