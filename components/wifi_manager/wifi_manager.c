@@ -46,6 +46,8 @@ static bool s_ap_boot_expired  = false;
 static bool s_manual_reconnect = false;
 static bool s_mdns_started     = false; /* mDNS init guard — start only once, after first IP */
 
+static void start_mdns(void); /* forward declaration — defined after wifi_event_handler */
+
 static void ap_disable_cb(void *arg)
 {
     ESP_LOGI(TAG, "STA connected – disabling setup AP");
