@@ -1,12 +1,14 @@
 #include "display.h"
 #include "board_pins.h"
 #include "esp_log.h"
+#include "esp_timer.h"          /* esp_timer_get_time — AP PIN phase clock */
 #include "driver/spi_master.h"
 #include "driver/ledc.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "weather.h"
+#include "wifi_manager.h"       /* AP PIN visibility (S1) */
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
@@ -421,7 +423,7 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
         snprintf(s_theme_error, sizeof(s_theme_error),
                  "%.320s (%ux%u decoded, need %ux%u)",
                  rel, out_img.width, out_img.height, LCD_WIDTH, LCD_HEIGHT);
-        s_img_cache[slot].path[0] = '\0';   /* slot data is allocated but invalid */
+        s_img_cache[slot].path[0] = '\0';   /* slot reusable; data buffer kept for next decode */
         return NULL;
     }
 
@@ -681,6 +683,43 @@ void display_show_ampm(int tube, const char *name, const char *theme)
 #include "freertos/semphr.h"
 
 /* ── Mode render helpers ────────────────────────────────────────────── */
+
+/* ── S1 — AP PIN renderer ────────────────────────────────────────────
+ * Called from the display task whenever the setup AP is broadcasting and
+ * no client is associated.  Shows the 8-digit PIN across 6 tubes in two
+ * 3-second phases:
+ *
+ *   Phase 0 (3 s):  tubes show pin[0..5]
+ *   Phase 1 (3 s):  tubes show pin[2..7]
+ *
+ * The 4-digit overlap (pin[2..5] visible in both phases) gives the user a
+ * stable anchor while their eyes piece the full PIN together.  Themes need
+ * no new artwork — this leverages each theme's existing Numbers/0..9.jpg.
+ *
+ * Defined here (after the include of config_mgr.h above) rather than next
+ * to display_show_number, because nextube_config_t is only visible from
+ * this point in the translation unit forward.
+ */
+static void render_ap_pin(const nextube_config_t *cfg)
+{
+    const char *pin = wifi_manager_get_ap_pin();
+    if (!pin || strlen(pin) < 8) return;
+
+    /* 3 s per phase, driven by the monotonic timer so phases stay in sync
+     * across reboots (cosmetic — doesn't actually matter for correctness). */
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    int phase  = (int)((now_ms / 3000) % 2);    /* 0 or 1 */
+    int offset = phase * 2;                     /* 0 or 2 */
+
+    for (int tube = 0; tube < LCD_COUNT; tube++) {
+        int idx = offset + tube;
+        if (idx < 8 && pin[idx] >= '0' && pin[idx] <= '9') {
+            display_show_number(tube, pin[idx] - '0', cfg->theme);
+        } else {
+            display_fill(tube, 0x0000);
+        }
+    }
+}
 
 /* Custom Clock: shows the current date as DD  MM  YY across the 6 tubes.
  * Example: 15 March 2026 → [1][5][0][3][2][6]
@@ -1404,6 +1443,29 @@ static void display_task(void *arg)
                              (unsigned long)cfg->burnin_auto_duration_s);
                 }
             }
+        }
+
+        /* ── S1 — AP PIN takeover ─────────────────────────────────────
+         * Whenever the setup AP is broadcasting AND no client is associated,
+         * the tubes show the WPA2 PIN instead of the user's selected mode.
+         * As soon as a client connects the PIN auto-hides and normal-mode
+         * rendering resumes on the next tick. */
+        if (wifi_manager_ap_pin_visible()) {
+            render_ap_pin(cfg);
+            /* Force the change-detection state to "no last frame" so when
+             * the AP closes (or a client connects) the next normal-mode
+             * tick re-renders from scratch — otherwise the equality checks
+             * below would skip the redraw and leave PIN digits on screen. */
+            last_mode     = (app_mode_t)-1;
+            last_t        = (struct tm){0};
+            last_subs     = UINT32_MAX;
+            last_remain_s = INT32_MAX;
+            last_temp_c   = -9999.0f;
+            last_hum      = -1.0f;
+            last_wx_valid = false;
+            first         = true;
+            vTaskDelayUntil(&wake, pdMS_TO_TICKS(200));
+            continue;
         }
 
         switch (mode) {

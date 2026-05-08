@@ -28,8 +28,9 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <errno.h>
-#include "esp_heap_caps.h"  /* heap_caps_malloc — PSRAM allocation for hotpatch buffer */
-#include "lwip/sockets.h"   /* setsockopt / SO_RCVTIMEO — OTA recv timeout extension */
+#include "esp_heap_caps.h"
+#include "lwip/sockets.h"
+#include "auth.h"
 
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
@@ -90,10 +91,28 @@ static int log_vprintf_hook(const char *fmt, va_list args)
 
 static esp_err_t send_json(httpd_req_t *req, const char *json)
 {
+    /* No Access-Control-Allow-Origin header on purpose.  The web UI is
+     * served from the same origin as the API (the device's IP / mDNS
+     * hostname), so it doesn't need CORS to reach the /api routes.
+     * Omitting the header makes browsers block any cross-origin script
+     * from reading the response — defence-in-depth against information
+     * leakage even on auth-open routes like /api/status. */
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_sendstr(req, json);
 }
+
+/* ── Auth ──────────────────────────────────────────────────────────
+ * REQUIRE_AUTH(r) is the gate macro applied to mutation handlers.  Returns
+ * 401 if the request lacks a valid Bearer token.  Defined up here (rather
+ * than next to the auth route handlers further down) because it has to be
+ * visible at every handler that uses it. */
+#define REQUIRE_AUTH(r) do { \
+    if (!auth_check_request(r)) { \
+        httpd_resp_set_status((r), "401 Unauthorized"); \
+        httpd_resp_set_type((r), "application/json"); \
+        return httpd_resp_sendstr((r), "{\"error\":\"unauthorized\"}"); \
+    } \
+} while (0)
 
 static esp_err_t api_ping(httpd_req_t *r)       { return send_json(r, "{\"status\":\"ok\"}"); }
 static esp_err_t api_fw_ver(httpd_req_t *r)      { return send_json(r, "{\"version\":\"" FW_VERSION_STR "\"}"); }
@@ -103,6 +122,7 @@ static esp_err_t api_hw_ver(httpd_req_t *r)      { return send_json(r, "{\"versi
  * Triggers a one-shot preview of the named audio file at the current volume. */
 static esp_err_t api_audio_play(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char buf[256] = {0};
     int  n = httpd_req_recv(r, buf, sizeof(buf) - 1);
     if (n <= 0) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "No body"), ESP_FAIL;
@@ -127,6 +147,7 @@ static esp_err_t api_audio_play(httpd_req_t *r)
 
 static esp_err_t api_get_settings(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char *j = config_to_json();
     if (!j) return send_json(r, "{}");
     /* Strip WiFi password — it must never travel over the wire on a GET.
@@ -156,6 +177,7 @@ static esp_err_t api_get_settings(httpd_req_t *r)
  * settings endpoint but IS preserved in backup/restore round-trips. */
 static esp_err_t api_backup(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char *j = config_to_json();
     esp_err_t ret = send_json(r, j ? j : "{}");
     free(j);
@@ -200,6 +222,7 @@ static void schedule_wifi_reconnect(void)
 
 static esp_err_t api_post_settings(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     int len = r->content_len;
     if (len <= 0 || len > 4096) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad length"), ESP_FAIL;
     char *buf = malloc(len + 1);
@@ -259,8 +282,222 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     return send_json(r, ok ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}");
 }
 
+/* ── Auth — request body helper ────────────────────────────────────
+ * REQUIRE_AUTH macro is defined near the top of this file (before any
+ * handler that uses it).  The JSON-body reader below is only used by the
+ * auth handlers immediately following, so it lives here. */
+
+/* Helper — read a JSON POST body up to max_len bytes and parse it.  Returns
+ * a cJSON object (caller must cJSON_Delete) or NULL on error.  Sends a 400
+ * error response itself on failure, so callers should just return on NULL.
+ * Loops on httpd_req_recv to handle TCP fragmentation cleanly. */
+static cJSON *read_json_body(httpd_req_t *r, size_t max_len)
+{
+    int len = r->content_len;
+    if (len <= 0 || (size_t)len > max_len) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid body length");
+        return NULL;
+    }
+    char *buf = malloc(len + 1);
+    if (!buf) {
+        httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return NULL;
+    }
+    int rx = 0;
+    while (rx < len) {
+        int n = httpd_req_recv(r, buf + rx, len - rx);
+        if (n <= 0) {
+            free(buf);
+            httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error");
+            return NULL;
+        }
+        rx += n;
+    }
+    buf[rx] = '\0';
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return NULL;
+    }
+    return root;
+}
+
+/* POST /api/auth/set_password — first-boot password setup.
+ * Allowed only while no password has been set yet (unauth, by design — the
+ * user can't authenticate without the first password).  After admin_set=1
+ * future password changes go through /api/auth/change_password. */
+static esp_err_t api_auth_set_password(httpd_req_t *r)
+{
+    if (auth_is_password_set()) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return httpd_resp_sendstr(r,
+            "{\"error\":\"password_already_set\"}");
+    }
+    cJSON *body = read_json_body(r, 256);
+    if (!body) return ESP_FAIL;
+
+    cJSON *jpw = cJSON_GetObjectItem(body, "password");
+    char pw_buf[80] = {0};
+    if (cJSON_IsString(jpw) && jpw->valuestring)
+        snprintf(pw_buf, sizeof(pw_buf), "%s", jpw->valuestring);
+    cJSON_Delete(body);
+
+    if (pw_buf[0] == '\0')
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "Missing password"), ESP_FAIL;
+
+    esp_err_t err = auth_set_password(pw_buf);
+    /* Wipe the local copy regardless of outcome. */
+    memset(pw_buf, 0, sizeof(pw_buf));
+    if (err == ESP_ERR_INVALID_ARG)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "Password must be 6-64 chars"), ESP_FAIL;
+    if (err != ESP_OK)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Storage error"), ESP_FAIL;
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
+/* POST /api/auth/login — exchange password for a session bearer token. */
+static esp_err_t api_auth_login(httpd_req_t *r)
+{
+    if (auth_is_locked_out()) {
+        httpd_resp_set_status(r, "429 Too Many Requests");
+        char body[80];
+        snprintf(body, sizeof(body),
+                 "{\"error\":\"locked_out\",\"retry_after_s\":%d}",
+                 auth_lockout_remaining_s());
+        return httpd_resp_sendstr(r, body);
+    }
+    cJSON *body = read_json_body(r, 256);
+    if (!body) return ESP_FAIL;
+
+    cJSON *jpw = cJSON_GetObjectItem(body, "password");
+    char pw_buf[80] = {0};
+    if (cJSON_IsString(jpw) && jpw->valuestring)
+        snprintf(pw_buf, sizeof(pw_buf), "%s", jpw->valuestring);
+    cJSON_Delete(body);
+
+    char *token = auth_login(pw_buf);
+    memset(pw_buf, 0, sizeof(pw_buf));
+
+    if (!token) {
+        httpd_resp_set_status(r, "401 Unauthorized");
+        httpd_resp_set_type(r, "application/json");
+        return httpd_resp_sendstr(r, "{\"error\":\"bad_password\"}");
+    }
+    char resp[200];
+    snprintf(resp, sizeof(resp), "{\"status\":\"ok\",\"token\":\"%s\"}", token);
+    free(token);
+    return send_json(r, resp);
+}
+
+/* POST /api/auth/logout — invalidate the current session token. */
+static esp_err_t api_auth_logout(httpd_req_t *r)
+{
+    /* Pull the token from the Authorization header.  No body required. */
+    char hdr[81];
+    if (httpd_req_get_hdr_value_str(r, "Authorization", hdr, sizeof(hdr)) == ESP_OK
+        && strncmp(hdr, "Bearer ", 7) == 0) {
+        auth_logout(hdr + 7);
+    }
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
+/* GET /api/wifi/ap_pin — returns the current 8-digit setup-AP PIN.
+ * Auth-gated so an unauthenticated LAN attacker can't snarf the PIN and
+ * connect to the AP (the AP itself, when active, is also gated by the same
+ * PIN — but exposing it on the LAN would let someone in WiFi range bypass
+ * that). */
+static esp_err_t api_wifi_ap_pin(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char body[64];
+    snprintf(body, sizeof(body), "{\"pin\":\"%s\"}",
+             wifi_manager_get_ap_pin());
+    return send_json(r, body);
+}
+
+/* POST /api/wifi/regen_pin — generate a new random PIN, persist it, and
+ * apply to the live AP.  Existing AP clients are not kicked. */
+static esp_err_t api_wifi_regen_pin(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    if (wifi_manager_regenerate_ap_pin() != ESP_OK)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Storage error"), ESP_FAIL;
+    char body[64];
+    snprintf(body, sizeof(body), "{\"status\":\"ok\",\"pin\":\"%s\"}",
+             wifi_manager_get_ap_pin());
+    return send_json(r, body);
+}
+
+/* POST /api/factory_reset_full — wipes admin password + AP PIN + user
+ * config, then reboots.  Distinct from /api/reset which only clears user
+ * config (and WiFi credentials).  Returns the device to fresh-from-box
+ * state: the next boot generates a new AP PIN and the web UI prompts the
+ * user to set a new admin password. */
+static esp_err_t api_factory_reset_full(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    /* Order matters slightly:
+     *   1. Send the response first (so the client gets a confirmation),
+     *   2. Wipe state,
+     *   3. Reboot.
+     * If we wipe before responding, the network may still drop the
+     * response if the WiFi reset path interrupts TCP. */
+    send_json(r, "{\"status\":\"ok\",\"message\":\"Resetting and rebooting...\"}");
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    auth_factory_reset();
+    wifi_manager_factory_reset_ap_pin();
+    esp_wifi_restore();        /* clear WiFi driver's NVS namespace */
+    config_reset();            /* clear /spiffs/config.json */
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
+    return ESP_OK;
+}
+
+/* POST /api/auth/change_password — old password must match before set. */
+static esp_err_t api_auth_change_password(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    cJSON *body = read_json_body(r, 256);
+    if (!body) return ESP_FAIL;
+
+    cJSON *jold = cJSON_GetObjectItem(body, "old_password");
+    cJSON *jnew = cJSON_GetObjectItem(body, "new_password");
+    char old_buf[80] = {0}, new_buf[80] = {0};
+    if (cJSON_IsString(jold) && jold->valuestring)
+        snprintf(old_buf, sizeof(old_buf), "%s", jold->valuestring);
+    if (cJSON_IsString(jnew) && jnew->valuestring)
+        snprintf(new_buf, sizeof(new_buf), "%s", jnew->valuestring);
+    cJSON_Delete(body);
+
+    esp_err_t err = auth_change_password(old_buf, new_buf);
+    memset(old_buf, 0, sizeof(old_buf));
+    memset(new_buf, 0, sizeof(new_buf));
+
+    if (err == ESP_ERR_INVALID_STATE)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "Old password incorrect"), ESP_FAIL;
+    if (err == ESP_ERR_INVALID_ARG)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "New password must be 6-64 chars"), ESP_FAIL;
+    if (err != ESP_OK)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Storage error"), ESP_FAIL;
+    /* Bonus: after a password change, kill all existing sessions so other
+     * devices have to re-authenticate with the new password. */
+    auth_clear_all_sessions();
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 static esp_err_t api_reset(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     /* Wipe the WiFi driver's own NVS namespace so the device cannot
      * reconnect to the old network after reboot.  Must be called while
      * the WiFi stack is running (before esp_restart). */
@@ -275,6 +512,7 @@ static esp_err_t api_reset(httpd_req_t *r)
 /* POST /api/reboot — restart the device without touching the config */
 static esp_err_t api_reboot(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     send_json(r, "{\"status\":\"ok\",\"message\":\"Rebooting...\"}");
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
@@ -305,7 +543,25 @@ static esp_err_t api_status(httpd_req_t *r)
     }
     const sub_count_t *s = youtube_bili_get();
     if (s && s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
-    cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size());
+    /* Heap / PSRAM telemetry — surfaced in the System tab so a slowly leaking
+     * build is visible long before allocations actually start failing.
+     * heap_*    = INTERNAL SRAM specifically (~320 KB total on ESP32-WROVER).
+     * psram_*   = PSRAM (capped at 4 MB by the ESP32 MMU).
+     * heap_min  = lifetime low-water mark across all caps (combined total).
+     * *_largest = largest free contiguous block (the real fragmentation signal).
+     *
+     * esp_get_free_heap_size() returns the COMBINED total across internal +
+     * PSRAM and is misleading for diagnostics; we use heap_caps_get_*
+     * with explicit cap masks instead. */
+    cJSON_AddNumberToObject(root, "heap_free",
+                            (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(root, "heap_min",      (double)esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(root, "heap_largest",
+                            (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(root, "psram_free",
+                            (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    cJSON_AddNumberToObject(root, "psram_largest",
+                            (double)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
     /* expected_fs: the LittleFS version this firmware binary was built against.
      * Baked in at compile time from version.json → fs_version.
@@ -337,6 +593,10 @@ static esp_err_t api_status(httpd_req_t *r)
     config_unlock();
     cJSON_AddStringToObject(root, "mode", app_mode_name(status_mode));
     cJSON_AddBoolToObject(root, "mic_calibration_saved", status_mic_cal);
+    /* auth state.  The web UI gates its first-boot setup flow on these.
+     * admin_set is the only auth-related field exposed unauthenticated; the
+     * AP PIN itself is on a separate auth'd route (/api/wifi/ap_pin). */
+    cJSON_AddBoolToObject(root, "admin_set", auth_is_password_set());
     char *json = cJSON_PrintUnformatted(root);
     esp_err_t ret = send_json(r, json);
     free(json); cJSON_Delete(root);
@@ -345,6 +605,7 @@ static esp_err_t api_status(httpd_req_t *r)
 
 static esp_err_t api_ota(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     if (r->content_len <= 0)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Content-Length required"), ESP_FAIL;
 
@@ -425,6 +686,7 @@ static esp_err_t api_ota(httpd_req_t *r)
 #define FS_SECTOR 4096
 static esp_err_t api_fs_ota(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     const esp_partition_t *part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, "littlefs");
     if (!part)
@@ -542,6 +804,7 @@ static void hp_mkdir_p(const char *path)
 
 static esp_err_t api_fs_hotpatch(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     int content_len = r->content_len;
     if (content_len <= 0)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
@@ -668,8 +931,17 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
 /* URL-decode a query-string parameter value in-place.
  * httpd_query_key_value() returns the raw (percent-encoded) value.
  * Without decoding, a path like "/" arrives as "%2F" and opendir/fopen
- * fail with ENOENT because the kernel never sees the real '/' character. */
-static void url_decode_inplace(char *s)
+ * fail with ENOENT because the kernel never sees the real '/' character.
+ *
+ * Returns true on a clean decode; false if the input contained an encoded
+ * NUL or other control character.  %00 NUL injection
+ * truncates strings before any post-decode validation can catch it —
+ * e.g. /api/file/get?path=/secret%00.png would slip through a hypothetical
+ * ".png-suffix" filter while opening "/secret".  Other control bytes
+ * (CR/LF/TAB/etc) also have no place in URL parameters here.  Callers
+ * should treat a false return as a 400 Bad Request — the input is almost
+ * certainly hostile. */
+static bool url_decode_inplace(char *s)
 {
     char *r = s, *w = s;
     while (*r) {
@@ -678,7 +950,10 @@ static void url_decode_inplace(char *s)
             char *end;
             long v = strtol(hex, &end, 16);
             if (end == hex + 2) {
-                /* Both digits were valid hex — use the decoded byte */
+                /* Reject encoded NUL (truncation attack) and ASCII control
+                 * characters (no legitimate use in our URL parameters).
+                 * 0x80-0xFF are still allowed so UTF-8 filenames work. */
+                if (v < 0x20 || v == 0x7F) return false;
                 *w++ = (char)v;
                 r += 3;
             } else {
@@ -692,16 +967,19 @@ static void url_decode_inplace(char *s)
         }
     }
     *w = '\0';
+    return true;
 }
 
 static esp_err_t api_file_ls(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char path[128] = "/spiffs";
     char q[128];
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) == ESP_OK) {
         char d[64];
         if (httpd_query_key_value(q, "dir", d, sizeof(d)) == ESP_OK && d[0] != '\0') {
-            url_decode_inplace(d);
+            if (!url_decode_inplace(d) || strstr(d, ".."))
+                return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
             snprintf(path, sizeof(path), "/spiffs%s", d);
         }
     }
@@ -719,7 +997,6 @@ static esp_err_t api_file_ls(httpd_req_t *r)
      * emit one JSON object per file via httpd_resp_send_chunk() so each
      * chunk is ≤ 512 bytes and always fits in the send buffer. */
     httpd_resp_set_type(r, "application/json");
-    httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
 
     DIR *dp = opendir(path);
     if (!dp) {
@@ -839,12 +1116,12 @@ static esp_err_t api_themes(httpd_req_t *r)
  * Streams the file as a download attachment. */
 static esp_err_t api_file_download(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char q[256], p[256] = {0}, spiffs_path[320];
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
         httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
-    url_decode_inplace(p);
-    if (strstr(p, ".."))
+    if (!url_decode_inplace(p) || strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
 
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
@@ -856,7 +1133,6 @@ static esp_err_t api_file_download(httpd_req_t *r)
     fseek(f, 0, SEEK_SET);
 
     httpd_resp_set_type(r, content_type(p));
-    httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
     const char *fname = strrchr(p, '/'); fname = fname ? fname + 1 : p;
     /* Sanitize filename for Content-Disposition — reject CR/LF/quotes */
     for (const char *c = fname; *c; c++) {
@@ -885,15 +1161,27 @@ static esp_err_t api_file_download(httpd_req_t *r)
  * Writes the raw request body to the given SPIFFS path, creating or
  * overwriting the file.  Directory components must already exist (SPIFFS
  * creates them implicitly via path-prefix emulation). */
+/* Hard cap on a single upload's Content-Length.  Prevents a slow-trickle or
+ * runaway upload from holding a connection slot indefinitely while consuming
+ * filesystem space.  2 MB comfortably accommodates audio clips and theme
+ * JPEGs; the WebUI patch route has its own dedicated limit. */
+#define MAX_UPLOAD_BYTES (2 * 1024 * 1024)
+
 static esp_err_t api_file_upload(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char q[256], p[256] = {0}, spiffs_path[320];
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
         httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
-    url_decode_inplace(p);
-    if (strstr(p, ".."))
+    if (!url_decode_inplace(p) || strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
+
+    /* Hard size cap — reject before opening the destination file so we don't
+     * leave a partially-written file behind on rejection. */
+    if (r->content_len > MAX_UPLOAD_BYTES)
+        return httpd_resp_send_err(r, HTTPD_413_CONTENT_TOO_LARGE,
+                                   "File too large (max 2 MB per upload)"), ESP_FAIL;
 
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
 
@@ -936,12 +1224,12 @@ static esp_err_t api_file_upload(httpd_req_t *r)
  * LittleFS (unlike SPIFFS) supports true directories via mkdir(). */
 static esp_err_t api_file_mkdir(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char q[256], p[256] = {0}, spiffs_path[320];
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
         httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
-    url_decode_inplace(p);
-    if (strstr(p, ".."))
+    if (!url_decode_inplace(p) || strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
 
     /* Strip trailing slash */
@@ -989,6 +1277,7 @@ static int fs_remove_recursive(const char *path)
  * LittleFS supports rename() for both files and directories via VFS. */
 static esp_err_t api_file_rename(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char q[512], from[256] = {0}, to[256] = {0};
     char from_path[320], to_path[320];
 
@@ -998,10 +1287,8 @@ static esp_err_t api_file_rename(httpd_req_t *r)
         from[0] == '\0' || to[0] == '\0')
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing from/to"), ESP_FAIL;
 
-    url_decode_inplace(from);
-    url_decode_inplace(to);
-
-    if (strstr(from, "..") || strstr(to, ".."))
+    if (!url_decode_inplace(from) || !url_decode_inplace(to) ||
+        strstr(from, "..") || strstr(to, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
     if (strcmp(from, "/config.json") == 0)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Protected file"), ESP_FAIL;
@@ -1026,12 +1313,12 @@ static esp_err_t api_file_rename(httpd_req_t *r)
  * Removes a file or a directory tree.  config.json is protected. */
 static esp_err_t api_file_delete(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char q[256], p[256] = {0}, spiffs_path[320];
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
         httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
-    url_decode_inplace(p);
-    if (strstr(p, ".."))
+    if (!url_decode_inplace(p) || strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
     if (strcmp(p, "/config.json") == 0)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Protected file"), ESP_FAIL;
@@ -1055,6 +1342,7 @@ static esp_err_t api_file_delete(httpd_req_t *r)
  * any mode — the mic task bypasses the Spectrum-mode gate when calibrating. */
 static esp_err_t api_mic_calibrate(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     float floor_vals[MIC_BAND_COUNT];
     if (!mic_calibrate(floor_vals, 1500)) {
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -1081,7 +1369,6 @@ static esp_err_t api_mic_calibrate(httpd_req_t *r)
     char *out = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
     httpd_resp_set_type(r, "application/json");
-    httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
     esp_err_t ret = httpd_resp_sendstr(r, out ? out : "{\"status\":\"ok\"}");
     free(out);
     return ret;
@@ -1093,6 +1380,7 @@ static esp_err_t api_mic_calibrate(httpd_req_t *r)
  * on the next boot. */
 static esp_err_t api_mic_reset_calibration(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     mic_reset_calibration();
     cJSON *patch = cJSON_CreateObject();
     cJSON_AddBoolToObject(patch, "mic_calibration_saved", false);
@@ -1110,6 +1398,7 @@ static esp_err_t api_mic_reset_calibration(httpd_req_t *r)
  * indefinitely until mask=0 is sent. */
 static esp_err_t api_debug_burnin(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char body[64] = {0};
     int blen = (int)r->content_len;
     if (blen <= 0 || blen >= (int)sizeof(body))
@@ -1143,6 +1432,7 @@ static esp_err_t api_debug_burnin(httpd_req_t *r)
  * update check). */
 static esp_err_t api_update_notify(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char body[64] = {0};
     int blen = (int)r->content_len;
     if (blen <= 0 || blen >= (int)sizeof(body))
@@ -1168,6 +1458,7 @@ static esp_err_t api_update_notify(httpd_req_t *r)
  * Response: {"channel":0,"gpio":36,"raw":2048,"voltage_mv":1650} */
 static esp_err_t api_debug_adc(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     config_lock();
     uint8_t ch = config_get()->mic_adc_channel;
     config_unlock();
@@ -1202,6 +1493,7 @@ static esp_err_t api_debug_adc(httpd_req_t *r)
  * "normal" restores idle behaviour.  Any active audio playback is stopped. */
 static esp_err_t api_debug_dac(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char body[256] = {0};
     int  blen = (int)r->content_len;
     if (blen <= 0 || blen >= (int)sizeof(body))
@@ -1240,6 +1532,7 @@ static esp_err_t api_debug_dac(httpd_req_t *r)
  * find a PWM frequency that minimises coupling into the DAC output. */
 static esp_err_t api_debug_pwm(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     char body[256] = {0};
     int  blen = (int)r->content_len;
     if (blen <= 0 || blen >= (int)sizeof(body))
@@ -1272,6 +1565,7 @@ static esp_err_t api_debug_pwm(httpd_req_t *r)
 /* GET /api/logs  → {"lines":["I (12) tag: msg", ...]}  chronological  */
 static esp_err_t api_get_logs(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     cJSON *root = cJSON_CreateObject();
     cJSON *arr  = cJSON_AddArrayToObject(root, "lines");
 
@@ -1295,6 +1589,7 @@ static esp_err_t api_get_logs(httpd_req_t *r)
 /* POST /api/logs/clear  → clears the in-RAM ring buffer only */
 static esp_err_t api_clear_logs(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
         s_log_head  = 0;
         s_log_count = 0;
@@ -1305,12 +1600,14 @@ static esp_err_t api_clear_logs(httpd_req_t *r)
 
 static esp_err_t api_wifi_scan_post(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     wifi_manager_scan_start();
     return send_json(r, "{\"status\":\"scanning\"}");
 }
 
 static esp_err_t api_wifi_scan_get(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     uint16_t cnt = 0;
     esp_wifi_scan_get_ap_num(&cnt);
     if (cnt == 0) return send_json(r, "[]");
@@ -1335,12 +1632,16 @@ static esp_err_t api_wifi_scan_get(httpd_req_t *r)
 
 static esp_err_t api_cors(httpd_req_t *r)
 {
-    /* Restrict cross-origin mutation: only GET is allowed from foreign origins.
-     * POST/DELETE/PUT preflights from a malicious site will not receive an
-     * Allow header for those methods and the browser will block the request. */
-    httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(r, "Access-Control-Allow-Methods", "GET");
-    httpd_resp_set_hdr(r, "Access-Control-Allow-Headers", "Content-Type");
+    /* CORS preflight (OPTIONS).  We deliberately return NO
+     * Access-Control-Allow-* headers — the browser will fail the
+     * preflight and block the cross-origin request entirely.
+     *
+     * Same-origin requests (the device's own web UI talking to its own
+     * API) never trigger a preflight in the first place, so this
+     * handler is only reached by cross-origin code, which is exactly
+     * what we want to refuse.  Returning 204 No Content keeps the
+     * response cheap. */
+    httpd_resp_set_status(r, "204 No Content");
     httpd_resp_send(r, NULL, 0);
     return ESP_OK;
 }
@@ -1417,6 +1718,16 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
     R(HTTP_POST, "/api/debug/burnin",           api_debug_burnin),
+    /* Auth routes .  set_password is allowed unauth on first boot only;
+     * change_password is itself REQUIRE_AUTH'd. */
+    R(HTTP_POST, "/api/auth/set_password",      api_auth_set_password),
+    R(HTTP_POST, "/api/auth/login",             api_auth_login),
+    R(HTTP_POST, "/api/auth/logout",            api_auth_logout),
+    R(HTTP_POST, "/api/auth/change_password",   api_auth_change_password),
+    /* setup AP PIN management. */
+    R(HTTP_GET,  "/api/wifi/ap_pin",            api_wifi_ap_pin),
+    R(HTTP_POST, "/api/wifi/regen_pin",         api_wifi_regen_pin),
+    R(HTTP_POST, "/api/factory_reset_full",     api_factory_reset_full),
     R(HTTP_OPTIONS, "/api/*",            api_cors),
 };
 
@@ -1445,14 +1756,26 @@ void web_server_start(void)
          * so the listening socket is always fresh after a credential change. */
         esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                    web_server_got_ip_handler, NULL);
+        /* Initialise admin auth state (in-RAM session table, lockout counters).
+         * NVS is already initialised by main.c::init_nvs() before web_server_start. */
+        auth_init();
     }
 
     if (s_server) return;   /* already running */
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 34;
-    cfg.uri_match_fn = httpd_uri_match_wildcard;
-    cfg.stack_size = 8192;
+    cfg.max_uri_handlers = 48;                /* current handlers + headroom for future routes */
+    cfg.uri_match_fn     = httpd_uri_match_wildcard;
+    cfg.stack_size       = 8192;
+    /* Bump the open-socket cap so concurrent OTA + page reload + status polls
+     * don't exhaust the default 7-slot pool.  Each socket costs ~1.3 KB
+     * internal RAM; 12 sockets ≈ 16 KB total. */
+    cfg.max_open_sockets  = 12;
+    /* Default recv/send timeouts are 5 s; bump to 10 s so a slow LAN doesn't
+     * abort mid-handler.  The OTA path overrides recv to 60 s per-request via
+     * setsockopt — that override remains in api_ota(). */
+    cfg.recv_wait_timeout = 10;
+    cfg.send_wait_timeout = 10;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");

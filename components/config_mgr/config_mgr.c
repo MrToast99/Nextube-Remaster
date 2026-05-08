@@ -90,6 +90,12 @@ static void set_defaults(void)
     memset(s_cfg.mic_noise_floor, 0, sizeof(s_cfg.mic_noise_floor));
     s_cfg.mic_calibration_saved = false;
 
+    /* Background-feature toggles (boot-time gates).  Default true so
+     * existing behaviour is preserved on upgrade. */
+    s_cfg.weather_enabled = true;
+    s_cfg.youtube_enabled = true;
+    s_cfg.mdns_enabled    = true;
+
     s_cfg.countdown_minutes = 1;
     s_cfg.pomodoro_work     = 25;
     s_cfg.pomodoro_break    = 5;
@@ -207,6 +213,20 @@ static void parse_json(const char *json, size_t len)
     {
         cJSON *me = cJSON_GetObjectItem(root, "mic_enabled");
         if (cJSON_IsBool(me)) s_cfg.mic_enabled = cJSON_IsTrue(me);
+    }
+    /* Background-feature toggles — default true if key absent (preserves
+     * behaviour for existing devices upgrading from older firmware). */
+    {
+        cJSON *we = cJSON_GetObjectItem(root, "weather_enabled");
+        if (cJSON_IsBool(we)) s_cfg.weather_enabled = cJSON_IsTrue(we);
+    }
+    {
+        cJSON *ye = cJSON_GetObjectItem(root, "youtube_enabled");
+        if (cJSON_IsBool(ye)) s_cfg.youtube_enabled = cJSON_IsTrue(ye);
+    }
+    {
+        cJSON *de = cJSON_GetObjectItem(root, "mdns_enabled");
+        if (cJSON_IsBool(de)) s_cfg.mdns_enabled = cJSON_IsTrue(de);
     }
     json_read_u8(root, "mic_adc_channel", &s_cfg.mic_adc_channel);
     if (s_cfg.mic_adc_channel > 7) s_cfg.mic_adc_channel = 0; /* clamp to valid ADC1 range */
@@ -541,6 +561,9 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);
+    cJSON_AddBoolToObject  (root, "weather_enabled",   s_cfg.weather_enabled);
+    cJSON_AddBoolToObject  (root, "youtube_enabled",   s_cfg.youtube_enabled);
+    cJSON_AddBoolToObject  (root, "mdns_enabled",      s_cfg.mdns_enabled);
     cJSON_AddNumberToObject(root, "mic_adc_channel",   s_cfg.mic_adc_channel);
     cJSON_AddNumberToObject(root, "mic_silence_gate",  (double)s_cfg.mic_silence_gate);
     {

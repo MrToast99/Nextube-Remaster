@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include "esp_err.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -9,6 +10,33 @@ void wifi_manager_apply_sta_credentials(void); /* update driver config without d
 bool wifi_manager_is_connected(void);
 const char *wifi_manager_get_ip(void);
 void wifi_manager_scan_start(void);
+
+/* ──────— setup AP PIN ──────────────────────────────────────────────
+ * The setup AP ("Nextube-Setup") is WPA2-secured with a per-device
+ * 8-digit PIN.  PIN is generated on first boot, persisted in the NVS
+ * namespace "nextube_sec", and displayed on the LCD tubes whenever
+ * the AP is broadcasting and no client is associated. */
+
+/* Returns the current 8-digit PIN string (NUL-terminated).  Pointer is
+ * stable for the lifetime of the process. */
+const char *wifi_manager_get_ap_pin(void);
+
+/* True when the AP is currently broadcasting (WIFI_MODE_APSTA). */
+bool wifi_manager_ap_active(void);
+
+/* True when AP is broadcasting AND no client is associated.  The display
+ * task uses this to decide whether to render the PIN on the tubes. */
+bool wifi_manager_ap_pin_visible(void);
+
+/* Generate a new random PIN, persist it, and apply to the live AP.
+ * Existing associated clients are NOT kicked.  Returns ESP_OK on success. */
+esp_err_t wifi_manager_regenerate_ap_pin(void);
+
+/* Wipe the PIN from NVS.  Intended for the "Full factory reset" flow.
+ * A fresh PIN is auto-generated on the next call to wifi_manager_start
+ * (i.e. next boot). */
+void wifi_manager_factory_reset_ap_pin(void);
+
 #ifdef __cplusplus
 }
 #endif

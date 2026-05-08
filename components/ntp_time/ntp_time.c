@@ -36,18 +36,25 @@ static void time_sync_cb(struct timeval *tv)
 
 static void ntp_task(void *arg)
 {
-    /* Wait for WiFi before reading config — any settings change during this
-     * delay would otherwise be read through a stale pointer held since boot. */
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    /* ── Phase 1: apply TZ + seed from RTC immediately ───────────────────
+     * This happens before the WiFi-wait delay so the display shows the
+     * correct local time from the very first render tick after boot.
+     * Reading TZ from config and seeding from RTC require neither WiFi
+     * nor SNTP — they are purely local operations and are always safe to
+     * run at task start.
+     *
+     * Minimum plausible time_t: 2024-01-01 00:00:00 UTC.
+     * Anything earlier means the RTC was never set or has lost power. */
+#define RTC_MIN_VALID_EPOCH  1704067200LL  /* 2024-01-01 */
 
     char timezone[64];
     char ntp_servers[4][64];
     config_lock();
-    const nextube_config_t *cfg = config_get();
-    strncpy(timezone, cfg->timezone, sizeof(timezone) - 1);
+    const nextube_config_t *cfg_boot = config_get();
+    strncpy(timezone, cfg_boot->timezone, sizeof(timezone) - 1);
     timezone[sizeof(timezone) - 1] = '\0';
     for (int i = 0; i < 4; i++) {
-        strncpy(ntp_servers[i], cfg->ntp_servers[i], sizeof(ntp_servers[i]) - 1);
+        strncpy(ntp_servers[i], cfg_boot->ntp_servers[i], sizeof(ntp_servers[i]) - 1);
         ntp_servers[i][sizeof(ntp_servers[i]) - 1] = '\0';
     }
     config_unlock();
@@ -61,10 +68,6 @@ static void ntp_task(void *arg)
      * a reasonable time immediately, before the first NTP sync completes.
      * rtc_get_time() returns local time; mktime() interprets it as local
      * (TZ is already set above), producing a correct time_t. */
-    /* Minimum plausible time_t: 2024-01-01 00:00:00 UTC.
-     * Anything earlier means the RTC was never set or has lost power. */
-#define RTC_MIN_VALID_EPOCH  1704067200LL  /* 2024-01-01 */
-
     struct tm rtc_t = {0};
     if (rtc_get_time(&rtc_t)) {
         time_t seed = mktime(&rtc_t);
@@ -81,6 +84,13 @@ static void ntp_task(void *arg)
     } else {
         ESP_LOGW(TAG, "RTC read failed — clock starts at epoch until NTP sync");
     }
+
+    /* ── Phase 2: wait for WiFi, then start SNTP polling ────────────────
+     * The delay gives WiFi time to connect so SNTP queries go out on the
+     * first poll rather than being silently dropped.  NTP servers were
+     * already read from config above (before the lock was released) so
+     * there is no need to re-acquire the lock here. */
+    vTaskDelay(pdMS_TO_TICKS(5000));
 
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     for (int i = 0; i < 4; i++) {

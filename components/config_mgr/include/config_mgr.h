@@ -109,6 +109,15 @@ typedef struct {
     bool             mic_calibration_saved;            /* true = mic_noise_floor[] is valid
                                            and should be applied on the next boot. */
 
+    /* Background-feature toggles (boot-time gates — restart required to apply).
+     * All default true so a config.json from older firmware retains current
+     * behaviour after upgrade.  Disabling frees the per-task stack and stops
+     * the periodic polling — useful for users who don't want weather data,
+     * subscriber counts, or LAN-side mDNS advertisement. */
+    bool             weather_enabled;    /* gate weather_task creation */
+    bool             youtube_enabled;    /* gate yt_bili_task creation */
+    bool             mdns_enabled;       /* gate mDNS advertisement */
+
     /* Countdown / Pomodoro */
     uint16_t         countdown_minutes;
     uint16_t         pomodoro_work;

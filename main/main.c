@@ -28,6 +28,7 @@
 #include "esp_littlefs.h"
 
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 
 #include "board_pins.h"
 #include "config_mgr.h"
@@ -51,6 +52,34 @@ static const char *TAG = "main";
  * main.c includes both headers so this is the natural place for the check. */
 _Static_assert(CFG_MIC_BAND_COUNT == MIC_BAND_COUNT,
                "CFG_MIC_BAND_COUNT in config_mgr.h must equal MIC_BAND_COUNT in microphone.h");
+
+/* ── Heap telemetry ───────────────────────────────────────────────────
+ * Logs internal-RAM and PSRAM free-size + largest-block every 5 minutes.
+ * largest-block is the real fragmentation indicator: a healthy device with
+ * 200 KB free / 180 KB largest is fine; 200 KB free / 8 KB largest is in
+ * trouble even though aggregate free looks the same.  The same numbers
+ * are exposed via /api/status so the System tab can chart them.
+ *
+ * Note on the per-cap queries: esp_get_free_heap_size() returns the total
+ * across ALL caps (internal + PSRAM combined when SPIRAM_USE_MALLOC=y),
+ * which is misleading on ESP32-WROVER where internal SRAM is ~320 KB and
+ * PSRAM contributes the bulk.  We use heap_caps_get_free_size(CAP_INTERNAL)
+ * and CAP_SPIRAM directly so each line is unambiguous. */
+static void heap_telemetry_task(void *arg)
+{
+    (void)arg;
+    /* Wait one cycle before the first log so boot-time peaks settle. */
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
+        ESP_LOGI("heap",
+                 "internal: free=%u largest=%u  psram: free=%u largest=%u  (lifetime min total: %u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+                 (unsigned)esp_get_minimum_free_heap_size());
+    }
+}
 
 /* ── WiFi-safe warm-boot ───────────────────────────────────────────────
  * After esptool flashes and hard-resets via the EN pin (ESP_RST_EXT) the
@@ -195,12 +224,16 @@ void app_main(void)
     bool    boot_audio_enabled;
     bool    boot_mic_enabled;
     bool    boot_mic_cal_saved;
+    bool    boot_weather_enabled;
+    bool    boot_youtube_enabled;
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
-    boot_volume        = cfg_boot->volume;
-    boot_audio_enabled = cfg_boot->audio_enabled;
-    boot_mic_enabled   = cfg_boot->mic_enabled;
-    boot_mic_cal_saved = cfg_boot->mic_calibration_saved;
+    boot_volume          = cfg_boot->volume;
+    boot_audio_enabled   = cfg_boot->audio_enabled;
+    boot_mic_enabled     = cfg_boot->mic_enabled;
+    boot_mic_cal_saved   = cfg_boot->mic_calibration_saved;
+    boot_weather_enabled = cfg_boot->weather_enabled;
+    boot_youtube_enabled = cfg_boot->youtube_enabled;
     config_unlock();
 
     /* Hardware drivers */
@@ -239,10 +272,21 @@ void app_main(void)
     wifi_manager_start();
     web_server_start();
 
-    /* Background services */
+    /* Background services — gated by their respective config flags so users
+     * can disable features they don't use, freeing each task's stack and
+     * stopping the periodic HTTPS polling.  Boot-time only — toggling the
+     * UI checkboxes requires a reboot to take effect. */
     ntp_time_start();
-    weather_start();
-    youtube_bili_start();
+    if (boot_weather_enabled) {
+        weather_start();
+    } else {
+        ESP_LOGI(TAG, "Weather disabled in config — task not started");
+    }
+    if (boot_youtube_enabled) {
+        youtube_bili_start();
+    } else {
+        ESP_LOGI(TAG, "YouTube/Bilibili disabled in config — task not started");
+    }
     sht30_task_start();    /* no-op task if sensor absent */
 
     /* Mark this OTA image as valid so the bootloader does not roll back to
@@ -253,6 +297,14 @@ void app_main(void)
      * Calling here — after all hardware and services initialised without panic —
      * is the correct point to declare the image healthy. */
     esp_ota_mark_app_valid_cancel_rollback();
+
+    /* Low-priority background heap monitor — fires every 5 minutes.
+     * 4 KB stack: ESP_LOGI through the log-ring vprintf hook
+     * (web_server.c::log_vprintf_hook) uses a 160-byte format buffer on
+     * top of vprintf/vsnprintf's own scratch, plus the captured va_list
+     * copy.  2 KB overflowed reliably in field testing. */
+    xTaskCreatePinnedToCore(heap_telemetry_task, "heap_tel",
+                            4096, NULL, 1, NULL, 0);
 
     ESP_LOGI(TAG, "All tasks launched – heap free: %u bytes",
              (unsigned)esp_get_free_heap_size());

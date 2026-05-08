@@ -88,7 +88,7 @@ select option{background:var(--accent);color:var(--text)}
 <!-- ─── Dashboard ──────────────────────────────────────────────── -->
 <div class="tab-content active" id="tab-dashboard">
   <div class="card">
-    <div class="row" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">
+    <div class="row" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
       <div class="stat"><div class="val" id="s-time">--:--</div><div class="lbl">Local Time</div></div>
       <div class="stat"><div class="val" id="s-mode">--</div><div class="lbl">Mode</div></div>
       <div class="stat"><div class="val" id="s-temp">--°</div><div class="lbl">Weather</div></div>
@@ -316,6 +316,16 @@ select option{background:var(--accent);color:var(--text)}
     <div class="field"><label>SSID</label><input id="f-ssid" type="text"></div>
     <div class="field"><label>Password</label><input id="f-pass" type="password"></div>
     <div class="field"><label>Hostname</label><input id="f-hostname" type="text" placeholder="nextube-remaster"></div>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-mdns-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
+        <label for="f-mdns-en" style="cursor:pointer">Advertise via mDNS (.local)</label>
+      </div>
+      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
+        When off, device is reachable by IP only — no <code>nextube-remaster.local</code> resolution.
+        <strong>Restart required.</strong>
+      </p>
+    </div>
     <div class="btn-group">
       <button class="btn btn-primary" onclick="saveSettings()">Save & Connect</button>
       <button class="btn btn-outline" onclick="scanWifi()">Scan Networks</button>
@@ -407,6 +417,16 @@ select option{background:var(--accent);color:var(--text)}
 <div class="tab-content" id="tab-services">
   <div class="card">
     <h2>Weather</h2>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
+        <label for="f-weather-en" style="cursor:pointer">Enable weather</label>
+      </div>
+      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
+        Periodic weather data fetch. Disabling frees ~8 KB RAM and stops HTTPS calls.
+        <strong>Restart required.</strong>
+      </p>
+    </div>
     <div class="field"><label>Source</label>
       <select id="f-wsrc" onchange="toggleWeatherKey()">
         <option value="wttr">wttr.in – free, no key needed</option>
@@ -443,6 +463,16 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <div class="card">
     <h2>YouTube / Bilibili</h2>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-youtube-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
+        <label for="f-youtube-en" style="cursor:pointer">Enable YouTube / Bilibili</label>
+      </div>
+      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
+        Periodic subscriber-count fetch. Disabling frees ~8 KB RAM.
+        <strong>Restart required.</strong>
+      </p>
+    </div>
     <div class="field"><label>Platform</label>
       <select id="f-vsite"><option value="youtube">YouTube</option><option value="bilibili">Bilibili</option></select>
     </div>
@@ -586,11 +616,44 @@ select option{background:var(--accent);color:var(--text)}
       <button class="btn btn-outline" onclick="clearLogs()">Clear</button>
     </div>
   </div>
+  <!-- ── Setup AP ──────────────────────────────────────────────── -->
+  <div class="card">
+    <h2>Setup AP</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">
+      8-digit PIN for the <strong>Nextube-Setup</strong> WiFi network.
+      Visible on the LCD tubes whenever the AP is broadcasting.
+    </p>
+    <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
+      <code id="ap-pin-display" style="font-size:1.05rem;letter-spacing:.18em;background:rgba(255,255,255,.06);padding:.45rem .8rem;border-radius:6px;min-width:9.5em;text-align:center">••••••••</code>
+      <button class="btn btn-outline" onclick="loadApPin()">Show</button>
+      <button class="btn btn-outline" onclick="regenApPin()">Regenerate</button>
+    </div>
+  </div>
+
+  <!-- ── Account ─────────────────────────────────────────────────── -->
+  <div class="card">
+    <h2>Account</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">
+      Admin access controls all device settings, OTA, and file management.
+    </p>
+    <div class="btn-group">
+      <button class="btn btn-outline" onclick="showChangePasswordPrompt()">Change password</button>
+      <button class="btn btn-outline" onclick="doLogout()">Sign out</button>
+    </div>
+  </div>
+
   <div class="card">
     <h2>Danger Zone</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">
+      <strong>Factory Reset</strong> clears your settings (WiFi credentials,
+      theme, modes) but preserves the admin password and AP PIN.<br>
+      <strong>Full factory reset</strong> additionally clears the admin
+      password and AP PIN — device returns to fresh-from-box state.
+    </p>
     <div class="btn-group">
-      <button class="btn btn-danger" onclick="if(confirm('Reset ALL settings to factory defaults?'))fetch('/api/reset',{method:'POST'}).then(()=>toast('Resetting...'))">Factory Reset</button>
-      <button class="btn btn-outline" onclick="if(confirm('Reboot the device?'))fetch('/api/reboot',{method:'POST'}).then(()=>toast('Rebooting...'))">Reboot Device</button>
+      <button class="btn btn-danger" onclick="if(confirm('Reset ALL settings to factory defaults?\n\nAdmin password and AP PIN are preserved.'))secureFetch('/api/reset',{method:'POST'}).then(()=>toast('Resetting...'))">Factory Reset</button>
+      <button class="btn btn-danger" onclick="doFullFactoryReset()">Full factory reset</button>
+      <button class="btn btn-outline" onclick="if(confirm('Reboot the device?'))secureFetch('/api/reboot',{method:'POST'}).then(()=>toast('Rebooting...'))">Reboot Device</button>
     </div>
   </div>
   <div class="card">
@@ -843,13 +906,40 @@ $('f-ab-en').onclick = () => {
   $('ab-cfg').style.display = $('f-ab-en').checked ? 'block' : 'none';
 };
 
+/* ── Auth ──────────────────────────────────────────────────────────
+ * Single global session token, persisted in localStorage so reload keeps
+ * the session.  All API calls go through secureFetch() which auto-adds
+ * the Authorization header and routes 401 responses to the login modal. */
+let authToken = localStorage.getItem('nextube_token') || '';
+
+async function secureFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {});
+  if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
+  const r = await fetch(url, opts);
+  if (r.status === 401) {
+    /* Token rejected — clear and re-prompt. */
+    authToken = '';
+    localStorage.removeItem('nextube_token');
+    showLoginModal();
+    /* Throw so callers don't try to .json() a 401 body — the catch in
+     * api() / individual handlers will swallow this silently. */
+    throw new Error('unauthorized');
+  }
+  return r;
+}
+
 /* ── API helpers ───────────────────────────────────── */
 async function api(path, opts) {
   try {
-    const r = await fetch('/api/' + path, opts);
+    const r = await secureFetch('/api/' + path, opts);
     if (!r.ok) { toast('API error: HTTP ' + r.status, true); return null; }
     return await r.json();
-  } catch(e) { toast('API error: ' + e.message, true); return null; }
+  } catch(e) {
+    if (e.message === 'unauthorized') return null;   /* handled by login modal */
+    toast('API error: ' + e.message, true);
+    return null;
+  }
 }
 
 /* ── Theme list (dynamic from /api/themes) ─────────── */
@@ -911,6 +1001,12 @@ async function loadSettings() {
   $('f-pass').value = '';
   $('f-pass').placeholder = cfg.has_password ? '(saved — leave blank to keep)' : 'Enter password';
   $('f-hostname').value = cfg.hostname || 'nextube-remaster';
+  /* Background-feature toggles — default true if key absent so devices
+   * upgrading from older firmware (no key in config.json yet) keep their
+   * current behaviour until the user chooses to disable. */
+  $('f-weather-en').checked = cfg.weather_enabled !== false;
+  $('f-youtube-en').checked = cfg.youtube_enabled !== false;
+  $('f-mdns-en').checked    = cfg.mdns_enabled    !== false;
   const tzStr = cfg.timezone || 'UTC0';
   $('f-tz').value = tzStr;
   $('f-tz-sel').value = tzStr; /* pre-selects matching option; stays blank for custom strings */
@@ -1126,6 +1222,7 @@ async function saveSettings() {
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: $('f-mic-en').checked,
+    weather_enabled: $('f-weather-en').checked, youtube_enabled: $('f-youtube-en').checked, mdns_enabled: $('f-mdns-en').checked,
     mic_silence_gate: parseFloat($('f-gate-num').value) || 0,
     leading_zero: $('f-leading-zero').checked,
     default_countdown_time: +$('f-countdown').value,
@@ -1209,7 +1306,7 @@ async function micCalibrate() {
     }
 
     msg.textContent = 'Capturing… (keep room quiet)';
-    const r = await fetch('/api/mic/calibrate', { method: 'POST' });
+    const r = await secureFetch('/api/mic/calibrate', { method: 'POST' });
     if (r.ok) {
       msg.textContent = '✓ Baseline saved — boots instantly from now on';
     } else {
@@ -1225,7 +1322,7 @@ async function micCalibrate() {
 
 async function micResetCal() {
   const msg = $('mic-cal-msg');
-  const r = await fetch('/api/mic/reset_calibration', { method: 'POST' });
+  const r = await secureFetch('/api/mic/reset_calibration', { method: 'POST' });
   msg.textContent = r.ok ? '↺ Auto-calibration restarted (~4 s ramp on next boot)' : '✗ Reset failed';
 }
 
@@ -1255,6 +1352,7 @@ async function doOTA() {
   };
   xhr.onload = () => {
     _otaInProgress = false;
+    if (_xhrHandle401(xhr)) return;
     if (xhr.status === 200) {
       $('ota-bar').style.width = '100%';
       toast('OTA complete! Rebooting…');
@@ -1278,6 +1376,7 @@ async function doOTA() {
     }
   };
   xhr.open('POST', '/api/update_firmware');
+  _xhrAuthHeader(xhr);
   xhr.send(file);
 }
 
@@ -1311,6 +1410,7 @@ function doFSOTA() {
     }
   };
   xhr.onload = () => {
+    if (_xhrHandle401(xhr)) { stat.textContent = 'Sign in required'; return; }
     if (xhr.status === 200) {
       bar.style.width = '100%';
       stat.textContent = 'Done! Device is rebooting — page will reload in 15 s…';
@@ -1326,6 +1426,7 @@ function doFSOTA() {
     toast('LittleFS update failed: network error', true);
   };
   xhr.open('POST', '/api/update_fs');
+  _xhrAuthHeader(xhr);
   xhr.send(file);
 }
 
@@ -1357,6 +1458,7 @@ function doHotPatch() {
   };
   xhr.onload = () => {
     bar.style.width = '100%';
+    if (_xhrHandle401(xhr)) { stat.textContent = 'Sign in required'; return; }
     try {
       const d = JSON.parse(xhr.responseText);
       if (xhr.status === 200 && d.written >= 0) {
@@ -1380,6 +1482,7 @@ function doHotPatch() {
   };
   xhr.open('POST', '/api/update_fs_hotpatch');
   xhr.setRequestHeader('Content-Type', 'application/zip');
+  _xhrAuthHeader(xhr);
   xhr.send(file);
 }
 
@@ -1495,7 +1598,7 @@ async function deleteFile(path) {
   const name = path.split('/').pop();
   if (!confirm(`Delete ${name}?`)) return;
   try {
-    const r = await fetch('/api/file/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
+    const r = await secureFetch('/api/file/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
     const d = await r.json();
     if (d.status === 'ok') { toast('Deleted ' + name); browseDir(s_filePath); }
     else toast('Delete failed', true);
@@ -1598,7 +1701,7 @@ async function dacTest(mode) {
   const msg = $('dac-test-msg');
   msg.textContent = 'Sending…';
   try {
-    const r = await fetch('/api/debug/dac', {
+    const r = await secureFetch('/api/debug/dac', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mode })
     });
@@ -1610,7 +1713,7 @@ async function dacTestDc() {
   const msg = $('dac-test-msg');
   msg.textContent = 'Sending…';
   try {
-    const r = await fetch('/api/debug/dac', {
+    const r = await secureFetch('/api/debug/dac', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mode: 'dc', level })
     });
@@ -1623,7 +1726,7 @@ async function dacTestTone() {
   const msg = $('dac-test-msg');
   msg.textContent = 'Sending…';
   try {
-    const r = await fetch('/api/debug/dac', {
+    const r = await secureFetch('/api/debug/dac', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mode: 'tone', freq_hz, amplitude })
     });
@@ -1644,7 +1747,7 @@ async function pwmApply() {
   const msg = $('pwm-test-msg');
   msg.textContent = 'Sending…';
   try {
-    const r = await fetch('/api/debug/pwm', {
+    const r = await secureFetch('/api/debug/pwm', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ freq_hz, brightness_pct })
     });
@@ -1657,7 +1760,7 @@ async function pwmRestore() {
   const msg = $('pwm-test-msg');
   msg.textContent = 'Restoring…';
   try {
-    const r = await fetch('/api/debug/pwm', {
+    const r = await secureFetch('/api/debug/pwm', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ restore: true })
     });
@@ -1681,7 +1784,7 @@ async function burninStart(duration_s) {
   if (!mask) { $('burnin-msg').textContent = '✗ Select at least one tube'; return; }
   const msg = $('burnin-msg');
   try {
-    const r = await fetch('/api/debug/burnin', {
+    const r = await secureFetch('/api/debug/burnin', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mask, duration_s })
     });
@@ -1700,7 +1803,7 @@ async function burninRestore() {
   burninSelectNone();
   const msg = $('burnin-msg');
   try {
-    const r = await fetch('/api/debug/burnin', {
+    const r = await secureFetch('/api/debug/burnin', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mask: 0, duration_s: 0 })
     });
@@ -1715,7 +1818,7 @@ async function deleteFolder(path) {
   const name = path.split('/').pop();
   if (!confirm(`Delete folder "${name}" and all its contents?`)) return;
   try {
-    const r = await fetch('/api/file/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
+    const r = await secureFetch('/api/file/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
     const d = await r.json();
     if (d.status === 'ok') { toast('Deleted ' + name); browseDir(s_filePath); }
     else toast('Delete failed', true);
@@ -1735,7 +1838,7 @@ async function uploadFiles(files, preservePath) {
     const rel = preservePath && file.webkitRelativePath ? file.webkitRelativePath : file.name;
     const destPath = s_filePath.replace(/\/$/, '') + '/' + rel;
     try {
-      const r = await fetch('/api/file/upload?path=' + encodeURIComponent(destPath), {
+      const r = await secureFetch('/api/file/upload?path=' + encodeURIComponent(destPath), {
         method: 'POST', body: file
       });
       const d = await r.json();
@@ -1770,7 +1873,7 @@ function toggleLogAuto() {
 
 async function refreshLogs() {
   try {
-    const r = await fetch('/api/logs');
+    const r = await secureFetch('/api/logs');
     if (!r.ok) return;
     const d = await r.json();
     const pre = $('log-output');
@@ -1793,7 +1896,7 @@ async function refreshLogs() {
 }
 
 async function clearLogs() {
-  await fetch('/api/logs/clear', {method:'POST'});
+  await secureFetch('/api/logs/clear', {method:'POST'});
   if ($('log-output')) $('log-output').innerHTML = '';
 }
 
@@ -1890,7 +1993,7 @@ let _latestUpdate = null;
  * httpd task is fully occupied streaming the firmware binary. */
 function setClockFaceUpdateIndicator(active) {
   if (_otaInProgress) return;
-  fetch('/api/update_notify', {
+  secureFetch('/api/update_notify', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ active: !!active })
@@ -1979,7 +2082,7 @@ async function checkForUpdates(silent = false) {
 
 /* ── Backup & Restore ──────────────────────────────── */
 async function exportSettings() {
-  const r = await fetch('/api/backup');
+  const r = await secureFetch('/api/backup');
   if (!r.ok) return toast('Could not fetch settings', true);
   const c = await r.json();
   const blob = new Blob([JSON.stringify(c, null, 2)], {type: 'application/json'});
@@ -2006,11 +2109,80 @@ async function importSettings(input) {
   input.value = '';
 }
 
-/* ── Init ──────────────────────────────────────────── */
-loadSettings();
-refreshStatus().then(() => checkForUpdates(true));   /* check once s-fwver is populated */
-setInterval(refreshStatus, 5000);
-setInterval(() => checkForUpdates(true), 86400000);  /* re-check every 24 h */
+/* ──────— Setup AP PIN management (System tab buttons) ─────────────── */
+async function loadApPin() {
+  try {
+    const r = await secureFetch('/api/wifi/ap_pin');
+    if (!r.ok) { toast('Failed to load AP PIN', true); return; }
+    const j = await r.json();
+    document.getElementById('ap-pin-display').textContent = j.pin || '--------';
+  } catch (e) { /* unauthorized handled by secureFetch */ }
+}
+
+async function regenApPin() {
+  if (!confirm('Generate a new AP PIN?\n\nDevices that have saved the current PIN will need to re-pair when the AP next opens.')) return;
+  try {
+    const r = await secureFetch('/api/wifi/regen_pin', { method: 'POST' });
+    if (!r.ok) { toast('Regen failed', true); return; }
+    const j = await r.json();
+    document.getElementById('ap-pin-display').textContent = j.pin || '--------';
+    toast('New AP PIN: ' + j.pin);
+  } catch (e) { /* handled */ }
+}
+
+/* ────— Change password (browser prompt() rather than a full modal,
+ *  matching the existing Reset / Reboot button UX). */
+async function showChangePasswordPrompt() {
+  const oldPw = prompt('Current admin password:');
+  if (!oldPw) return;
+  const newPw = prompt('New admin password (6-64 chars):');
+  if (!newPw) return;
+  if (newPw.length < 6 || newPw.length > 64) {
+    toast('Password must be 6-64 characters', true); return;
+  }
+  const confirmPw = prompt('Confirm new password:');
+  if (newPw !== confirmPw) { toast("Passwords don't match", true); return; }
+  try {
+    const r = await secureFetch('/api/auth/change_password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_password: oldPw, new_password: newPw })
+    });
+    if (!r.ok) { toast('Change failed (wrong current password?)', true); return; }
+    /* Server clears all sessions on change; force re-login. */
+    authToken = '';
+    localStorage.removeItem('nextube_token');
+    toast('Password changed. Please sign in again.');
+    setTimeout(showLoginModal, 600);
+  } catch (e) { /* handled */ }
+}
+
+/* ────— Full factory reset (wipes admin password + AP PIN + config) */
+async function doFullFactoryReset() {
+  if (!confirm('FULL factory reset?\n\nThis will:\n  • Erase the admin password\n  • Generate a new AP PIN on next boot\n  • Reset all settings\n  • Reboot the device\n\nYou will need to set a new admin password after reboot.')) return;
+  if (!confirm('Are you absolutely sure?  This cannot be undone without local console access.')) return;
+  try {
+    await secureFetch('/api/factory_reset_full', { method: 'POST' });
+    toast('Full factory reset — rebooting...');
+    /* The device is rebooting; clear local state too. */
+    authToken = '';
+    localStorage.removeItem('nextube_token');
+  } catch (e) { /* token already cleared */ }
+}
+
+/* ── Init ──────────────────────────────────────────────────────────
+ * Bootstrapping is gated behind successful auth.  bootAuth() (defined
+ * with the auth modals at the bottom of <body>) calls onAuthSucceeded
+ * once the user is logged in and the /api/settings probe succeeds. */
+let _bootstrapped = false;
+function onAuthSucceeded() {
+  if (_bootstrapped) return;     /* idempotent — login can fire twice on token refresh */
+  _bootstrapped = true;
+  loadSettings();
+  refreshStatus().then(() => checkForUpdates(true));   /* check once s-fwver is populated */
+  setInterval(refreshStatus, 5000);
+  setInterval(() => checkForUpdates(true), 86400000);  /* re-check every 24 h */
+}
 </script>
 
 <!-- ── Dismissable update toast (persistent, not auto-close) ─────── -->
@@ -2037,5 +2209,269 @@ setInterval(() => checkForUpdates(true), 86400000);  /* re-check every 24 h */
   </div>
   <div class="toast" id="toast" style="pointer-events:auto"></div>
 </div>
+
+<!-- ──── Auth modals ─────────────────────────────────────────────────
+     Both modals use the same fixed full-screen overlay style.  Only one
+     should be visible at a time.  showLoginModal / showSetPasswordModal
+     handle the toggle, hideAuthModals dismisses both. -->
+<style>
+  .auth-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.85);
+    z-index: 1000;
+    align-items: center; justify-content: center;
+    padding: 1rem;
+  }
+  .auth-overlay.show { display: flex; }
+  .auth-card {
+    background: var(--bg, #18181b); color: var(--fg, #f5f5f5);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 10px;
+    padding: 1.5rem 1.75rem;
+    max-width: 360px; width: 100%;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+  }
+  .auth-card h3 { margin: 0 0 .25rem 0; font-size: 1.15rem; }
+  .auth-card p  { margin: .25rem 0 1rem 0; color: var(--dim,#9ca3af); font-size: .85rem; line-height: 1.4; }
+  .auth-card input[type=password] {
+    width: 100%; padding: .55rem .75rem; margin-bottom: .65rem;
+    background: rgba(255,255,255,.05); color: inherit;
+    border: 1px solid rgba(255,255,255,.15); border-radius: 6px;
+    font-size: .95rem;
+  }
+  .auth-card button {
+    width: 100%; padding: .6rem; margin-top: .35rem;
+    background: var(--accent,#4ecca3); color: #000; border: none;
+    border-radius: 6px; cursor: pointer; font-weight: 600;
+    font-size: .95rem;
+  }
+  .auth-card button:disabled { opacity: .8; cursor: default; }
+  .auth-err { color: #f87171; font-size: .82rem; min-height: 1.2em; margin-top: .35rem; }
+
+  /* In-button spinner shown while a request is in flight.  Sits inline
+   * with the busy label so the button width doesn't jump.  Two-tone
+   * border + spinning ring provides clear motion at 700 ms/turn. */
+  @keyframes nx-spin { to { transform: rotate(360deg); } }
+  .nx-spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid rgba(0,0,0,.20);
+    border-top-color: rgba(0,0,0,.85);
+    border-radius: 50%;
+    animation: nx-spin .7s linear infinite;
+    margin-right: .55em;
+    vertical-align: -2px;
+  }
+</style>
+
+<div id="setpw-modal" class="auth-overlay">
+  <div class="auth-card">
+    <h3>🔒 Set admin password</h3>
+    <p>This password will be required to make any changes through the web
+       interface.  It's stored on the device only — never sent anywhere.</p>
+    <input id="setpw-input"   type="password" placeholder="New password (6-64 chars)" autocomplete="new-password">
+    <input id="setpw-confirm" type="password" placeholder="Confirm password" autocomplete="new-password" onkeydown="if(event.key==='Enter')doSetPassword()">
+    <button id="setpw-btn" onclick="doSetPassword()">Set password</button>
+    <div id="setpw-err" class="auth-err"></div>
+  </div>
+</div>
+
+<div id="login-modal" class="auth-overlay">
+  <div class="auth-card">
+    <h3>🔑 Sign in</h3>
+    <p>Enter the admin password to manage this Nextube.</p>
+    <input id="login-pw" type="password" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button id="login-btn" onclick="doLogin()">Sign in</button>
+    <div id="login-err" class="auth-err"></div>
+  </div>
+</div>
+
+<script>
+/* ────— Auth UI glue (declared at script bottom so secureFetch above
+ *  can reference showLoginModal via hoisting; all functions are global). */
+function showLoginModal() {
+  document.getElementById('setpw-modal').classList.remove('show');
+  const m = document.getElementById('login-modal');
+  m.classList.add('show');
+  document.getElementById('login-err').textContent = '';
+  setTimeout(() => document.getElementById('login-pw').focus(), 50);
+}
+function showSetPasswordModal() {
+  document.getElementById('login-modal').classList.remove('show');
+  const m = document.getElementById('setpw-modal');
+  m.classList.add('show');
+  document.getElementById('setpw-err').textContent = '';
+  setTimeout(() => document.getElementById('setpw-input').focus(), 50);
+}
+function hideAuthModals() {
+  document.getElementById('setpw-modal').classList.remove('show');
+  document.getElementById('login-modal').classList.remove('show');
+}
+
+/* ── XHR auth helpers ────────────────────────────────────────────
+ * The OTA / LittleFS / WebUI-patch uploaders use XMLHttpRequest rather
+ * than fetch so they can drive the upload-progress bar.  XHR doesn't
+ * route through secureFetch, so the Authorization header has to be added
+ * manually after xhr.open() and the 401 case has to be handled in
+ * onload.  Two tiny helpers below keep all three uploaders consistent. */
+
+function _xhrAuthHeader(xhr) {
+  if (authToken) xhr.setRequestHeader('Authorization', 'Bearer ' + authToken);
+}
+
+/* Returns true if the XHR completed with 401 (token rejected).  The
+ * caller should bail out of its onload handler immediately when this
+ * returns true — the user has been routed to the login modal and any
+ * "Failed: 401" message would be misleading. */
+function _xhrHandle401(xhr) {
+  if (xhr.status !== 401) return false;
+  authToken = '';
+  localStorage.removeItem('nextube_token');
+  showLoginModal();
+  toast('Session expired — please sign in again', true);
+  return true;
+}
+
+/* Lock a button + show a busy label with a spinning ring while a request
+ * is in flight.  Returns a restore function that re-enables the button
+ * and puts back the original label.  Call the restore function on BOTH
+ * success and failure paths (a finally{} is the safe pattern) so a
+ * thrown exception doesn't leave the UI permanently disabled.
+ *
+ * The spinner is injected as a sibling node rather than via innerHTML,
+ * so the busy label is treated as text and never interpreted as HTML. */
+function _btnBusy(id, busyLabel) {
+  const b = document.getElementById(id);
+  if (!b) return () => {};
+  const originalHtml = b.innerHTML;
+  b.disabled = true;
+  const spinner = document.createElement('span');
+  spinner.className = 'nx-spinner';
+  spinner.setAttribute('aria-hidden', 'true');
+  b.replaceChildren(spinner, document.createTextNode(busyLabel));
+  return () => {
+    b.disabled = false;
+    b.innerHTML = originalHtml;
+  };
+}
+
+async function doSetPassword() {
+  const pw  = document.getElementById('setpw-input').value;
+  const cf  = document.getElementById('setpw-confirm').value;
+  const err = document.getElementById('setpw-err');
+  err.textContent = '';
+  if (pw.length < 6 || pw.length > 64) {
+    err.textContent = 'Password must be 6-64 characters';
+    return;
+  }
+  if (pw !== cf) { err.textContent = "Passwords don't match"; return; }
+
+  /* PBKDF2 with 100 000 iterations runs twice on this flow (set + login),
+   * which can take 2-6 seconds on the ESP32.  Lock the button so the user
+   * doesn't re-click thinking nothing happened — that race is what caused
+   * the "password already set" error in the original first-boot UX. */
+  const release = _btnBusy('setpw-btn', 'Working…');
+  try {
+    const r = await fetch('/api/auth/set_password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      err.textContent = t || ('HTTP ' + r.status);
+      return;
+    }
+    /* Auto-login with the password we just set. */
+    await doLoginInternal(pw, /*lockSetpw=*/true);
+  } catch (e) {
+    err.textContent = 'Network error';
+  } finally {
+    release();
+  }
+}
+
+async function doLogin() {
+  const pw  = document.getElementById('login-pw').value;
+  const err = document.getElementById('login-err');
+  err.textContent = '';
+  if (!pw) { err.textContent = 'Enter password'; return; }
+  const release = _btnBusy('login-btn', 'Signing in…');
+  try {
+    await doLoginInternal(pw, /*lockSetpw=*/false);
+  } finally {
+    release();
+  }
+}
+
+/* Internal: actually performs the login POST and finalises session state.
+ * Used by both doLogin (after Sign In click) and doSetPassword (auto-login
+ * after first-boot password setup).  Reports errors to whichever modal is
+ * visible.  Does NOT manage button state itself — the caller does that so
+ * the busy label persists across the auth_set + auth_login round trips. */
+async function doLoginInternal(pw, viaSetpw) {
+  const err = document.getElementById(viaSetpw ? 'setpw-err' : 'login-err');
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    });
+    if (r.status === 429) {
+      const j = await r.json().catch(() => ({}));
+      err.textContent = 'Too many attempts. Try again in ' +
+                        (j.retry_after_s || 60) + ' s.';
+      return;
+    }
+    if (!r.ok) { err.textContent = 'Wrong password'; return; }
+    const j = await r.json();
+    authToken = j.token;
+    localStorage.setItem('nextube_token', authToken);
+    document.getElementById('login-pw').value = '';
+    document.getElementById('setpw-input').value = '';
+    document.getElementById('setpw-confirm').value = '';
+    hideAuthModals();
+    /* Trigger the rest of the UI bootstrap that was paused awaiting auth. */
+    if (typeof onAuthSucceeded === 'function') onAuthSucceeded();
+  } catch (e) { err.textContent = 'Network error'; }
+}
+
+async function doLogout() {
+  try {
+    await secureFetch('/api/auth/logout', { method: 'POST' });
+  } catch (e) { /* ignore — token already cleared by 401 path */ }
+  authToken = '';
+  localStorage.removeItem('nextube_token');
+  showLoginModal();
+}
+
+/* On page load, probe auth state and decide which modal (if any) to show.
+ * This blocks normal UI initialisation on success — the rest of the app
+ * loads from onAuthSucceeded() to avoid leaking secrets via early API calls. */
+async function bootAuth() {
+  try {
+    const r = await fetch('/api/status');
+    if (!r.ok) throw new Error('status fetch failed');
+    const s = await r.json();
+    if (!s.admin_set) {
+      showSetPasswordModal();
+    } else if (!authToken) {
+      showLoginModal();
+    } else {
+      /* Token exists — verify with a probe call.  If 401, secureFetch
+       * triggers the login modal automatically. */
+      try {
+        await secureFetch('/api/settings');
+        if (typeof onAuthSucceeded === 'function') onAuthSucceeded();
+      } catch (_) { /* login modal already shown */ }
+    }
+  } catch (e) {
+    /* Status itself failed — show a generic toast and try login as fallback. */
+    showLoginModal();
+  }
+}
+window.addEventListener('load', bootAuth);
+</script>
 </body>
 </html>

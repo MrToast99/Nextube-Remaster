@@ -121,7 +121,17 @@ static void dac_restart(void)
         }
     }
     if (!s_dac_cont) {
-        ESP_LOGE(TAG, "dac_restart: all attempts failed — audio silenced");
+        /* Rate-limit the all-attempts-failed log to once per minute.
+         * Per-attempt warnings above (one ESP_LOGW per failed retry) still
+         * fire on every call — those are the diagnostic signal.  This guard
+         * just prevents a flood of identical ERRORs when audio_play_file()
+         * is called repeatedly while the DAC remains unable to restart. */
+        static int64_t s_last_err_us = 0;
+        int64_t now = esp_timer_get_time();
+        if (now - s_last_err_us > 60LL * 1000 * 1000) {
+            ESP_LOGE(TAG, "dac_restart: all attempts failed — audio silenced");
+            s_last_err_us = now;
+        }
         return;
     }
     if (dac_continuous_enable(s_dac_cont) != ESP_OK) {

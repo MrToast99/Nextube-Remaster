@@ -22,7 +22,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | WS2812 RGB LED accent lighting (static/breath/rainbow) | ✅ Working |
 | Capacitive touch pads (3 buttons) | ✅ Working |
 | PCF8563 RTC (battery-backed) | ✅ Working |
-| WiFi AP+STA with captive portal | ✅ Working |
+| WiFi AP+STA (WPA2-secured setup network with per-device PIN) | ✅ Working |
 | NTP time sync | ✅ Working |
 | Built-in web management UI (SPA) | ✅ Working |
 | REST API (backward-compatible + extensions) | ✅ Working |
@@ -393,14 +393,32 @@ Changing the partition subtype from `spiffs` to `littlefs` requires re-flashing 
 
 ## Web Management UI
 
-On first boot (or whenever home WiFi is not configured/unreachable) the device broadcasts a `Nextube-Setup` open WiFi AP. Connect to it and navigate to **http://192.168.4.1** to configure your network.
+### First Boot — Admin Password
+
+The very first time the web UI loads, a **Set admin password** prompt blocks the interface. Set a password of at least 6 characters. This password is required to change any settings and is stored in NVS (survives firmware OTA; cleared only by a full factory reset). After setting the password you are logged in automatically.
+
+On subsequent visits the UI shows a login prompt. Sessions are stored in your browser's `localStorage` and remain valid for 7 days.
+
+### Setup AP (WiFi Provisioning)
+
+The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi provisioning. The password is an **8-digit PIN** unique to each device, generated on first boot and stored in NVS.
+
+**Finding the PIN:**
+- **LCD tubes** — while the setup AP is active and no client is connected, the tubes display the PIN in two alternating phases (digits 0–5 for 3 s, then digits 2–7 for 3 s). The 4-digit overlap lets you read it comfortably.
+- **Web UI** — once logged in, go to **System → WiFi Setup AP → Show** to display the PIN. You can also regenerate it there.
+- **Serial monitor** — on first boot the PIN is logged: `Generated new AP PIN (first boot): 47391082`
+
+**Connecting to the setup AP:**
+1. The tubes display the 8-digit PIN (or find it in the serial log).
+2. On your phone or laptop, connect to **Nextube-Setup** and enter the PIN when prompted.
+3. Navigate to **http://192.168.4.1**.
+4. Set your admin password (first boot only), then enter your home WiFi credentials under **Network**.
 
 **AP lifecycle:**
-- **No credentials saved** — AP stays open indefinitely for first-time setup.
-- **Credentials saved, STA connects** — AP shuts down **60 seconds** after the device gets an IP (gives the browser time to finish loading the UI).
-- **Credentials saved, STA never connects** — AP closes automatically after **3 minutes** so the device doesn't broadcast `Nextube-Setup` indefinitely in a deployed environment. The device keeps retrying STA silently in the background.
-- **STA drops after connecting** — AP comes back immediately so you can always reach the device at `192.168.4.1` to fix credentials.
-- **New credentials saved via UI** — AP reappears and a fresh 3-minute window starts while the device tries the new credentials.
+- **No credentials saved** — AP stays up indefinitely for first-time setup.
+- **Credentials saved, STA connects** — AP closes **90 seconds** after the device gets an IP, giving the browser time to finish loading the UI.
+- **Credentials saved, STA fails to connect** — AP opens automatically after a **90-second** fallback timeout so you can always recover access. The device keeps retrying STA in the background.
+- **STA drops after connecting** — AP comes back so you can reach the device at `192.168.4.1` to fix credentials.
 
 After setup, access the management interface via:
 
@@ -585,26 +603,44 @@ Requires Python 3 and Pillow (`pip install Pillow` — auto-installed on first r
 
 ## REST API
 
-All endpoints return JSON. The API is backward-compatible with the original firmware's endpoints and adds new ones:
+All endpoints return JSON. The API is backward-compatible with the original firmware's endpoints and adds new ones.
+
+**Authentication** — all mutation endpoints and any endpoint that returns secrets require a valid session. Obtain a bearer token via `/api/auth/login` and pass it as `Authorization: Bearer <token>` on every subsequent request. `/api/status` and static file serving are open (no token required).
 
 ```
-GET  /api/ping              → {"status":"ok"}
-GET  /api/settings          → full configuration JSON
-POST /api/settings          → update config (JSON body)
-GET  /api/status            → live status: time, wifi, weather, heap, firmware, fs_version
-GET  /api/firmwareVersion   → {"version":"1.0.0"}
-GET  /api/hardwareVersion   → {"version":"1.31"}
-POST /api/reset             → factory reset + reboot
-POST /api/update_firmware   → OTA firmware upload (binary body, nextube-fw-ota.bin)
-POST /api/update_fs         → OTA LittleFS upload (binary body, nextube-littlefs-*.bin)
-POST /api/update_spiffs     → alias for /api/update_fs (backward-compatible)
-GET  /api/themes            → {"themes":["ThemeA","ThemeB",...]} — scanned from LittleFS at runtime
-GET  /api/file/ls?dir=/     → LittleFS directory listing
-POST /api/file/rename       → rename a file or folder (JSON: {"from":"/path","to":"/newpath"})
-POST /api/wifi/scan         → trigger WiFi scan
-GET  /api/wifi/scan         → scan results
-GET  /api/logs              → in-RAM device log (last 64 lines)
-POST /api/logs/clear        → clear in-RAM log buffer
+# Auth — bootstrap (open, no token required)
+POST /api/auth/set_password    → first-boot only; rejected once password is set
+POST /api/auth/login           → {"password":"…"} → {"token":"<64-char hex>"}
+
+# Auth — session management (requires valid token)
+POST /api/auth/logout          → invalidates the current session
+POST /api/auth/change_password → {"old_password":"…","new_password":"…"}
+
+# WiFi setup AP (requires auth)
+GET  /api/wifi/ap_pin        → {"pin":"12345678"}
+POST /api/wifi/regen_pin     → generate and persist a new AP PIN → {"pin":"…"}
+
+# Status (open)
+GET  /api/ping               → {"status":"ok"}
+GET  /api/status             → live status: time, wifi, weather, heap, firmware, admin_set, ap_active
+
+# Settings (requires auth)
+GET  /api/settings           → full configuration JSON
+POST /api/settings           → update config (JSON body)
+GET  /api/firmwareVersion    → {"version":"1.0.0"}
+GET  /api/hardwareVersion    → {"version":"1.31"}
+POST /api/reset              → reset settings to defaults + reboot (preserves admin password & AP PIN)
+POST /api/factory_reset_full → full factory reset: clears settings + admin password + AP PIN, then reboots
+POST /api/update_firmware    → OTA firmware upload (binary body, nextube-fw-ota.bin)
+POST /api/update_fs          → OTA LittleFS upload (binary body, nextube-littlefs-*.bin)
+POST /api/update_spiffs      → alias for /api/update_fs (backward-compatible)
+GET  /api/themes             → {"themes":["ThemeA","ThemeB",...]} — scanned from LittleFS at runtime
+GET  /api/file/ls?dir=/      → LittleFS directory listing
+POST /api/file/rename        → rename a file or folder (JSON: {"from":"/path","to":"/newpath"})
+POST /api/wifi/scan          → trigger WiFi scan
+GET  /api/wifi/scan          → scan results
+GET  /api/logs               → in-RAM device log (last 64 lines)
+POST /api/logs/clear         → clear in-RAM log buffer
 ```
 
 ## Project Structure
@@ -627,7 +663,7 @@ nextube-fw/
 │   ├── touch/                     # Capacitive touch input (L/R = mode cycle, M = pause/resume or backlight)
 │   ├── rtc/                       # PCF8563 RTC driver
 │   ├── audio/                     # DAC audio playback (WAV)
-│   ├── wifi_manager/              # AP+STA WiFi (3 min boot timeout if STA fails; 60 s graceful shutdown after connect)
+│   ├── wifi_manager/              # AP+STA WiFi (WPA2 setup AP; 90 s fallback if STA fails; NVS-backed per-device PIN)
 │   ├── web_server/                # HTTP server + REST API + OTA handlers + log viewer
 │   ├── ntp_time/                  # NTP synchronisation
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
