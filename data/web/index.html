@@ -1239,6 +1239,12 @@ async function saveSettings() {
     burnin_auto_hour:       +$('bi-hour').value,
   };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (res?.reboot) {
+    clearDirty();
+    toast('Settings saved — rebooting…');
+    setTimeout(() => location.reload(), 8000);
+    return;
+  }
   toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
   if (res?.status === 'ok') {
     clearDirty();
@@ -2100,8 +2106,13 @@ async function importSettings(input) {
       const j = JSON.parse(e.target.result);
       const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(j) });
       if (res?.status === 'ok') {
-        toast('Settings restored! Reloading...');
-        setTimeout(() => location.reload(), 2000);
+        if (res?.reboot) {
+          toast('Settings restored — rebooting…');
+          setTimeout(() => location.reload(), 8000);
+        } else {
+          toast('Settings restored! Reloading...');
+          setTimeout(() => location.reload(), 2000);
+        }
       } else { toast('Restore failed', true); }
     } catch(err) { toast('Invalid JSON file', true); }
   };

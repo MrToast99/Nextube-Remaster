@@ -404,7 +404,7 @@ On subsequent visits the UI shows a login prompt. Sessions are stored in your br
 The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi provisioning. The password is an **8-digit PIN** unique to each device, generated on first boot and stored in NVS.
 
 **Finding the PIN:**
-- **LCD tubes** — while the setup AP is active and no client is connected, the tubes display the PIN in two alternating phases (digits 0–5 for 3 s, then digits 2–7 for 3 s). The 4-digit overlap lets you read it comfortably.
+- **LCD tubes** — while the setup AP is active and no client is connected, the PIN scrolls across the tubes as a repeating marquee: 3 blank tubes followed by all 8 digits, cycling continuously. Read the digits as they scroll past — the 3-blank gap gives your eye a clear reset point between repetitions.
 - **Web UI** — once logged in, go to **System → WiFi Setup AP → Show** to display the PIN. You can also regenerate it there.
 - **Serial monitor** — on first boot the PIN is logged: `Generated new AP PIN (first boot): 47391082`
 

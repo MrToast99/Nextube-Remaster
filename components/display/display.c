@@ -705,18 +705,27 @@ static void render_ap_pin(const nextube_config_t *cfg)
     const char *pin = wifi_manager_get_ap_pin();
     if (!pin || strlen(pin) < 8) return;
 
-    /* 3 s per phase, driven by the monotonic timer so phases stay in sync
-     * across reboots (cosmetic — doesn't actually matter for correctness). */
+    /* Scrolling marquee: the virtual tape is 3 blanks followed by the 8 PIN
+     * digits (11 characters total), repeating endlessly.  The 6-tube window
+     * advances one position every 500 ms so digits scroll right-to-left —
+     * new digits enter on the rightmost tube and exit on the left, with a
+     * 3-blank gap between each repetition to give the eye a reset point.
+     *
+     * Example at scroll=3: [d0][d1][d2][d3][d4][d5]
+     *           at scroll=8: [d5][d6][d7][ ][ ][ ]
+     *           at scroll=0: [ ][ ][ ][d0][d1][d2]  */
+    const int seq_len = 11;   /* 3 blanks + 8 digits */
+    const int step_ms = 1000;
+
     int64_t now_ms = esp_timer_get_time() / 1000;
-    int phase  = (int)((now_ms / 3000) % 2);    /* 0 or 1 */
-    int offset = phase * 2;                     /* 0 or 2 */
+    int     scroll  = (int)((now_ms / step_ms) % seq_len);
 
     for (int tube = 0; tube < LCD_COUNT; tube++) {
-        int idx = offset + tube;
-        if (idx < 8 && pin[idx] >= '0' && pin[idx] <= '9') {
-            display_show_number(tube, pin[idx] - '0', cfg->theme);
+        int pos = (scroll + tube) % seq_len;
+        if (pos < 3) {
+            display_fill(tube, 0x0000);   /* blank gap */
         } else {
-            display_fill(tube, 0x0000);
+            display_show_number(tube, pin[pos - 3] - '0', cfg->theme);
         }
     }
 }

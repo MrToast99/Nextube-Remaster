@@ -52,24 +52,18 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # mDNS
 CONFIG_MDNS_MAX_SERVICES=10
-# Set the compile-time default hostname so mdns_init() never probes with a
-# NULL/uninitialised hostname buffer.  mdns_hostname_set() is async — it posts
-# to the mDNS task queue and returns before the rename takes effect, so without
-# this the device sends mDNS conflict-detection probes with garbage bytes in the
-# hostname field (visible in DNS logs as queries for "@\x80?", "\x80\x80?",
-# etc.) on every boot.  With CONFIG_MDNS_HOSTNAME set, mdns_init() calls
-# mdns_hostname_set() synchronously before any probe is sent.
-# The runtime call to mdns_hostname_set() in start_mdns() still applies the
-# user-configured hostname if it differs from this default.
-CONFIG_MDNS_HOSTNAME="nextube-remaster"
-# Restrict mDNS to the STA interface only.  Without this the mDNS stack also
-# probes on the AP interface, doubling the garbage-probe burst on every boot.
-CONFIG_MDNS_MULTIPLE_INTERFACES=n
-# Restrict mDNS to the STA interface only.  Without this, the mDNS stack probes
-# on both AP and STA simultaneously, and the brief window where the hostname is
-# still "espressif" (before mdns_hostname_set takes effect) causes a flood of
-# unicast DNS queries for "espressif.<domain>.a" visible on the LAN.
-CONFIG_MDNS_MULTIPLE_INTERFACES=n
+
+# LWIP netif default hostname.
+# This controls the name the device uses in DHCP client requests (option 12)
+# and is the hostname the mDNS stack reads from the netif during mdns_init().
+# Without this, the netif hostname defaults to "espressif", causing the device
+# to announce itself as "espressif.localdomain" on the LAN and send mDNS probes
+# with "espressif" before mdns_hostname_set() (which is async) takes effect.
+# The start_mdns() function also calls esp_netif_set_hostname() at runtime to
+# apply the user-configured hostname from config; this default ensures the very
+# first probe — fired the moment mdns_init() starts the task — is already
+# correct even before that runtime call executes.
+CONFIG_LWIP_LOCAL_HOSTNAME="nextube-remaster"
 
 # TLS / HTTPS
 # Enable the built-in Mozilla CA certificate bundle so esp_crt_bundle_attach()

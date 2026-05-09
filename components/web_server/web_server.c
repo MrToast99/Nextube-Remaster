@@ -101,7 +101,7 @@ static esp_err_t send_json(httpd_req_t *req, const char *json)
     return httpd_resp_sendstr(req, json);
 }
 
-/* ── Auth ──────────────────────────────────────────────────────────
+/* ── Auth ———──────────────────────────────────────────────────────────
  * REQUIRE_AUTH(r) is the gate macro applied to mutation handlers.  Returns
  * 401 if the request lacks a valid Bearer token.  Defined up here (rather
  * than next to the auth route handlers further down) because it has to be
@@ -235,15 +235,24 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     }
     buf[len] = '\0';
 
-    /* Snapshot credentials BEFORE applying the new config so we can detect
-     * whether WiFi needs to reconnect.  Only reconnect when SSID or password
-     * actually changed — reconnecting on every display/theme/volume save
-     * stops the HTTP server 1500 ms later and drops the browser connection. */
+    /* Snapshot fields BEFORE applying the new config so we can detect what
+     * actually changed.  We distinguish two classes:
+     *
+     *   1. WiFi credentials — handled with a live reconnect (no reboot).
+     *   2. Boot-time feature flags — tasks are created once in app_main and
+     *      cannot be started/stopped at runtime, so a reboot is required for
+     *      changes to weather_enabled / youtube_enabled / mdns_enabled /
+     *      mic_enabled to take effect. */
     char old_ssid[64], old_pass[64];
+    bool old_weather_en, old_youtube_en, old_mdns_en, old_mic_en;
     config_lock();
     const nextube_config_t *old_cfg = config_get();
     strlcpy(old_ssid, old_cfg->ssid,     sizeof(old_ssid));
     strlcpy(old_pass, old_cfg->password, sizeof(old_pass));
+    old_weather_en = old_cfg->weather_enabled;
+    old_youtube_en = old_cfg->youtube_enabled;
+    old_mdns_en    = old_cfg->mdns_enabled;
+    old_mic_en     = old_cfg->mic_enabled;
     config_unlock();
 
     bool ok = config_set_json(buf, len);
@@ -252,18 +261,37 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     uint8_t new_brightness;
     bool    new_audio_enabled;
     char    new_ssid[64], new_pass[64];
+    bool    new_weather_en, new_youtube_en, new_mdns_en, new_mic_en;
     config_lock();
     const nextube_config_t *new_cfg = config_get();
     new_brightness    = new_cfg->led_brightness;
     new_audio_enabled = new_cfg->audio_enabled;
     strlcpy(new_ssid, new_cfg->ssid,     sizeof(new_ssid));
     strlcpy(new_pass, new_cfg->password, sizeof(new_pass));
+    new_weather_en = new_cfg->weather_enabled;
+    new_youtube_en = new_cfg->youtube_enabled;
+    new_mdns_en    = new_cfg->mdns_enabled;
+    new_mic_en     = new_cfg->mic_enabled;
     config_unlock();
 
     leds_set_brightness(new_brightness);
     ntp_apply_timezone();
     ntp_apply_servers();
     audio_set_enabled(new_audio_enabled);
+
+    /* Boot-time feature flags changed — reboot required.  Respond first so
+     * the browser gets confirmation before the TCP connection drops. */
+    bool needs_reboot = (old_weather_en != new_weather_en) ||
+                        (old_youtube_en != new_youtube_en) ||
+                        (old_mdns_en    != new_mdns_en)    ||
+                        (old_mic_en     != new_mic_en);
+    if (needs_reboot) {
+        send_json(r, ok ? "{\"status\":\"ok\",\"reboot\":true}"
+                        : "{\"status\":\"error\",\"reboot\":false}");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+        return ESP_OK;
+    }
 
     bool ssid_changed = (strcmp(old_ssid, new_ssid) != 0);
     bool pass_changed = (strcmp(old_pass, new_pass)  != 0);
@@ -282,7 +310,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     return send_json(r, ok ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}");
 }
 
-/* ── Auth — request body helper ────────────────────────────────────
+/* ── Auth —— request body helper ────────────────────────────────────
  * REQUIRE_AUTH macro is defined near the top of this file (before any
  * handler that uses it).  The JSON-body reader below is only used by the
  * auth handlers immediately following, so it lives here. */
@@ -593,7 +621,7 @@ static esp_err_t api_status(httpd_req_t *r)
     config_unlock();
     cJSON_AddStringToObject(root, "mode", app_mode_name(status_mode));
     cJSON_AddBoolToObject(root, "mic_calibration_saved", status_mic_cal);
-    /* auth state.  The web UI gates its first-boot setup flow on these.
+    /* —— auth state.  The web UI gates its first-boot setup flow on these.
      * admin_set is the only auth-related field exposed unauthenticated; the
      * AP PIN itself is on a separate auth'd route (/api/wifi/ap_pin). */
     cJSON_AddBoolToObject(root, "admin_set", auth_is_password_set());
@@ -1718,13 +1746,13 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
     R(HTTP_POST, "/api/debug/burnin",           api_debug_burnin),
-    /* Auth routes .  set_password is allowed unauth on first boot only;
+    /* Auth routes.  set_password is allowed unauth on first boot only;
      * change_password is itself REQUIRE_AUTH'd. */
     R(HTTP_POST, "/api/auth/set_password",      api_auth_set_password),
     R(HTTP_POST, "/api/auth/login",             api_auth_login),
     R(HTTP_POST, "/api/auth/logout",            api_auth_logout),
     R(HTTP_POST, "/api/auth/change_password",   api_auth_change_password),
-    /* setup AP PIN management. */
+    /* —— setup AP PIN management. */
     R(HTTP_GET,  "/api/wifi/ap_pin",            api_wifi_ap_pin),
     R(HTTP_POST, "/api/wifi/regen_pin",         api_wifi_regen_pin),
     R(HTTP_POST, "/api/factory_reset_full",     api_factory_reset_full),

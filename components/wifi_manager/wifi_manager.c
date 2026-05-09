@@ -301,6 +301,25 @@ static void start_mdns(void)
         strncpy(hostname, cfg->hostname, sizeof(hostname) - 1);
     config_unlock();
 
+    /* Set the netif hostname BEFORE mdns_init().
+     *
+     * mdns_hostname_set() is asynchronous — it posts an ACTION_HOSTNAME_SET
+     * to the mDNS task queue and returns immediately.  mdns_init() starts the
+     * mDNS task and begins conflict-detection probing straight away, using
+     * whatever hostname the netif already has.  The default netif hostname is
+     * "espressif" (CONFIG_LWIP_LOCAL_HOSTNAME), so without this call the
+     * device sends a burst of mDNS probe packets with "espressif" in the
+     * question field on every boot — visible in DNS logs as garbage queries
+     * for "espressif.<domain>.a".
+     *
+     * Setting the netif hostname first means mdns_init() picks up the correct
+     * name from the start; the subsequent mdns_hostname_set() call is still
+     * made to keep the mDNS-layer hostname explicitly in sync, but there is
+     * no longer a window where the wrong name is probed. */
+    if (s_sta_netif) {
+        esp_netif_set_hostname(s_sta_netif, hostname);
+    }
+
     mdns_init();
     mdns_hostname_set(hostname);
     mdns_instance_name_set("Nextube Remaster");
