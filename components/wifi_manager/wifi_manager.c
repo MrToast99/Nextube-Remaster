@@ -320,25 +320,25 @@ static void start_mdns(void)
 
     mdns_init();
 
-    /* IDF 5.2+ requires explicit interface registration — mdns_init() alone
-     * does not probe on any interface.  Register ONLY the STA netif so the
-     * AP interface never participates in mDNS:
+    /* Register ONLY the STA netif.  The AP netif is excluded at build time
+     * via CONFIG_MDNS_PREDEF_NETIF_AP=n in sdkconfig.defaults, which prevents
+     * the mDNS component from auto-registering the AP interface when
+     * WIFI_EVENT_AP_START fires.
      *
-     *  • Without explicit registration, legacy event-handler code in the
-     *    mDNS component may auto-register ALL netifs, including the AP
-     *    interface.  The AP netif can probe with a stale or default hostname
-     *    ("espressif"), causing the Unifi controller (and other LAN tools)
-     *    to see the device hostname oscillate between "espressif" and the
-     *    correct name on every mDNS announcement interval.
+     * NOTE: do NOT call mdns_unregister_netif(s_ap_netif) here.  This
+     * function runs inside the IP_EVENT_STA_GOT_IP handler, which is
+     * dispatched by the default event loop task.  mdns_unregister_netif()
+     * posts an action to the mDNS task and blocks until it completes; the
+     * mDNS task then calls esp_event_post() back into the default event loop.
+     * The default event loop task is already blocked waiting for mDNS —
+     * deadlock.  The event queue fills up, httpd and the HTTP client both
+     * fail to post events, and the web UI stops responding.
      *
-     *  • The AP network (192.168.4.x) is a private stub — no LAN client
-     *    needs to resolve "nextube-remaster.local" on that subnet.  Keeping
-     *    mDNS off the AP interface eliminates the oscillation entirely. */
+     * ESP_ERR_INVALID_STATE = already registered (idempotent on reconnect).
+     * Any other non-OK result is logged but not fatal. */
     if (s_sta_netif) {
         esp_err_t reg_err = mdns_register_netif(s_sta_netif);
         if (reg_err != ESP_OK && reg_err != ESP_ERR_INVALID_STATE) {
-            /* ESP_ERR_INVALID_STATE = already registered (idempotent on
-             * reconnect). Any other error is worth logging but not fatal. */
             ESP_LOGW(TAG, "mdns_register_netif STA: %s", esp_err_to_name(reg_err));
         }
     }

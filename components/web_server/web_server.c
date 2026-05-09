@@ -426,6 +426,18 @@ static esp_err_t api_auth_login(httpd_req_t *r)
     return send_json(r, resp);
 }
 
+/* GET /api/auth/check — lightweight session-validity probe.
+ * Returns 200 {"status":"ok"} if the bearer token is valid, 401 if not.
+ * Used by the web UI as a pre-flight before starting a large upload (OTA /
+ * LittleFS) so an expired session is caught before the binary is sent,
+ * avoiding a false-positive "OTA complete" toast when the server rejects
+ * the upload mid-stream and the browser fires onerror with uploadPct=100%. */
+static esp_err_t api_auth_check(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* POST /api/auth/logout — invalidate the current session token. */
 static esp_err_t api_auth_logout(httpd_req_t *r)
 {
@@ -1757,6 +1769,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/auth/login",             api_auth_login),
     R(HTTP_POST, "/api/auth/logout",            api_auth_logout),
     R(HTTP_POST, "/api/auth/change_password",   api_auth_change_password),
+    R(HTTP_GET,  "/api/auth/check",             api_auth_check),
     /* —— setup AP PIN management. */
     R(HTTP_GET,  "/api/wifi/ap_pin",            api_wifi_ap_pin),
     R(HTTP_POST, "/api/wifi/regen_pin",         api_wifi_regen_pin),

@@ -645,14 +645,14 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>Danger Zone</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">
-      <strong>Factory Reset</strong> clears your settings (WiFi credentials,
+      <strong>Partial Factory Reset</strong> clears your settings (WiFi credentials,
       theme, modes) but preserves the admin password and AP PIN.<br>
       <strong>Full factory reset</strong> additionally clears the admin
       password and AP PIN — device returns to fresh-from-box state.
     </p>
     <div class="btn-group">
-      <button class="btn btn-danger" onclick="if(confirm('Reset ALL settings to factory defaults?\n\nAdmin password and AP PIN are preserved.'))secureFetch('/api/reset',{method:'POST'}).then(()=>toast('Resetting...'))">Factory Reset</button>
-      <button class="btn btn-danger" onclick="doFullFactoryReset()">Full factory reset</button>
+      <button class="btn btn-danger" onclick="if(confirm('Reset ALL settings to factory defaults?\n\nAdmin password and AP PIN are preserved.'))secureFetch('/api/reset',{method:'POST'}).then(()=>toast('Resetting...'))">Partial Factory Reset</button>
+      <button class="btn btn-danger" onclick="doFullFactoryReset()">Full Factory Reset</button>
       <button class="btn btn-outline" onclick="if(confirm('Reboot the device?'))secureFetch('/api/reboot',{method:'POST'}).then(()=>toast('Rebooting...'))">Reboot Device</button>
     </div>
   </div>
@@ -1345,6 +1345,16 @@ async function doOTA() {
   if (file.name.toLowerCase().includes('full')) {
     return toast('Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin', true);
   }
+  /* Pre-flight auth check — must happen before the binary is sent.
+   * If the session has expired the server returns 401 and closes the
+   * connection immediately.  By the time xhr.onerror fires the browser
+   * has already buffered the entire file for upload, so uploadPct can
+   * read as 100% even though nothing was written to flash.  That trips
+   * the "device rebooted" heuristic below and shows a false-positive
+   * "OTA complete" toast.  Catching it here aborts cleanly before the
+   * multi-MB transfer begins and routes the user to the login modal. */
+  try { await secureFetch('/api/auth/check'); }
+  catch(e) { return; } /* 401 → login modal shown by secureFetch */
   $('ota-progress').style.display = 'block';
   _otaInProgress = true;
 
@@ -1387,7 +1397,7 @@ async function doOTA() {
 }
 
 /* ── LittleFS OTA ────────────────────────────────────── */
-function doFSOTA() {
+async function doFSOTA() {
   const file = $('spiffs-file').files[0];
   if (!file) return toast('Select a LittleFS .bin file first', true);
   if (!file.name.toLowerCase().includes('littlefs')) {
@@ -1398,6 +1408,9 @@ function doFSOTA() {
     'Built-in themes will be restored. Custom themes/images will be erased.\n\n' +
     'Continue?'
   )) return;
+  /* Pre-flight auth check — same reason as doOTA above. */
+  try { await secureFetch('/api/auth/check'); }
+  catch(e) { return; }
 
   const prog = $('spiffs-progress');
   const bar  = $('spiffs-bar');

@@ -52,6 +52,17 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # mDNS
 CONFIG_MDNS_MAX_SERVICES=10
+# Disable automatic mDNS registration for the AP netif.
+# By default IDF 5.x mDNS registers ALL netifs (STA, AP, ETH) automatically
+# via built-in event handlers when each interface comes up.  We do our own
+# explicit mdns_register_netif(s_sta_netif) in start_mdns(), so we only want
+# STA registered.  With AP auto-registration enabled, any WIFI_EVENT_AP_START
+# fired after mdns_init() (fallback AP, reconnect) causes mDNS to probe on the
+# AP interface and announce to the LAN — producing a 1-second "espressif" blip
+# on the Unifi controller (or any mDNS-aware client) on every announcement
+# cycle until the probe settles.  Turning it off here ensures the AP interface
+# is never presented to LAN-side mDNS resolvers.
+CONFIG_MDNS_PREDEF_NETIF_AP=n
 
 # LWIP netif default hostname.
 # This controls the name the device uses in DHCP client requests (option 12)
