@@ -5,7 +5,16 @@
  * Layout in NVS namespace "nextube_sec":
  *   "admin_set"   u8       0 = no password yet, 1 = password configured
  *   "admin_salt"  blob[16] random per-device, generated on first set_password
- *   "admin_hash"  blob[32] PBKDF2-SHA256(password, salt, 100k iters)
+ *   "admin_hash"  blob[32] PBKDF2-SHA256(password, salt, <iters>)
+ *   "admin_iter"  u32      PBKDF2 iteration count used for admin_hash
+ *                          (absent on devices that set their password before
+ *                          this key was introduced → treated as 100 000)
+ *
+ * On a successful login, if the stored iteration count differs from the
+ * current PBKDF2_ITER, the hash is transparently re-computed and stored at
+ * the new count.  This lets devices that set their password at 100 000 iters
+ * migrate to the current (lower) count on their first login without any
+ * manual intervention.
  *
  * The same namespace also holds "ap_pin" written by wifi_manager (S1) — both
  * are bundled under one factory-reset target.
@@ -35,6 +44,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
 static const char *TAG = "auth";
 
@@ -42,8 +52,20 @@ static const char *TAG = "auth";
 #define K_ADMIN_SET     "admin_set"
 #define K_ADMIN_SALT    "admin_salt"
 #define K_ADMIN_HASH    "admin_hash"
+#define K_ADMIN_ITER    "admin_iter"
 
-#define PBKDF2_ITER     100000
+/* 10 000 iterations: ~150–250 ms on the ESP32 LX6 @ 240 MHz.
+ * Online brute-force is already gated by the 5-strikes / 60-s lockout
+ * regardless of this value.  Offline cracking of a stolen NVS hash
+ * requires physical flash access — a hardware-skills barrier that makes
+ * high iteration counts less meaningful for a home embedded device.
+ * 10 000 is the NIST SP 800-132 minimum and keeps the UX responsive. */
+#define PBKDF2_ITER         10000
+/* Iteration count used before K_ADMIN_ITER was introduced.  Devices whose
+ * admin_iter key is absent in NVS (i.e. set their password before this
+ * firmware) are verified with this count, then silently re-hashed at
+ * PBKDF2_ITER on their next successful login. */
+#define PBKDF2_ITER_LEGACY  100000
 #define HASH_LEN        32
 #define SALT_LEN        16
 #define TOKEN_LEN       32
@@ -78,6 +100,7 @@ static inline void unlock(void) { if (s_lock) xSemaphoreGive(s_lock); }
 
 static int pbkdf2_hash(const char *pw, size_t pw_len,
                        const uint8_t *salt, size_t salt_len,
+                       uint32_t iters,
                        uint8_t out[HASH_LEN])
 {
     /* mbedtls 3.x: pkcs5_pbkdf2_hmac_ext takes the MD type directly,
@@ -86,7 +109,7 @@ static int pbkdf2_hash(const char *pw, size_t pw_len,
         MBEDTLS_MD_SHA256,
         (const unsigned char *)pw, pw_len,
         salt, salt_len,
-        PBKDF2_ITER, HASH_LEN, out);
+        iters, HASH_LEN, out);
 }
 
 static void bin_to_hex(const uint8_t *in, size_t n, char *out)
@@ -117,9 +140,12 @@ static int hex_to_bin(const char *in, uint8_t *out, size_t n)
     return 0;
 }
 
-/* Read salt+hash from NVS into the supplied buffers.  Returns true on
- * success; false if the password is not set or NVS read fails. */
-static bool load_salt_hash(uint8_t salt[SALT_LEN], uint8_t hash[HASH_LEN])
+/* Read salt, hash, and iteration count from NVS.
+ * out_iters is set to the stored count, or PBKDF2_ITER_LEGACY when the
+ * admin_iter key is absent (device set its password before that key was
+ * introduced).  Returns true on success; false if not set or NVS error. */
+static bool load_salt_hash(uint8_t salt[SALT_LEN], uint8_t hash[HASH_LEN],
+                            uint32_t *out_iters)
 {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
@@ -132,6 +158,12 @@ static bool load_salt_hash(uint8_t salt[SALT_LEN], uint8_t hash[HASH_LEN])
     if (nvs_get_blob(h, K_ADMIN_SALT, salt, &s_len) != ESP_OK) goto done;
     if (nvs_get_blob(h, K_ADMIN_HASH, hash, &h_len) != ESP_OK) goto done;
     if (s_len != SALT_LEN || h_len != HASH_LEN) goto done;
+
+    /* admin_iter absent → legacy device; treat as PBKDF2_ITER_LEGACY. */
+    uint32_t iters = PBKDF2_ITER_LEGACY;
+    nvs_get_u32(h, K_ADMIN_ITER, &iters);   /* ignore error — default stands */
+    *out_iters = iters;
+
     ok = true;
 done:
     nvs_close(h);
@@ -190,7 +222,7 @@ esp_err_t auth_set_password(const char *password)
     uint8_t hash[HASH_LEN];
     esp_fill_random(salt, sizeof(salt));
 
-    if (pbkdf2_hash(password, pw_len, salt, sizeof(salt), hash) != 0) {
+    if (pbkdf2_hash(password, pw_len, salt, sizeof(salt), PBKDF2_ITER, hash) != 0) {
         ESP_LOGE(TAG, "PBKDF2 failed");
         return ESP_FAIL;
     }
@@ -201,6 +233,7 @@ esp_err_t auth_set_password(const char *password)
 
     err = nvs_set_blob(h, K_ADMIN_SALT, salt, sizeof(salt));
     if (err == ESP_OK) err = nvs_set_blob(h, K_ADMIN_HASH, hash, sizeof(hash));
+    if (err == ESP_OK) err = nvs_set_u32 (h, K_ADMIN_ITER, PBKDF2_ITER);
     if (err == ESP_OK) err = nvs_set_u8  (h, K_ADMIN_SET, 1);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
@@ -218,10 +251,11 @@ bool auth_verify_password(const char *password)
     if (!password) return false;
     uint8_t salt[SALT_LEN];
     uint8_t stored[HASH_LEN];
-    if (!load_salt_hash(salt, stored)) return false;
+    uint32_t iters;
+    if (!load_salt_hash(salt, stored, &iters)) return false;
 
     uint8_t computed[HASH_LEN];
-    int rc = pbkdf2_hash(password, strlen(password), salt, sizeof(salt), computed);
+    int rc = pbkdf2_hash(password, strlen(password), salt, sizeof(salt), iters, computed);
     bool ok = (rc == 0) && (mbedtls_ct_memcmp(stored, computed, HASH_LEN) == 0);
 
     memset(salt,     0, sizeof(salt));
@@ -261,7 +295,36 @@ char *auth_login(const char *password)
      * wait out the timer. */
     if (auth_is_locked_out()) return NULL;
 
-    bool ok = auth_verify_password(password);
+    /* Verify using whatever iteration count is stored in NVS.  We need the
+     * count here (not just a bool from auth_verify_password) so we can detect
+     * whether a re-hash is warranted after a successful login. */
+    uint8_t salt[SALT_LEN];
+    uint8_t stored[HASH_LEN];
+    uint32_t stored_iters = PBKDF2_ITER_LEGACY;
+    bool loaded = load_salt_hash(salt, stored, &stored_iters);
+
+    bool ok = false;
+    if (loaded) {
+        uint8_t computed[HASH_LEN];
+        int rc = pbkdf2_hash(password, strlen(password),
+                             salt, sizeof(salt), stored_iters, computed);
+        ok = (rc == 0) && (mbedtls_ct_memcmp(stored, computed, HASH_LEN) == 0);
+        memset(computed, 0, sizeof(computed));
+    }
+    memset(salt,   0, sizeof(salt));
+    memset(stored, 0, sizeof(stored));
+
+    /* Transparent hash upgrade: if the stored iteration count differs from
+     * the current target (e.g. device had 100 000 iters, firmware now uses
+     * 10 000), silently re-hash and overwrite NVS.  This runs once per
+     * device on the first successful login after the firmware update. */
+    if (ok && stored_iters != PBKDF2_ITER) {
+        ESP_LOGI(TAG, "Upgrading password hash: %"PRIu32" → %d iters",
+                 stored_iters, PBKDF2_ITER);
+        if (auth_set_password(password) != ESP_OK) {
+            ESP_LOGW(TAG, "Hash upgrade failed — login still succeeds");
+        }
+    }
 
     lock();
     int64_t now = esp_timer_get_time();
@@ -368,6 +431,7 @@ void auth_factory_reset(void)
         nvs_erase_key(h, K_ADMIN_SET);
         nvs_erase_key(h, K_ADMIN_SALT);
         nvs_erase_key(h, K_ADMIN_HASH);
+        nvs_erase_key(h, K_ADMIN_ITER);
         nvs_commit(h);
         nvs_close(h);
     }

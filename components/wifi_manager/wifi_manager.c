@@ -49,6 +49,14 @@ static esp_netif_t *s_ap_netif  = NULL;
 #define AP_PIN_LEN            8     /* must be ≥ 8 — WPA2_PSK minimum length */
 
 static char s_ap_pin[AP_PIN_LEN + 1] = {0};
+
+/* Module-level hostname buffer.  LWIP's netif_set_hostname() stores the raw
+ * pointer — it does NOT copy the string.  Passing a stack-local char array
+ * leaves netif->hostname dangling after the caller returns, causing DHCP
+ * to read freed stack memory (and emit whatever was there — often the
+ * compile-time "espressif" default) on every subsequent DHCP transaction.
+ * Keeping the string here guarantees it lives as long as the netif. */
+static char s_hostname[32] = "nextube-remaster";
 static volatile int s_ap_client_count = 0;
 
 /* Explicit "AP is broadcasting" flag.  Tracked locally rather than queried
@@ -292,39 +300,53 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
 static void start_mdns(void)
 {
-    /* Read the user-configured hostname; fall back to "nextube-remaster"
-     * if the config is empty or unavailable. */
-    char hostname[32] = "nextube-remaster";
+    /* Refresh s_hostname from config in case it changed since boot
+     * (e.g. user saved new hostname via web UI and reconnected).
+     * s_hostname is module-level so netif->hostname stays valid after
+     * this function returns — LWIP stores the pointer, not a copy. */
     config_lock();
     const nextube_config_t *cfg = config_get();
-    if (cfg->hostname[0] != '\0')
-        strncpy(hostname, cfg->hostname, sizeof(hostname) - 1);
+    if (cfg->hostname[0] != '\0') {
+        strncpy(s_hostname, cfg->hostname, sizeof(s_hostname) - 1);
+        s_hostname[sizeof(s_hostname) - 1] = '\0';
+    }
     config_unlock();
 
-    /* Set the netif hostname BEFORE mdns_init().
-     *
-     * mdns_hostname_set() is asynchronous — it posts an ACTION_HOSTNAME_SET
-     * to the mDNS task queue and returns immediately.  mdns_init() starts the
-     * mDNS task and begins conflict-detection probing straight away, using
-     * whatever hostname the netif already has.  The default netif hostname is
-     * "espressif" (CONFIG_LWIP_LOCAL_HOSTNAME), so without this call the
-     * device sends a burst of mDNS probe packets with "espressif" in the
-     * question field on every boot — visible in DNS logs as garbage queries
-     * for "espressif.<domain>.a".
-     *
-     * Setting the netif hostname first means mdns_init() picks up the correct
-     * name from the start; the subsequent mdns_hostname_set() call is still
-     * made to keep the mDNS-layer hostname explicitly in sync, but there is
-     * no longer a window where the wrong name is probed. */
+    /* Re-apply to the STA netif so any hostname change made via the web UI
+     * takes effect without a full reboot (reconnect path). */
     if (s_sta_netif) {
-        esp_netif_set_hostname(s_sta_netif, hostname);
+        esp_netif_set_hostname(s_sta_netif, s_hostname);
     }
 
     mdns_init();
-    mdns_hostname_set(hostname);
+
+    /* IDF 5.2+ requires explicit interface registration — mdns_init() alone
+     * does not probe on any interface.  Register ONLY the STA netif so the
+     * AP interface never participates in mDNS:
+     *
+     *  • Without explicit registration, legacy event-handler code in the
+     *    mDNS component may auto-register ALL netifs, including the AP
+     *    interface.  The AP netif can probe with a stale or default hostname
+     *    ("espressif"), causing the Unifi controller (and other LAN tools)
+     *    to see the device hostname oscillate between "espressif" and the
+     *    correct name on every mDNS announcement interval.
+     *
+     *  • The AP network (192.168.4.x) is a private stub — no LAN client
+     *    needs to resolve "nextube-remaster.local" on that subnet.  Keeping
+     *    mDNS off the AP interface eliminates the oscillation entirely. */
+    if (s_sta_netif) {
+        esp_err_t reg_err = mdns_register_netif(s_sta_netif);
+        if (reg_err != ESP_OK && reg_err != ESP_ERR_INVALID_STATE) {
+            /* ESP_ERR_INVALID_STATE = already registered (idempotent on
+             * reconnect). Any other error is worth logging but not fatal. */
+            ESP_LOGW(TAG, "mdns_register_netif STA: %s", esp_err_to_name(reg_err));
+        }
+    }
+
+    mdns_hostname_set(s_hostname);
     mdns_instance_name_set("Nextube Remaster");
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-    ESP_LOGI(TAG, "mDNS: http://%s.local", hostname);
+    ESP_LOGI(TAG, "mDNS: http://%s.local  (STA netif registered)", s_hostname);
 }
 
 void wifi_manager_start(void)
@@ -334,12 +356,34 @@ void wifi_manager_start(void)
     const nextube_config_t *cfg = config_get();
     strncpy(ssid,     cfg->ssid,     sizeof(ssid)     - 1); ssid[sizeof(ssid)         - 1] = '\0';
     strncpy(password, cfg->password, sizeof(password) - 1); password[sizeof(password) - 1] = '\0';
+    /* Write into the module-level s_hostname buffer so netif->hostname
+     * remains valid after this function returns (LWIP stores the pointer). */
+    if (cfg->hostname[0] != '\0') {
+        strncpy(s_hostname, cfg->hostname, sizeof(s_hostname) - 1);
+    } else {
+        strncpy(s_hostname, "nextube-remaster", sizeof(s_hostname) - 1);
+    }
+    s_hostname[sizeof(s_hostname) - 1] = '\0';
     config_unlock();
 
     s_wifi_events = xEventGroupCreate();
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
     s_ap_netif  = esp_netif_create_default_wifi_ap();
+
+    /* Set the correct hostname on both netifs BEFORE esp_wifi_start().
+     * The DHCP client sends the hostname in DISCOVER/REQUEST packets which
+     * go out before IP_EVENT_STA_GOT_IP fires (and before start_mdns() is
+     * called).  Without this, all early DHCP packets use the LWIP compile-
+     * time default "espressif" — Unifi (and other controllers) log that as
+     * the device hostname, creating a conflict with the mDNS announcement
+     * of "nextube-remaster" and causing the name to oscillate every DHCP
+     * retry cycle (~15 s) until the lease is fully established.
+     * Setting it here ensures the very first DHCP DISCOVER already carries
+     * the correct name. */
+    esp_netif_set_hostname(s_sta_netif, s_hostname);
+    esp_netif_set_hostname(s_ap_netif,  s_hostname);
+    ESP_LOGI(TAG, "Netif hostname set to \"%s\" (STA + AP)", s_hostname);
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));

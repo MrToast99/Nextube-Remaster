@@ -243,12 +243,13 @@ static esp_err_t api_post_settings(httpd_req_t *r)
      *      cannot be started/stopped at runtime, so a reboot is required for
      *      changes to weather_enabled / youtube_enabled / mdns_enabled /
      *      mic_enabled to take effect. */
-    char old_ssid[64], old_pass[64];
+    char old_ssid[64], old_pass[64], old_hostname[32];
     bool old_weather_en, old_youtube_en, old_mdns_en, old_mic_en;
     config_lock();
     const nextube_config_t *old_cfg = config_get();
-    strlcpy(old_ssid, old_cfg->ssid,     sizeof(old_ssid));
-    strlcpy(old_pass, old_cfg->password, sizeof(old_pass));
+    strlcpy(old_ssid,     old_cfg->ssid,      sizeof(old_ssid));
+    strlcpy(old_pass,     old_cfg->password,  sizeof(old_pass));
+    strlcpy(old_hostname, old_cfg->hostname,  sizeof(old_hostname));
     old_weather_en = old_cfg->weather_enabled;
     old_youtube_en = old_cfg->youtube_enabled;
     old_mdns_en    = old_cfg->mdns_enabled;
@@ -260,14 +261,15 @@ static esp_err_t api_post_settings(httpd_req_t *r)
 
     uint8_t new_brightness;
     bool    new_audio_enabled;
-    char    new_ssid[64], new_pass[64];
+    char    new_ssid[64], new_pass[64], new_hostname[32];
     bool    new_weather_en, new_youtube_en, new_mdns_en, new_mic_en;
     config_lock();
     const nextube_config_t *new_cfg = config_get();
     new_brightness    = new_cfg->led_brightness;
     new_audio_enabled = new_cfg->audio_enabled;
-    strlcpy(new_ssid, new_cfg->ssid,     sizeof(new_ssid));
-    strlcpy(new_pass, new_cfg->password, sizeof(new_pass));
+    strlcpy(new_ssid,     new_cfg->ssid,      sizeof(new_ssid));
+    strlcpy(new_pass,     new_cfg->password,  sizeof(new_pass));
+    strlcpy(new_hostname, new_cfg->hostname,  sizeof(new_hostname));
     new_weather_en = new_cfg->weather_enabled;
     new_youtube_en = new_cfg->youtube_enabled;
     new_mdns_en    = new_cfg->mdns_enabled;
@@ -279,9 +281,12 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     ntp_apply_servers();
     audio_set_enabled(new_audio_enabled);
 
-    /* Boot-time feature flags changed — reboot required.  Respond first so
-     * the browser gets confirmation before the TCP connection drops. */
-    bool needs_reboot = (old_weather_en != new_weather_en) ||
+    /* Boot-time feature flags or hostname changed — reboot required.
+     * Hostname is baked into LWIP netif, DHCP option 12, and mDNS at start-up;
+     * changing it live is not supported.  Respond first so the browser gets
+     * confirmation before the TCP connection drops. */
+    bool needs_reboot = (strcmp(old_hostname, new_hostname) != 0) ||
+                        (old_weather_en != new_weather_en) ||
                         (old_youtube_en != new_youtube_en) ||
                         (old_mdns_en    != new_mdns_en)    ||
                         (old_mic_en     != new_mic_en);
