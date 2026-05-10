@@ -78,9 +78,12 @@ static esp_timer_handle_t s_ap_fallback_timer  = NULL;
  * two concurrent association requests and leave the TCP/IP stack in an
  * indeterminate state. */
 static bool s_manual_reconnect = false;
-static bool s_mdns_started     = false; /* mDNS init guard — start only once, after first IP */
+static bool s_mdns_inited  = false; /* mdns_init() called (pre-WiFi-start) */
+static bool s_mdns_started = false; /* netif registered — guard against double task spawn */
 
-static void start_mdns(void); /* forward declaration — defined after wifi_event_handler */
+static void start_mdns(void);             /* defined after wifi_event_handler */
+static void mdns_start_task(void *arg);   /* spawned from IP_EVENT_STA_GOT_IP */
+static void mdns_unregister_ap_task(void *arg); /* spawned from WIFI_EVENT_AP_START */
 
 /* ──────— AP PIN helpers ──────────────────────────────────────────── */
 
@@ -252,6 +255,19 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                      ev->aid, s_ap_client_count);
             break;
         }
+        case WIFI_EVENT_AP_START:
+            /* If mDNS is already running, the managed espressif/mdns component
+             * may have auto-registered the AP netif on this event (its default
+             * behaviour when CONFIG_MDNS_PREDEF_NETIF_AP is not honoured for
+             * managed-component builds).  Spawn a task to unregister it so the
+             * AP interface never leaks its hostname ("espressif") to LAN-side
+             * mDNS resolvers.  The task is cheap — it runs, unregisters, then
+             * deletes itself. */
+            if (s_mdns_inited && s_ap_netif) {
+                xTaskCreate(mdns_unregister_ap_task, "mdns_unreg_ap",
+                            2048, NULL, 5, NULL);
+            }
+            break;
         default: break;
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -275,35 +291,29 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         } else {
             ESP_LOGI(TAG, "STA got IP: %s", s_ip_str);
         }
-        /* Start mDNS once — only after the STA interface has a routable IP.
-         * Initialising mDNS earlier (at wifi_start) causes it to probe using
-         * the ESP-IDF default hostname "espressif" on the AP interface before
-         * mdns_hostname_set() takes effect, flooding the LAN with unicast DNS
-         * queries for "espressif.<domain>.a" on every boot and reconnect. */
-        if (!s_mdns_started) {
+        /* Register the STA netif with mDNS once we have a routable IP.
+         * mdns_init() and mdns_hostname_set() were already called in
+         * wifi_manager_start() while all netifs were DOWN; this deferred
+         * task only does the register + service-add step.  It runs in a
+         * task (not here) so mdns_unregister_netif(s_ap_netif) can be
+         * called without deadlocking the default event loop. */
+        if (!s_mdns_started && s_mdns_inited) {
             s_mdns_started = true;
-            /* Gate on user config — some users prefer their devices not to
-             * advertise on the LAN.  Boot-time only; toggling this requires
-             * a reboot to take effect (matches the other feature toggles). */
-            bool mdns_on;
-            config_lock();
-            mdns_on = config_get()->mdns_enabled;
-            config_unlock();
-            if (mdns_on) {
-                start_mdns();
-            } else {
-                ESP_LOGI(TAG, "mDNS disabled in config — not advertising");
-            }
+            xTaskCreate(mdns_start_task, "mdns_reg", 3072, NULL, 5, NULL);
         }
     }
 }
 
 static void start_mdns(void)
 {
-    /* Refresh s_hostname from config in case it changed since boot
-     * (e.g. user saved new hostname via web UI and reconnected).
-     * s_hostname is module-level so netif->hostname stays valid after
-     * this function returns — LWIP stores the pointer, not a copy. */
+    /* mdns_init(), mdns_hostname_set(), and mdns_instance_name_set() were
+     * already called in wifi_manager_start() before esp_wifi_start(), while
+     * all netifs were still DOWN.  This function only handles the registration
+     * step, which requires the STA to have a valid IP first.
+     *
+     * Refresh s_hostname in case the user changed the hostname via the web UI
+     * after the initial pre-init (requires a reboot to take effect in mDNS,
+     * but the netif hostname is updated here for DHCP accuracy). */
     config_lock();
     const nextube_config_t *cfg = config_get();
     if (cfg->hostname[0] != '\0') {
@@ -312,41 +322,55 @@ static void start_mdns(void)
     }
     config_unlock();
 
-    /* Re-apply to the STA netif so any hostname change made via the web UI
-     * takes effect without a full reboot (reconnect path). */
-    if (s_sta_netif) {
-        esp_netif_set_hostname(s_sta_netif, s_hostname);
-    }
+    esp_netif_set_hostname(s_sta_netif, s_hostname);
 
-    mdns_init();
-
-    /* Register ONLY the STA netif.  The AP netif is excluded at build time
-     * via CONFIG_MDNS_PREDEF_NETIF_AP=n in sdkconfig.defaults, which prevents
-     * the mDNS component from auto-registering the AP interface when
-     * WIFI_EVENT_AP_START fires.
-     *
-     * NOTE: do NOT call mdns_unregister_netif(s_ap_netif) here.  This
-     * function runs inside the IP_EVENT_STA_GOT_IP handler, which is
-     * dispatched by the default event loop task.  mdns_unregister_netif()
-     * posts an action to the mDNS task and blocks until it completes; the
-     * mDNS task then calls esp_event_post() back into the default event loop.
-     * The default event loop task is already blocked waiting for mDNS —
-     * deadlock.  The event queue fills up, httpd and the HTTP client both
-     * fail to post events, and the web UI stops responding.
-     *
-     * ESP_ERR_INVALID_STATE = already registered (idempotent on reconnect).
-     * Any other non-OK result is logged but not fatal. */
+    /* Register only the STA netif.  ESP_ERR_INVALID_STATE = already registered. */
     if (s_sta_netif) {
-        esp_err_t reg_err = mdns_register_netif(s_sta_netif);
-        if (reg_err != ESP_OK && reg_err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "mdns_register_netif STA: %s", esp_err_to_name(reg_err));
+        esp_err_t err = mdns_register_netif(s_sta_netif);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "mdns_register_netif STA: %s", esp_err_to_name(err));
         }
     }
 
-    mdns_hostname_set(s_hostname);
-    mdns_instance_name_set("Nextube Remaster");
+    /* Unregister the AP netif.  The managed espressif/mdns component may have
+     * auto-registered it via the predefined-netif mechanism if
+     * CONFIG_MDNS_PREDEF_NETIF_AP was not honoured.  Safe to call here because
+     * we are in mdns_start_task, not the default event loop task. */
+    if (s_ap_netif) {
+        esp_err_t err = mdns_unregister_netif(s_ap_netif);
+        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND
+                          && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "mdns_unregister_netif AP: %s", esp_err_to_name(err));
+        }
+    }
+
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
     ESP_LOGI(TAG, "mDNS: http://%s.local  (STA netif registered)", s_hostname);
+}
+
+/* Deferred AP-netif de-registration.  Spawned from WIFI_EVENT_AP_START after
+ * mDNS has been initialised so the AP interface never leaks its hostname to
+ * the LAN.  Self-deletes when done. */
+static void mdns_unregister_ap_task(void *arg)
+{
+    if (s_ap_netif) {
+        esp_err_t err = mdns_unregister_netif(s_ap_netif);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "mDNS: AP netif unregistered");
+        } else if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "mdns_unregister_netif AP: %s", esp_err_to_name(err));
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+/* Deferred mDNS initialisation.  Runs start_mdns() in a task context so
+ * mdns_unregister_netif() inside start_mdns() is safe (no deadlock with the
+ * default event loop task).  Self-deletes when done. */
+static void mdns_start_task(void *arg)
+{
+    start_mdns();
+    vTaskDelete(NULL);
 }
 
 void wifi_manager_start(void)
@@ -444,6 +468,31 @@ void wifi_manager_start(void)
     } else {
         s_ap_active = true;
         ESP_LOGI(TAG, "No STA credentials — AP-only mode for first-boot setup");
+    }
+
+    /* Pre-initialise mDNS while ALL netifs are still DOWN (before
+     * esp_wifi_start fires any WIFI_EVENT_* that could trigger auto-
+     * registration).  The managed espressif/mdns v1.11.x component probes
+     * with its current internal hostname the moment a netif is registered;
+     * if mdns_init() is called later (after the STA gets an IP) there is a
+     * narrow window where it may probe with the compile-time default
+     * "espressif" before mdns_hostname_set() takes effect.  Initialising
+     * here and queuing hostname_set immediately afterwards guarantees the
+     * mDNS task's very first probe — for any netif, via any code path —
+     * already uses the correct name. */
+    {
+        bool mdns_on;
+        config_lock();
+        mdns_on = config_get()->mdns_enabled;
+        config_unlock();
+        if (mdns_on) {
+            mdns_init();
+            mdns_hostname_set(s_hostname);
+            mdns_instance_name_set("Nextube Remaster");
+            s_mdns_inited = true;
+            ESP_LOGI(TAG, "mDNS pre-init: hostname \"%s\" (netif registration deferred to first IP)",
+                     s_hostname);
+        }
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());

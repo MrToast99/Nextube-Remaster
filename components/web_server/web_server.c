@@ -438,6 +438,45 @@ static esp_err_t api_auth_check(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/auth/set_enabled — toggle the authentication requirement.
+ *
+ * Body: { "enabled": true|false }
+ *
+ * Permission rules:
+ *   • Enabling  (auth currently OFF) — no token required; any device on the
+ *     LAN can enable auth.  If no password has been set yet, the web UI will
+ *     present the set-password modal on next load.
+ *   • Disabling (auth currently ON)  — REQUIRE_AUTH enforced; an attacker
+ *     without the current session token cannot turn auth off. */
+static esp_err_t api_auth_set_enabled(httpd_req_t *r)
+{
+    /* Gate: only require auth when we're disabling (turning off) auth.
+     * Turning it on is always allowed — there's nothing to protect yet. */
+    if (auth_is_enabled()) {
+        REQUIRE_AUTH(r);
+    }
+
+    cJSON *root = read_json_body(r, 64);
+    if (!root) return ESP_FAIL;   /* 400 already sent */
+
+    cJSON *en = cJSON_GetObjectItem(root, "enabled");
+    if (!cJSON_IsBool(en)) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "\"enabled\" bool required");
+    }
+    bool want = cJSON_IsTrue(en);
+    cJSON_Delete(root);
+
+    esp_err_t err = auth_set_enabled(want);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "NVS write failed");
+    }
+    return send_json(r, want ? "{\"status\":\"ok\",\"auth_enabled\":true}"
+                             : "{\"status\":\"ok\",\"auth_enabled\":false}");
+}
+
 /* POST /api/auth/logout — invalidate the current session token. */
 static esp_err_t api_auth_logout(httpd_req_t *r)
 {
@@ -641,7 +680,8 @@ static esp_err_t api_status(httpd_req_t *r)
     /* —— auth state.  The web UI gates its first-boot setup flow on these.
      * admin_set is the only auth-related field exposed unauthenticated; the
      * AP PIN itself is on a separate auth'd route (/api/wifi/ap_pin). */
-    cJSON_AddBoolToObject(root, "admin_set", auth_is_password_set());
+    cJSON_AddBoolToObject(root, "admin_set",     auth_is_password_set());
+    cJSON_AddBoolToObject(root, "auth_enabled",  auth_is_enabled());
     char *json = cJSON_PrintUnformatted(root);
     esp_err_t ret = send_json(r, json);
     free(json); cJSON_Delete(root);
@@ -1770,6 +1810,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/auth/logout",            api_auth_logout),
     R(HTTP_POST, "/api/auth/change_password",   api_auth_change_password),
     R(HTTP_GET,  "/api/auth/check",             api_auth_check),
+    R(HTTP_POST, "/api/auth/set_enabled",       api_auth_set_enabled),
     /* —— setup AP PIN management. */
     R(HTTP_GET,  "/api/wifi/ap_pin",            api_wifi_ap_pin),
     R(HTTP_POST, "/api/wifi/regen_pin",         api_wifi_regen_pin),

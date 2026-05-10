@@ -70,6 +70,18 @@ void auth_clear_all_sessions(void);
  *  behaves as fresh-from-box: next browser session must set a new password. */
 void auth_factory_reset(void);
 
+/** True if authentication is currently required for mutation endpoints.
+ *  Defaults to false (disabled) so existing devices are never locked out
+ *  on firmware upgrade.  Persisted in NVS key "auth_en". */
+bool auth_is_enabled(void);
+
+/** Enable or disable the authentication requirement.
+ *  Callers must enforce the permission check themselves:
+ *  — disabling while auth is on  → call REQUIRE_AUTH before this
+ *  — enabling while auth is off  → no existing token to check
+ *  Takes effect immediately in RAM; survives reboots via NVS. */
+esp_err_t auth_set_enabled(bool enabled);
+
 /** True while the lockout timer is active.  Used by the login route to
  *  return 429 instead of 401 when the user keeps trying. */
 bool auth_is_locked_out(void);
