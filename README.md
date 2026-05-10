@@ -393,11 +393,21 @@ Changing the partition subtype from `spiffs` to `littlefs` requires re-flashing 
 
 ## Web Management UI
 
-### First Boot — Admin Password
+### Admin Authentication (optional)
 
-The very first time the web UI loads, a **Set admin password** prompt blocks the interface. Set a password of at least 6 characters. This password is required to change any settings and is stored in NVS (survives firmware OTA; cleared only by a full factory reset). After setting the password you are logged in automatically.
+Authentication is **disabled by default** — the web UI is fully accessible to anyone on your network without a password, matching the behaviour of all previous firmware versions.
 
-On subsequent visits the UI shows a login prompt. Sessions are stored in your browser's `localStorage` and remain valid for 7 days.
+To enable password protection, go to **System → Lock Webui** and check **Require admin password to change settings**. On first enable you will be prompted to set a password (minimum 6 characters). The password is stored as a PBKDF2-SHA256 hash in NVS — it survives firmware OTA and is never visible in any API response. It is cleared only by a **Full factory reset**.
+
+Once enabled:
+- Every visit shows a login prompt. Sessions are stored in your browser's `localStorage` and remain valid for 7 days (sliding window).
+- Five wrong password attempts in a row trigger a **60-second lockout**.
+- All mutation endpoints and any endpoint that returns secrets (settings, AP PIN) require a valid bearer token.
+- `/api/status`, static files, and the login endpoints remain open so the UI can always load and authenticate.
+
+Authentication can be disabled again at any time from the same **Lock Webui** card (requires a valid session to turn off). You can also change the password there, or sign out to clear your local session.
+
+Sessions are **RAM-only** and lost on reboot — you will be asked to log in once after each restart.
 
 ### Setup AP (WiFi Provisioning)
 
@@ -431,7 +441,7 @@ The web UI provides:
 - **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
-- **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (automatic on page load and every 24 h; compares against latest GitHub release with dismissable toast notification), factory reset, about (shows firmware + web UI versions independently)
+- **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (automatic on page load and every 24 h; compares against latest GitHub release with dismissable toast notification), **Lock Webui** (enable/disable password protection, change password, sign out), WiFi Setup AP PIN management (show/regenerate), factory reset (settings-only or full), about (shows firmware + web UI versions independently)
 
 ## Modes
 
@@ -605,16 +615,19 @@ Requires Python 3 and Pillow (`pip install Pillow` — auto-installed on first r
 
 All endpoints return JSON. The API is backward-compatible with the original firmware's endpoints and adds new ones.
 
-**Authentication** — all mutation endpoints and any endpoint that returns secrets require a valid session. Obtain a bearer token via `/api/auth/login` and pass it as `Authorization: Bearer <token>` on every subsequent request. `/api/status` and static file serving are open (no token required).
+**Authentication** — when auth is enabled, all mutation endpoints and any endpoint that returns secrets require a valid session. Obtain a bearer token via `/api/auth/login` and pass it as `Authorization: Bearer <token>` on every subsequent request. When auth is disabled, all tokens are accepted automatically — no header needed. `/api/status` and static file serving are always open.
 
 ```
 # Auth — bootstrap (open, no token required)
-POST /api/auth/set_password    → first-boot only; rejected once password is set
+POST /api/auth/set_password    → set password for first time; rejected once already set
 POST /api/auth/login           → {"password":"…"} → {"token":"<64-char hex>"}
 
 # Auth — session management (requires valid token)
+GET  /api/auth/check           → 200 if token is valid, 401 if expired/missing
 POST /api/auth/logout          → invalidates the current session
 POST /api/auth/change_password → {"old_password":"…","new_password":"…"}
+POST /api/auth/set_enabled     → {"enabled":true/false} — enable or disable auth requirement
+                                  (requires valid token when disabling; open when enabling)
 
 # WiFi setup AP (requires auth)
 GET  /api/wifi/ap_pin        → {"pin":"12345678"}
@@ -622,7 +635,7 @@ POST /api/wifi/regen_pin     → generate and persist a new AP PIN → {"pin":"�
 
 # Status (open)
 GET  /api/ping               → {"status":"ok"}
-GET  /api/status             → live status: time, wifi, weather, heap, firmware, admin_set, ap_active
+GET  /api/status             → live status: time, wifi, weather, heap, firmware, admin_set, auth_enabled, ap_active
 
 # Settings (requires auth)
 GET  /api/settings           → full configuration JSON
