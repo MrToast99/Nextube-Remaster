@@ -1460,6 +1460,7 @@ static void display_task(void *arg)
          * As soon as a client connects the PIN auto-hides and normal-mode
          * rendering resumes on the next tick. */
         if (wifi_manager_ap_pin_visible()) {
+            display_set_brightness(100);   /* full brightness so PIN digits are easy to read */
             render_ap_pin(cfg);
             /* Force the change-detection state to "no last frame" so when
              * the AP closes (or a client connects) the next normal-mode
