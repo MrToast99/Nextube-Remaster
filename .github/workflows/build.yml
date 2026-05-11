@@ -40,34 +40,46 @@ jobs:
 
       - name: Determine update type
         id: updatetype
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
-          # Compare against the most recent previous tag to decide which
-          # partitions changed.  Falls back to "full" when no prior tag exists.
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$PREV_TAG" ]; then
-            echo "No previous tag found – marking as full flash"
-            echo "update_type=full" >> $GITHUB_OUTPUT
+          # For a release tag: compare against the previous git tag so the
+          # release notes reflect the full set of changes in this release.
+          # For a branch/PR push: compare only the commits in THIS push using
+          # the before-SHA GitHub provides — avoids false "both changed" when
+          # development has touched both trees since the last release tag.
+          if git describe --exact-match HEAD 2>/dev/null | grep -q '^v'; then
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            BASE="$PREV_TAG"
+            echo "Tag build — comparing against previous tag: ${BASE:-<none>}"
+          elif [ -n "$BEFORE_SHA" ] && \
+               [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && \
+               git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            BASE="$BEFORE_SHA"
+            echo "Branch push — comparing HEAD against before-SHA: $BASE"
           else
-            echo "Comparing against $PREV_TAG"
-            FW_CHANGED=$(git diff --name-only "$PREV_TAG" HEAD \
+            BASE=""
+            echo "No usable base commit — marking as full flash"
+          fi
+
+          if [ -z "$BASE" ]; then
+            TYPE="full"
+          else
+            FW_CHANGED=$(git diff --name-only "$BASE" HEAD \
               -- main/ components/ CMakeLists.txt sdkconfig.defaults \
                  partitions.csv version.json \
               | grep -v '^data/' | wc -l | tr -d ' ')
-            SP_CHANGED=$(git diff --name-only "$PREV_TAG" HEAD -- data/ \
+            SP_CHANGED=$(git diff --name-only "$BASE" HEAD -- data/ \
               | wc -l | tr -d ' ')
             echo "Firmware-side changes: $FW_CHANGED   LittleFS-side changes: $SP_CHANGED"
-            if [ "$FW_CHANGED" -gt 0 ] && [ "$SP_CHANGED" -gt 0 ]; then
-              TYPE="full"
-            elif [ "$FW_CHANGED" -gt 0 ]; then
-              TYPE="firmware-ota"
-            elif [ "$SP_CHANGED" -gt 0 ]; then
-              TYPE="spiffs-only"
-            else
-              TYPE="no-change"
+            if   [ "$FW_CHANGED" -gt 0 ] && [ "$SP_CHANGED" -gt 0 ]; then TYPE="full"
+            elif [ "$FW_CHANGED" -gt 0 ];                              then TYPE="firmware-ota"
+            elif [ "$SP_CHANGED" -gt 0 ];                              then TYPE="spiffs-only"
+            else                                                            TYPE="no-change"
             fi
-            echo "update_type=$TYPE" >> $GITHUB_OUTPUT
-            echo "Update type: $TYPE"
           fi
+          echo "update_type=$TYPE" >> $GITHUB_OUTPUT
+          echo "Update type: $TYPE"
 
       - name: Build firmware
         shell: bash
