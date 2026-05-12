@@ -505,13 +505,6 @@ select option{background:var(--accent);color:var(--text)}
     <h2>Audio Settings</h2>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-mic-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
-        <label for="f-mic-en" style="margin:0;cursor:pointer;font-weight:normal">Enable microphone</label>
-      </div>
-      <p style="color:var(--dim);font-size:.8rem;margin:.4rem 0 0 24px">Required for Spectrum mode. When disabled the ADC is not initialised and Spectrum mode shows silence. Takes effect after reboot.</p>
-    </div>
-    <div class="field" style="padding-bottom:4px">
-      <div style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-audio-en" style="width:16px;height:16px;cursor:pointer">
         <label for="f-audio-en" style="margin:0;cursor:pointer;font-weight:normal">Enable audio output</label>
       </div>
@@ -1027,7 +1020,7 @@ async function loadSettings() {
   $('f-click').value = cfg.click_file || '';
   $('f-btn-sound').checked = cfg.button_sound !== false;
   $('f-audio-en').checked  = cfg.audio_enabled !== false;
-  $('f-mic-en').checked    = cfg.mic_enabled !== false;
+  /* mic_enabled is derived from Spectrum mode — no separate checkbox */
   if (cfg.mic_adc_channel != null && $('dbg-adc-ch'))
     $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
   if (cfg.mic_silence_gate != null && $('dbg-gate-num'))
@@ -1218,7 +1211,7 @@ async function saveSettings() {
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
-    click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: $('f-mic-en').checked,
+    click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: !!$('m-spectrum').checked,
     weather_enabled: $('f-weather-en').checked, youtube_enabled: $('f-youtube-en').checked, mdns_enabled: $('f-mdns-en').checked,
     mic_silence_gate: parseFloat($('f-gate-num').value) || 0,
     leading_zero: $('f-leading-zero').checked,
@@ -2114,6 +2107,13 @@ async function importSettings(input) {
   r.onload = async (e) => {
     try {
       const j = JSON.parse(e.target.result);
+      /* Normalize: mic_enabled must match whether Spectrum mode (bit 8) is
+       * in enabled_modes.  Old config.json files may have the two fields out
+       * of sync (e.g. mic_enabled:true but Spectrum removed from the rotation,
+       * or mic_enabled:false from before the mic toggle was removed).
+       * Fall back to all-modes-enabled (0x1FF) if enabled_modes is absent. */
+      const em = typeof j.enabled_modes === 'number' ? j.enabled_modes : 0x1FF;
+      j.mic_enabled = !!(em & (1 << 8));   /* 1<<8 = APP_MODE_SPECTRUM */
       const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(j) });
       if (res?.status === 'ok') {
         if (res?.reboot) {

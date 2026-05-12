@@ -437,6 +437,14 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(nu)) s_cfg.notify_update_on_display = cJSON_IsTrue(nu);
     }
 
+    /* ── Post-parse normalization ──────────────────────────────────────
+     * mic_enabled is no longer a user-settable toggle — it is derived
+     * entirely from whether Spectrum mode is present in enabled_modes.
+     * This enforces consistency after loading any config.json, including
+     * old backups or hand-edited files where the two fields may disagree.
+     * APP_MODE_SPECTRUM == 8 → bit 8 of the bitmask. */
+    s_cfg.mic_enabled = (s_cfg.enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
+
     cJSON_Delete(root);
 }
 
