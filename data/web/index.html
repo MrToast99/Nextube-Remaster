@@ -828,13 +828,21 @@ select option{background:var(--accent);color:var(--text)}
         <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="burninSelectNone()">None</button>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <span style="font-size:.82rem;color:var(--dim)">Duration:</span>
+        <span style="font-size:.82rem;color:var(--dim)">Color cycle:</span>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(3600)">1 hr</button>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(7200)">2 hr</button>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(10800)">3 hr</button>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(14400)">4 hr</button>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninRestore()">⏹ Stop</button>
         <span id="burnin-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:.4rem">
+        <span style="font-size:.82rem;color:var(--dim)">Snow:</span>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(30)">30 s</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(60)">60 s</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(0)">Manual</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStop()">⏹ Stop</button>
+        <span id="snow-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
       </div>
 
       <div class="btn-group">
@@ -1051,8 +1059,8 @@ async function loadSettings() {
   $('f-wx-p0').checked    = cfg.weather_panel0_en !== false;
   $('f-wx-p1').checked    = cfg.weather_panel1_en !== false;
 
-  /* Enabled modes bitmask.  Default 0xFF = all modes on (Clock and Date are independent). */
-  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
+  /* Enabled modes bitmask.  Default 0x1FF = all 9 modes on (bits 0-8). */
+  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0x1FF;
   $('m-clock').checked       = !!(em & (1 << 0));
   $('m-countdown').checked   = !!(em & (1 << 1));
   $('m-scoreboard').checked  = !!(em & (1 << 2));
@@ -1500,19 +1508,19 @@ function doHotPatch() {
         stat.textContent = `✓ ${d.written} file(s) patched: ${names}`;
         if (d.skipped) stat.textContent += `  (${d.skipped} skipped)`;
         if (d.failed)  stat.textContent += `  ⚠️ ${d.failed} failed`;
-        toast(`Hot patch applied — ${d.written} file(s) updated`);
+        toast(`Web UI updated — ${d.written} file(s) applied`);
       } else {
         stat.textContent = 'Failed: ' + (d.error || xhr.statusText);
-        toast('Hot patch failed: ' + (d.error || xhr.statusText), true);
+        toast('Web UI update failed: ' + (d.error || xhr.statusText), true);
       }
     } catch(e) {
       stat.textContent = 'Failed: ' + xhr.statusText;
-      toast('Hot patch failed', true);
+      toast('Web UI update failed', true);
     }
   };
   xhr.onerror = () => {
     stat.textContent = 'Network error.';
-    toast('Hot patch failed: network error', true);
+    toast('Web UI update failed: network error', true);
   };
   xhr.open('POST', '/api/update_fs_hotpatch');
   xhr.setRequestHeader('Content-Type', 'application/zip');
@@ -1838,6 +1846,49 @@ async function burninRestore() {
   const msg = $('burnin-msg');
   try {
     const r = await secureFetch('/api/debug/burnin', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mask: 0, duration_s: 0 })
+    });
+    msg.textContent = r.ok ? '✓ Stopped — display restored' : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+
+let _snowTimer = null;
+async function snowStart(duration_s) {
+  const mask = burninMask();
+  if (!mask) { $('snow-msg').textContent = '✗ Select at least one tube'; return; }
+  const msg = $('snow-msg');
+  try {
+    const r = await secureFetch('/api/debug/snow', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mask, duration_s })
+    });
+    if (!r.ok) { msg.textContent = '✗ ' + await r.text(); return; }
+    if (_snowTimer) { clearInterval(_snowTimer); _snowTimer = null; }
+    if (duration_s) {
+      let remaining = duration_s;
+      msg.textContent = `▶ Snow — ${remaining} s remaining`;
+      _snowTimer = setInterval(() => {
+        remaining--;
+        if (remaining <= 0) {
+          clearInterval(_snowTimer); _snowTimer = null;
+          msg.textContent = '✓ Complete — display restored';
+          burninSelectNone();
+        } else {
+          msg.textContent = `▶ Snow — ${remaining} s remaining`;
+        }
+      }, 1000);
+    } else {
+      msg.textContent = '▶ Snow — running (press Stop to end)';
+    }
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+async function snowStop() {
+  if (_snowTimer) { clearInterval(_snowTimer); _snowTimer = null; }
+  burninSelectNone();
+  const msg = $('snow-msg');
+  try {
+    const r = await secureFetch('/api/debug/snow', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mask: 0, duration_s: 0 })
     });

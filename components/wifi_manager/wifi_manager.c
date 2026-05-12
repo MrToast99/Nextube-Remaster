@@ -255,19 +255,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                      ev->aid, s_ap_client_count);
             break;
         }
-        case WIFI_EVENT_AP_START:
-            /* If mDNS is already running, the managed espressif/mdns component
-             * may have auto-registered the AP netif on this event (its default
-             * behaviour when CONFIG_MDNS_PREDEF_NETIF_AP is not honoured for
-             * managed-component builds).  Spawn a task to unregister it so the
-             * AP interface never leaks its hostname ("espressif") to LAN-side
-             * mDNS resolvers.  The task is cheap — it runs, unregisters, then
-             * deletes itself. */
-            if (s_mdns_inited && s_ap_netif) {
-                xTaskCreate(mdns_unregister_ap_task, "mdns_unreg_ap",
-                            2048, NULL, 5, NULL);
-            }
-            break;
         default: break;
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -468,6 +455,7 @@ void wifi_manager_start(void)
     } else {
         s_ap_active = true;
         ESP_LOGI(TAG, "No STA credentials — AP-only mode for first-boot setup");
+		ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     }
 
     /* Pre-initialise mDNS while ALL netifs are still DOWN (before

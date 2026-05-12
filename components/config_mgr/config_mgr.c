@@ -344,6 +344,14 @@ static void parse_json(const char *json, size_t len)
         cJSON *em = cJSON_GetObjectItem(root, "enabled_modes");
         if (cJSON_IsNumber(em)) s_cfg.enabled_modes = (uint16_t)em->valueint;
     }
+    /* Migration: configs saved before APP_MODE_SPECTRUM (bit 8) was introduced
+     * store enabled_modes = 0xFF (8-bit, modes 0-7).  Set bit 8 on upgrade so
+     * existing devices gain spectrum automatically rather than needing a manual
+     * settings save.  The web UI previously defaulted to 0xFF when loading,
+     * which would then persist the missing bit on the next save — this guard
+     * ensures the bit is present in flash regardless of what the UI did. */
+    if (!(s_cfg.enabled_modes & (1u << APP_MODE_SPECTRUM)))
+        s_cfg.enabled_modes |= (1u << APP_MODE_SPECTRUM);
     /* Clock and Date are independent — both may be enabled simultaneously.
      * Safety fallback: if the user has disabled every time-display mode,
      * re-enable Clock so the device can always show the time. */

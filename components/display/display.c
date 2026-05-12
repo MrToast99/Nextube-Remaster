@@ -2,6 +2,7 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "esp_timer.h"          /* esp_timer_get_time — AP PIN phase clock */
+#include "esp_random.h"         /* esp_random() — snow recovery */
 #include "driver/spi_master.h"
 #include "driver/ledc.h"
 #include "driver/gpio.h"
@@ -45,6 +46,15 @@ static int8_t s_burnin_shift_x = 0;
  * tubes.  Set/cleared via display_set_burnin_mask().                          */
 static volatile uint8_t  s_burnin_mask     = 0;
 static volatile time_t   s_burnin_end_time = 0;  /* 0 = no timer; else epoch s */
+static volatile uint8_t  s_snow_mask       = 0;
+static volatile time_t   s_snow_end_time   = 0;  /* 0 = no timer; else epoch s */
+
+/* AP PIN suppression: when the user presses a touch button while the AP PIN
+ * is being displayed, the PIN is hidden for 30 s so they can see and
+ * interact with normal mode content.  The display task compares this against
+ * esp_timer_get_time() on each tick. */
+#define AP_PIN_TOUCH_SUPPRESS_US  (30LL * 1000000LL)   /* 30 seconds */
+static volatile int64_t  s_last_touch_us   = -AP_PIN_TOUCH_SUPPRESS_US;
 
 /* RGB565 colour cycle — drives each sub-pixel high and low in turn. */
 static const uint16_t s_burnin_colors[] = {
@@ -205,6 +215,28 @@ void display_fill(int tube, uint16_t color)
     deselect_all();
 }
 
+/* Fill a tube with independent random RGB565 values for each pixel (snow).
+ * Sends 8-row chunks so the stack buffer stays small (1280 B) while keeping
+ * the transaction count low (20 per tube vs 160 single-row sends). */
+static void display_snow_fill(int tube)
+{
+    if (tube < 0 || tube >= LCD_COUNT) return;
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
+    lcd_cmd(0x2A); uint8_t ca[] = {0,ox,0,(uint8_t)(ox+LCD_WIDTH-1)}; lcd_data(ca,4);
+    lcd_cmd(0x2B); uint8_t ra[] = {0,LCD_OFFSET_Y,0,LCD_OFFSET_Y+LCD_HEIGHT-1}; lcd_data(ra,4);
+    lcd_cmd(0x2C);
+    gpio_set_level(PIN_LCD_DC, 1);
+    uint8_t chunk[LCD_WIDTH * 2 * 8];   /* 1280 B — 8 rows, always in SRAM */
+    for (int y = 0; y < LCD_HEIGHT; y += 8) {
+        int rows = (y + 8 <= LCD_HEIGHT) ? 8 : LCD_HEIGHT - y;
+        esp_fill_random(chunk, (size_t)(rows * LCD_WIDTH * 2));
+        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8, .tx_buffer = chunk };
+        spi_device_transmit(spi_dev, &t);
+    }
+    deselect_all();
+}
+
 void display_show_digit(int tube, const uint8_t *data, int w, int h)
 {
     if (tube < 0 || tube >= LCD_COUNT || !data) return;
@@ -273,6 +305,20 @@ void display_set_burnin_mask(uint8_t mask, uint32_t duration_s)
     s_burnin_end_time = (mask && duration_s) ? time(NULL) + (time_t)duration_s : 0;
     ESP_LOGI(TAG, "burn-in mask: 0x%02X  duration: %s",
              (unsigned)s_burnin_mask,
+             duration_s ? "timed" : "manual");
+}
+
+void display_notify_touch(void)
+{
+    s_last_touch_us = esp_timer_get_time();
+}
+
+void display_set_snow_mask(uint8_t mask, uint32_t duration_s)
+{
+    s_snow_mask     = mask & 0x3F;
+    s_snow_end_time = (mask && duration_s) ? time(NULL) + (time_t)duration_s : 0;
+    ESP_LOGI(TAG, "snow mask: 0x%02X  duration: %s",
+             (unsigned)s_snow_mask,
              duration_s ? "timed" : "manual");
 }
 
@@ -440,6 +486,7 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
 void display_show_image(int tube, const char *path)
 {
     if (tube < 0 || tube >= LCD_COUNT || !path) return;
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
 
     int w = 0, h = 0;
     const uint8_t *rgb_buf = img_cache_get(path, &w, &h);
@@ -1459,7 +1506,8 @@ static void display_task(void *arg)
          * the tubes show the WPA2 PIN instead of the user's selected mode.
          * As soon as a client connects the PIN auto-hides and normal-mode
          * rendering resumes on the next tick. */
-        if (wifi_manager_ap_pin_visible()) {
+        bool pin_suppressed = (esp_timer_get_time() - s_last_touch_us) < AP_PIN_TOUCH_SUPPRESS_US;
+        if (wifi_manager_ap_pin_visible() && !pin_suppressed) {
             display_set_brightness(100);   /* full brightness so PIN digits are easy to read */
             render_ap_pin(cfg);
             /* Force the change-detection state to "no last frame" so when
@@ -1675,6 +1723,25 @@ static void display_task(void *arg)
                 for (int _t = 0; _t < LCD_COUNT; _t++) {
                     if (s_burnin_mask & (1u << _t))
                         display_fill(_t, col);
+                }
+            }
+        }
+
+        /* ── Snow recovery: rapid random-colour fill ─────────────────────
+         * Each selected tube gets a fresh random RGB565 colour every tick
+         * (~200 ms), forcing rapid sub-pixel state transitions across the
+         * full colour space.  Complements colour-cycle which is slow but
+         * exercises voltage extremes; snow is fast but covers mid-tones. */
+        if (s_snow_mask) {
+            time_t now_t = time(NULL);
+            if (s_snow_end_time != 0 && now_t >= s_snow_end_time) {
+                s_snow_mask     = 0;
+                s_snow_end_time = 0;
+                ESP_LOGI(TAG, "snow timer expired — restoring normal display");
+            } else {
+                for (int _t = 0; _t < LCD_COUNT; _t++) {
+                    if (s_snow_mask & (1u << _t))
+                        display_snow_fill(_t);
                 }
             }
         }

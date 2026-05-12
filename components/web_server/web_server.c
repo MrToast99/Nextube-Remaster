@@ -1502,6 +1502,31 @@ static esp_err_t api_debug_burnin(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/debug/snow
+ * Body: {"mask": <0–63>, "duration_s": <0=manual>}
+ *   Fills selected tubes with a new random RGB565 colour every render tick
+ *   (~200 ms), rapidly cycling all sub-pixels.  mask=0 stops and restores. */
+static esp_err_t api_debug_snow(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char body[64] = {0};
+    int blen = (int)r->content_len;
+    if (blen <= 0 || blen >= (int)sizeof(body))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required"), ESP_FAIL;
+    if (httpd_req_recv(r, body, (size_t)blen) != blen)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error"), ESP_FAIL;
+    cJSON *root = cJSON_Parse(body);
+    if (!root)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON"), ESP_FAIL;
+    cJSON *jm = cJSON_GetObjectItem(root, "mask");
+    cJSON *jd = cJSON_GetObjectItem(root, "duration_s");
+    uint8_t  mask       = cJSON_IsNumber(jm) ? (uint8_t)(jm->valueint & 0x3F) : 0;
+    uint32_t duration_s = cJSON_IsNumber(jd) ? (uint32_t)jd->valueint : 0;
+    cJSON_Delete(root);
+    display_set_snow_mask(mask, duration_s);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* POST /api/update_notify
  * Body: {"active":true}  — draw the 4-row red update indicator on tube 6
  *       {"active":false} — clear the indicator
@@ -1803,6 +1828,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
     R(HTTP_POST, "/api/debug/burnin",           api_debug_burnin),
+    R(HTTP_POST, "/api/debug/snow",             api_debug_snow),
     /* Auth routes.  set_password is allowed unauth on first boot only;
      * change_password is itself REQUIRE_AUTH'd. */
     R(HTTP_POST, "/api/auth/set_password",      api_auth_set_password),
