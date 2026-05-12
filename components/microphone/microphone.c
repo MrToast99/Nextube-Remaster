@@ -146,7 +146,9 @@ static void mic_sample_cb(void *arg)
     if (s_isr_pos >= FRAME_SIZE) {
         s_isr_pos  = 0;
         s_isr_write ^= 1u;   /* flip write buffer */
-        xSemaphoreGive(s_frame_sem);
+        BaseType_t woken = pdFALSE;
+        xSemaphoreGiveFromISR(s_frame_sem, &woken);
+        portYIELD_FROM_ISR(woken);
     }
 }
 

@@ -630,25 +630,11 @@ select option{background:var(--accent);color:var(--text)}
     </div>
   </div>
 
-  <!-- ── Lock Webui ──────────────────────────────────────────────── -->
-  <div class="card">
-    <h2>Lock Webui</h2>
-    <div class="field" style="padding-bottom:6px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-auth-enabled" style="width:16px;height:16px;cursor:pointer" onchange="onAuthEnabledToggle(this)">
-        <label for="f-auth-enabled" style="cursor:pointer;font-weight:normal">Require admin password to change settings</label>
-      </div>
-      <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0 24px">
-        When off, the web UI is open to anyone on the network — no login required.
-        Disabling clears your active session on the next page load.
-      </p>
-    </div>
-    <div id="auth-enabled-actions" style="display:none">
-      <div class="btn-group" style="margin-top:.5rem">
-        <button class="btn btn-outline" onclick="showChangePasswordPrompt()">Change password</button>
-        <button class="btn btn-outline" onclick="doLogout()">Sign out</button>
-      </div>
-    </div>
+  <!-- ── Admin Authentication ──────────────────────────────────────── -->
+  <div class="card" id="auth-mgmt-card">
+    <h2>Admin Authentication</h2>
+    <!-- Content rendered dynamically by updateAuthCard() -->
+    <p style="color:var(--dim);font-size:.85rem">Loading…</p>
   </div>
 
   <div class="card">
@@ -828,21 +814,13 @@ select option{background:var(--accent);color:var(--text)}
         <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="burninSelectNone()">None</button>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <span style="font-size:.82rem;color:var(--dim)">Color cycle:</span>
+        <span style="font-size:.82rem;color:var(--dim)">Duration:</span>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(3600)">1 hr</button>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(7200)">2 hr</button>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(10800)">3 hr</button>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninStart(14400)">4 hr</button>
         <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="burninRestore()">⏹ Stop</button>
         <span id="burnin-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
-      </div>
-      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:.4rem">
-        <span style="font-size:.82rem;color:var(--dim)">Snow:</span>
-        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(30)">30 s</button>
-        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(60)">60 s</button>
-        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(0)">Manual</button>
-        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStop()">⏹ Stop</button>
-        <span id="snow-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
       </div>
 
       <div class="btn-group">
@@ -935,10 +913,12 @@ async function secureFetch(url, opts) {
   if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
   const r = await fetch(url, opts);
   if (r.status === 401) {
-    /* Token rejected — clear and re-prompt. */
+    /* Token rejected — clear and re-prompt only when auth is enabled.
+     * (With auth disabled, REQUIRE_AUTH is a no-op and 401s shouldn't
+     * arrive; if they do, silently clear the stale token.) */
     authToken = '';
     localStorage.removeItem('nextube_token');
-    showLoginModal();
+    if (g_adminSet) showLoginModal();
     /* Throw so callers don't try to .json() a 401 body — the catch in
      * api() / individual handlers will swallow this silently. */
     throw new Error('unauthorized');
@@ -1059,8 +1039,8 @@ async function loadSettings() {
   $('f-wx-p0').checked    = cfg.weather_panel0_en !== false;
   $('f-wx-p1').checked    = cfg.weather_panel1_en !== false;
 
-  /* Enabled modes bitmask.  Default 0x1FF = all 9 modes on (bits 0-8). */
-  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0x1FF;
+  /* Enabled modes bitmask.  Default 0xFF = all modes on (Clock and Date are independent). */
+  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
   $('m-clock').checked       = !!(em & (1 << 0));
   $('m-countdown').checked   = !!(em & (1 << 1));
   $('m-scoreboard').checked  = !!(em & (1 << 2));
@@ -1134,12 +1114,6 @@ async function loadSettings() {
     col.appendChild(d);
     sw.appendChild(col);
   });
-  /* Sync the auth-enabled checkbox — read from /api/status (open endpoint)
-   * so it reflects the real NVS state, not the config.json settings. */
-  fetch('/api/status').then(r => r.json()).then(s => {
-    syncAuthEnabledUI(s.auth_enabled);
-  }).catch(() => {});
-
   loadingSettings = false;
   clearDirty();
 }
@@ -1508,19 +1482,19 @@ function doHotPatch() {
         stat.textContent = `✓ ${d.written} file(s) patched: ${names}`;
         if (d.skipped) stat.textContent += `  (${d.skipped} skipped)`;
         if (d.failed)  stat.textContent += `  ⚠️ ${d.failed} failed`;
-        toast(`Web UI updated — ${d.written} file(s) applied`);
+        toast(`WebUI patch applied — ${d.written} file(s) updated`);
       } else {
         stat.textContent = 'Failed: ' + (d.error || xhr.statusText);
-        toast('Web UI update failed: ' + (d.error || xhr.statusText), true);
+        toast('WebUI patch failed: ' + (d.error || xhr.statusText), true);
       }
     } catch(e) {
       stat.textContent = 'Failed: ' + xhr.statusText;
-      toast('Web UI update failed', true);
+      toast('WebUI patch failed', true);
     }
   };
   xhr.onerror = () => {
     stat.textContent = 'Network error.';
-    toast('Web UI update failed: network error', true);
+    toast('WebUI patch failed: network error', true);
   };
   xhr.open('POST', '/api/update_fs_hotpatch');
   xhr.setRequestHeader('Content-Type', 'application/zip');
@@ -1846,49 +1820,6 @@ async function burninRestore() {
   const msg = $('burnin-msg');
   try {
     const r = await secureFetch('/api/debug/burnin', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ mask: 0, duration_s: 0 })
-    });
-    msg.textContent = r.ok ? '✓ Stopped — display restored' : '✗ ' + await r.text();
-  } catch(e) { msg.textContent = '✗ ' + e.message; }
-}
-
-let _snowTimer = null;
-async function snowStart(duration_s) {
-  const mask = burninMask();
-  if (!mask) { $('snow-msg').textContent = '✗ Select at least one tube'; return; }
-  const msg = $('snow-msg');
-  try {
-    const r = await secureFetch('/api/debug/snow', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ mask, duration_s })
-    });
-    if (!r.ok) { msg.textContent = '✗ ' + await r.text(); return; }
-    if (_snowTimer) { clearInterval(_snowTimer); _snowTimer = null; }
-    if (duration_s) {
-      let remaining = duration_s;
-      msg.textContent = `▶ Snow — ${remaining} s remaining`;
-      _snowTimer = setInterval(() => {
-        remaining--;
-        if (remaining <= 0) {
-          clearInterval(_snowTimer); _snowTimer = null;
-          msg.textContent = '✓ Complete — display restored';
-          burninSelectNone();
-        } else {
-          msg.textContent = `▶ Snow — ${remaining} s remaining`;
-        }
-      }, 1000);
-    } else {
-      msg.textContent = '▶ Snow — running (press Stop to end)';
-    }
-  } catch(e) { msg.textContent = '✗ ' + e.message; }
-}
-async function snowStop() {
-  if (_snowTimer) { clearInterval(_snowTimer); _snowTimer = null; }
-  burninSelectNone();
-  const msg = $('snow-msg');
-  try {
-    const r = await secureFetch('/api/debug/snow', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mask: 0, duration_s: 0 })
     });
@@ -2268,6 +2199,8 @@ let _bootstrapped = false;
 function onAuthSucceeded() {
   if (_bootstrapped) return;     /* idempotent — login can fire twice on token refresh */
   _bootstrapped = true;
+  /* Render the auth management card in the System tab with the current state. */
+  updateAuthCard(g_adminSet);
   loadSettings();
   refreshStatus().then(() => checkForUpdates(true));   /* check once s-fwver is populated */
   setInterval(refreshStatus, 5000);
@@ -2418,8 +2351,10 @@ function _xhrHandle401(xhr) {
   if (xhr.status !== 401) return false;
   authToken = '';
   localStorage.removeItem('nextube_token');
-  showLoginModal();
-  toast('Session expired — please sign in again', true);
+  if (g_adminSet) {
+    showLoginModal();
+    toast('Session expired — please sign in again', true);
+  }
   return true;
 }
 
@@ -2533,98 +2468,155 @@ async function doLogout() {
   } catch (e) { /* ignore — token already cleared by 401 path */ }
   authToken = '';
   localStorage.removeItem('nextube_token');
-  showLoginModal();
+  /* Only redirect to the login modal if auth is still enabled.
+   * If auth was just disabled, stay on the page — no password needed. */
+  if (g_adminSet) showLoginModal();
 }
 
-/* ── Auth-enabled toggle ────────────────────────────────────────────
- * Called when the checkbox in the Account card changes.
- * Restores the checkbox to its previous state immediately, then
- * applies the change only after the server confirms. */
-async function onAuthEnabledToggle(cb) {
-  const enabling = cb.checked;
+/* Global: tracks whether the device has a password set.  Set in bootAuth()
+ * and updated whenever the user enables/disables auth from the System tab.
+ * Used by doLogout() and updateAuthCard() to decide what to show. */
+let g_adminSet = false;
 
-  if (!enabling) {
-    /* Disabling auth — ask for confirmation. */
-    if (!confirm(
-      'Disable authentication?\n\n' +
-      'The web UI will be accessible to anyone on your network without a password.\n\n' +
-      'You can re-enable it at any time from the Account section.'
-    )) {
-      cb.checked = true;   /* user cancelled — revert */
-      return;
-    }
+/* Render the "Admin Authentication" card in the System tab based on the
+ * current auth state.  Called on app load and after enable/disable actions. */
+function updateAuthCard(adminSet) {
+  g_adminSet = adminSet;
+  const card = document.getElementById('auth-mgmt-card');
+  if (!card) return;
+
+  if (!adminSet) {
+    card.innerHTML = `
+      <h2>Admin Authentication</h2>
+      <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">
+        Authentication is currently <strong>disabled</strong>.
+        Anyone on the network can access and change all settings.
+        Set a password to restrict access.
+      </p>
+      <div style="display:flex;flex-direction:column;gap:.5rem;max-width:340px">
+        <input id="auth-en-pw"  type="password" placeholder="New password (6-64 chars)" autocomplete="new-password">
+        <input id="auth-en-cf"  type="password" placeholder="Confirm password" autocomplete="new-password"
+               onkeydown="if(event.key==='Enter')doEnableAuth()">
+        <div id="auth-en-err" style="color:var(--err,#e94560);font-size:.83rem;min-height:1.2em"></div>
+        <div class="btn-group" style="margin-top:.2rem">
+          <button id="auth-en-btn" class="btn btn-primary" onclick="doEnableAuth()">Enable Authentication</button>
+        </div>
+      </div>`;
+  } else {
+    card.innerHTML = `
+      <h2>Admin Authentication</h2>
+      <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">
+        Authentication is currently <strong>enabled</strong>.
+        A password is required to change any settings.
+      </p>
+      <div class="btn-group">
+        <button class="btn btn-outline" onclick="showChangePasswordPrompt()">Change password</button>
+        <button class="btn btn-outline" onclick="doLogout()">Sign out</button>
+        <button class="btn btn-danger"  onclick="doDisableAuth()">Disable Authentication</button>
+      </div>`;
+  }
+}
+
+/* Enable auth: set a new password (only allowed when no password is set). */
+async function doEnableAuth() {
+  const pw  = (document.getElementById('auth-en-pw')  || {}).value || '';
+  const cf  = (document.getElementById('auth-en-cf')  || {}).value || '';
+  const err =  document.getElementById('auth-en-err');
+  if (err) err.textContent = '';
+
+  if (pw.length < 6 || pw.length > 64) {
+    if (err) err.textContent = 'Password must be 6-64 characters';
+    return;
+  }
+  if (pw !== cf) {
+    if (err) err.textContent = "Passwords don't match";
+    return;
   }
 
-  /* If enabling and no password has been set yet, prompt to set one first. */
-  if (enabling) {
-    const st = await fetch('/api/status').then(r => r.json()).catch(() => null);
-    if (st && !st.admin_set) {
-      if (!confirm(
-        'No admin password is set yet.\n\n' +
-        'Enabling authentication now will show the set-password prompt on your next page load.\n\n' +
-        'Continue?'
-      )) {
-        cb.checked = false;
-        return;
-      }
-    }
-  }
-
+  const release = _btnBusy('auth-en-btn', 'Working…');
   try {
-    await secureFetch('/api/auth/set_enabled', {
+    const r = await fetch('/api/auth/set_password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: enabling })
+      body: JSON.stringify({ password: pw })
     });
-    /* Update the actions row visibility. */
-    document.getElementById('auth-enabled-actions').style.display =
-      enabling ? 'block' : 'none';
-    toast(enabling ? 'Authentication enabled' : 'Authentication disabled');
-  } catch(e) {
-    /* Revert on failure (e.g. 401 mid-session — login modal already shown). */
-    cb.checked = !enabling;
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      if (err) err.textContent = t || ('HTTP ' + r.status);
+      return;
+    }
+    /* Auto-login with the new password so the session stays valid. */
+    const lr = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    });
+    if (lr.ok) {
+      const lj = await lr.json();
+      authToken = lj.token || '';
+      if (authToken) localStorage.setItem('nextube_token', authToken);
+    }
+    updateAuthCard(true);
+    toast('Authentication enabled');
+  } catch (e) {
+    if (err) err.textContent = 'Network error';
+  } finally {
+    release();
   }
 }
 
-/* Populate the auth-enabled checkbox and actions row from /api/status.
- * Called from loadSettings() so it stays in sync with the rest of the UI. */
-function syncAuthEnabledUI(authEnabled) {
-  const cb = document.getElementById('f-auth-enabled');
-  if (cb) cb.checked = !!authEnabled;
-  const actions = document.getElementById('auth-enabled-actions');
-  if (actions) actions.style.display = authEnabled ? 'block' : 'none';
+/* Disable auth: requires confirming the current password. */
+async function doDisableAuth() {
+  const pw = prompt('Enter your current password to disable authentication:');
+  if (pw === null) return;   /* user cancelled */
+  if (!pw) { toast('Password required', true); return; }
+
+  try {
+    const r = await secureFetch('/api/auth/disable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      toast(j.error === 'bad_password' ? 'Wrong password' : ('Error: HTTP ' + r.status), true);
+      return;
+    }
+    authToken = '';
+    localStorage.removeItem('nextube_token');
+    updateAuthCard(false);
+    toast('Authentication disabled');
+  } catch (e) {
+    if (e.message !== 'unauthorized') toast('Network error', true);
+  }
 }
 
-/* On page load, probe auth state and decide which modal (if any) to show.
- * When auth is disabled the app boots immediately with no login required.
- * When auth is enabled the normal set-password / login gate applies. */
+/* On page load, probe auth state and start the app.
+ * When no password is set, authentication is disabled and the app loads
+ * immediately without any modal.  When a password is set, a valid session
+ * token is required — show the login modal if none is present or if the
+ * stored token has expired. */
 async function bootAuth() {
   try {
     const r = await fetch('/api/status');
     if (!r.ok) throw new Error('status fetch failed');
     const s = await r.json();
-
-    /* Auth disabled — go straight in, no token needed. */
-    if (!s.auth_enabled) {
+    g_adminSet = !!s.admin_set;
+    if (!g_adminSet) {
+      /* Auth disabled — open access, go straight to the app. */
       if (typeof onAuthSucceeded === 'function') onAuthSucceeded();
-      return;
-    }
-
-    /* Auth enabled: gate on password set + valid token. */
-    if (!s.admin_set) {
-      showSetPasswordModal();
     } else if (!authToken) {
       showLoginModal();
     } else {
       /* Token exists — verify with a probe call.  If 401, secureFetch
        * triggers the login modal automatically. */
       try {
-        await secureFetch('/api/settings');
+        await secureFetch('/api/auth/check');
         if (typeof onAuthSucceeded === 'function') onAuthSucceeded();
       } catch (_) { /* login modal already shown */ }
     }
   } catch (e) {
-    /* Status itself failed — show a generic toast and try login as fallback. */
+    /* Status itself failed — fall through to login modal as safe fallback. */
     showLoginModal();
   }
 }

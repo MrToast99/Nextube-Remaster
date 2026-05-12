@@ -96,9 +96,6 @@ RTC_DATA_ATTR static uint32_t s_warm_boot;
 /* ── Touch handler ─────────────────────────────────────────────────── */
 static void on_touch(touch_pad_id_t pad)
 {
-    /* Notify display task immediately so AP PIN takeover is suppressed. */
-    display_notify_touch();
-
     app_mode_t  current_mode;
     uint16_t    enabled_modes;
     bool        backlight_on;
@@ -114,9 +111,6 @@ static void on_touch(touch_pad_id_t pad)
     strncpy(click_file, cfg->click_file, sizeof(click_file) - 1);
     click_file[sizeof(click_file) - 1] = '\0';
     config_unlock();
-
-    ESP_LOGI(TAG, "Touch pad=%d  mode=%d  enabled_modes=0x%03X",
-             (int)pad, (int)current_mode, (unsigned)enabled_modes);
 
     switch (pad) {
     case TOUCH_LEFT: {

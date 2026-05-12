@@ -102,12 +102,8 @@ static void touch_poll_task(void *arg)
 
             /* Slowly track baseline toward current smooth only when NOT pressed.
              * IIR: baseline = baseline - baseline/64 + smooth/64 */
-            if (!raw) {
-                if (s_baseline[i] > 0) {
-                    s_baseline[i] = s_baseline[i] - (s_baseline[i] / 64) + (smooth[0] / 64);
-                } else {
-                    s_baseline[i] = smooth[0];  /* self-heal from 0 */
-                }
+            if (!raw && s_baseline[i] > 0) {
+                s_baseline[i] = s_baseline[i] - (s_baseline[i] / 64) + (smooth[0] / 64);
             }
 
             /* Debounce: accumulate consecutive pressed samples; clear on release.

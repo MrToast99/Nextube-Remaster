@@ -53,7 +53,6 @@ static const char *TAG = "auth";
 #define K_ADMIN_SALT    "admin_salt"
 #define K_ADMIN_HASH    "admin_hash"
 #define K_ADMIN_ITER    "admin_iter"
-#define K_AUTH_ENABLED  "auth_en"
 
 /* 10 000 iterations: ~150–250 ms on the ESP32 LX6 @ 240 MHz.
  * Online brute-force is already gated by the 5-strikes / 60-s lockout
@@ -93,11 +92,6 @@ static SemaphoreHandle_t s_lock = NULL;
 /* Brute-force counters (touched only under s_lock). */
 static int64_t s_lockout_until_us = 0;
 static int     s_failed_count     = 0;
-
-/* Cached auth-enabled flag.  Loaded from NVS in auth_init(); updated by
- * auth_set_enabled().  Default false so devices upgrading from firmware
- * that predates this flag are never locked out without opting in. */
-static bool s_auth_enabled = false;
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -204,19 +198,8 @@ void auth_init(void)
     s_lockout_until_us = 0;
     s_failed_count     = 0;
     unlock();
-
-    /* Load the auth-enabled flag from NVS.  Absent key → default false. */
-    nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
-        uint8_t val = 0;
-        nvs_get_u8(h, K_AUTH_ENABLED, &val);
-        s_auth_enabled = (val != 0);
-        nvs_close(h);
-    }
-
-    ESP_LOGI(TAG, "auth subsystem ready (sessions=%d, ttl=%lld s, auth=%s)",
-             SESSION_SLOTS, (long long)(SESSION_TTL_US / 1000000),
-             s_auth_enabled ? "enabled" : "disabled");
+    ESP_LOGI(TAG, "auth subsystem ready (sessions=%d, ttl=%lld s)",
+             SESSION_SLOTS, (long long)(SESSION_TTL_US / 1000000));
 }
 
 bool auth_is_password_set(void)
@@ -397,9 +380,6 @@ void auth_logout(const char *token_hex)
 
 bool auth_check_request(httpd_req_t *r)
 {
-    /* When auth is disabled every request is implicitly authorised. */
-    if (!s_auth_enabled) return true;
-
     /* Pull the Authorization header.  ESP-IDF httpd returns the value-length
      * via httpd_req_get_hdr_value_len(), then we read into a stack buffer. */
     size_t hdr_len = httpd_req_get_hdr_value_len(r, "Authorization");
@@ -452,35 +432,13 @@ void auth_factory_reset(void)
         nvs_erase_key(h, K_ADMIN_SALT);
         nvs_erase_key(h, K_ADMIN_HASH);
         nvs_erase_key(h, K_ADMIN_ITER);
-        nvs_erase_key(h, K_AUTH_ENABLED);
         nvs_commit(h);
         nvs_close(h);
     }
-    s_auth_enabled = false;   /* reset in RAM too */
     auth_clear_all_sessions();
     lock();
     s_lockout_until_us = 0;
     s_failed_count     = 0;
     unlock();
-    ESP_LOGW(TAG, "Auth factory reset — admin password and auth enable flag cleared");
-}
-
-bool auth_is_enabled(void)
-{
-    return s_auth_enabled;
-}
-
-esp_err_t auth_set_enabled(bool enabled)
-{
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) return err;
-    err = nvs_set_u8(h, K_AUTH_ENABLED, enabled ? 1 : 0);
-    if (err == ESP_OK) err = nvs_commit(h);
-    nvs_close(h);
-    if (err == ESP_OK) {
-        s_auth_enabled = enabled;
-        ESP_LOGI(TAG, "Auth %s", enabled ? "enabled" : "disabled");
-    }
-    return err;
+    ESP_LOGW(TAG, "Auth factory reset — admin password cleared");
 }

@@ -102,12 +102,15 @@ static esp_err_t send_json(httpd_req_t *req, const char *json)
 }
 
 /* ── Auth ———──────────────────────────────────────────────────────────
- * REQUIRE_AUTH(r) is the gate macro applied to mutation handlers.  Returns
- * 401 if the request lacks a valid Bearer token.  Defined up here (rather
- * than next to the auth route handlers further down) because it has to be
- * visible at every handler that uses it. */
+ * REQUIRE_AUTH(r) is the gate macro applied to mutation handlers.  When no
+ * admin password has been set (auth is disabled), it is a no-op and every
+ * caller proceeds unconditionally.  Once a password is set, it requires a
+ * valid Bearer token and returns 401 on failure.
+ *
+ * This makes authentication opt-in: the device works without any password
+ * by default, and the user can enable auth from the System tab. */
 #define REQUIRE_AUTH(r) do { \
-    if (!auth_check_request(r)) { \
+    if (auth_is_password_set() && !auth_check_request(r)) { \
         httpd_resp_set_status((r), "401 Unauthorized"); \
         httpd_resp_set_type((r), "application/json"); \
         return httpd_resp_sendstr((r), "{\"error\":\"unauthorized\"}"); \
@@ -356,10 +359,11 @@ static cJSON *read_json_body(httpd_req_t *r, size_t max_len)
     return root;
 }
 
-/* POST /api/auth/set_password — first-boot password setup.
- * Allowed only while no password has been set yet (unauth, by design — the
- * user can't authenticate without the first password).  After admin_set=1
- * future password changes go through /api/auth/change_password. */
+/* POST /api/auth/set_password — enable authentication by setting a password.
+ * Allowed only while no password has been set (auth disabled), so this
+ * endpoint requires no Bearer token.  Once a password is set, future
+ * changes go through /api/auth/change_password; to disable auth entirely
+ * use /api/auth/disable. */
 static esp_err_t api_auth_set_password(httpd_req_t *r)
 {
     if (auth_is_password_set()) {
@@ -436,45 +440,6 @@ static esp_err_t api_auth_check(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
     return send_json(r, "{\"status\":\"ok\"}");
-}
-
-/* POST /api/auth/set_enabled — toggle the authentication requirement.
- *
- * Body: { "enabled": true|false }
- *
- * Permission rules:
- *   • Enabling  (auth currently OFF) — no token required; any device on the
- *     LAN can enable auth.  If no password has been set yet, the web UI will
- *     present the set-password modal on next load.
- *   • Disabling (auth currently ON)  — REQUIRE_AUTH enforced; an attacker
- *     without the current session token cannot turn auth off. */
-static esp_err_t api_auth_set_enabled(httpd_req_t *r)
-{
-    /* Gate: only require auth when we're disabling (turning off) auth.
-     * Turning it on is always allowed — there's nothing to protect yet. */
-    if (auth_is_enabled()) {
-        REQUIRE_AUTH(r);
-    }
-
-    cJSON *root = read_json_body(r, 64);
-    if (!root) return ESP_FAIL;   /* 400 already sent */
-
-    cJSON *en = cJSON_GetObjectItem(root, "enabled");
-    if (!cJSON_IsBool(en)) {
-        cJSON_Delete(root);
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
-                                   "\"enabled\" bool required");
-    }
-    bool want = cJSON_IsTrue(en);
-    cJSON_Delete(root);
-
-    esp_err_t err = auth_set_enabled(want);
-    if (err != ESP_OK) {
-        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "NVS write failed");
-    }
-    return send_json(r, want ? "{\"status\":\"ok\",\"auth_enabled\":true}"
-                             : "{\"status\":\"ok\",\"auth_enabled\":false}");
 }
 
 /* POST /api/auth/logout — invalidate the current session token. */
@@ -579,6 +544,39 @@ static esp_err_t api_auth_change_password(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/auth/disable — remove the admin password, disabling auth.
+ * The current password must be supplied in the request body so a brief
+ * session-hijack or XSS script cannot silently disable protection.
+ * After success, auth_is_password_set() returns false, REQUIRE_AUTH
+ * becomes a no-op, and the device is open until a new password is set. */
+static esp_err_t api_auth_disable(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    cJSON *body = read_json_body(r, 256);
+    if (!body) return ESP_FAIL;
+
+    cJSON *jpw = cJSON_GetObjectItem(body, "password");
+    char pw_buf[80] = {0};
+    if (cJSON_IsString(jpw) && jpw->valuestring)
+        snprintf(pw_buf, sizeof(pw_buf), "%s", jpw->valuestring);
+    cJSON_Delete(body);
+
+    if (!auth_verify_password(pw_buf)) {
+        memset(pw_buf, 0, sizeof(pw_buf));
+        httpd_resp_set_status(r, "401 Unauthorized");
+        httpd_resp_set_type(r, "application/json");
+        return httpd_resp_sendstr(r, "{\"error\":\"bad_password\"}");
+    }
+    memset(pw_buf, 0, sizeof(pw_buf));
+
+    /* auth_factory_reset() erases admin_set / salt / hash / iter from NVS
+     * and clears all in-RAM sessions.  ap_pin is in the same NVS namespace
+     * but is NOT touched here — only the full factory reset clears it. */
+    auth_factory_reset();
+    ESP_LOGI(TAG, "Admin authentication disabled by user");
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 static esp_err_t api_reset(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
@@ -680,8 +678,7 @@ static esp_err_t api_status(httpd_req_t *r)
     /* —— auth state.  The web UI gates its first-boot setup flow on these.
      * admin_set is the only auth-related field exposed unauthenticated; the
      * AP PIN itself is on a separate auth'd route (/api/wifi/ap_pin). */
-    cJSON_AddBoolToObject(root, "admin_set",     auth_is_password_set());
-    cJSON_AddBoolToObject(root, "auth_enabled",  auth_is_enabled());
+    cJSON_AddBoolToObject(root, "admin_set", auth_is_password_set());
     char *json = cJSON_PrintUnformatted(root);
     esp_err_t ret = send_json(r, json);
     free(json); cJSON_Delete(root);
@@ -1502,31 +1499,6 @@ static esp_err_t api_debug_burnin(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
-/* POST /api/debug/snow
- * Body: {"mask": <0–63>, "duration_s": <0=manual>}
- *   Fills selected tubes with a new random RGB565 colour every render tick
- *   (~200 ms), rapidly cycling all sub-pixels.  mask=0 stops and restores. */
-static esp_err_t api_debug_snow(httpd_req_t *r)
-{
-    REQUIRE_AUTH(r);
-    char body[64] = {0};
-    int blen = (int)r->content_len;
-    if (blen <= 0 || blen >= (int)sizeof(body))
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required"), ESP_FAIL;
-    if (httpd_req_recv(r, body, (size_t)blen) != blen)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error"), ESP_FAIL;
-    cJSON *root = cJSON_Parse(body);
-    if (!root)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON"), ESP_FAIL;
-    cJSON *jm = cJSON_GetObjectItem(root, "mask");
-    cJSON *jd = cJSON_GetObjectItem(root, "duration_s");
-    uint8_t  mask       = cJSON_IsNumber(jm) ? (uint8_t)(jm->valueint & 0x3F) : 0;
-    uint32_t duration_s = cJSON_IsNumber(jd) ? (uint32_t)jd->valueint : 0;
-    cJSON_Delete(root);
-    display_set_snow_mask(mask, duration_s);
-    return send_json(r, "{\"status\":\"ok\"}");
-}
-
 /* POST /api/update_notify
  * Body: {"active":true}  — draw the 4-row red update indicator on tube 6
  *       {"active":false} — clear the indicator
@@ -1828,15 +1800,14 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
     R(HTTP_POST, "/api/debug/burnin",           api_debug_burnin),
-    R(HTTP_POST, "/api/debug/snow",             api_debug_snow),
     /* Auth routes.  set_password is allowed unauth on first boot only;
      * change_password is itself REQUIRE_AUTH'd. */
     R(HTTP_POST, "/api/auth/set_password",      api_auth_set_password),
     R(HTTP_POST, "/api/auth/login",             api_auth_login),
     R(HTTP_POST, "/api/auth/logout",            api_auth_logout),
     R(HTTP_POST, "/api/auth/change_password",   api_auth_change_password),
+    R(HTTP_POST, "/api/auth/disable",           api_auth_disable),
     R(HTTP_GET,  "/api/auth/check",             api_auth_check),
-    R(HTTP_POST, "/api/auth/set_enabled",       api_auth_set_enabled),
     /* —— setup AP PIN management. */
     R(HTTP_GET,  "/api/wifi/ap_pin",            api_wifi_ap_pin),
     R(HTTP_POST, "/api/wifi/regen_pin",         api_wifi_regen_pin),

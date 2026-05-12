@@ -86,13 +86,6 @@ void display_set_update_indicator(bool active);
  *  Thread-safe: safe to call from any task. */
 void display_set_burnin_mask(uint8_t mask, uint32_t duration_s);
 
-/** Start or stop per-tube snow recovery mode.
- *  Each masked tube is filled with a new random RGB565 colour every render
- *  tick (~200 ms), rapidly cycling all sub-pixels through the full colour
- *  space.  Complements colour-cycle (which exercises voltage extremes slowly).
- *  mask / duration_s semantics identical to display_set_burnin_mask(). */
-void display_set_snow_mask(uint8_t mask, uint32_t duration_s);
-
 /* ── Debug helpers ─────────────────────────────────────────────────── */
 /**
  * Override LEDC timer 0 / channel 0 (backlight GPIO) frequency and duty at
@@ -109,12 +102,6 @@ void display_debug_set_pwm(uint32_t freq_hz, uint8_t duty_pct);
 /** Restore LEDC timer 0 to 50 kHz.  The display task corrects duty within
  *  200 ms.  Safe to call from any task. */
 void display_debug_restore_pwm(void);
-
-/** Notify the display task that a physical touch button was just pressed.
- *  Suppresses the AP PIN takeover for 30 seconds so the user can see and
- *  interact with normal mode content while the setup AP is still active.
- *  Thread-safe: safe to call from any task. */
-void display_notify_touch(void);
 
 /* ── Display task ──────────────────────────────────────────────────── */
 /** Launch the FreeRTOS display task (core 1, 5 Hz).  Re-renders
