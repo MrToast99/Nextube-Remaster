@@ -226,6 +226,13 @@ void app_main(void)
     bool    boot_mic_cal_saved;
     bool    boot_weather_enabled;
     bool    boot_youtube_enabled;
+    uint8_t boot_invert_mask;
+    uint8_t boot_init_profile[6];
+    uint8_t boot_vcom[6];
+    float   boot_gamma[6];
+    int8_t  boot_col_offset[6];
+    int8_t  boot_row_offset[6];
+    uint8_t boot_tube_brightness[6];
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
     boot_volume          = cfg_boot->volume;
@@ -234,10 +241,23 @@ void app_main(void)
     boot_mic_cal_saved   = cfg_boot->mic_calibration_saved;
     boot_weather_enabled = cfg_boot->weather_enabled;
     boot_youtube_enabled = cfg_boot->youtube_enabled;
+    boot_invert_mask     = cfg_boot->lcd_invert_mask;
+    memcpy(boot_init_profile,    cfg_boot->lcd_init_profile,    sizeof(boot_init_profile));
+    memcpy(boot_vcom,            cfg_boot->lcd_vcom,            sizeof(boot_vcom));
+    memcpy(boot_gamma,           cfg_boot->lcd_gamma,            sizeof(boot_gamma));
+    memcpy(boot_col_offset,      cfg_boot->lcd_col_offset,      sizeof(boot_col_offset));
+    memcpy(boot_row_offset,      cfg_boot->lcd_row_offset,      sizeof(boot_row_offset));
+    memcpy(boot_tube_brightness, cfg_boot->lcd_tube_brightness, sizeof(boot_tube_brightness));
     config_unlock();
 
     /* Hardware drivers */
     display_init();
+    display_apply_invert_mask(boot_invert_mask);                  /* INVON for replacement panels    */
+    display_apply_tube_vcom(boot_vcom);                           /* per-tube VMCTR1 VCOM            */
+    display_apply_tube_gamma(boot_gamma);                         /* per-tube software gamma LUT     */
+    display_apply_init_profiles(boot_init_profile);               /* gamma per-tube profile          */
+    display_apply_tube_offsets(boot_col_offset, boot_row_offset); /* ST7735S window alignment        */
+    display_apply_tube_brightness(boot_tube_brightness);          /* per-tube brightness scale       */
     display_task_start();          /* launch 5 Hz FreeRTOS display task */
 
     audio_init();

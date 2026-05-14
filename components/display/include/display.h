@@ -37,6 +37,58 @@ void display_set_brightness(uint8_t pct);
 void display_fill(int tube, uint16_t colour);
 void display_show_digit(int tube, const uint8_t *rgb565_data, int w, int h);
 
+/** Send INVON (0x21) or INVOFF (0x20) to each tube according to mask.
+ *  Bit N set → tube N gets INVON (colour-inverted replacement panel).
+ *  Takes effect immediately; no reboot required.
+ *  Call after display_init() and again when lcd_invert_mask changes. */
+void display_apply_invert_mask(uint8_t mask);
+
+/** Apply per-tube panel profile (VCOM voltage + gamma curve).
+ *  0 = Standard — tuned for the original Green-Tab ST7735 panels.
+ *  1 = Vivid    — ST7735S replacement panels (e.g. LH096NT-IF09W) that appear
+ *                 washed/low-contrast at Standard.  Raises VCOM from 0x0E → 0x3C
+ *                 and recalibrates gamma for the ST7735S transfer curve.
+ *  Takes effect immediately by re-sending VCOM + gamma registers; no full
+ *  reinit or screen clear.  Call after display_init() and on settings change. */
+void display_apply_init_profiles(const uint8_t profiles[6]);
+
+/** Set per-tube VMCTR1 VCOM value (0x00–0x3F; default 0x0E = 14).
+ *  VCOM controls the AC driving voltage; raising it restores contrast and colour
+ *  saturation on replacement panels that look washed at the original 0x0E setting.
+ *  Changes require a per-tube SWRESET + full register reload (same as profile
+ *  changes) because VMCTR1 is only latched during the SLPOUT→DISPON window.
+ *  The display task is suspended for the duration so the SPI bus is not contested.
+ *  Typical values: 0x0E (14) Standard / 0x3C (60) Vivid preset / 0x3F (63) max.
+ *  Call after display_init() and again when lcd_vcom changes. */
+void display_apply_tube_vcom(const uint8_t vcom[6]);
+
+/** Apply per-tube software gamma correction to every pixel in display_show_digit().
+ *  Builds a 32-entry (R/B) and 64-entry (G) lookup table per tube from
+ *  out = in^gamma, then applies it per-pixel inside the SPI chunk loop
+ *  (pure integer math, no float ops per pixel).  Takes effect on the next
+ *  render tick.  gamma[i] = 1.0 → identity, LUT bypassed for that tube
+ *  (zero overhead).  gamma[i] > 1.0 → darkens midtones; fixes washed /
+ *  low-contrast panels.  gamma[i] < 1.0 → brightens midtones.
+ *  Each element clamped to [0.5, 3.0].  Call after display_init(). */
+void display_apply_tube_gamma(const float gamma[6]);
+
+/** Set per-tube CASET/RASET window offset adjustments.
+ *  col_off[i] is added to LCD_OFFSET_X; row_off[i] to LCD_OFFSET_Y.
+ *  Range -8..+8. Replacement panels based on ST7735S variants typically need
+ *  col_off=+2, row_off=+1 to prevent 1px static at the right/bottom edge.
+ *  Thread-safe: values are cached and applied on the next render tick.
+ *  Call after display_init() and again when lcd_col/row_offset changes. */
+void display_apply_tube_offsets(const int8_t col_off[6], const int8_t row_off[6]);
+
+/** Set per-tube software brightness scale (0-100; 100 = no scaling, default).
+ *  RGB565 pixel components (R5, G6, B5) are multiplied by br/100 per-pixel
+ *  during each display_show_digit() call. Overhead is negligible at 5 Hz
+ *  (~12 800 pixel ops/tube, all integer arithmetic, no memory allocation).
+ *  Use to match replacement panels that are noticeably brighter than originals.
+ *  Thread-safe: values are cached; takes effect on the next render tick.
+ *  Call after display_init() and again when lcd_tube_brightness changes. */
+void display_apply_tube_brightness(const uint8_t br[6]);
+
 /* ── JPEG asset loader ─────────────────────────────────────────────── */
 /** Load JPEG from SPIFFS, decode RGB565, push to tube.  Falls back to
  *  black fill on any error.  Uses 8 MB PSRAM decode buffer. */

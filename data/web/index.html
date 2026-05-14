@@ -142,6 +142,7 @@ select option{background:var(--accent);color:var(--text)}
     <div class="field" id="tube5-section" style="display:none"><label>Tube 6 Display</label>
       <select id="f-tube5"><option value="blank">Blank</option><option value="weather">Weather Icon</option></select>
     </div>
+
     <div class="field meter"><label>LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">60</span>%</div>
 
     <div style="border:1px solid var(--accent);padding:.8rem;border-radius:8px;margin-bottom:1rem">
@@ -159,6 +160,112 @@ select option{background:var(--accent);color:var(--text)}
     </div>
 
     <div class="field meter"><label>LED Brightness</label><input type="range" id="f-ledbr" min="0" max="100"><span id="v-ledbr">60</span>%</div>
+
+    <!-- ── Advanced Display ────────────────────────────────────── -->
+    <div style="border:1px solid var(--accent);border-radius:8px;margin-bottom:1rem">
+      <button type="button" id="adv-display-toggle" onclick="toggleAdvDisplay()"
+              style="width:100%;display:flex;justify-content:space-between;align-items:center;background:none;border:none;color:var(--text);font-size:.95rem;font-weight:600;padding:.75rem 1rem;cursor:pointer;letter-spacing:.02em">
+        Advanced Display
+        <span id="adv-display-arrow" style="font-size:.8rem;color:var(--dim);transition:transform .2s">▼</span>
+      </button>
+      <div id="adv-display-body" style="display:none;padding:.75rem 1rem;border-top:1px solid var(--accent)">
+        <p style="color:var(--dim);font-size:.82rem;margin:0 0 1.2rem">Panel correction settings for replacement screens. The LCD Brightness and Night Brightness sliders above apply uniformly to all tubes as a group; the individual trim below scales each tube within that baseline.</p>
+
+        <!-- Gamma -->
+        <div class="field" style="padding-bottom:.2rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Gamma Correction</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem">Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and colour depth on panels with a flat native response. Try <b>1.8–2.2</b> for washed replacement panels. Takes effect after Save.</div>
+          <div style="padding:0 2.5rem">
+            <div style="display:flex;flex-direction:column;gap:.3rem">
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 1</span><span style="font-size:.78rem;color:var(--dim)">0.5</span><input type="range" class="f-tube-gamma" data-tube="0" min="0.5" max="3.0" step="0.05" value="1.0" style="flex:1" oninput="this.nextElementSibling.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)"><span style="font-size:.78rem;color:var(--dim)">3.0</span><span style="min-width:2.8rem;text-align:right;font-variant-numeric:tabular-nums">1.00</span></div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 2</span><span style="font-size:.78rem;color:var(--dim)">0.5</span><input type="range" class="f-tube-gamma" data-tube="1" min="0.5" max="3.0" step="0.05" value="1.0" style="flex:1" oninput="this.nextElementSibling.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)"><span style="font-size:.78rem;color:var(--dim)">3.0</span><span style="min-width:2.8rem;text-align:right;font-variant-numeric:tabular-nums">1.00</span></div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 3</span><span style="font-size:.78rem;color:var(--dim)">0.5</span><input type="range" class="f-tube-gamma" data-tube="2" min="0.5" max="3.0" step="0.05" value="1.0" style="flex:1" oninput="this.nextElementSibling.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)"><span style="font-size:.78rem;color:var(--dim)">3.0</span><span style="min-width:2.8rem;text-align:right;font-variant-numeric:tabular-nums">1.00</span></div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 4</span><span style="font-size:.78rem;color:var(--dim)">0.5</span><input type="range" class="f-tube-gamma" data-tube="3" min="0.5" max="3.0" step="0.05" value="1.0" style="flex:1" oninput="this.nextElementSibling.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)"><span style="font-size:.78rem;color:var(--dim)">3.0</span><span style="min-width:2.8rem;text-align:right;font-variant-numeric:tabular-nums">1.00</span></div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 5</span><span style="font-size:.78rem;color:var(--dim)">0.5</span><input type="range" class="f-tube-gamma" data-tube="4" min="0.5" max="3.0" step="0.05" value="1.0" style="flex:1" oninput="this.nextElementSibling.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)"><span style="font-size:.78rem;color:var(--dim)">3.0</span><span style="min-width:2.8rem;text-align:right;font-variant-numeric:tabular-nums">1.00</span></div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 6</span><span style="font-size:.78rem;color:var(--dim)">0.5</span><input type="range" class="f-tube-gamma" data-tube="5" min="0.5" max="3.0" step="0.05" value="1.0" style="flex:1" oninput="this.nextElementSibling.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)"><span style="font-size:.78rem;color:var(--dim)">3.0</span><span style="min-width:2.8rem;text-align:right;font-variant-numeric:tabular-nums">1.00</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Panel profile -->
+        <div class="field" style="padding-bottom:.2rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Panel Profile</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem"><b>Profile</b> selects the hardware gamma curve. <b>VCOM</b> (0–63) sets the AC driving voltage — higher values increase contrast and colour depth. For ST7735S replacement panels (e.g. LH096NT-IF09W) start with Profile <b>Vivid</b> + VCOM <b>40</b>, then tune: raise toward 60 if still washed, lower toward 25 if over-saturated. Changes take effect after Save.</div>
+          <div style="padding:0 2.5rem">
+            <table style="border-collapse:collapse;font-size:.82rem;width:100%">
+              <thead><tr style="color:var(--dim)">
+                <th style="text-align:left;padding:2px 6px;font-weight:500">Tube</th>
+                <th style="padding:2px 8px;font-weight:500">Profile (gamma)</th>
+                <th style="padding:2px 8px;font-weight:500">VCOM (0–63)</th>
+              </tr></thead>
+              <tbody>
+                <tr><td style="padding:4px 6px">Tube 1</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="0" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="0" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 2</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="1" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="1" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 3</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="2" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="2" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 4</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="3" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="3" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 5</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="4" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="4" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 6</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="5" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="5" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Colour inversion -->
+        <div class="field" style="padding-bottom:.2rem;margin-top:.9rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Colour Inversion</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem">Enable for any tube whose replacement screen shows a photo-negative image. Sends INVON immediately — no reboot needed.</div>
+          <div style="padding:0 2.5rem">
+            <div style="display:flex;gap:1.2rem;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="f-invert-tube" value="0"> Tube 1</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="f-invert-tube" value="1"> Tube 2</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="f-invert-tube" value="2"> Tube 3</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="f-invert-tube" value="3"> Tube 4</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="f-invert-tube" value="4"> Tube 5</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="f-invert-tube" value="5"> Tube 6</label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Window offset -->
+        <div class="field" style="padding-bottom:.2rem;margin-top:.9rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Window Offset</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem">Shift the pixel window to fix 1 px static at the right/bottom edge of replacement panels. ST7735S variants (e.g. LH096NT-IF09W) typically need Col +2 / Row +1.</div>
+          <div style="padding:0 2.5rem">
+            <table style="border-collapse:collapse;font-size:.82rem;width:100%">
+              <thead><tr style="color:var(--dim)">
+                <th style="text-align:left;padding:2px 6px;font-weight:500">Tube</th>
+                <th style="padding:2px 8px;font-weight:500">Col</th>
+                <th style="padding:2px 8px;font-weight:500">Row</th>
+              </tr></thead>
+              <tbody>
+                <tr><td style="padding:4px 6px">Tube 1</td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-col-off" data-tube="0" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-row-off" data-tube="0" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 2</td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-col-off" data-tube="1" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-row-off" data-tube="1" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 3</td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-col-off" data-tube="2" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-row-off" data-tube="2" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 4</td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-col-off" data-tube="3" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-row-off" data-tube="3" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 5</td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-col-off" data-tube="4" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-row-off" data-tube="4" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 6</td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-col-off" data-tube="5" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-row-off" data-tube="5" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Per-tube brightness trim -->
+        <div class="field" style="padding-bottom:0;margin-top:.9rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Individual Brightness Trim</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem">Scale each tube's pixels relative to the group LCD Brightness above. Use when one replacement panel is noticeably brighter or dimmer than the others (100 = no change).</div>
+          <div style="padding:0 2.5rem">
+            <div style="display:flex;flex-direction:column;gap:.3rem">
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 1</span><input type="range" class="f-tube-br" data-tube="0" min="0" max="100" value="100" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">100</span>%</div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 2</span><input type="range" class="f-tube-br" data-tube="1" min="0" max="100" value="100" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">100</span>%</div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 3</span><input type="range" class="f-tube-br" data-tube="2" min="0" max="100" value="100" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">100</span>%</div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 4</span><input type="range" class="f-tube-br" data-tube="3" min="0" max="100" value="100" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">100</span>%</div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 5</span><input type="range" class="f-tube-br" data-tube="4" min="0" max="100" value="100" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">100</span>%</div>
+              <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 6</span><input type="range" class="f-tube-br" data-tube="5" min="0" max="100" value="100" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">100</span>%</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
   <div class="card">
     <h2>LED Accent Lighting</h2>
@@ -924,6 +1031,28 @@ $('f-ab-en').onclick = () => {
   $('ab-cfg').style.display = $('f-ab-en').checked ? 'block' : 'none';
 };
 
+/* Pre-fill the VCOM field with the profile's suggested starting point when the
+ * user changes a tube's panel profile dropdown.
+ * Standard = 14 (0x0E) — original Green-Tab Nextube panels.
+ * Vivid    = 40 (0x28) — conservative starting point for ST7735S replacements;
+ *            tune up toward 60 if still washed, down toward 25 if over-saturated.
+ * The user can fine-tune the VCOM number before saving. */
+function onProfileChange(sel) {
+  const tube   = +sel.dataset.tube;
+  const vcom   = sel.value === '1' ? 40 : 14;
+  const vcomEl = document.querySelector('.f-tube-vcom[data-tube="' + tube + '"]');
+  if (vcomEl) vcomEl.value = vcom;
+  markUnsaved();
+}
+
+function toggleAdvDisplay() {
+  const body  = $('adv-display-body');
+  const arrow = $('adv-display-arrow');
+  const open  = body.style.display !== 'none';
+  body.style.display  = open ? 'none' : 'block';
+  arrow.style.transform = open ? '' : 'rotate(180deg)';
+}
+
 /* ── Auth ──────────────────────────────────────────────────────────
  * Single global session token, persisted in localStorage so reload keeps
  * the session.  All API calls go through secureFetch() which auto-adds
@@ -1009,6 +1138,29 @@ async function loadSettings() {
   $('f-timetype').value = a.type || '24H'; onTimeTypeChange();
   $('f-tube5').value = a.clock_tube5 || 'blank';
   $('f-leading-zero').checked = cfg.leading_zero === true;
+  { const gg = Array.isArray(cfg.lcd_gamma) ? cfg.lcd_gamma : [1,1,1,1,1,1];
+    document.querySelectorAll('.f-tube-gamma').forEach(el => {
+      const v = gg[+el.dataset.tube] ?? 1.0;
+      el.value = v;
+      /* value span is two siblings after the range input: <span>0.5</span><input><span>3.0</span><span>value</span> */
+      el.nextElementSibling.nextElementSibling.textContent = parseFloat(v).toFixed(2);
+    }); }
+  { const pp = cfg.lcd_init_profile || [0,0,0,0,0,0];
+    document.querySelectorAll('.f-panel-profile').forEach(el => { el.value = pp[+el.dataset.tube] ?? 0; }); }
+  { const vv = cfg.lcd_vcom || [14,14,14,14,14,14];
+    document.querySelectorAll('.f-tube-vcom').forEach(el => { el.value = vv[+el.dataset.tube] ?? 14; }); }
+  { const mask = cfg.lcd_invert_mask || 0;
+    document.querySelectorAll('.f-invert-tube').forEach(cb => { cb.checked = !!(mask & (1 << +cb.value)); }); }
+  { const colOff = cfg.lcd_col_offset || [0,0,0,0,0,0];
+    const rowOff = cfg.lcd_row_offset || [0,0,0,0,0,0];
+    document.querySelectorAll('.f-col-off').forEach(el => { el.value = colOff[+el.dataset.tube] ?? 0; });
+    document.querySelectorAll('.f-row-off').forEach(el => { el.value = rowOff[+el.dataset.tube] ?? 0; }); }
+  { const tubeBr = cfg.lcd_tube_brightness || [100,100,100,100,100,100];
+    document.querySelectorAll('.f-tube-br').forEach(el => {
+      const v = tubeBr[+el.dataset.tube] ?? 100;
+      el.value = v;
+      el.nextElementSibling.textContent = v;
+    }); }
   $('f-lcdbr').value = cfg.lcd_brightness || 60; $('v-lcdbr').textContent = cfg.lcd_brightness || 60;
   $('f-ab-en').checked = cfg.auto_brightness || false;
   $('ab-cfg').style.display = cfg.auto_brightness ? 'block' : 'none';
@@ -1245,6 +1397,13 @@ async function saveSettings() {
     weather_enabled: $('f-weather-en').checked, youtube_enabled: $('f-youtube-en').checked, mdns_enabled: $('f-mdns-en').checked,
     mic_silence_gate: parseFloat($('f-gate-num').value) || 0,
     leading_zero: $('f-leading-zero').checked,
+    lcd_gamma: Array.from(document.querySelectorAll('.f-tube-gamma')).map(el => Math.round(parseFloat(el.value) * 100) / 100),
+    lcd_init_profile: Array.from(document.querySelectorAll('.f-panel-profile')).map(el => parseInt(el.value)||0),
+    lcd_vcom: Array.from(document.querySelectorAll('.f-tube-vcom')).map(el => Math.min(63,Math.max(0,parseInt(el.value)||14))),
+    lcd_invert_mask: Array.from(document.querySelectorAll('.f-invert-tube')).reduce((m,cb) => cb.checked ? m|(1<<+cb.value) : m, 0),
+    lcd_col_offset: Array.from(document.querySelectorAll('.f-col-off')).map(el => parseInt(el.value)||0),
+    lcd_row_offset: Array.from(document.querySelectorAll('.f-row-off')).map(el => parseInt(el.value)||0),
+    lcd_tube_brightness: Array.from(document.querySelectorAll('.f-tube-br')).map(el => parseInt(el.value)||100),
     default_countdown_time: +$('f-countdown').value,
     pomodoro_work:  +$('f-pomo-work').value,
     pomodoro_break: +$('f-pomo-break').value,

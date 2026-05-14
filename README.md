@@ -261,6 +261,31 @@ Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in 
 
 Peak-hold: instant attack, exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
 
+### Replacement LCD Panels
+
+The six original displays are **80×160 px ST7735 "Green Tab" IPS panels**. If one or more tubes fail they can be replaced with compatible ST7735S modules — the most common drop-in replacement confirmed to work with this firmware is:
+
+| Part number | Notes |
+|---|---|
+| **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working |
+
+ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colours on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
+
+#### Quick-start for LH096NT-IF09W replacement panels
+
+1. Flash firmware, open the web UI
+2. Go to **Display → Advanced Display → Panel Profile**
+3. For each replaced tube set **Profile → Vivid** and **VCOM → 40** as a starting point
+4. Click **Save** and evaluate — if colours are still washed raise VCOM toward 50–60; if they look over-saturated or too dark lower it toward 25–30
+5. If colours remain washed even at high VCOM, raise **Gamma Correction** for that tube to **1.8–2.2**
+6. If colours are inverted (white background appears black), tick **Colour Inversion** for that tube
+7. If there is a 1-pixel static border on the right or bottom edge, set **Column Offset → +2** and **Row Offset → +1** for that tube
+8. Click **Save** — changes take effect immediately without a reboot
+
+> **Note on window offsets:** The LH096NT-IF09W ST7735S variant uses a frame-buffer that is 2 px wider than the visible area. Without the +2 column offset, the rightmost column of uninitialized frame-buffer appears as a thin static line. Row offset of +1 corrects the same issue at the bottom edge.
+
+---
+
 ### Original Firmware Analysis
 
 The stock firmware was built with **ESP-IDF v4.4** + **Arduino framework** via PlatformIO by developer `HERRY0812`. It uses:
@@ -437,11 +462,61 @@ After setup, access the management interface via:
 
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
-- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, Spectrum LED glow colour, Spectrum LCD bar colour, Spectrum noise floor threshold
+- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, Spectrum LED glow colour, Spectrum LCD bar colour, Spectrum noise floor threshold, **Advanced Display** (see below)
 - **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
 - **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (automatic on page load and every 24 h; compares against latest GitHub release with dismissable toast notification), **Lock Webui** (enable/disable password protection, change password, sign out), WiFi Setup AP PIN management (show/regenerate), factory reset (settings-only or full), about (shows firmware + web UI versions independently)
+
+### Advanced Display (LCD Calibration)
+
+**Display → Advanced Display** contains per-tube hardware calibration controls for mixed panel sets (original + replacement tubes, or batches of replacement panels that differ slightly from each other). All changes take effect after **Save** and are applied immediately without a reboot.
+
+#### Gamma Correction
+
+| Setting | Per-tube | Range | Default | Description |
+|---|---|---|---|---|
+| **Gamma** | ✅ Yes (6 sliders) | 0.5–3.0 | 1.0 | Software midtone correction applied in the pixel render loop. `1.0` = identity (zero overhead). Values above 1.0 darken midtones — try **1.8–2.2** for washed ST7735S replacement panels. Values below 1.0 brighten midtones. |
+
+Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, one table for R/B 5-bit and one for G 6-bit per tube). There is no floating-point math per pixel at render time — the overhead is negligible even at 5 Hz.
+
+#### Panel Profile
+
+| Setting | Per-tube | Values | Default | Description |
+|---|---|---|---|---|
+| **Profile** | ✅ Yes | Standard · Vivid | Standard | Selects the hardware gamma curve (register 0xE0/0xE1) written to the ST7735 during init. **Standard** is tuned for the original Green-Tab panels; **Vivid** uses a recalibrated curve for ST7735S replacement panels. Changing the profile triggers a per-tube software reset (SWRESET) + full reinit — the display task is briefly suspended for the duration. |
+| **VCOM** | ✅ Yes | 0–63 | 14 | Sets the VMCTR1 AC driving voltage (register 0xC5). Higher values increase contrast and colour saturation. Original panels use **14** (0x0E). For ST7735S replacements, start at **40** and tune from there — increase toward 60 if still washed, decrease toward 25 if over-saturated. Also requires a SWRESET+reinit to take effect (handled automatically). |
+
+> **Why SWRESET is needed:** The ST7735S only latches VCOM and the hardware gamma registers during the `SLPOUT → DISPON` initialisation window. Writes issued while the display is already on are silently ignored. The firmware performs a CS-gated software reset on the affected tube only — the other five tubes are unaffected.
+
+#### Individual Brightness Trim
+
+| Setting | Per-tube | Range | Default | Description |
+|---|---|---|---|---|
+| **Brightness** | ✅ Yes | 0–100 % | 100 % | Scales RGB565 pixel components (R5, G6, B5) by `value / 100` in the render loop. Use when a replacement panel is noticeably brighter than the originals. Applied in the same integer-only pixel pass as gamma — no additional overhead. |
+
+#### Colour Inversion
+
+| Setting | Per-tube | Description |
+|---|---|---|
+| **Invert** | ✅ Yes (per-tube checkbox) | Sends INVON (0x21) to tubes that need colour inversion. Some ST7735S batches default to an inverted colour space — whites appear black without this. Takes effect immediately (no SWRESET needed; INVON/INVOFF survive normal display-on mode). |
+
+#### Window Offsets
+
+| Setting | Per-tube | Range | Default | Description |
+|---|---|---|---|---|
+| **Column Offset** | ✅ Yes | −8 to +8 | 0 | Shifts the CASET window start column. LH096NT-IF09W and similar ST7735S variants typically need **+2** to prevent 1 px of uninitialised frame-buffer from appearing at the right edge. |
+| **Row Offset** | ✅ Yes | −8 to +8 | 0 | Shifts the RASET window start row. Same ST7735S variants typically need **+1** to prevent 1 px at the bottom edge. |
+
+#### Anti-Burn-In
+
+| Setting | Description |
+|---|---|
+| **Colour Cycle** | Cycles each selected tube through red → green → blue → white → black (30 s per step) to exercise every sub-pixel at both voltage extremes. Can run for 1–4 hours or until manually stopped. |
+| **Static Snow** | Writes truly random RGB565 pixels to every selected tube each frame (5 Hz) — more thorough than the colour cycle because every pixel address receives an independent random level. Tube selection and duration are the same as colour cycle. |
+| **Scheduled** | Automatic overnight burn-in recovery. Fires at a configured hour on a **weekly** (Sunday midnight) or **monthly** (1st of month) schedule. Tube bitmask, session duration, and trigger hour are all configurable. Disabled by default. |
+
+The CASET window also drifts ±2 px every hour automatically (synchronized to the real-time hour value) as a passive column-shift anti-burn-in measure — no configuration needed.
 
 ## Modes
 

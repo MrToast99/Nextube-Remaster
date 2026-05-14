@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include <math.h>
 #include "microphone.h"
 #include "config_mgr.h"
 #include "wifi_manager.h"
@@ -248,15 +249,28 @@ static esp_err_t api_post_settings(httpd_req_t *r)
      *      mic_enabled to take effect. */
     char old_ssid[64], old_pass[64], old_hostname[32];
     bool old_weather_en, old_youtube_en, old_mdns_en, old_mic_en;
+    uint8_t old_invert_mask;
+    uint8_t old_init_profile[6];
+    uint8_t old_vcom[6];
+    float   old_gamma[6];
+    int8_t  old_col_offset[6], old_row_offset[6];
+    uint8_t old_tube_brightness[6];
     config_lock();
     const nextube_config_t *old_cfg = config_get();
     strlcpy(old_ssid,     old_cfg->ssid,      sizeof(old_ssid));
     strlcpy(old_pass,     old_cfg->password,  sizeof(old_pass));
     strlcpy(old_hostname, old_cfg->hostname,  sizeof(old_hostname));
-    old_weather_en = old_cfg->weather_enabled;
-    old_youtube_en = old_cfg->youtube_enabled;
-    old_mdns_en    = old_cfg->mdns_enabled;
-    old_mic_en     = old_cfg->mic_enabled;
+    old_weather_en   = old_cfg->weather_enabled;
+    old_youtube_en   = old_cfg->youtube_enabled;
+    old_mdns_en      = old_cfg->mdns_enabled;
+    old_mic_en       = old_cfg->mic_enabled;
+    old_invert_mask  = old_cfg->lcd_invert_mask;
+    memcpy(old_init_profile,    old_cfg->lcd_init_profile,    sizeof(old_init_profile));
+    memcpy(old_vcom,            old_cfg->lcd_vcom,            sizeof(old_vcom));
+    memcpy(old_gamma,           old_cfg->lcd_gamma,           sizeof(old_gamma));
+    memcpy(old_col_offset,      old_cfg->lcd_col_offset,      sizeof(old_col_offset));
+    memcpy(old_row_offset,      old_cfg->lcd_row_offset,      sizeof(old_row_offset));
+    memcpy(old_tube_brightness, old_cfg->lcd_tube_brightness, sizeof(old_tube_brightness));
     config_unlock();
 
     bool ok = config_set_json(buf, len);
@@ -266,6 +280,12 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     bool    new_audio_enabled;
     char    new_ssid[64], new_pass[64], new_hostname[32];
     bool    new_weather_en, new_youtube_en, new_mdns_en, new_mic_en;
+    uint8_t new_invert_mask;
+    uint8_t new_init_profile[6];
+    uint8_t new_vcom[6];
+    float   new_gamma[6];
+    int8_t  new_col_offset[6], new_row_offset[6];
+    uint8_t new_tube_brightness[6];
     config_lock();
     const nextube_config_t *new_cfg = config_get();
     new_brightness    = new_cfg->led_brightness;
@@ -273,16 +293,41 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     strlcpy(new_ssid,     new_cfg->ssid,      sizeof(new_ssid));
     strlcpy(new_pass,     new_cfg->password,  sizeof(new_pass));
     strlcpy(new_hostname, new_cfg->hostname,  sizeof(new_hostname));
-    new_weather_en = new_cfg->weather_enabled;
-    new_youtube_en = new_cfg->youtube_enabled;
-    new_mdns_en    = new_cfg->mdns_enabled;
-    new_mic_en     = new_cfg->mic_enabled;
+    new_weather_en   = new_cfg->weather_enabled;
+    new_youtube_en   = new_cfg->youtube_enabled;
+    new_mdns_en      = new_cfg->mdns_enabled;
+    new_mic_en       = new_cfg->mic_enabled;
+    new_invert_mask  = new_cfg->lcd_invert_mask;
+    memcpy(new_init_profile,    new_cfg->lcd_init_profile,    sizeof(new_init_profile));
+    memcpy(new_vcom,            new_cfg->lcd_vcom,            sizeof(new_vcom));
+    memcpy(new_gamma,           new_cfg->lcd_gamma,           sizeof(new_gamma));
+    memcpy(new_col_offset,      new_cfg->lcd_col_offset,      sizeof(new_col_offset));
+    memcpy(new_row_offset,      new_cfg->lcd_row_offset,      sizeof(new_row_offset));
+    memcpy(new_tube_brightness, new_cfg->lcd_tube_brightness, sizeof(new_tube_brightness));
     config_unlock();
 
     leds_set_brightness(new_brightness);
     ntp_apply_timezone();
     ntp_apply_servers();
     audio_set_enabled(new_audio_enabled);
+    if (new_invert_mask != old_invert_mask)
+        display_apply_invert_mask(new_invert_mask);
+    if (memcmp(new_init_profile, old_init_profile, sizeof(new_init_profile)) != 0)
+        display_apply_init_profiles(new_init_profile);
+    if (memcmp(new_vcom, old_vcom, sizeof(new_vcom)) != 0)
+        display_apply_tube_vcom(new_vcom);
+    {
+        bool gamma_changed = false;
+        for (int i = 0; i < 6; i++) {
+            if (fabsf(new_gamma[i] - old_gamma[i]) > 0.005f) { gamma_changed = true; break; }
+        }
+        if (gamma_changed) display_apply_tube_gamma(new_gamma);
+    }
+    if (memcmp(new_col_offset, old_col_offset, sizeof(new_col_offset)) != 0 ||
+        memcmp(new_row_offset, old_row_offset, sizeof(new_row_offset)) != 0)
+        display_apply_tube_offsets(new_col_offset, new_row_offset);
+    if (memcmp(new_tube_brightness, old_tube_brightness, sizeof(new_tube_brightness)) != 0)
+        display_apply_tube_brightness(new_tube_brightness);
 
     /* Boot-time feature flags or hostname changed — reboot required.
      * Hostname is baked into LWIP netif, DHCP option 12, and mDNS at start-up;

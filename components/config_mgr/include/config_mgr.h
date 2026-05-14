@@ -64,6 +64,13 @@ typedef struct {
                                                   firmware update is available.  Driven by the
                                                   web UI via POST /api/update_notify. */
     uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0x1FF (all 9) */
+    uint8_t          lcd_invert_mask;    /* bitmask: bit N = tube N needs INVON (colour-inverted replacement panel) */
+    uint8_t          lcd_init_profile[6];    /* per-tube panel profile: 0=Standard, 1=Vivid (gamma curve selector) */
+    uint8_t          lcd_vcom[6];        /* per-tube VMCTR1 VCOM value 0x00–0x3F (0=14, standard; higher=more contrast) */
+    float            lcd_gamma[6];       /* per-tube software gamma exponent 0.5–3.0 (1.0=off; >1 darkens midtones for washed panels) */
+    int8_t           lcd_col_offset[6];  /* per-tube CASET column offset adj. -8..+8 (ST7735S variants need +2) */
+    int8_t           lcd_row_offset[6];  /* per-tube RASET row offset adj. -8..+8 (ST7735S variants need +1) */
+    uint8_t          lcd_tube_brightness[6]; /* per-tube software brightness 0-100 (100 = no scaling, default) */
 
     /* Network */
     char             ssid[64];

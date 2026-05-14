@@ -21,6 +21,12 @@ static const int cs_pins[LCD_COUNT] = {
 };
 static spi_device_handle_t spi_dev;
 
+/* Display task handle — stored so display_apply_init_profiles() can suspend
+ * the task for the duration of a per-tube SWRESET + reinit sequence, giving
+ * the init code exclusive ownership of the SPI bus and CS lines.
+ * NULL until display_task_start() is called; checked before use. */
+static TaskHandle_t s_display_task_handle = NULL;
+
 /* Update indicator flag — set true to overlay 4 red rows at the physical
  * bottom of tube 5 on every frame.  Declared here (before display_show_digit)
  * so the function can read it.  Implementation: display_set_update_indicator(). */
@@ -63,6 +69,113 @@ static volatile uint8_t s_snow_mask     = 0;
 static volatile time_t  s_snow_end_time = 0;
 #define BURNIN_COLOR_SECS   30   /* seconds per step in the cycle */
 
+/* ── Panel profiles (VCOM + gamma) ──────────────────────────────────────────
+ * The ST7735 "Green Tab" (original Nextube panels) and ST7735S (replacement
+ * panels such as LH096NT-IF09W) require different VCOM voltages and gamma
+ * curves to achieve proper contrast and colour saturation.
+ *
+ *  Profile 0 "Standard" — VCOM 0x0E.  Tuned for the original Green Tab panels
+ *     shipped with the Nextube.  Colours are accurate and saturated on those.
+ *
+ *  Profile 1 "Vivid"    — VCOM 0x3C.  For ST7735S replacement panels that
+ *     look washed/low-contrast at Standard VCOM.  The higher VCOM raises the
+ *     AC driving voltage, restoring contrast and colour depth.  Gamma is also
+ *     recalibrated to match the ST7735S response curve.
+ *
+ * Only VCOM (0xC5) and the two gamma registers (0xE0 / 0xE1) differ between
+ * profiles.  All power-control registers (0xC0-0xC4) are identical and are
+ * not included here — they are sent once during st7735_init_one().
+ *
+ * Source: Adafruit ST7735R Red-Tab (VCOM 0x3C) vs Green-Tab (VCOM 0x0E);
+ *   TFT_eSPI ST7735S_80x160 gamma table.                                      */
+typedef struct {
+    uint8_t vcom;       /* VMCTR1 (0xC5) — AC driving voltage for contrast     */
+    uint8_t gmp[16];    /* GMCTRP1 (0xE0) — positive gamma correction          */
+    uint8_t gmn[16];    /* GMCTRN1 (0xE1) — negative gamma correction          */
+} panel_profile_t;
+
+static const panel_profile_t s_panel_profiles[] = {
+    /* 0: Standard — original Nextube Green-Tab panels */
+    {
+        .vcom = 0x0E,
+        .gmp  = {0x02, 0x1C, 0x07, 0x12, 0x37, 0x32, 0x29, 0x2D,
+                 0x29, 0x25, 0x2B, 0x39, 0x00, 0x01, 0x03, 0x10},
+        .gmn  = {0x03, 0x1D, 0x07, 0x06, 0x2E, 0x2C, 0x29, 0x2D,
+                 0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10},
+    },
+    /* 1: Vivid — ST7735S replacement panels (e.g. LH096NT-IF09W).
+     * VCOM raised from 0x0E → 0x3C restores contrast lost to a mismatched
+     * AC voltage.  Gamma recalibrated for the ST7735S transfer curve. */
+    {
+        .vcom = 0x3C,
+        .gmp  = {0x0F, 0x1A, 0x0F, 0x18, 0x2F, 0x28, 0x20, 0x22,
+                 0x1F, 0x1B, 0x23, 0x37, 0x00, 0x07, 0x02, 0x10},
+        .gmn  = {0x0F, 0x1B, 0x0F, 0x17, 0x33, 0x2C, 0x29, 0x2E,
+                 0x30, 0x30, 0x39, 0x3F, 0x00, 0x07, 0x03, 0x10},
+    },
+};
+#define PANEL_PROFILE_COUNT  ((int)(sizeof(s_panel_profiles) / sizeof(s_panel_profiles[0])))
+
+/* Active per-tube profile index.  Zero-init = Profile 0 (Standard) at boot. */
+static uint8_t s_init_profiles[LCD_COUNT];
+
+/* ── Per-tube panel fine-tuning ──────────────────────────────────────────── */
+/* Window offset overrides — added to LCD_OFFSET_X/Y in every CASET/RASET.
+ * Replacement panels based on ST7735S variants typically need col +2, row +1
+ * to prevent 1px of uninitialized frame-buffer from appearing at the right/bottom
+ * edge.  Updated by display_apply_tube_offsets(); safe to read from display task. */
+static int8_t  s_col_offsets[LCD_COUNT];   /* default 0 — zero-init by linker */
+static int8_t  s_row_offsets[LCD_COUNT];   /* default 0 — zero-init by linker */
+
+/* Per-tube software brightness scale (0-100).  Must be initialised to 100 in
+ * display_init() because the linker zero-initialises static arrays, which would
+ * render every pixel black.  Updated by display_apply_tube_brightness(). */
+static uint8_t s_tube_brightness[LCD_COUNT];
+
+/* Per-tube VMCTR1 VCOM value (0x00–0x3F).  Must be initialised to 0x0E in
+ * display_init().  Decoupled from the panel profile so users can fine-tune
+ * contrast for their specific replacement panel batch without changing the
+ * gamma curve.  Updated by display_apply_tube_vcom(). */
+static uint8_t s_tube_vcom[LCD_COUNT];
+
+/* ── Software gamma correction ───────────────────────────────────────────────
+ * Pre-computed lookup tables that map each possible R5/B5 (0–31) and G6 (0–63)
+ * channel value through out = in^gamma before the pixel is sent to the display.
+ *
+ * Gamma > 1.0 darkens midtones (fixes washed / low-contrast panels whose native
+ * response curve is flatter than expected).  Gamma = 1.0 is identity — the
+ * s_gamma_lut_active flag short-circuits the table entirely so there is no
+ * per-pixel overhead when gamma correction is off.
+ *
+ * The tables are rebuilt by rebuild_gamma_lut() whenever the gamma value
+ * changes.  The display task is suspended during the rebuild to avoid reading
+ * a partially-updated table.                                                   */
+static float   s_gamma[LCD_COUNT];                  /* per-tube exponent; 1.0 = identity */
+static bool    s_gamma_lut_active[LCD_COUNT];        /* false = LUT skipped (identity)    */
+static uint8_t s_gamma_lut_5bit[LCD_COUNT][32];      /* R and B channels (5-bit, 0–31)    */
+static uint8_t s_gamma_lut_6bit[LCD_COUNT][64];      /* G channel        (6-bit, 0–63)    */
+
+static void rebuild_gamma_lut(int tube)
+{
+    float g = s_gamma[tube];
+    if (fabsf(g - 1.0f) < 0.005f) {
+        /* Identity — fill with pass-through values and disable the LUT path. */
+        for (int i = 0; i < 32; i++) s_gamma_lut_5bit[tube][i] = (uint8_t)i;
+        for (int i = 0; i < 64; i++) s_gamma_lut_6bit[tube][i] = (uint8_t)i;
+        s_gamma_lut_active[tube] = false;
+        return;
+    }
+    for (int i = 0; i < 32; i++) {
+        float v = powf((float)i / 31.0f, g) * 31.0f + 0.5f;
+        s_gamma_lut_5bit[tube][i] = (v >= 31.0f) ? 31u : (uint8_t)v;
+    }
+    for (int i = 0; i < 64; i++) {
+        float v = powf((float)i / 63.0f, g) * 63.0f + 0.5f;
+        s_gamma_lut_6bit[tube][i] = (v >= 63.0f) ? 63u : (uint8_t)v;
+    }
+    s_gamma_lut_active[tube] = true;
+}
+
 static void lcd_cmd(uint8_t cmd)
 {
     gpio_set_level(PIN_LCD_DC, 0);
@@ -100,22 +213,33 @@ static void st7735_init_one(int tube)
     lcd_cmd(0x01); vTaskDelay(pdMS_TO_TICKS(150)); /* SWRESET */
     lcd_cmd(0x11); vTaskDelay(pdMS_TO_TICKS(120)); /* SLPOUT  */
 
-    /* Power Control – values typical for ST7735 IPS panels to improve contrast/vibrancy */
+    /* Power Control – common to all profiles */
     lcd_cmd(0xC0); uint8_t pc1[] = {0xA2, 0x02, 0x84}; lcd_data(pc1, 3);
     lcd_cmd(0xC1); uint8_t pc2[] = {0xC5};             lcd_data(pc2, 1);
     lcd_cmd(0xC2); uint8_t pc3[] = {0x0A, 0x00};       lcd_data(pc3, 2);
     lcd_cmd(0xC3); uint8_t pc4[] = {0x8A, 0x2A};       lcd_data(pc4, 2);
     lcd_cmd(0xC4); uint8_t pc5[] = {0x8A, 0xEE};       lcd_data(pc5, 2);
-    lcd_cmd(0xC5); uint8_t vcom[] = {0x0E};            lcd_data(vcom, 1);
 
-    /* Gamma Correction – ensures correct luminance curve and prevents washed-out look */
-    lcd_cmd(0xE0); uint8_t gm1[] = {0x02, 0x1C, 0x07, 0x12, 0x37, 0x32, 0x29, 0x2D, 0x29, 0x25, 0x2B, 0x39, 0x00, 0x01, 0x03, 0x10}; lcd_data(gm1, 16);
-    lcd_cmd(0xE1); uint8_t gm2[] = {0x03, 0x1D, 0x07, 0x06, 0x2E, 0x2C, 0x29, 0x2D, 0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10}; lcd_data(gm2, 16);
+    /* VCOM + Gamma — VCOM from per-tube s_tube_vcom (user-tunable), gamma from
+     * per-tube profile.  Keeping them separate lets the user dial contrast via
+     * VCOM without having to change the gamma curve. */
+    {
+        uint8_t pidx = s_init_profiles[tube];
+        if (pidx >= (uint8_t)PANEL_PROFILE_COUNT) pidx = 0;
+        const panel_profile_t *p = &s_panel_profiles[pidx];
+        lcd_cmd(0xC5); lcd_data(&s_tube_vcom[tube], 1);  /* VMCTR1 — per-tube VCOM */
+        lcd_cmd(0xE0); lcd_data(p->gmp, 16);
+        lcd_cmd(0xE1); lcd_data(p->gmn, 16);
+    }
 
     lcd_cmd(0x3A); lcd_data_byte(0x05);            /* COLMOD  RGB565 */
     lcd_cmd(0x36); lcd_data_byte(0xC8);            /* MADCTL  MY|MX|BGR = 180° rotation */
     uint8_t fr[] = {0x01, 0x2C, 0x2D};
     lcd_cmd(0xB1); lcd_data(fr, 3);                /* FRMCTR1 */
+    lcd_cmd(0x13); vTaskDelay(pdMS_TO_TICKS(10));  /* NORON   Normal Display Mode On
+                                                     * Clears partial-display mode that
+                                                     * can leave border pixels undriven
+                                                     * on ST7735S variants. */
     lcd_cmd(0x29); vTaskDelay(pdMS_TO_TICKS(50));  /* DISPON  */
     deselect_all();
 }
@@ -151,11 +275,24 @@ void display_init(void)
     };
     ledc_channel_config(&ch);
 
+    /* Initialise per-tube brightness to 100 (full) — static arrays are
+     * zero-initialised by the linker, which would otherwise make every tube black. */
+    for (int i = 0; i < LCD_COUNT; i++) s_tube_brightness[i] = 100;
+    /* Initialise per-tube VCOM to 0x0E (Standard / original panel value).
+     * display_apply_tube_vcom() will override before the task starts if the
+     * saved config has different values. */
+    for (int i = 0; i < LCD_COUNT; i++) s_tube_vcom[i] = 0x0E;
+    /* Initialise per-tube gamma LUT to identity (gamma = 1.0, no correction). */
+    for (int i = 0; i < LCD_COUNT; i++) { s_gamma[i] = 1.0f; rebuild_gamma_lut(i); }
+
     /* Hardware reset is shared — pulse RST once to reset all 6 displays,
      * then send the init sequence to each tube individually. */
     gpio_set_level(PIN_LCD_RST, 0); vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_level(PIN_LCD_RST, 1); vTaskDelay(pdMS_TO_TICKS(120));
     for (int i = 0; i < LCD_COUNT; i++) { st7735_init_one(i); display_fill(i, 0x0000); }
+    /* display_apply_invert_mask(), display_apply_tube_offsets(), and
+     * display_apply_tube_brightness() are called by app_main() after display_init()
+     * once config_mgr has loaded the saved values. */
     ESP_LOGI(TAG, "Displays ready");
 }
 
@@ -166,6 +303,190 @@ void display_set_brightness(uint8_t pct)
     if (pct > 100) pct = 100;
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, ((100 - pct) * 255) / 100);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+}
+
+/* Cached invert mask — persisted here so display_apply_init_profiles() can
+ * re-apply INVON/INVOFF after a per-tube SWRESET without needing the config. */
+static uint8_t s_invert_mask = 0;
+
+void display_apply_invert_mask(uint8_t mask)
+{
+    s_invert_mask = mask & 0x3F;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        select_tube(i);
+        lcd_cmd((s_invert_mask & (1u << i)) ? 0x21 : 0x20);  /* INVON : INVOFF */
+    }
+    deselect_all();
+    ESP_LOGI(TAG, "lcd_invert_mask 0x%02X applied", s_invert_mask);
+}
+
+void display_apply_tube_offsets(const int8_t col_off[6], const int8_t row_off[6])
+{
+    for (int i = 0; i < LCD_COUNT; i++) {
+        s_col_offsets[i] = col_off[i];
+        s_row_offsets[i] = row_off[i];
+    }
+    ESP_LOGI(TAG, "tube col_offsets [%d,%d,%d,%d,%d,%d]  row_offsets [%d,%d,%d,%d,%d,%d]",
+             col_off[0], col_off[1], col_off[2], col_off[3], col_off[4], col_off[5],
+             row_off[0], row_off[1], row_off[2], row_off[3], row_off[4], row_off[5]);
+}
+
+void display_apply_tube_brightness(const uint8_t br[6])
+{
+    for (int i = 0; i < LCD_COUNT; i++)
+        s_tube_brightness[i] = (br[i] > 100) ? 100 : br[i];
+    ESP_LOGI(TAG, "tube brightness [%u,%u,%u,%u,%u,%u]",
+             s_tube_brightness[0], s_tube_brightness[1], s_tube_brightness[2],
+             s_tube_brightness[3], s_tube_brightness[4], s_tube_brightness[5]);
+}
+
+void display_apply_tube_vcom(const uint8_t vcom[6])
+{
+    bool tube_changed[LCD_COUNT] = {false};
+    bool any = false;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        uint8_t v = vcom[i] & 0x3F;   /* clamp to valid VMCTR1 range */
+        if (s_tube_vcom[i] != v) {
+            s_tube_vcom[i]  = v;
+            tube_changed[i] = true;
+            any             = true;
+        }
+    }
+    if (!any) return;
+
+    /* VMCTR1 is only latched during the SLPOUT→DISPON window — same constraint
+     * as profile gamma registers.  Suspend the display task and do a per-tube
+     * SWRESET + full reinit for each tube whose VCOM changed. */
+    if (s_display_task_handle) {
+        vTaskSuspend(s_display_task_handle);
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    for (int i = 0; i < LCD_COUNT; i++) {
+        if (!tube_changed[i]) continue;
+        ESP_LOGI(TAG, "tube %d: SWRESET + reinit (vcom 0x%02X)", i, s_tube_vcom[i]);
+        st7735_init_one(i);
+        select_tube(i);
+        lcd_cmd((s_invert_mask & (1u << i)) ? 0x21 : 0x20);
+        deselect_all();
+        display_fill(i, 0x0000);
+    }
+    if (s_display_task_handle) vTaskResume(s_display_task_handle);
+
+    ESP_LOGI(TAG, "tube VCOM [0x%02X,0x%02X,0x%02X,0x%02X,0x%02X,0x%02X]",
+             s_tube_vcom[0], s_tube_vcom[1], s_tube_vcom[2],
+             s_tube_vcom[3], s_tube_vcom[4], s_tube_vcom[5]);
+}
+
+void display_apply_tube_gamma(const float gamma[6])
+{
+    /* First pass: clamp, detect changes, update s_gamma[]. */
+    bool tube_changed[LCD_COUNT] = {false};
+    bool any = false;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        float g = gamma[i];
+        if (g < 0.5f) g = 0.5f;
+        if (g > 3.0f) g = 3.0f;
+        if (fabsf(g - s_gamma[i]) > 0.005f) {
+            s_gamma[i]      = g;
+            tube_changed[i] = true;
+            any             = true;
+        }
+    }
+    if (!any) return;
+
+    /* Suspend the display task so it cannot read a partially-updated LUT while
+     * rebuild_gamma_lut() is writing table entries.  Each rebuild takes only a
+     * few µs (96 powf calls on Xtensa LX6 at 240 MHz) so the task is paused
+     * for well under one frame period even when all 6 tubes change at once. */
+    if (s_display_task_handle) {
+        vTaskSuspend(s_display_task_handle);
+    }
+    /* Second pass: rebuild only the tubes that changed. */
+    for (int i = 0; i < LCD_COUNT; i++) {
+        if (tube_changed[i]) rebuild_gamma_lut(i);
+    }
+    if (s_display_task_handle) {
+        vTaskResume(s_display_task_handle);
+    }
+    ESP_LOGI(TAG, "tube gamma [%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+             s_gamma[0], s_gamma[1], s_gamma[2],
+             s_gamma[3], s_gamma[4], s_gamma[5]);
+}
+
+void display_apply_init_profiles(const uint8_t profiles[6])
+{
+    /* Determine which tubes actually changed profile. */
+    bool tube_changed[LCD_COUNT] = {false};
+    bool any = false;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        uint8_t p = (profiles[i] < (uint8_t)PANEL_PROFILE_COUNT) ? profiles[i] : 0;
+        if (s_init_profiles[i] != p) {
+            s_init_profiles[i] = p;
+            tube_changed[i]    = true;
+            any                = true;
+        }
+    }
+    if (!any) return;
+
+    /* VCOM (0xC5) and gamma registers (0xE0/0xE1) are only latched by ST7735S
+     * variants during the SLPOUT → DISPON initialisation window; writes issued
+     * during normal display-on mode are silently ignored.  The only reliable
+     * way to change these registers at runtime is a per-tube software reset
+     * (SWRESET, command 0x01) followed by the full init sequence.
+     *
+     * SWRESET is CS-gated — sending it to one tube's CS does not affect the
+     * other five tubes.  st7735_init_one() performs:
+     *   SWRESET (150 ms) → SLPOUT (120 ms) → power-ctrl → VCOM → gamma →
+     *   COLMOD → MADCTL → FRMCTR1 → NORON (10 ms) → DISPON (50 ms)
+     * for the already-selected tube and then deselects all.
+     *
+     * After reinit, s_invert_mask must be re-applied because SWRESET clears
+     * every register — including the INVON/INVOFF state — back to POR defaults.
+     *
+     * ── SPI bus ownership ───────────────────────────────────────────────
+     * st7735_init_one() calls select_tube() once at the top, then blocks for
+     * 150 ms (SWRESET) and 120 ms (SLPOUT) via vTaskDelay.  Without
+     * protection, the display task (Core 1) wakes during those delays, calls
+     * select_tube(j) for a different tube, and later deselect_all() — which
+     * drives tube i CS HIGH.  Every register write after the initial SWRESET
+     * (SLPOUT, VCOM, gamma, DISPON) arrives on a deselected bus and is
+     * silently ignored by the panel.  The panel wakes from reset but never
+     * exits sleep mode, leaving the old VCOM and gamma untouched.
+     *
+     * Fix: suspend the display task for the entire reinit loop so we have
+     * exclusive ownership of the SPI bus and all CS lines.
+     * s_display_task_handle is NULL at boot (display_task_start() not yet
+     * called), so the guard is safe for the boot-time apply path too. */
+    if (s_display_task_handle) {
+        vTaskSuspend(s_display_task_handle);
+        /* Wait 2 ms after suspend to let any in-flight SPI transaction the
+         * display task started complete in hardware before we touch the CS
+         * lines.  A single 8-row chunk at 26 MHz takes ≈ 0.4 ms worst-case. */
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+
+    for (int i = 0; i < LCD_COUNT; i++) {
+        if (!tube_changed[i]) continue;
+
+        ESP_LOGI(TAG, "tube %d: SWRESET + reinit (profile %u)", i, s_init_profiles[i]);
+        st7735_init_one(i);   /* SWRESET + full register reload; deselects_all on return */
+
+        /* Re-apply colour inversion — cleared by SWRESET. */
+        select_tube(i);
+        lcd_cmd((s_invert_mask & (1u << i)) ? 0x21 : 0x20);  /* INVON : INVOFF */
+        deselect_all();
+
+        /* Clear framebuffer; display task re-renders within one 200 ms tick. */
+        display_fill(i, 0x0000);
+    }
+
+    if (s_display_task_handle) {
+        vTaskResume(s_display_task_handle);
+    }
+
+    ESP_LOGI(TAG, "panel profiles [%u,%u,%u,%u,%u,%u] applied (per-tube reinit)",
+             s_init_profiles[0], s_init_profiles[1], s_init_profiles[2],
+             s_init_profiles[3], s_init_profiles[4], s_init_profiles[5]);
 }
 
 void display_debug_set_pwm(uint32_t freq_hz, uint8_t duty_pct)
@@ -197,9 +518,10 @@ void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
-    lcd_cmd(0x2A); uint8_t ca[] = {0,ox,0,(uint8_t)(ox+LCD_WIDTH-1)}; lcd_data(ca,4);
-    lcd_cmd(0x2B); uint8_t ra[] = {0,LCD_OFFSET_Y,0,LCD_OFFSET_Y+LCD_HEIGHT-1}; lcd_data(ra,4);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
+    lcd_cmd(0x2A); uint8_t ca[] = {0,ox,0,(uint8_t)(ox+LCD_WIDTH-1)};  lcd_data(ca,4);
+    lcd_cmd(0x2B); uint8_t ra[] = {0,oy,0,(uint8_t)(oy+LCD_HEIGHT-1)}; lcd_data(ra,4);
     lcd_cmd(0x2C);
     gpio_set_level(PIN_LCD_DC, 1);
     uint8_t line[LCD_WIDTH * 2];
@@ -215,20 +537,52 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
 {
     if (tube < 0 || tube >= LCD_COUNT || !data) return;
     select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
     lcd_cmd(0x2A); uint8_t ca[] = {0,ox,0,(uint8_t)(ox+w-1)}; lcd_data(ca,4);
-    lcd_cmd(0x2B); uint8_t ra[] = {0,LCD_OFFSET_Y,0,LCD_OFFSET_Y+h-1}; lcd_data(ra,4);
+    lcd_cmd(0x2B); uint8_t ra[] = {0,oy,0,(uint8_t)(oy+h-1)}; lcd_data(ra,4);
     lcd_cmd(0x2C);
     gpio_set_level(PIN_LCD_DC, 1);
     /* `data` may be in PSRAM; ESP32 SPI DMA cannot access PSRAM directly.
-     * Copy 8 rows at a time into a stack SRAM chunk buffer and send via
-     * polling transmit.  8 rows reduces transaction count 160→20 per tube,
-     * cutting per-transaction GPIO/controller overhead by ~8×. */
+     * Copy 8 rows at a time into a stack SRAM chunk buffer, optionally scale
+     * brightness per-pixel (integer arithmetic, negligible overhead at 5 Hz),
+     * then send via polling transmit.  8 rows reduces transaction count 160→20
+     * per tube, cutting per-transaction GPIO/controller overhead by ~8×. */
 #define DISP_CHUNK_ROWS 8
     uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];  /* 1280 B — always SRAM */
+    uint8_t br        = s_tube_brightness[tube];
+    bool    do_br     = (br < 100);
+    bool    do_gamma  = s_gamma_lut_active[tube];
+    bool    do_px     = do_br || do_gamma;
     for (int y = 0; y < h; y += DISP_CHUNK_ROWS) {
         int rows = (y + DISP_CHUNK_ROWS <= h) ? DISP_CHUNK_ROWS : h - y;
         memcpy(chunk, data + y * w * 2, (size_t)(rows * w * 2));
+        if (do_px) {
+            /* Single-pass brightness scale + gamma LUT.
+             * Brightness runs first (linear channel scale), gamma LUT second
+             * (maps the already-scaled value through out = in^γ).  Both are
+             * pure integer arithmetic — no float ops inside the pixel loop. */
+            int npx = rows * w;
+            for (int j = 0; j < npx; j++) {
+                uint16_t px = ((uint16_t)chunk[j * 2] << 8) | chunk[j * 2 + 1];
+                uint32_t r = (px >> 11) & 0x1Fu;
+                uint32_t g = (px >>  5) & 0x3Fu;
+                uint32_t b =  px        & 0x1Fu;
+                if (do_br) {
+                    r = r * br / 100u;
+                    g = g * br / 100u;
+                    b = b * br / 100u;
+                }
+                if (do_gamma) {
+                    r = s_gamma_lut_5bit[tube][r];
+                    g = s_gamma_lut_6bit[tube][g];
+                    b = s_gamma_lut_5bit[tube][b];
+                }
+                px = (uint16_t)((r << 11) | (g << 5) | b);
+                chunk[j * 2]     = (uint8_t)(px >> 8);
+                chunk[j * 2 + 1] = (uint8_t)(px & 0xFF);
+            }
+        }
         spi_transaction_t t = { .length = (size_t)(rows * w * 2) * 8, .tx_buffer = chunk };
         spi_device_polling_transmit(spi_dev, &t);
     }
@@ -237,14 +591,15 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
     /* ── Update indicator overlay ──────────────────────────────────────── */
     /* When s_update_indicator is set, paint 4 rows of solid red at the
      * physical bottom of tube 5.  Physical bottom = the last 4 rows of the
-     * address window (LCD_OFFSET_Y + h - 4 .. LCD_OFFSET_Y + h - 1).
+     * address window (oy + h - 4 .. oy + h - 1).  Uses the already-computed
+     * ox/oy so the overlay tracks per-tube window offset corrections.
      * Red in RGB565 big-endian = 0xF800 → bytes {0xF8, 0x00}.
      * The SPI device is still selected (cs low) so no extra select call is
      * needed — we simply reissue CASET/RASET for the 4-row window. */
     if (tube == LCD_COUNT - 1 && s_update_indicator) {
-        uint8_t ca2[] = {0, LCD_OFFSET_X, 0, (uint8_t)(LCD_OFFSET_X + w - 1)};
+        uint8_t ca2[] = {0, ox, 0, (uint8_t)(ox + w - 1)};
         lcd_cmd(0x2A); lcd_data(ca2, 4);
-        uint8_t ra2[] = {0, (uint8_t)(LCD_OFFSET_Y + h - 4), 0, (uint8_t)(LCD_OFFSET_Y + h - 1)};
+        uint8_t ra2[] = {0, (uint8_t)(oy + h - 4), 0, (uint8_t)(oy + h - 1)};
         lcd_cmd(0x2B); lcd_data(ra2, 4);
         lcd_cmd(0x2C);
         gpio_set_level(PIN_LCD_DC, 1);
@@ -293,12 +648,13 @@ static void display_fill_snow(int tube)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
     lcd_cmd(0x2A);
     uint8_t ca[] = {0, ox, 0, (uint8_t)(ox + LCD_WIDTH - 1)};
     lcd_data(ca, 4);
     lcd_cmd(0x2B);
-    uint8_t ra[] = {0, LCD_OFFSET_Y, 0, (uint8_t)(LCD_OFFSET_Y + LCD_HEIGHT - 1)};
+    uint8_t ra[] = {0, oy, 0, (uint8_t)(oy + LCD_HEIGHT - 1)};
     lcd_data(ra, 4);
     lcd_cmd(0x2C);
     gpio_set_level(PIN_LCD_DC, 1);
@@ -1069,12 +1425,13 @@ static void render_spectrum(const nextube_config_t *cfg)
 
         /* Open SPI window — identical to display_show_digit() preamble. */
         select_tube(tube);
-        uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
+        uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
+        uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
         lcd_cmd(0x2A);
         uint8_t ca[] = {0, ox, 0, (uint8_t)(ox + LCD_WIDTH - 1)};
         lcd_data(ca, 4);
         lcd_cmd(0x2B);
-        uint8_t ra[] = {0, LCD_OFFSET_Y, 0, LCD_OFFSET_Y + LCD_HEIGHT - 1};
+        uint8_t ra[] = {0, oy, 0, (uint8_t)(oy + LCD_HEIGHT - 1)};
         lcd_data(ra, 4);
         lcd_cmd(0x2C);
         gpio_set_level(PIN_LCD_DC, 1);
@@ -1778,6 +2135,7 @@ static void display_task(void *arg)
 
 void display_task_start(void)
 {
-    xTaskCreatePinnedToCore(display_task, "display", 8192, NULL, 6, NULL, 1);
+    xTaskCreatePinnedToCore(display_task, "display", 8192, NULL, 6,
+                            &s_display_task_handle, 1);
     ESP_LOGI(TAG, "Display task started");
 }

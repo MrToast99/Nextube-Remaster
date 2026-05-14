@@ -53,6 +53,29 @@ static void set_defaults(void)
     /* Clock-face update indicator — opt-in (off by default) */
     s_cfg.notify_update_on_display = false;
 
+    /* Per-tube colour-inversion mask (0 = all normal; set bit N for replacement
+     * panels that default to INVON, e.g. LH096NT-IF09W variants) */
+    s_cfg.lcd_invert_mask = 0;
+    /* Per-tube panel profile: 0=Standard (original panels), 1=Vivid (ST7735S
+     * replacements that appear washed at Standard VCOM/gamma). */
+    memset(s_cfg.lcd_init_profile, 0, sizeof(s_cfg.lcd_init_profile));
+    /* Per-tube VCOM voltage (VMCTR1 register, 0x00–0x3F).
+     * 0x0E (14) = original Nextube Standard value; 0x3C (60) = Vivid preset.
+     * Higher VCOM raises AC driving voltage, restoring contrast on replacement panels.
+     * Independent of profile — allows fine-tuning within a chosen gamma curve. */
+    for (int i = 0; i < 6; i++) s_cfg.lcd_vcom[i] = 0x0E;
+    /* Per-tube software gamma exponent — 1.0 = identity (no correction). */
+    for (int i = 0; i < 6; i++) s_cfg.lcd_gamma[i] = 1.0f;
+    /* Per-tube window offset fine-tuning (all zero = stock ST7735 alignment).
+     * Replacement panels based on ST7735S variants typically need col_offset=+2,
+     * row_offset=+1 to avoid exposing uninitialized frame-buffer pixels at the
+     * right/bottom edge.  User-configurable via Display Settings > Panel Correction. */
+    memset(s_cfg.lcd_col_offset, 0, sizeof(s_cfg.lcd_col_offset));
+    memset(s_cfg.lcd_row_offset, 0, sizeof(s_cfg.lcd_row_offset));
+    /* Per-tube software brightness (100 = full, no pixel scaling).
+     * Replacement panels are often brighter than the originals; reduce to match. */
+    for (int i = 0; i < 6; i++) s_cfg.lcd_tube_brightness[i] = 100;
+
     /* Default rainbow-ish backlight colours */
     uint8_t defaults[6][3] = {
         {200,0,0}, {0,200,0}, {0,0,200},
@@ -437,6 +460,121 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(nu)) s_cfg.notify_update_on_display = cJSON_IsTrue(nu);
     }
 
+    /* lcd_invert_mask — per-tube INVON flag for colour-inverted replacement panels */
+    json_read_u8(root, "lcd_invert_mask", &s_cfg.lcd_invert_mask);
+    s_cfg.lcd_invert_mask &= 0x3F;   /* only 6 tubes */
+
+    /* Per-tube panel profile — 0=Standard, 1=Vivid; clamp to valid range */
+    {
+        cJSON *arr = cJSON_GetObjectItem(root, "lcd_init_profile");
+        if (cJSON_IsArray(arr)) {
+            int cnt = cJSON_GetArraySize(arr);
+            if (cnt > 6) cnt = 6;
+            for (int i = 0; i < cnt; i++) {
+                cJSON *v = cJSON_GetArrayItem(arr, i);
+                if (cJSON_IsNumber(v))
+                    s_cfg.lcd_init_profile[i] = (v->valueint >= 1) ? 1 : 0;
+            }
+        }
+    }
+
+    /* Per-tube VCOM (VMCTR1) — clamped to 0x00..0x3F (0–63) */
+    {
+        cJSON *arr = cJSON_GetObjectItem(root, "lcd_vcom");
+        if (cJSON_IsArray(arr)) {
+            int cnt = cJSON_GetArraySize(arr);
+            if (cnt > 6) cnt = 6;
+            for (int i = 0; i < cnt; i++) {
+                cJSON *v = cJSON_GetArrayItem(arr, i);
+                if (cJSON_IsNumber(v)) {
+                    int val = v->valueint;
+                    if (val < 0x00) val = 0x00;
+                    if (val > 0x3F) val = 0x3F;
+                    s_cfg.lcd_vcom[i] = (uint8_t)val;
+                }
+            }
+        }
+    }
+
+    /* Per-tube software gamma — clamped to 0.5..3.0.
+     * Accepts both the new array form [g0,g1,g2,g3,g4,g5] and the legacy
+     * scalar form (written by firmware before the per-tube refactor):
+     * if a scalar is found it is broadcast to all 6 tubes so old configs
+     * produce the same visual result they did before the upgrade. */
+    {
+        cJSON *v = cJSON_GetObjectItem(root, "lcd_gamma");
+        if (cJSON_IsArray(v)) {
+            int cnt = cJSON_GetArraySize(v);
+            if (cnt > 6) cnt = 6;
+            for (int i = 0; i < cnt; i++) {
+                cJSON *el = cJSON_GetArrayItem(v, i);
+                if (cJSON_IsNumber(el)) {
+                    float g = (float)el->valuedouble;
+                    if (g < 0.5f) g = 0.5f;
+                    if (g > 3.0f) g = 3.0f;
+                    s_cfg.lcd_gamma[i] = g;
+                }
+            }
+        } else if (cJSON_IsNumber(v)) {
+            /* Legacy scalar — broadcast to all tubes */
+            float g = (float)v->valuedouble;
+            if (g < 0.5f) g = 0.5f;
+            if (g > 3.0f) g = 3.0f;
+            for (int i = 0; i < 6; i++) s_cfg.lcd_gamma[i] = g;
+        }
+    }
+
+    /* Per-tube CASET/RASET window offset adjustments — clamped to -8..+8 */
+    {
+        cJSON *arr = cJSON_GetObjectItem(root, "lcd_col_offset");
+        if (cJSON_IsArray(arr)) {
+            int cnt = cJSON_GetArraySize(arr);
+            if (cnt > 6) cnt = 6;
+            for (int i = 0; i < cnt; i++) {
+                cJSON *v = cJSON_GetArrayItem(arr, i);
+                if (cJSON_IsNumber(v)) {
+                    int off = v->valueint;
+                    if (off < -8) off = -8;
+                    if (off >  8) off =  8;
+                    s_cfg.lcd_col_offset[i] = (int8_t)off;
+                }
+            }
+        }
+    }
+    {
+        cJSON *arr = cJSON_GetObjectItem(root, "lcd_row_offset");
+        if (cJSON_IsArray(arr)) {
+            int cnt = cJSON_GetArraySize(arr);
+            if (cnt > 6) cnt = 6;
+            for (int i = 0; i < cnt; i++) {
+                cJSON *v = cJSON_GetArrayItem(arr, i);
+                if (cJSON_IsNumber(v)) {
+                    int off = v->valueint;
+                    if (off < -8) off = -8;
+                    if (off >  8) off =  8;
+                    s_cfg.lcd_row_offset[i] = (int8_t)off;
+                }
+            }
+        }
+    }
+    /* Per-tube software brightness — clamped to 0-100 */
+    {
+        cJSON *arr = cJSON_GetObjectItem(root, "lcd_tube_brightness");
+        if (cJSON_IsArray(arr)) {
+            int cnt = cJSON_GetArraySize(arr);
+            if (cnt > 6) cnt = 6;
+            for (int i = 0; i < cnt; i++) {
+                cJSON *v = cJSON_GetArrayItem(arr, i);
+                if (cJSON_IsNumber(v)) {
+                    int br = v->valueint;
+                    if (br < 0)   br = 0;
+                    if (br > 100) br = 100;
+                    s_cfg.lcd_tube_brightness[i] = (uint8_t)br;
+                }
+            }
+        }
+    }
+
     /* ── Post-parse normalization ──────────────────────────────────────
      * mic_enabled is no longer a user-settable toggle — it is derived
      * entirely from whether Spectrum mode is present in enabled_modes.
@@ -633,6 +771,37 @@ char *config_to_json(void)
     }
 
     cJSON_AddBoolToObject(root, "notify_update_on_display", s_cfg.notify_update_on_display);
+    cJSON_AddNumberToObject(root, "lcd_invert_mask", s_cfg.lcd_invert_mask);
+    {
+        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_init_profile");
+        for (int i = 0; i < 6; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_init_profile[i]));
+    }
+    {
+        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_vcom");
+        for (int i = 0; i < 6; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_vcom[i]));
+    }
+    {
+        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_gamma");
+        for (int i = 0; i < 6; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateNumber((double)s_cfg.lcd_gamma[i]));
+    }
+    {
+        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_col_offset");
+        for (int i = 0; i < 6; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_col_offset[i]));
+    }
+    {
+        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_row_offset");
+        for (int i = 0; i < 6; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_row_offset[i]));
+    }
+    {
+        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_tube_brightness");
+        for (int i = 0; i < 6; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_tube_brightness[i]));
+    }
 
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
