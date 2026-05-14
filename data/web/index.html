@@ -816,6 +816,36 @@ select option{background:var(--accent);color:var(--text)}
         <span id="burnin-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
       </div>
 
+      <!-- ── Static Snow ──────────────────────────────────────────────── -->
+      <hr style="border:none;border-top:1px solid rgba(255,160,0,.25);margin:1rem 0">
+      <h3 style="color:#ffa000;font-size:.95rem;margin:.2rem 0 .5rem">Static Snow</h3>
+      <p style="font-size:.78rem;color:var(--dim);margin-bottom:.6rem">
+        Writes truly random RGB565 pixels to selected tubes every display tick
+        (5 Hz).  Every pixel address receives an independent random level each
+        frame — more thorough than the solid colour-cycle for uneven wear
+        patterns.  Can run alongside the colour-cycle on different tubes.
+      </p>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+        <span style="font-size:.82rem;color:var(--dim)">Tubes:</span>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="0"> 1</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="1"> 2</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="2"> 3</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="3"> 4</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="4"> 5</label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="5"> 6</label>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="snowSelectAll()">All</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="snowSelectNone()">None</button>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:.82rem;color:var(--dim)">Duration:</span>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(3600)">1 hr</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(7200)">2 hr</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(10800)">3 hr</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStart(14400)">4 hr</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="snowStop()">⏹ Stop</button>
+        <span id="snow-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
+      </div>
+
       <div class="btn-group">
         <button class="btn btn-primary" style="background:#ffa000;border-color:#ffa000" onclick="dbgSave()">Save to Config</button>
         <button class="btn btn-outline" onclick="dbgHide()">Close Debug Panel</button>
@@ -1787,7 +1817,19 @@ function burninMask() {
 function burninSelectAll()  { document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = true); }
 function burninSelectNone() { document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = false); }
 
-let _burninTimer = null;
+/* Shared countdown formatter → "HH:MM:SS" */
+function _fmtCountdown(ms) {
+  if (ms <= 0) return '00:00:00';
+  const s   = Math.floor(ms / 1000);
+  const h   = Math.floor(s / 3600);
+  const m   = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+
+let _burninTimer    = null;
+let _burninInterval = null;
+let _burninEndTime  = 0;
 async function burninStart(duration_s) {
   const mask = burninMask();
   if (!mask) { $('burnin-msg').textContent = '✗ Select at least one tube'; return; }
@@ -1798,21 +1840,99 @@ async function burninStart(duration_s) {
       body: JSON.stringify({ mask, duration_s })
     });
     if (!r.ok) { msg.textContent = '✗ ' + await r.text(); return; }
-    const hrs = duration_s / 3600;
-    msg.textContent = `▶ Cycling — ${hrs} hr${hrs > 1 ? 's' : ''} remaining`;
-    if (_burninTimer) clearTimeout(_burninTimer);
+    /* Stop any previous session */
+    if (_burninTimer)    { clearTimeout(_burninTimer);    _burninTimer    = null; }
+    if (_burninInterval) { clearInterval(_burninInterval); _burninInterval = null; }
+    /* Live countdown */
+    _burninEndTime = Date.now() + duration_s * 1000;
+    const tick = () => {
+      const left = _burninEndTime - Date.now();
+      if (left <= 0) {
+        msg.textContent = '✓ Complete — display restored';
+        burninSelectNone();
+        clearInterval(_burninInterval); _burninInterval = null;
+        return;
+      }
+      msg.textContent = `▶ Cycling — ${_fmtCountdown(left)} remaining`;
+    };
+    tick();  /* immediate first update */
+    _burninInterval = setInterval(tick, 1000);
+    /* Safety net: clean up interval if tab is left open */
     _burninTimer = setTimeout(() => {
+      if (_burninInterval) { clearInterval(_burninInterval); _burninInterval = null; }
       msg.textContent = '✓ Complete — display restored';
       burninSelectNone();
-    }, duration_s * 1000);
+      _burninTimer = null;
+    }, duration_s * 1000 + 500);
   } catch(e) { msg.textContent = '✗ ' + e.message; }
 }
 async function burninRestore() {
-  if (_burninTimer) { clearTimeout(_burninTimer); _burninTimer = null; }
+  if (_burninTimer)    { clearTimeout(_burninTimer);    _burninTimer    = null; }
+  if (_burninInterval) { clearInterval(_burninInterval); _burninInterval = null; }
   burninSelectNone();
   const msg = $('burnin-msg');
   try {
     const r = await secureFetch('/api/debug/burnin', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mask: 0, duration_s: 0 })
+    });
+    msg.textContent = r.ok ? '✓ Stopped — display restored' : '✗ ' + await r.text();
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+
+/* ── Static Snow ─────────────────────────────────────────────────── */
+let _snowTimer    = null;
+let _snowInterval = null;
+let _snowEndTime  = 0;
+function snowSelectAll()  { document.querySelectorAll('.snow-tube').forEach(c => c.checked = true);  }
+function snowSelectNone() { document.querySelectorAll('.snow-tube').forEach(c => c.checked = false); }
+
+async function snowStart(duration_s) {
+  const checks = document.querySelectorAll('.snow-tube:checked');
+  if (!checks.length) { toast('Select at least one tube', true); return; }
+  let mask = 0;
+  checks.forEach(c => { mask |= (1 << parseInt(c.value)); });
+  const msg = $('snow-msg');
+  msg.textContent = '…';
+  try {
+    const r = await secureFetch('/api/debug/snow', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mask, duration_s })
+    });
+    if (!r.ok) { msg.textContent = '✗ ' + await r.text(); return; }
+    /* Stop any previous session */
+    if (_snowTimer)    { clearTimeout(_snowTimer);    _snowTimer    = null; }
+    if (_snowInterval) { clearInterval(_snowInterval); _snowInterval = null; }
+    /* Live countdown */
+    _snowEndTime = Date.now() + duration_s * 1000;
+    const tick = () => {
+      const left = _snowEndTime - Date.now();
+      if (left <= 0) {
+        msg.textContent = '✓ Complete — display restored';
+        snowSelectNone();
+        clearInterval(_snowInterval); _snowInterval = null;
+        return;
+      }
+      msg.textContent = `▶ Snow — ${_fmtCountdown(left)} remaining`;
+    };
+    tick();
+    _snowInterval = setInterval(tick, 1000);
+    _snowTimer = setTimeout(() => {
+      if (_snowInterval) { clearInterval(_snowInterval); _snowInterval = null; }
+      msg.textContent = '✓ Complete — display restored';
+      snowSelectNone();
+      _snowTimer = null;
+    }, duration_s * 1000 + 500);
+  } catch(e) { msg.textContent = '✗ ' + e.message; }
+}
+
+async function snowStop() {
+  if (_snowTimer)    { clearTimeout(_snowTimer);    _snowTimer    = null; }
+  if (_snowInterval) { clearInterval(_snowInterval); _snowInterval = null; }
+  snowSelectNone();
+  const msg = $('snow-msg');
+  try {
+    const r = await secureFetch('/api/debug/snow', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mask: 0, duration_s: 0 })
     });

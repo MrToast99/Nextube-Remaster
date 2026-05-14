@@ -86,6 +86,16 @@ void display_set_update_indicator(bool active);
  *  Thread-safe: safe to call from any task. */
 void display_set_burnin_mask(uint8_t mask, uint32_t duration_s);
 
+/** Static-snow burn-in mode: each display tick writes truly random RGB565
+ *  pixels to every tube in mask, exercising each sub-pixel independently.
+ *  More thorough than the colour-cycle because every pixel address receives
+ *  a unique random level on every frame rather than a global solid colour.
+ *  mask:       6-bit field, bit N = tube N (0x3F = all six tubes).
+ *  duration_s: session length in seconds; 0 = run until stopped (mask = 0).
+ *  Calling with mask = 0 stops an active session immediately.
+ *  Thread-safe: safe to call from any task. */
+void display_set_snow_mask(uint8_t mask, uint32_t duration_s);
+
 /* ── Debug helpers ─────────────────────────────────────────────────── */
 /**
  * Override LEDC timer 0 / channel 0 (backlight GPIO) frequency and duty at

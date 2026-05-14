@@ -3,6 +3,7 @@
 #include "rtc_pcf8563.h"
 #include "esp_log.h"
 #include "esp_sntp.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -100,8 +101,19 @@ static void ntp_task(void *arg)
     sntp_set_time_sync_notification_cb(time_sync_cb);
     esp_sntp_init();
 
+/* Re-resolve pool.ntp.org DNS once per day so the cached IP stays fresh
+ * as the NTP pool rotates members.  ntp_apply_servers() does the full
+ * stop → setservername → init cycle which flushes lwIP's address cache. */
+#define NTP_DNS_REFRESH_US  (24LL * 3600LL * 1000000LL)
+
+    int64_t last_dns_refresh = esp_timer_get_time();
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        vTaskDelay(pdMS_TO_TICKS(60000));   /* wake every minute */
+        if (esp_timer_get_time() - last_dns_refresh >= NTP_DNS_REFRESH_US) {
+            last_dns_refresh = esp_timer_get_time();
+            ESP_LOGI(TAG, "Daily NTP pool re-resolution");
+            ntp_apply_servers();
+        }
     }
 }
 

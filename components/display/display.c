@@ -55,6 +55,12 @@ static const uint16_t s_burnin_colors[] = {
     0x0000,   /* black — all min          */
 };
 #define BURNIN_COLOR_COUNT  ((int)(sizeof(s_burnin_colors)/sizeof(s_burnin_colors[0])))
+
+/* Static-snow burn-in: each frame writes truly random RGB565 pixels to every
+ * tube in the mask, exercising each sub-pixel independently rather than as a
+ * uniform colour block.  State mirrors the colour-cycle variables above. */
+static volatile uint8_t s_snow_mask     = 0;
+static volatile time_t  s_snow_end_time = 0;
 #define BURNIN_COLOR_SECS   30   /* seconds per step in the cycle */
 
 static void lcd_cmd(uint8_t cmd)
@@ -276,6 +282,44 @@ void display_set_burnin_mask(uint8_t mask, uint32_t duration_s)
              duration_s ? "timed" : "manual");
 }
 
+/* Fill one tube with a single frame of random RGB565 pixels — the core of
+ * the static-snow burn-in.  One scan-line of random bytes is generated at a
+ * time using the ESP32 hardware RNG (esp_fill_random) to keep stack usage
+ * minimal (160 B) while ensuring every pixel is independently randomised.
+ * The same s_burnin_shift_x hourly pixel-shift is applied to the CASET
+ * window so snow co-operates with the column-drift anti-burn-in. */
+#include "esp_random.h"
+static void display_fill_snow(int tube)
+{
+    if (tube < 0 || tube >= LCD_COUNT) return;
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x);
+    lcd_cmd(0x2A);
+    uint8_t ca[] = {0, ox, 0, (uint8_t)(ox + LCD_WIDTH - 1)};
+    lcd_data(ca, 4);
+    lcd_cmd(0x2B);
+    uint8_t ra[] = {0, LCD_OFFSET_Y, 0, (uint8_t)(LCD_OFFSET_Y + LCD_HEIGHT - 1)};
+    lcd_data(ra, 4);
+    lcd_cmd(0x2C);
+    gpio_set_level(PIN_LCD_DC, 1);
+    uint8_t line[LCD_WIDTH * 2];   /* 160 B — always SRAM, within stack budget */
+    for (int y = 0; y < LCD_HEIGHT; y++) {
+        esp_fill_random(line, sizeof(line));
+        spi_transaction_t t = {.length = sizeof(line) * 8, .tx_buffer = line};
+        spi_device_transmit(spi_dev, &t);
+    }
+    deselect_all();
+}
+
+void display_set_snow_mask(uint8_t mask, uint32_t duration_s)
+{
+    s_snow_mask     = mask & 0x3F;
+    s_snow_end_time = (mask && duration_s) ? time(NULL) + (time_t)duration_s : 0;
+    ESP_LOGI(TAG, "snow mask: 0x%02X  duration: %s",
+             (unsigned)s_snow_mask,
+             duration_s ? "timed" : "manual");
+}
+
 /* ════════════════════════════════════════════════════════════════════
  *  JPEG asset loader
  * ════════════════════════════════════════════════════════════════════ */
@@ -440,6 +484,12 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
 void display_show_image(int tube, const char *path)
 {
     if (tube < 0 || tube >= LCD_COUNT || !path) return;
+    /* Skip any tube that is currently held by the colour-cycle or snow burn-in.
+     * Both modes overwrite the tube in the display task after normal rendering
+     * completes, so writing a JPEG here would be immediately discarded.
+     * Skipping avoids the image-cache lookup, JPEG decode (on miss), and the
+     * full ~8 ms SPI frame write — for no visible benefit on the masked tube. */
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
 
     int w = 0, h = 0;
     const uint8_t *rgb_buf = img_cache_get(path, &w, &h);
@@ -994,6 +1044,11 @@ static void render_spectrum(const nextube_config_t *cfg)
 
     for (int tube = 0; tube < LCD_COUNT; tube++) {
 
+        /* Skip masked tubes — burn-in or snow will overwrite them immediately
+         * after render_spectrum returns, so generating the spectrum frame and
+         * pushing it over SPI would produce no visible output. */
+        if ((s_burnin_mask | s_snow_mask) & (1u << tube)) continue;
+
         /* Precompute RGB565 colour for every (bar, segment) on this tube.
          * 52 spec_seg_color() calls here replace 640 calls inside the row loop. */
         uint16_t seg_color[SPEC_BARS_PER_TUBE][SPEC_SEGS];
@@ -1108,7 +1163,11 @@ static void render_album(const nextube_config_t *cfg,
 {
     album_load_list();
     if (s_album_count == 0) {
-        for (int i = 0; i < LCD_COUNT; i++) display_fill(i, 0x0000);
+        for (int i = 0; i < LCD_COUNT; i++) {
+            /* Skip masked tubes — burn-in/snow will cover them anyway. */
+            if (!((s_burnin_mask | s_snow_mask) & (1u << i)))
+                display_fill(i, 0x0000);
+        }
         return;
     }
     uint32_t interval_ms = cfg->album_switch_ms ? cfg->album_switch_ms : 2000;
@@ -1675,6 +1734,23 @@ static void display_task(void *arg)
                 for (int _t = 0; _t < LCD_COUNT; _t++) {
                     if (s_burnin_mask & (1u << _t))
                         display_fill(_t, col);
+                }
+            }
+        }
+
+        /* Static-snow burn-in: write random RGB565 pixels to masked tubes.
+         * Runs independently of the colour-cycle above — both modes can be
+         * active on different tube subsets simultaneously. */
+        if (s_snow_mask) {
+            time_t now_t = time(NULL);
+            if (s_snow_end_time != 0 && now_t >= s_snow_end_time) {
+                s_snow_mask     = 0;
+                s_snow_end_time = 0;
+                ESP_LOGI(TAG, "snow timer expired — restoring normal display");
+            } else {
+                for (int _t = 0; _t < LCD_COUNT; _t++) {
+                    if (s_snow_mask & (1u << _t))
+                        display_fill_snow(_t);
                 }
             }
         }
