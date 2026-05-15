@@ -227,15 +227,18 @@ static void schedule_wifi_reconnect(void)
 static esp_err_t api_post_settings(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    int len = r->content_len;
-    if (len <= 0 || len > 4096) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad length"), ESP_FAIL;
-    char *buf = malloc(len + 1);
+    /* Validate on the signed content_len first (catches negative/absent header),
+     * then widen to size_t so all subsequent arithmetic is unsigned. */
+    if (r->content_len <= 0 || r->content_len > 4096)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad length"), ESP_FAIL;
+    size_t len = (size_t)r->content_len;
+    char *buf = malloc((size_t)len + 1);
     if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
-    int rx = 0;
+    size_t rx = 0;
     while (rx < len) {
         int n = httpd_req_recv(r, buf + rx, len - rx);
         if (n <= 0) { free(buf); return ESP_FAIL; }
-        rx += n;
+        rx += (size_t)n;
     }
     buf[len] = '\0';
 
@@ -374,17 +377,18 @@ static esp_err_t api_post_settings(httpd_req_t *r)
  * Loops on httpd_req_recv to handle TCP fragmentation cleanly. */
 static cJSON *read_json_body(httpd_req_t *r, size_t max_len)
 {
-    int len = r->content_len;
-    if (len <= 0 || (size_t)len > max_len) {
+    /* Validate on the signed content_len first, then widen to size_t. */
+    if (r->content_len <= 0 || (size_t)r->content_len > max_len) {
         httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid body length");
         return NULL;
     }
-    char *buf = malloc(len + 1);
+    size_t len = (size_t)r->content_len;
+    char *buf = malloc((size_t)len + 1);
     if (!buf) {
         httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
         return NULL;
     }
-    int rx = 0;
+    size_t rx = 0;
     while (rx < len) {
         int n = httpd_req_recv(r, buf + rx, len - rx);
         if (n <= 0) {
@@ -392,7 +396,7 @@ static cJSON *read_json_body(httpd_req_t *r, size_t max_len)
             httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error");
             return NULL;
         }
-        rx += n;
+        rx += (size_t)n;
     }
     buf[rx] = '\0';
     cJSON *root = cJSON_Parse(buf);
@@ -1196,8 +1200,7 @@ static esp_err_t api_themes(httpd_req_t *r)
         struct dirent *e;
         while ((e = readdir(dp)) && count < MAX_THEMES) {
             if (e->d_type == DT_DIR && e->d_name[0] != '.') {
-                strncpy(names[count], e->d_name, THEME_NAME_MAX - 1);
-                names[count][THEME_NAME_MAX - 1] = '\0';
+                strlcpy(names[count], e->d_name, THEME_NAME_MAX);
                 count++;
             }
         }
@@ -1207,16 +1210,13 @@ static esp_err_t api_themes(httpd_req_t *r)
     /* Insertion sort (small list — no need for qsort overhead) */
     for (int i = 1; i < count; i++) {
         char tmp[THEME_NAME_MAX];
-        strncpy(tmp, names[i], THEME_NAME_MAX - 1);
-        tmp[THEME_NAME_MAX - 1] = '\0';
+        strlcpy(tmp, names[i], THEME_NAME_MAX);
         int j = i - 1;
         while (j >= 0 && strcmp(names[j], tmp) > 0) {
-            strncpy(names[j + 1], names[j], THEME_NAME_MAX - 1);
-            names[j + 1][THEME_NAME_MAX - 1] = '\0';
+            strlcpy(names[j + 1], names[j], THEME_NAME_MAX);
             j--;
         }
-        strncpy(names[j + 1], tmp, THEME_NAME_MAX - 1);
-        names[j + 1][THEME_NAME_MAX - 1] = '\0';
+        strlcpy(names[j + 1], tmp, THEME_NAME_MAX);
     }
 
     /* Build JSON: {"themes":["A","B",...]} */
