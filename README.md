@@ -367,6 +367,10 @@ Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) aut
 3. Click **Connect** and select the device's COM port
 4. Set baud rate to **460800**
 5. Flash `nextube-fw-full.bin` at offset `0x0`
+6. Once flashing is complete, click **Disconnect** in ESPConnect to release the serial port
+7. **Unplug the USB cable, wait 3 seconds, then plug it back in** (or use the power switch if you have one)
+
+> ⚠️ **Steps 6 and 7 are required.** The Nextube cannot start its WiFi setup network while ESPConnect is still connected to the serial port. After power-cycling you will see the display light up and the `Nextube-Setup` WiFi network will appear within about 10 seconds. If the network does not appear, unplug and replug the USB cable once more.
 
 > **Note:** Web Serial requires Chrome or Edge. Firefox is not supported. Use USB-A to USB-C, C-C cables don't seem to work.
 
