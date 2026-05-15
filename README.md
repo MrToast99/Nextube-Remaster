@@ -784,6 +784,12 @@ This is a community reverse-engineering effort. Key areas needing help:
 
 MIT License. This is an independent community project with no affiliation to Rotrics.
 
+## Community
+
+**A big thank you to Andrew Lau** for sharing and promoting this firmware in the Nextube Facebook community — it's genuinely appreciated!
+
+I'm not really active on Facebook, so if you have a bug report, feature request, or question, **GitHub is the best place to reach me**: open an [issue](https://github.com/MrToast99/Nextube-Remaster/issues) or start a [discussion](https://github.com/MrToast99/Nextube-Remaster/discussions) and I'll get back to you there.
+
 ## Acknowledgements
 
 - [previoustube/previoustube](https://github.com/previoustube/previoustube) — pioneering reverse engineering of the Nextube hardware
