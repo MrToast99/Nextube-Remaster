@@ -184,23 +184,29 @@ static void led_task(void *arg)
         uint8_t led_brightness;
         app_mode_t current_mode;
         uint8_t spectrum_rgb[3];
+        uint8_t spectrum_led_source;
         backlight_mode_t backlight_mode;
         uint8_t backlight_rgb[LED_COUNT][3];
 
         config_lock();
         const nextube_config_t *cfg = config_get();
-        led_brightness = cfg->led_brightness;
-        current_mode   = cfg->current_mode;
+        led_brightness      = cfg->led_brightness;
+        current_mode        = cfg->current_mode;
         memcpy(spectrum_rgb,  cfg->spectrum_rgb,  sizeof(spectrum_rgb));
-        backlight_mode = cfg->backlight_mode;
+        spectrum_led_source = cfg->spectrum_led_source;
+        backlight_mode      = cfg->backlight_mode;
         memcpy(backlight_rgb, cfg->backlight_rgb, sizeof(backlight_rgb));
         config_unlock();
 
         /* led_brightness is 0=off, 100=full bright — use directly. */
         leds_set_brightness(led_brightness);
 
-        /* ── Spectrum mode: drive each LED at per-band audio brightness ── */
-        if (current_mode == APP_MODE_SPECTRUM) {
+        /* ── Spectrum mode: drive each LED at per-band audio brightness ──
+         * spectrum_led_source == 0: amplitude-modulate the custom glow colour.
+         * spectrum_led_source == 1: fall through to the accent mode switch so
+         *   the LEDs animate in Static/Breath/Rainbow/Off as configured — the
+         *   LCD still shows spectrum bars; only the LED source differs. */
+        if (current_mode == APP_MODE_SPECTRUM && spectrum_led_source == 0) {
             float bands[MIC_BAND_COUNT];
             mic_get_bands(bands);
             /* Average the 4 frequency bands assigned to each tube/LED */

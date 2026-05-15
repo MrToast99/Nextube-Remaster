@@ -50,6 +50,10 @@ static void set_defaults(void)
     s_cfg.spectrum_lcd_rgb[1] = 220;
     s_cfg.spectrum_lcd_rgb[2] = 30;
 
+    /* Spectrum LED source — 0 = custom glow colour (amplitude-modulated),
+     * 1 = follow configured accent mode. Default 0 for backward compatibility. */
+    s_cfg.spectrum_led_source = 0;
+
     /* Clock-face update indicator — opt-in (off by default) */
     s_cfg.notify_update_on_display = false;
 
@@ -130,6 +134,12 @@ static void set_defaults(void)
     /* Rotation off by default; user must explicitly enable it */
     s_cfg.rotation_enabled    = false;
     s_cfg.rotation_interval_s = 60;
+
+    /* Theme rotation off by default; 0 count = all installed themes */
+    s_cfg.theme_rotation_enabled    = false;
+    s_cfg.theme_rotation_interval_s = 300;   /* 5 minutes */
+    s_cfg.theme_rotation_count      = 0;
+    memset(s_cfg.theme_rotation_themes, 0, sizeof(s_cfg.theme_rotation_themes));
 
     /* Scheduled burn-in — off by default */
     s_cfg.burnin_auto_enabled    = false;
@@ -386,6 +396,32 @@ static void parse_json(const char *json, size_t len)
     json_read_u16(root, "rotation_interval_s", &s_cfg.rotation_interval_s);
     if (s_cfg.rotation_interval_s == 0) s_cfg.rotation_interval_s = 60;
 
+    /* Theme rotation */
+    {
+        cJSON *tr = cJSON_GetObjectItem(root, "theme_rotation_enabled");
+        if (cJSON_IsBool(tr)) s_cfg.theme_rotation_enabled = cJSON_IsTrue(tr);
+    }
+    json_read_u16(root, "theme_rotation_interval_s", &s_cfg.theme_rotation_interval_s);
+    if (s_cfg.theme_rotation_interval_s == 0) s_cfg.theme_rotation_interval_s = 300;
+    {
+        cJSON *ta = cJSON_GetObjectItem(root, "theme_rotation_themes");
+        if (cJSON_IsArray(ta)) {
+            int cnt = cJSON_GetArraySize(ta);
+            if (cnt > 16) cnt = 16;
+            s_cfg.theme_rotation_count = 0;
+            memset(s_cfg.theme_rotation_themes, 0, sizeof(s_cfg.theme_rotation_themes));
+            for (int i = 0; i < cnt; i++) {
+                cJSON *v = cJSON_GetArrayItem(ta, i);
+                if (cJSON_IsString(v) && v->valuestring && v->valuestring[0]) {
+                    strncpy(s_cfg.theme_rotation_themes[s_cfg.theme_rotation_count],
+                            v->valuestring, 31);
+                    s_cfg.theme_rotation_themes[s_cfg.theme_rotation_count][31] = '\0';
+                    s_cfg.theme_rotation_count++;
+                }
+            }
+        }
+    }
+
     /* Scheduled burn-in */
     {
         cJSON *be = cJSON_GetObjectItem(root, "burnin_auto_enabled");
@@ -453,6 +489,10 @@ static void parse_json(const char *json, size_t len)
             }
         }
     }
+
+    /* spectrum_led_source — 0 = custom glow, 1 = follow accent mode */
+    json_read_u8(root, "spectrum_led_source", &s_cfg.spectrum_led_source);
+    if (s_cfg.spectrum_led_source > 1) s_cfg.spectrum_led_source = 0;
 
     /* notify_update_on_display — opt-in clock-face update indicator */
     {
@@ -742,6 +782,13 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "enabled_modes",      s_cfg.enabled_modes);
     cJSON_AddBoolToObject  (root, "rotation_enabled",   s_cfg.rotation_enabled);
     cJSON_AddNumberToObject(root, "rotation_interval_s", s_cfg.rotation_interval_s);
+    cJSON_AddBoolToObject  (root, "theme_rotation_enabled",    s_cfg.theme_rotation_enabled);
+    cJSON_AddNumberToObject(root, "theme_rotation_interval_s", s_cfg.theme_rotation_interval_s);
+    {
+        cJSON *ta = cJSON_AddArrayToObject(root, "theme_rotation_themes");
+        for (int i = 0; i < s_cfg.theme_rotation_count; i++)
+            cJSON_AddItemToArray(ta, cJSON_CreateString(s_cfg.theme_rotation_themes[i]));
+    }
 
     cJSON_AddBoolToObject  (root, "burnin_auto_enabled",    s_cfg.burnin_auto_enabled);
     cJSON_AddNumberToObject(root, "burnin_auto_mask",       s_cfg.burnin_auto_mask);
@@ -769,6 +816,8 @@ char *config_to_json(void)
         for (int i = 0; i < 3; i++)
             cJSON_AddItemToArray(sp, cJSON_CreateNumber(s_cfg.spectrum_lcd_rgb[i]));
     }
+
+    cJSON_AddNumberToObject(root, "spectrum_led_source", s_cfg.spectrum_led_source);
 
     cJSON_AddBoolToObject(root, "notify_update_on_display", s_cfg.notify_update_on_display);
     cJSON_AddNumberToObject(root, "lcd_invert_mask", s_cfg.lcd_invert_mask);
@@ -841,6 +890,19 @@ void config_advance_mode(void)
         ESP_LOGI(TAG, "Rotation: advanced to mode %d", m);
     }
 
+    xSemaphoreGiveRecursive(s_mutex);
+}
+
+/* Update the active theme in RAM without a flash write.
+ * Used by theme auto-rotation so that frequent theme changes do not wear
+ * the flash.  The theme is persisted only when the user explicitly saves
+ * settings via the web UI.  Thread-safe (recursive mutex). */
+void config_set_theme(const char *theme)
+{
+    if (!theme || theme[0] == '\0') return;
+    xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
+    strncpy(s_cfg.theme, theme, sizeof(s_cfg.theme) - 1);
+    s_cfg.theme[sizeof(s_cfg.theme) - 1] = '\0';
     xSemaphoreGiveRecursive(s_mutex);
 }
 

@@ -45,6 +45,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Spectrum mode (microphone audio visualiser — 24 Goertzel bands, 4 per tube → LED + LCD) | ✅ Working |
 | Per-mode enable/disable toggles | ✅ Working |
 | Auto mode rotation with configurable interval | ✅ Working |
+| Auto theme rotation with configurable interval and per-theme selection | ✅ Working |
 | LittleFS file browser with upload/delete/mkdir/rename | ✅ Working |
 | Automatic firmware update check (compares against latest GitHub release) | ✅ Working |
 | Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
@@ -261,6 +262,17 @@ Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in 
 
 Peak-hold: instant attack, exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
 
+#### Spectrum LED Control
+
+The LED ring behaviour in Spectrum mode is independently configurable under **Display → Spectrum Mode → LED Source**:
+
+| Source | Behaviour |
+|---|---|
+| **Custom glow colour** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. The colour is set by the **LED Glow Colour** picker and is the same for all LEDs. |
+| **Follow accent mode** | The LEDs ignore the audio entirely and animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colours from the LED settings. The LCD bars still respond to the microphone normally. |
+
+The **LCD Bar Colour** picker is separate from the LED source and always applies — it controls the colour of the frequency bars drawn on the LCDs regardless of which LED source is selected.
+
 ### Replacement LCD Panels
 
 The six original displays are **80×160 px ST7735 "Green Tab" IPS panels**. If one or more tubes fail they can be replaced with compatible ST7735S modules — the most common drop-in replacement confirmed to work with this firmware is:
@@ -466,7 +478,7 @@ After setup, access the management interface via:
 
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
-- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, Spectrum LED glow colour, Spectrum LCD bar colour, Spectrum noise floor threshold, **Advanced Display** (see below)
+- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, auto theme rotation (cycle all or selected themes on a timer), Spectrum LED source (custom amplitude-modulated glow colour **or** follow configured accent mode), Spectrum LCD bar colour, Spectrum noise floor threshold, **Advanced Display** (see below)
 - **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
@@ -533,12 +545,21 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 | **YouTube** | Live subscriber/follower count |
 | **Weather** | Two panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon. Either panel can be disabled (but not both). Temperatures rounded to whole degrees; leading zeros suppressed; minus sign position shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
-| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
+| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
 | **Scoreboard** | Stub — displays zeros |
 
 ### Mode Rotation
 
 Enable **Auto Rotation** in Display settings to automatically cycle through all enabled modes on a configurable interval (15 s → 1 hour). When disabled, modes only change via the Quick Actions buttons or the physical left/right touch pads. Any manual mode change resets the rotation timer.
+
+### Theme Rotation
+
+Enable **Theme Rotation** in Display settings to automatically cycle through themes on a timer (1 minute → 4 hours, default 5 minutes).
+
+- **All themes** — leave every checkbox ticked (or click **All**) to rotate through every theme installed on the device. Any custom theme you upload to `/images/themes/` is picked up automatically at the next rotation event — no restart required.
+- **Selected themes** — uncheck themes you want to exclude. Only the ticked themes participate in rotation. Click **None** to start a fresh selection.
+- The rotation order is alphabetical. Any manual theme change (saving a new theme via the dropdown) resets the timer.
+- The active theme is held in RAM during rotation and is not written to flash on each step. The theme shown at boot will be whichever was last explicitly saved via the web UI.
 
 ### Touch Buttons
 

@@ -288,9 +288,14 @@ select option{background:var(--accent);color:var(--text)}
     <h2>Spectrum Mode</h2>
     <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left &rarr; treble right).</p>
     <div class="field" style="display:grid;grid-template-columns:max-content 44px 1fr;gap:.6rem 1rem;align-items:center">
-      <label>LED Glow Colour</label>
+      <label>LED Source</label>
+      <select id="f-spec-led-src" onchange="specLedSrcChange()" style="grid-column:2/4;height:36px;background:var(--surface);color:var(--text);border:1px solid #444;border-radius:6px;padding:0 .5rem;font-size:.9rem">
+        <option value="0">Custom glow colour (amplitude-modulated)</option>
+        <option value="1">Follow accent mode (Static / Breath / Rainbow / Off)</option>
+      </select>
+      <label id="spec-color-label">LED Glow Colour</label>
       <input type="color" id="f-spec-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
-      <span style="color:var(--dim);font-size:.82rem">Ambient LED ring colour</span>
+      <span id="spec-color-hint" style="color:var(--dim);font-size:.82rem">Amplitude-modulated LED ring colour in Spectrum mode</span>
       <label>LCD Bar Colour</label>
       <input type="color" id="f-spec-lcd-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
       <span style="color:var(--dim);font-size:.82rem">Bar colour for the LCD spectrum display</span>
@@ -361,6 +366,41 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
   </div>
+  <!-- Theme Rotation -->
+  <div class="card">
+    <h2>Theme Rotation</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
+      Automatically cycles through themes on a timer. Choose which themes to
+      include, or leave all checked to rotate every installed theme.
+    </p>
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
+        <input type="checkbox" id="theme-rot-enabled" onchange="onThemeRotToggle()">
+        Enable Theme Rotation
+      </label>
+      <div id="theme-rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;opacity:0.4">
+        <label for="theme-rot-interval" style="white-space:nowrap">Interval per theme:</label>
+        <select id="theme-rot-interval" class="select">
+          <option value="60">1 minute</option>
+          <option value="300" selected>5 minutes</option>
+          <option value="600">10 minutes</option>
+          <option value="1800">30 minutes</option>
+          <option value="3600">1 hour</option>
+          <option value="7200">2 hours</option>
+          <option value="14400">4 hours</option>
+        </select>
+      </div>
+    </div>
+    <div id="theme-rot-themes-wrap" style="opacity:0.4">
+      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.4rem">
+        <span style="font-size:.85rem;color:var(--dim)">Themes to include:</span>
+        <button onclick="themeRotSelectAll(true)"  style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">All</button>
+        <button onclick="themeRotSelectAll(false)" style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">None</button>
+      </div>
+      <div id="theme-rot-list" style="display:flex;flex-wrap:wrap;gap:.4rem .8rem"></div>
+    </div>
+  </div>
+
   <!-- Scheduled Anti Burn-in / LCD Refresh -->
   <div class="card">
     <h2>Scheduled Anti Burn-in / LCD Refresh</h2>
@@ -1097,6 +1137,7 @@ const DEFAULT_THEMES = [
   'GlitchGR','LightFuture','NixieOY','NotionRain','RedDigits',
   'RetroPaper','WireMesh'
 ];
+let s_themes = DEFAULT_THEMES.slice();  /* kept in sync by loadThemes() */
 
 function populateThemes(themes) {
   const sel = $('f-theme');
@@ -1117,7 +1158,9 @@ async function loadThemes(manual) {
     const data = await api('themes');
     const themes = data?.themes;
     if (themes && themes.length) {
+      s_themes = themes;
       populateThemes(themes);
+      buildThemeRotList();   /* refresh rotation checkboxes if card is visible */
       if (manual) toast('Themes refreshed (' + themes.length + ' found)');
     } else if (manual) {
       toast('No new themes found on device — showing defaults');
@@ -1226,11 +1269,13 @@ async function loadSettings() {
   $('m-weather').checked     = !!(em & (1 << 7));
   $('m-spectrum').checked    = !!(em & (1 << 8));
 
-  /* Spectrum colour */
+  /* Spectrum colours and LED source */
   const sc = cfg.spectrum_RGB || [50, 80, 100];
   $('f-spec-color').value = '#' + sc.map(v => v.toString(16).padStart(2,'0')).join('');
   const slc = cfg.spectrum_lcd_RGB || [30, 220, 30];
   $('f-spec-lcd-color').value = '#' + slc.map(v => v.toString(16).padStart(2,'0')).join('');
+  $('f-spec-led-src').value = String(cfg.spectrum_led_source || 0);
+  specLedSrcChange();  /* show/hide custom colour row to match loaded value */
 
   /* Mode rotation */
   const rotEnabled = cfg.rotation_enabled === true;
@@ -1244,6 +1289,20 @@ async function loadSettings() {
   }
   rotSel.value = bestOpt.value;
   $('rot-interval-wrap').style.opacity = rotEnabled ? '1' : '0.4';
+
+  /* Theme rotation */
+  const themeRotEn = cfg.theme_rotation_enabled === true;
+  $('theme-rot-enabled').checked = themeRotEn;
+  const themeRotInt = cfg.theme_rotation_interval_s || 300;
+  const trSel = $('theme-rot-interval');
+  let trBest = trSel.options[1]; /* default: 5 min */
+  for (let i = 0; i < trSel.options.length; i++) {
+    if (+trSel.options[i].value === themeRotInt) { trBest = trSel.options[i]; break; }
+  }
+  trSel.value = trBest.value;
+  $('theme-rot-interval-wrap').style.opacity = themeRotEn ? '1' : '0.4';
+  buildThemeRotList(cfg.theme_rotation_themes || []);  /* [] = all themes checked */
+  $('theme-rot-themes-wrap').style.opacity   = themeRotEn ? '1' : '0.4';
 
   /* Scheduled burn-in */
   {
@@ -1324,6 +1383,42 @@ function onRotToggle() {
   $('rot-interval-wrap').style.opacity = $('rot-enabled').checked ? '1' : '0.4';
 }
 
+/* ── Theme rotation ─────────────────────────────────────────────────── */
+function onThemeRotToggle() {
+  const on = $('theme-rot-enabled').checked;
+  $('theme-rot-interval-wrap').style.opacity = on ? '1' : '0.4';
+  $('theme-rot-themes-wrap').style.opacity   = on ? '1' : '0.4';
+  markDirty();
+}
+
+/* Build theme checkboxes from the cached s_themes list.
+ * selectedNames: string[] of theme names to check; empty array = check all. */
+function buildThemeRotList(selectedNames) {
+  const wrap = $('theme-rot-list');
+  if (!wrap) return;
+  /* Preserve current checked state when called without an explicit list */
+  const prev = selectedNames !== undefined ? selectedNames
+    : [...wrap.querySelectorAll('input')].filter(c => c.checked).map(c => c.dataset.theme);
+  wrap.innerHTML = '';
+  s_themes.forEach(t => {
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:.35rem;font-size:.85rem;cursor:pointer;white-space:nowrap';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.dataset.theme = t; cb.className = 'theme-rot-cb';
+    /* Empty prev list = "all themes" → check every box */
+    cb.checked = (prev.length === 0) || prev.includes(t);
+    cb.onchange = markDirty;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(t));
+    wrap.appendChild(label);
+  });
+}
+
+function themeRotSelectAll(checked) {
+  document.querySelectorAll('.theme-rot-cb').forEach(cb => cb.checked = checked);
+  markDirty();
+}
+
 /* ── Scheduled burn-in ─────────────────────────────────────────── */
 function buildBurninHourSelect() {
   const sel = $('bi-hour');
@@ -1384,9 +1479,18 @@ async function saveSettings() {
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     spectrum_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-color').value.replace('#','')),
     spectrum_lcd_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-lcd-color').value.replace('#','')),
+    spectrum_led_source: +$('f-spec-led-src').value,
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,
     rotation_interval_s: +$('rot-interval').value,
+    theme_rotation_enabled:    $('theme-rot-enabled').checked,
+    theme_rotation_interval_s: +$('theme-rot-interval').value,
+    theme_rotation_themes: (() => {
+      const all = [...document.querySelectorAll('.theme-rot-cb')];
+      const checked = all.filter(c => c.checked).map(c => c.dataset.theme);
+      /* Empty array = "all themes" — avoids storing every name in flash */
+      return checked.length === all.length ? [] : checked;
+    })(),
     ssid: $('f-ssid').value, ...($('f-pass').value ? {password: $('f-pass').value} : {}), hostname: $('f-hostname').value,
     timezone: $('f-tz').value,
     ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
@@ -1848,6 +1952,17 @@ function dbgGateSync(fromNum) {
   if ($('f-gate-slider')) $('f-gate-slider').value = Math.min(val, 1000);
   if ($('f-gate-num'))    $('f-gate-num').value    = val;
 }
+/* Toggle visibility of the custom LED glow colour row based on LED source selection.
+ * Source 0 = custom colour (show picker); Source 1 = accent mode (hide picker). */
+function specLedSrcChange() {
+  const show = $('f-spec-led-src').value === '0';
+  const disp = show ? '' : 'none';
+  $('spec-color-label').style.display = disp;
+  $('f-spec-color').style.display     = disp;
+  $('spec-color-hint').style.display  = disp;
+  markDirty();
+}
+
 /* Called when user-facing Spectrum card slider or number input changes */
 function specGateSync(fromNum) {
   const val = fromNum

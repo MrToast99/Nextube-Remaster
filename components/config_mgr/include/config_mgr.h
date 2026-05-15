@@ -60,6 +60,8 @@ typedef struct {
     uint8_t          backlight_rgb[6][3];
     uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
     uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
+    uint8_t          spectrum_led_source;   /* 0 = custom glow colour (amplitude-modulated),
+                                               1 = follow configured accent mode (Static/Breath/Rainbow/Off) */
     bool             notify_update_on_display; /* true = draw red indicator on tube 6 when a
                                                   firmware update is available.  Driven by the
                                                   web UI via POST /api/update_notify. */
@@ -144,6 +146,14 @@ typedef struct {
     bool             rotation_enabled;     /* false = manual-only mode switching */
     uint16_t         rotation_interval_s;  /* seconds per mode; 0 treated as 60 */
 
+    /* Theme Rotation – auto-cycle through themes on a timer.
+     * theme_rotation_count == 0 → rotate all installed themes.
+     * theme_rotation_count  > 0 → rotate only the listed themes. */
+    bool             theme_rotation_enabled;         /* false = manual-only */
+    uint16_t         theme_rotation_interval_s;      /* seconds per theme; 0 treated as 300 */
+    uint8_t          theme_rotation_count;           /* 0 = all themes */
+    char             theme_rotation_themes[16][32];  /* selected theme names */
+
     /* Scheduled Burn-in – automatic LCD colour-cycle recovery.
      * Fires at midnight on the configured interval (weekly = every Sunday,
      * monthly = 1st of month).  Calls display_set_burnin_mask() autonomously
@@ -183,6 +193,7 @@ void config_reset(void);
  *  Skips modes that are not set in enabled_modes.  Thread-safe. */
 void config_set_mode    (app_mode_t mode); /* RAM-only – no flash write */
 void config_advance_mode(void);            /* RAM-only – no flash write */
+void config_set_theme   (const char *theme); /* RAM-only – no flash write */
 
 /** Return the canonical display name string for a mode enum value.
  *  Returns "Clock" for any out-of-range value.

@@ -1515,6 +1515,79 @@ static void album_load_list(void)
     s_album_loaded = true;
 }
 
+/* Scan /spiffs/images/themes/, build a sorted rotation pool (filtered to the
+ * user's selection when sel_count > 0), then advance cfg->theme to the next
+ * entry.  Called at most once per theme_rotation_interval_s — the SPIFFS scan
+ * cost is negligible at that frequency.  No mutex needed: called only from
+ * the display task; config_set_theme() handles its own mutex for the write. */
+#define MAX_THEMES_ROT     48
+#define THEME_NAME_MAX_ROT 32
+
+static void advance_theme(const char *current_theme,
+                          uint8_t sel_count,
+                          const char sel[][THEME_NAME_MAX_ROT])
+{
+    /* 1. Collect all installed theme directory names */
+    char all[MAX_THEMES_ROT][THEME_NAME_MAX_ROT];
+    int  total = 0;
+    DIR *dp = opendir("/spiffs/images/themes");
+    if (dp) {
+        struct dirent *e;
+        while ((e = readdir(dp)) && total < MAX_THEMES_ROT) {
+            if (e->d_type == DT_DIR && e->d_name[0] != '.') {
+                strncpy(all[total], e->d_name, THEME_NAME_MAX_ROT - 1);
+                all[total][THEME_NAME_MAX_ROT - 1] = '\0';
+                total++;
+            }
+        }
+        closedir(dp);
+    }
+    /* 2. Insertion sort (matches api_themes() in web_server.c) */
+    for (int i = 1; i < total; i++) {
+        char tmp[THEME_NAME_MAX_ROT];
+        strncpy(tmp, all[i], THEME_NAME_MAX_ROT);
+        int j = i - 1;
+        while (j >= 0 && strcmp(all[j], tmp) > 0) {
+            strncpy(all[j + 1], all[j], THEME_NAME_MAX_ROT);
+            j--;
+        }
+        strncpy(all[j + 1], tmp, THEME_NAME_MAX_ROT);
+    }
+    /* 3. Build rotation pool */
+    char pool[MAX_THEMES_ROT][THEME_NAME_MAX_ROT];
+    int  pool_count = 0;
+    if (sel_count == 0) {
+        /* All installed themes */
+        for (int i = 0; i < total; i++) {
+            strncpy(pool[pool_count], all[i], THEME_NAME_MAX_ROT - 1);
+            pool[pool_count][THEME_NAME_MAX_ROT - 1] = '\0';
+            pool_count++;
+        }
+    } else {
+        /* Intersection: only selected themes that are actually installed */
+        for (int i = 0; i < total; i++) {
+            for (int s = 0; s < sel_count; s++) {
+                if (strcmp(all[i], sel[s]) == 0) {
+                    strncpy(pool[pool_count], all[i], THEME_NAME_MAX_ROT - 1);
+                    pool[pool_count][THEME_NAME_MAX_ROT - 1] = '\0';
+                    pool_count++;
+                    break;
+                }
+            }
+        }
+    }
+    if (pool_count <= 1) return;  /* nothing to cycle */
+
+    /* 4. Find current theme; advance with wrap-around */
+    int cur = -1;
+    for (int i = 0; i < pool_count; i++) {
+        if (strcmp(pool[i], current_theme) == 0) { cur = i; break; }
+    }
+    int next = (cur < 0) ? 0 : (cur + 1) % pool_count;
+    config_set_theme(pool[next]);
+    ESP_LOGI(TAG, "Theme rotation: \"%s\"", pool[next]);
+}
+
 static void render_album(const nextube_config_t *cfg,
                          TickType_t *last_switch, bool force)
 {
@@ -1740,8 +1813,9 @@ static void display_task(void *arg)
     bool          last_leading_zero = false;    /* leading-zero change detection */
     bool          last_bl_on    = true;        /* backlight on/off tracking */
     uint8_t       last_bl_brt   = 255;         /* sentinel: force-apply on first tick */
-    TickType_t    album_switch       = 0;
-    TickType_t    rotation_tick      = 0;      /* tick when current mode started */
+    TickType_t    album_switch        = 0;
+    TickType_t    rotation_tick       = 0;     /* tick when current mode started */
+    TickType_t    theme_rotation_tick = 0;     /* tick when current theme started */
     int           weather_panel      = 0;      /* 0 = temp, 1 = humidity */
     TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
     bool          first              = true;
@@ -1749,7 +1823,8 @@ static void display_task(void *arg)
     int           burnin_last_run_yday  = -1;  /* day-of-year the scheduled burn-in last ran */
 
     TickType_t wake = xTaskGetTickCount();
-    rotation_tick = wake;
+    rotation_tick       = wake;
+    theme_rotation_tick = wake;
 
     while (1) {
         nextube_config_t cfg_snap;
@@ -1774,6 +1849,26 @@ static void display_task(void *arg)
             if (elapsed_ms >= (uint32_t)interval * 1000u) {
                 config_advance_mode();   /* updates cfg->current_mode + saves */
                 rotation_tick = xTaskGetTickCount();
+            }
+        }
+
+        /* ── Theme rotation ─────────────────────────────────────────────
+         * Fires independently of mode rotation.  Any theme change (web UI
+         * save or a previous rotation step) resets the timer so each theme
+         * gets its full interval.  advance_theme() is RAM-only; the cache
+         * flush fires on the next tick when theme_changed becomes true.  */
+        if (theme_changed) {
+            theme_rotation_tick = xTaskGetTickCount();
+        } else if (cfg->theme_rotation_enabled && !first) {
+            uint16_t t_int = cfg->theme_rotation_interval_s
+                             ? cfg->theme_rotation_interval_s : 300;
+            uint32_t t_ms  = (uint32_t)pdTICKS_TO_MS(
+                                 xTaskGetTickCount() - theme_rotation_tick);
+            if (t_ms >= (uint32_t)t_int * 1000u) {
+                advance_theme(cfg->theme,
+                              cfg->theme_rotation_count,
+                              (const char (*)[THEME_NAME_MAX_ROT])cfg->theme_rotation_themes);
+                theme_rotation_tick = xTaskGetTickCount();
             }
         }
 
