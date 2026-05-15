@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_timer.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,6 +25,65 @@ typedef struct {
     char api_key[48];
 } wx_cfg_snap_t;
 
+/* ── API rate limiter ───────────────────────────────────────────────── */
+/* Open-Meteo free-tier hard limits: < 600 calls/min, < 5 000/hr, < 10 000/day.
+ * We use fixed windows with a 10 % safety margin so bursts near a window
+ * boundary never push us over the server-side limit.
+ *
+ * In normal operation (10-minute poll, 1-2 calls per poll) none of these
+ * caps will ever be reached; the limiter is a guard against pathological
+ * retry storms or future code changes that increase call frequency.
+ *
+ * All calls that go through http_get() are counted, regardless of provider.
+ * The weather task is single-threaded so no mutex is needed here. */
+#define RL_CAP_MIN   540        /* 600  × 0.90 */
+#define RL_CAP_HOUR  4500       /* 5000 × 0.90 */
+#define RL_CAP_DAY   9000       /* 10000 × 0.90 */
+
+typedef struct { int64_t start_us; int count; } rl_win_t;
+static rl_win_t s_rl_min  = {0, 0};
+static rl_win_t s_rl_hour = {0, 0};
+static rl_win_t s_rl_day  = {0, 0};
+
+static void rl_wait(void)
+{
+    for (;;) {
+        int64_t now = esp_timer_get_time();
+
+        /* Advance any window that has expired */
+        if (now - s_rl_min.start_us  >=    60LL * 1000000LL) { s_rl_min.start_us  = now; s_rl_min.count  = 0; }
+        if (now - s_rl_hour.start_us >= 3600LL  * 1000000LL) { s_rl_hour.start_us = now; s_rl_hour.count = 0; }
+        if (now - s_rl_day.start_us  >= 86400LL * 1000000LL) { s_rl_day.start_us  = now; s_rl_day.count  = 0; }
+
+        /* Find the longest wait imposed by any saturated window */
+        int64_t wait_us = 0, w;
+        if (s_rl_min.count  >= RL_CAP_MIN) {
+            w = 60LL   * 1000000LL - (now - s_rl_min.start_us);
+            if (w > wait_us) wait_us = w;
+        }
+        if (s_rl_hour.count >= RL_CAP_HOUR) {
+            w = 3600LL * 1000000LL - (now - s_rl_hour.start_us);
+            if (w > wait_us) wait_us = w;
+        }
+        if (s_rl_day.count  >= RL_CAP_DAY) {
+            w = 86400LL * 1000000LL - (now - s_rl_day.start_us);
+            if (w > wait_us) wait_us = w;
+        }
+
+        if (wait_us <= 0) break;    /* all windows have capacity */
+
+        ESP_LOGW(TAG, "API rate limit reached — waiting %lld s before next call",
+                 (long long)(wait_us / 1000000LL));
+        /* Sleep until the tightest window expires (+500 ms margin) */
+        vTaskDelay(pdMS_TO_TICKS(wait_us / 1000 + 500));
+    }
+
+    /* Consume one slot in every active window */
+    s_rl_min.count++;
+    s_rl_hour.count++;
+    s_rl_day.count++;
+}
+
 /* ── HTTP helper ────────────────────────────────────────────────────── */
 /* Returns heap-allocated NUL-terminated body (up to 4 KB), or NULL on error.
  * Uses open/fetch_headers/read loop so chunked-encoded responses (no
@@ -40,6 +100,8 @@ typedef struct {
 
 static char *http_get(const char *url)
 {
+    rl_wait();      /* enforce Open-Meteo free-tier rate limits */
+
     esp_http_client_config_t hcfg = {
         .url               = url,
         .timeout_ms        = 10000,
@@ -654,13 +716,21 @@ static void weather_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
+    /* Give the DNS resolver ~3 s to settle after DHCP assigns an IP.
+     * Without this delay the first geocoding lookup hits an EAI_AGAIN
+     * (getaddrinfo code 202) because the resolver isn't ready yet, which
+     * produces a noisy error and delays the first weather update by the
+     * full 5 s backoff.  3 s is enough for virtually all routers; the
+     * exponential backoff below handles the rare case where it isn't. */
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
     /* First fetch: attempt immediately, then retry with exponential backoff
-     * (5 s → 10 s → 20 s → … capped at 5 min) until it succeeds.
+     * (2 s → 4 s → 8 s → … capped at 5 min) until it succeeds.
      * If weather is not configured (empty city, no API key) the fetch
      * functions return immediately without setting s_weather.valid;
-     * the backoff prevents spinning at 5 s forever in that case. */
+     * the backoff prevents spinning at 2 s forever in that case. */
     ESP_LOGI(TAG, "WiFi ready – fetching weather");
-    uint32_t retry_ms = 5000;
+    uint32_t retry_ms = 2000;
     while (!s_weather.valid) {
         fetch_weather();
         if (!s_weather.valid) {
