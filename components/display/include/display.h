@@ -12,7 +12,6 @@
  *   /images/themes/{theme}/MutiInfo/Humidity/{degree,humidity}.jpg
  *   /images/themes/{theme}/MutiInfo/WeekDate/week/{monday,…}.jpg
  *   /images/themes/{theme}/MutiInfo/WeekDate/date/{0-9}.jpg
- *   /images/system/{matrix,setting,waiting}/
  *
  * Available themes: NixieOY, FlipClock, DarkSlate, DotMatrixRG, DotMatrixY,
  *   Formula1, GlitchGR, LightFuture, NotionRain, RedDigits, RetroPaper,
@@ -107,7 +106,6 @@ void display_path_temperature(char *buf, size_t n, const char *theme, const char
 void display_path_humidity   (char *buf, size_t n, const char *theme, const char *name);
 void display_path_weekday    (char *buf, size_t n, const char *theme, int wday);
 void display_path_date_digit (char *buf, size_t n, const char *theme, int digit);
-void display_path_system     (char *buf, size_t n, const char *cat,   const char *name);
 
 /* ── High-level helpers ────────────────────────────────────────────── */
 void display_show_number(int tube, int digit,        const char *theme);

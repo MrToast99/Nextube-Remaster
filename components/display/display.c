@@ -1062,8 +1062,6 @@ void display_path_weekday(char *buf, size_t n, const char *theme, int wday)
 void display_path_date_digit(char *buf, size_t n, const char *theme, int digit)
 { snprintf(buf, n, "/images/themes/%s/MutiInfo/WeekDate/date/%d.jpg", theme, digit); }
 
-void display_path_system(char *buf, size_t n, const char *cat, const char *name)
-{ snprintf(buf, n, "/images/system/%s/%s.jpg", cat, name); }
 
 /* ── High-level helpers ────────────────────────────────────────────── */
 void display_show_number(int tube, int digit, const char *theme)
@@ -1971,12 +1969,24 @@ static void display_task(void *arg)
          * As soon as a client connects the PIN auto-hides and normal-mode
          * rendering resumes on the next tick. */
         if (wifi_manager_ap_pin_visible()) {
-			display_set_brightness(100);
+            display_set_brightness(100);
             render_ap_pin(cfg);
-            /* Force the change-detection state to "no last frame" so when
-             * the AP closes (or a client connects) the next normal-mode
-             * tick re-renders from scratch — otherwise the equality checks
-             * below would skip the redraw and leave PIN digits on screen. */
+            /* Keep last_theme in sync with the current theme so that
+             * theme_changed evaluates to FALSE on subsequent AP-PIN ticks.
+             * Without this, the `strcmp(cfg->theme, last_theme)` at the top
+             * of the loop is always non-zero (last_theme never gets written
+             * because the continue below skips line 2167), causing
+             * img_cache_flush() to fire every 200 ms — evicting the freshly
+             * decoded digit JPEGs and forcing a full LittleFS re-read each
+             * tick.  Keeping last_theme current stops the spurious flush and
+             * lets the cache warm across PIN render cycles. */
+            strncpy(last_theme, cfg->theme, sizeof(last_theme) - 1);
+            last_theme[sizeof(last_theme) - 1] = '\0';
+            /* Force the remaining change-detection state to "no last frame"
+             * so when the AP closes (or a client connects) the next
+             * normal-mode tick re-renders from scratch — otherwise the
+             * equality checks below would skip the redraw and leave PIN
+             * digits on screen. */
             last_mode     = (app_mode_t)-1;
             last_t        = (struct tm){0};
             last_subs     = UINT32_MAX;
@@ -2230,7 +2240,11 @@ static void display_task(void *arg)
 
 void display_task_start(void)
 {
-    xTaskCreatePinnedToCore(display_task, "display", 8192, NULL, 6,
+    /* Stack bumped to 12 KB: the config snapshot (nextube_config_t, ~1900 B)
+     * lives on the stack, and the JPEG decode call chain adds another
+     * 3-4 KB of frames on the first full-mode render after AP-PIN exit.
+     * 8 KB was too tight — panic handler couldn't print a backtrace. */
+    xTaskCreatePinnedToCore(display_task, "display", 12288, NULL, 6,
                             &s_display_task_handle, 1);
     ESP_LOGI(TAG, "Display task started");
 }
