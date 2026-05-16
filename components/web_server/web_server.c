@@ -693,6 +693,12 @@ static esp_err_t api_status(httpd_req_t *r)
                             (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddNumberToObject(root, "psram_largest",
                             (double)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    {
+        size_t fs_total = 0, fs_used = 0;
+        esp_littlefs_info("littlefs", &fs_total, &fs_used);
+        cJSON_AddNumberToObject(root, "fs_total", (double)fs_total);
+        cJSON_AddNumberToObject(root, "fs_used",  (double)fs_used);
+    }
     cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
     /* expected_fs: the LittleFS version this firmware binary was built against.
      * Baked in at compile time from version.json → fs_version.

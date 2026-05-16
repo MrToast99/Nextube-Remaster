@@ -722,6 +722,17 @@ select option{background:var(--accent);color:var(--text)}
     </div>
   </div>
   <div class="card">
+    <h2>LittleFS Storage</h2>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:.85rem;margin-bottom:.45rem">
+      <span><span id="fs-used-lbl" style="font-weight:600">--</span> used of <span id="fs-total-lbl">--</span></span>
+      <span style="color:var(--dim)"><span id="fs-free-lbl">--</span> free</span>
+    </div>
+    <div style="background:rgba(255,255,255,.1);border-radius:4px;height:8px;overflow:hidden">
+      <div id="fs-bar" style="height:100%;width:0%;border-radius:4px;transition:width .4s,background .4s"></div>
+    </div>
+    <p id="fs-pct-lbl" style="font-size:.78rem;color:var(--dim);margin-top:.35rem;text-align:right"></p>
+  </div>
+  <div class="card">
     <h2>LittleFS Files</h2>
     <div id="file-breadcrumb" style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem;min-height:1.2em"></div>
     <div id="file-list" style="font-size:.85rem;max-height:320px;overflow-y:auto;border:1px solid rgba(255,255,255,.07);border-radius:6px"></div>
@@ -2324,6 +2335,23 @@ async function refreshStatus() {
   $('s-subs').textContent = s.subscribers != null ? s.subscribers.toLocaleString() : '--';
   $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
   $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';
+
+  /* LittleFS storage card */
+  if (s.fs_total) {
+    const fmtBytes = b => b >= 1048576 ? (b/1048576).toFixed(2) + ' MB'
+                        : b >= 1024    ? (b/1024).toFixed(0) + ' KB'
+                        :                b + ' B';
+    const fsFree = s.fs_total - s.fs_used;
+    const pct    = Math.round(s.fs_used / s.fs_total * 100);
+    $('fs-used-lbl').textContent  = fmtBytes(s.fs_used);
+    $('fs-total-lbl').textContent = fmtBytes(s.fs_total);
+    $('fs-free-lbl').textContent  = fmtBytes(fsFree);
+    $('fs-bar').style.width       = pct + '%';
+    $('fs-bar').style.background  = pct > 90 ? 'var(--hi)'
+                                  : pct > 75 ? '#ffa000'
+                                  :            'var(--ok)';
+    $('fs-pct-lbl').textContent   = pct + '% used';
+  }
   $('s-fwver').textContent = s.firmware || '--';
   if ($('s-spver')) $('s-spver').textContent = s.fs_version || '--';
 
