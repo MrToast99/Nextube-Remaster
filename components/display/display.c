@@ -1134,16 +1134,26 @@ static void render_ap_pin(const nextube_config_t *cfg)
     }
 }
 
-/* Custom Clock: shows the current date as DD  MM  YY across the 6 tubes.
- * Example: 15 March 2026 → [1][5][0][3][2][6]
- * This gives the user a dedicated date-display mode that is distinct from
- * the standard clock (which always shows time). */
+/* Custom Clock: shows the current date as DD MM YY (or MM DD YY) across the
+ * 6 tubes depending on the user's date_format setting.
+ *   "DD/MM/YY" (default): [d1][d2][m1][m2][y1][y2]  e.g. 15 Mar 2026 → 150326
+ *   "MM/DD/YY":           [m1][m2][d1][d2][y1][y2]  e.g. 15 Mar 2026 → 031526 */
 static void render_date(const nextube_config_t *cfg, const struct tm *t)
 {
     int d  = t->tm_mday;        /* 1-31  */
     int mo = t->tm_mon + 1;     /* 1-12  */
     int y  = t->tm_year % 100;  /* 0-99 (last two digits of year) */
-    int digits[6] = { d/10, d%10, mo/10, mo%10, y/10, y%10 };
+    int digits[6];
+    if (strcmp(cfg->date_format, "MM/DD/YY") == 0) {
+        /* US format: month first */
+        digits[0] = mo/10; digits[1] = mo%10;
+        digits[2] = d/10;  digits[3] = d%10;
+    } else {
+        /* European format (default): day first */
+        digits[0] = d/10;  digits[1] = d%10;
+        digits[2] = mo/10; digits[3] = mo%10;
+    }
+    digits[4] = y/10; digits[5] = y%10;
     for (int i = 0; i < 6; i++)
         display_show_number(i, digits[i], cfg->theme);
 }
@@ -1965,11 +1975,16 @@ static void display_task(void *arg)
                     should_fire = (burn_tm.tm_wday == 0);
 
                 if (should_fire) {
-                    display_set_burnin_mask(cfg->burnin_auto_mask,
-                                            cfg->burnin_auto_duration_s);
+                    if (strcmp(cfg->burnin_auto_mode, "snow") == 0)
+                        display_set_snow_mask(cfg->burnin_auto_mask,
+                                              cfg->burnin_auto_duration_s);
+                    else
+                        display_set_burnin_mask(cfg->burnin_auto_mask,
+                                                cfg->burnin_auto_duration_s);
                     ESP_LOGI(TAG,
-                             "Scheduled burn-in fired (%s): mask=0x%02X  dur=%lus",
+                             "Scheduled burn-in fired (%s, %s): mask=0x%02X  dur=%lus",
                              cfg->burnin_auto_interval,
+                             cfg->burnin_auto_mode,
                              (unsigned)cfg->burnin_auto_mask,
                              (unsigned long)cfg->burnin_auto_duration_s);
                 }

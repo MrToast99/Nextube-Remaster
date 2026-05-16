@@ -8,7 +8,7 @@
 *{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#1a1a2e;--card:#16213e;--accent:#0f3460;--hi:#e94560;--text:#eee;--dim:#999;--ok:#4ecca3}
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-header{background:var(--accent);padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+header{background:var(--accent);padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.3)}
 header h1{font-size:1.2rem;font-weight:600;letter-spacing:.5px}
 header h1 span{color:var(--hi)}
 .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
@@ -41,7 +41,7 @@ select option{background:var(--accent);color:var(--text)}
 .toast.show{opacity:1;transform:translateY(0)}
 .toast.err{background:var(--hi);color:#fff}
 .tab-content{display:none}.tab-content.active{display:block}
-#unsaved-banner{display:none;background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.45);border-radius:8px;padding:.6rem 1rem;margin:.25rem 1rem .5rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
+#unsaved-banner{display:none;width:100%;background:rgba(255,180,0,.09);border-top:1px solid rgba(255,180,0,.4);padding:.5rem 1rem;margin-top:.5rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
 #unsaved-banner.show{display:flex}
 .wifi-item{display:flex;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05)}
 .wifi-item .ssid{font-weight:500}.wifi-item .rssi{color:var(--dim);font-size:.8rem}
@@ -59,6 +59,10 @@ select option{background:var(--accent);color:var(--text)}
 <header>
   <h1>🕐 <span>Nextube-Remaster</span> Manager</h1>
   <div id="conn-status"><span class="status-dot err"></span>Connecting…</div>
+  <div id="unsaved-banner">
+    <span>⚠ You have unsaved changes.</span>
+    <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveSettings()">Save Now</button>
+  </div>
 </header>
 
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
@@ -70,10 +74,6 @@ select option{background:var(--accent);color:var(--text)}
   <span style="flex:1">⚠️ <strong>Theme image error</strong> — JPEG decode failed for <code id="te-path"></code>.
   Images must be exactly <strong>80 × 160 px</strong> RGB JPEG. Check <strong>System → Device Log</strong> for details or upload a corrected file via <strong>System → LittleFS Files</strong>.</span>
   <button onclick="$('theme-error-banner').style.display='none'" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.1rem;line-height:1;padding:0 .2rem" title="Dismiss">✕</button>
-</div>
-<div id="unsaved-banner">
-  <span>⚠ You have unsaved changes.</span>
-  <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveSettings()">Save Now</button>
 </div>
 <nav id="tabs">
   <button class="active" data-tab="dashboard">Dashboard</button>
@@ -272,6 +272,12 @@ select option{background:var(--accent);color:var(--text)}
     <div class="field"><label>Mode</label>
       <select id="f-blmode" onchange="onBlModeChange()"><option>Static</option><option>Breath</option><option>Rainbow</option><option>Off</option></select>
     </div>
+    <div class="field meter" id="led-speed-section">
+      <label>Effect speed</label>
+      <input type="range" id="f-blspeed" min="1" max="10" value="5"
+             oninput="$('v-blspeed').textContent=this.value;markDirty()">
+      <span id="v-blspeed">5</span>
+    </div>
     <div class="field" id="led-color-section">
       <label>LED Colours (click to change)</label>
       <div id="color-swatches" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:.4rem"></div>
@@ -405,9 +411,9 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>Scheduled Anti Burn-in / LCD Refresh</h2>
     <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
-      Automatically runs the colour-cycle recovery (red → green → blue → white → black, 30 s/step)
-      at the configured schedule, then returns to normal display.  No user action is
-      required — the device fires the session automatically while powered on.
+      Automatically runs a burn-in recovery session at the configured schedule, then returns
+      to normal display.  No user action is required — the device fires autonomously while
+      powered on.
     </p>
     <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.8rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
@@ -436,6 +442,13 @@ select option{background:var(--accent);color:var(--text)}
             <option value="7200">2 hours</option>
             <option value="10800">3 hours</option>
             <option value="14400">4 hours</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
+          <label for="bi-mode" style="white-space:nowrap">Mode:</label>
+          <select id="bi-mode" class="select" onchange="markDirty()">
+            <option value="colour-cycle">Colour-cycle (R→G→B→W→K)</option>
+            <option value="snow">Snow (random pixel noise)</option>
           </select>
         </div>
       </div>
@@ -480,70 +493,24 @@ select option{background:var(--accent);color:var(--text)}
     <div id="wifi-list" style="margin-top:.8rem"></div>
   </div>
   <div class="card">
+    <h2>Date</h2>
+    <div class="field">
+      <label for="f-datefmt">Date format</label>
+      <select id="f-datefmt" class="select" onchange="markDirty()">
+        <option value="DD/MM/YY">DD/MM/YY &nbsp;(day / month / year)</option>
+        <option value="MM/DD/YY">MM/DD/YY &nbsp;(month / day / year)</option>
+      </select>
+    </div>
+  </div>
+  <div class="card">
     <h2>Time Zone</h2>
     <div class="field"><label>Region</label>
-      <select id="f-tz-sel" onchange="onTzSelChange()">
-        <option value="">-- select or enter POSIX string below --</option>
-        <optgroup label="UTC">
-          <option value="UTC0">UTC (no offset, no DST)</option>
-        </optgroup>
-        <optgroup label="Americas">
-          <option value="NST3:30NDT,M3.2.0,M11.1.0">America/St_Johns (NT, UTC-3:30)</option>
-          <option value="AST4ADT,M3.2.0,M11.1.0">America/Halifax (AT, UTC-4)</option>
-          <option value="EST5EDT,M3.2.0,M11.1.0">America/New_York (ET, UTC-5)</option>
-          <option value="CST6CDT,M3.2.0,M11.1.0">America/Chicago (CT, UTC-6)</option>
-          <option value="MST7MDT,M3.2.0,M11.1.0">America/Denver (MT, UTC-7)</option>
-          <option value="MST7">America/Phoenix (MST, UTC-7, no DST)</option>
-          <option value="PST8PDT,M3.2.0,M11.1.0">America/Los_Angeles (PT, UTC-8)</option>
-          <option value="AKST9AKDT,M3.2.0,M11.1.0">America/Anchorage (AKT, UTC-9)</option>
-          <option value="HST10">Pacific/Honolulu (HT, UTC-10, no DST)</option>
-          <option value="VET4:30">America/Caracas (VET, UTC-4:30)</option>
-          <option value="COT5">America/Bogota (COT, UTC-5)</option>
-          <option value="PET5">America/Lima (PET, UTC-5)</option>
-          <option value="ART3">America/Buenos_Aires (ART, UTC-3)</option>
-          <option value="BRT3">America/Sao_Paulo (BRT, UTC-3)</option>
-        </optgroup>
-        <optgroup label="Europe">
-          <option value="GMT0BST,M3.5.0/1,M10.5.0">Europe/London (GMT/BST)</option>
-          <option value="WET0WEST,M3.5.0/1,M10.5.0">Europe/Lisbon (WET, UTC+0)</option>
-          <option value="CET-1CEST,M3.5.0,M10.5.0/3">Europe/Paris (CET, UTC+1)</option>
-          <option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Europe/Helsinki (EET, UTC+2)</option>
-          <option value="MSK-3">Europe/Moscow (MSK, UTC+3, no DST)</option>
-          <option value="TRT-3">Europe/Istanbul (TRT, UTC+3, no DST)</option>
-        </optgroup>
-        <optgroup label="Africa">
-          <option value="WAT-1">Africa/Lagos (WAT, UTC+1)</option>
-          <option value="CAT-2">Africa/Harare (CAT, UTC+2)</option>
-          <option value="EAT-3">Africa/Nairobi (EAT, UTC+3)</option>
-        </optgroup>
-        <optgroup label="Middle East">
-          <option value="AST-3">Asia/Riyadh (AST, UTC+3)</option>
-          <option value="IRST-3:30IRDT,M3.4.4/0,M9.4.4/0">Asia/Tehran (IRST, UTC+3:30)</option>
-          <option value="GST-4">Asia/Dubai (GST, UTC+4)</option>
-          <option value="AFT-4:30">Asia/Kabul (AFT, UTC+4:30)</option>
-          <option value="PKT-5">Asia/Karachi (PKT, UTC+5)</option>
-          <option value="IST-5:30">Asia/Kolkata (IST, UTC+5:30)</option>
-          <option value="NPT-5:45">Asia/Kathmandu (NPT, UTC+5:45)</option>
-        </optgroup>
-        <optgroup label="Asia">
-          <option value="BDT-6">Asia/Dhaka (BDT, UTC+6)</option>
-          <option value="MMT-6:30">Asia/Yangon (MMT, UTC+6:30)</option>
-          <option value="ICT-7">Asia/Bangkok (ICT, UTC+7)</option>
-          <option value="WIB-7">Asia/Jakarta (WIB, UTC+7)</option>
-          <option value="CST-8">Asia/Shanghai (CST, UTC+8)</option>
-          <option value="HKT-8">Asia/Hong_Kong (HKT, UTC+8)</option>
-          <option value="SGT-8">Asia/Singapore (SGT, UTC+8)</option>
-          <option value="ULAT-8">Asia/Ulaanbaatar (ULAT, UTC+8)</option>
-          <option value="JST-9">Asia/Tokyo (JST, UTC+9)</option>
-          <option value="KST-9">Asia/Seoul (KST, UTC+9)</option>
-          <option value="ACST-9:30ACDT,M10.1.0,M4.1.0/3">Australia/Adelaide (ACST, UTC+9:30)</option>
-          <option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Australia/Sydney (AEST, UTC+10)</option>
-          <option value="AWST-8">Australia/Perth (AWST, UTC+8, no DST)</option>
-        </optgroup>
-        <optgroup label="Pacific">
-          <option value="NZST-12NZDT,M9.5.0,M4.1.0/3">Pacific/Auckland (NZST, UTC+12)</option>
-          <option value="SST11">Pacific/Apia (SST, UTC-11)</option>
-        </optgroup>
+      <input id="f-tz-filter" type="text" placeholder="Filter timezones…"
+             oninput="buildTzSelect(this.value)"
+             style="margin-bottom:.4rem;width:100%;box-sizing:border-box">
+      <select id="f-tz-sel" size="6" onchange="onTzSelChange()"
+              style="width:100%;font-family:monospace;font-size:.82rem">
+        <option value="">Loading timezone list…</option>
       </select>
     </div>
     <div class="field">
@@ -562,6 +529,7 @@ select option{background:var(--accent);color:var(--text)}
 
 <!-- ─── Services ───────────────────────────────────────────────── -->
 <div class="tab-content" id="tab-services">
+
   <div class="card">
     <h2>Weather</h2>
     <div class="field" style="padding-bottom:4px">
@@ -1184,7 +1152,14 @@ async function loadThemes(manual) {
 /* ── Load settings ─────────────────────────────────── */
 async function loadSettings() {
   loadingSettings = true;
-  await loadThemes();
+  /* Fetch themes and timezone DB in parallel with config to minimise load time.
+   * buildTzSelect() must run before the timezone fields are populated below. */
+  const [, tzdb] = await Promise.all([
+    loadThemes(),
+    fetch('/zones.json').then(r => r.json()).catch(() => null)
+  ]);
+  if (tzdb) { s_tz_db = tzdb; }
+  buildTzSelect();   /* populate listbox (uses s_tz_db, falls back to TZ_FALLBACK) */
   cfg = await api('settings');
   if (!cfg) return;
   const a = cfg.apps?.[0] || {};
@@ -1222,7 +1197,9 @@ async function loadSettings() {
   $('f-nightsh').value = cfg.night_start_hour !== undefined ? cfg.night_start_hour : 22;
   $('f-nighteh').value = cfg.night_end_hour !== undefined ? cfg.night_end_hour : 7;
   $('f-ledbr').value = cfg.led_brightness || 60; $('v-ledbr').textContent = cfg.led_brightness || 60;
-  $('f-blmode').value = cfg.backlight_mode || 'Breath'; onBlModeChange();
+  $('f-blmode').value = cfg.backlight_mode || 'Breath';
+  const spd = cfg.led_effect_speed || 5; $('f-blspeed').value = spd; $('v-blspeed').textContent = spd;
+  onBlModeChange();
   $('f-ssid').value = cfg.ssid || '';
   $('f-pass').value = '';
   $('f-pass').placeholder = cfg.has_password ? '(saved — leave blank to keep)' : 'Enter password';
@@ -1244,6 +1221,7 @@ async function loadSettings() {
   $('f-wkey').value = cfg.weather_api_key || '';
   $('f-city').value = cfg.City || '';
   $('f-tempfmt').value = cfg.temperature_formate || 'Celsius';
+  $('f-datefmt').value = cfg.date_format || 'DD/MM/YY';
   $('f-vsite').value = cfg.video_site || 'youtube';
   $('f-ytid').value = cfg.youtube_id || '';
   $('f-ytkey').value = cfg.youtube_key || '';
@@ -1332,6 +1310,7 @@ async function loadSettings() {
     document.querySelectorAll('.bi-sched-tube').forEach(cb => {
       cb.checked = !!(biMask & (1 << parseInt(cb.value)));
     });
+    $('bi-mode').value = cfg.burnin_auto_mode || 'colour-cycle';
     onBurninSchedToggle();
   }
 
@@ -1377,8 +1356,10 @@ function onTzSelChange() {
 /* ── LED mode change – hide colour pickers for Rainbow / Off ── */
 function onBlModeChange() {
   const mode = $('f-blmode').value;
-  const show = (mode === 'Static' || mode === 'Breath');
-  $('led-color-section').style.display = show ? '' : 'none';
+  const showColor = (mode === 'Static' || mode === 'Breath');
+  const showSpeed = (mode === 'Breath' || mode === 'Rainbow');
+  $('led-color-section').style.display = showColor ? '' : 'none';
+  $('led-speed-section').style.display = showSpeed ? '' : 'none';
 }
 
 /* ── Apply single colour to all tube swatches ── */
@@ -1487,6 +1468,7 @@ async function saveSettings() {
     night_start_hour: +$('f-nightsh').value,
     night_end_hour: +$('f-nighteh').value,
     backlight_mode: $('f-blmode').value,
+    led_effect_speed: +$('f-blspeed').value,
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     spectrum_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-color').value.replace('#','')),
     spectrum_lcd_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-lcd-color').value.replace('#','')),
@@ -1505,6 +1487,7 @@ async function saveSettings() {
     ssid: $('f-ssid').value, ...($('f-pass').value ? {password: $('f-pass').value} : {}), hostname: $('f-hostname').value,
     timezone: $('f-tz').value,
     ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
+    date_format: $('f-datefmt').value,
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
@@ -1531,6 +1514,7 @@ async function saveSettings() {
     burnin_auto_duration_s: +$('bi-duration').value,
     burnin_auto_interval:   $('bi-interval').value,
     burnin_auto_hour:       +$('bi-hour').value,
+    burnin_auto_mode:       $('bi-mode').value,
   };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (res?.reboot) {
@@ -3043,6 +3027,50 @@ async function bootAuth() {
   }
 }
 window.addEventListener('load', bootAuth);
+</script>
+
+<script>
+/* ── IANA timezone database (nayarsystems/posix_tz_db zones.json) ───────
+ * Loaded at init from /zones.json.  Falls back to TZ_FALLBACK if the fetch
+ * fails (e.g. file absent after a partial flash).  Option value = POSIX TZ
+ * string; display text = IANA name — matches what onTzSelChange() expects. */
+let s_tz_db = null;
+
+const TZ_FALLBACK = {
+  "UTC":"UTC0",
+  "America/New_York":"EST5EDT,M3.2.0,M11.1.0",
+  "America/Chicago":"CST6CDT,M3.2.0,M11.1.0",
+  "America/Denver":"MST7MDT,M3.2.0,M11.1.0",
+  "America/Los_Angeles":"PST8PDT,M3.2.0,M11.1.0",
+  "Europe/London":"GMT0BST,M3.5.0/1,M10.5.0",
+  "Europe/Paris":"CET-1CEST,M3.5.0,M10.5.0/3",
+  "Asia/Kolkata":"IST-5:30",
+  "Asia/Tokyo":"JST-9",
+  "Asia/Shanghai":"CST-8",
+  "Australia/Sydney":"AEST-10AEDT,M10.1.0,M4.1.0/3"
+};
+
+function buildTzSelect(filter) {
+  const db = s_tz_db || TZ_FALLBACK;
+  const q  = (filter || '').toLowerCase();
+  const groups = {};
+  for (const [name, posix] of Object.entries(db)) {
+    if (q && !name.toLowerCase().includes(q) && !posix.toLowerCase().includes(q)) continue;
+    const region = name.includes('/') ? name.split('/')[0] : 'UTC';
+    if (!groups[region]) groups[region] = [];
+    groups[region].push({ name, posix });
+  }
+  const sel = $('f-tz-sel');
+  sel.innerHTML = '';
+  for (const region of Object.keys(groups).sort()) {
+    const og = document.createElement('optgroup');
+    og.label = region.replace(/_/g, ' ');
+    groups[region]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach(({ name, posix }) => og.appendChild(new Option(name, posix)));
+    sel.appendChild(og);
+  }
+}
 </script>
 </body>
 </html>

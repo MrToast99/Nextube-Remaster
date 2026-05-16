@@ -182,6 +182,7 @@ static void led_task(void *arg)
         /* Copy all config fields needed for this iteration under the lock so
          * no task switch between struct member reads can produce a torn read. */
         uint8_t led_brightness;
+        uint8_t led_effect_speed;
         app_mode_t current_mode;
         uint8_t spectrum_rgb[3];
         uint8_t spectrum_led_source;
@@ -191,6 +192,9 @@ static void led_task(void *arg)
         config_lock();
         const nextube_config_t *cfg = config_get();
         led_brightness      = cfg->led_brightness;
+        led_effect_speed    = cfg->led_effect_speed;
+        if (led_effect_speed < 1)  led_effect_speed = 1;
+        if (led_effect_speed > 10) led_effect_speed = 10;
         current_mode        = cfg->current_mode;
         memcpy(spectrum_rgb,  cfg->spectrum_rgb,  sizeof(spectrum_rgb));
         spectrum_led_source = cfg->spectrum_led_source;
@@ -257,14 +261,15 @@ static void led_task(void *arg)
              * The old leds_effect_breath() used a hardcoded blue palette;
              * this version respects the per-tube backlight_RGB settings.
              *
-             * Update rate is 10 Hz (100 ms) rather than 20 Hz (50 ms).
-             * The phase increment is doubled (0.10 vs 0.05) so the breath
-             * cycle duration is unchanged (~6.3 s).  Halving the RMT burst
-             * rate keeps the 10 MHz WS2812 transmission fundamental below
-             * 20 Hz, reducing audible coupling into the DAC / amplifier
-             * from WS2812 current spikes on the shared 3.3 V rail. */
+             * Update rate is fixed at 10 Hz (100 ms) to keep WS2812 RMT
+             * bursts below 20 Hz and reduce audible coupling into the DAC.
+             * Speed is controlled by scaling the phase increment:
+             *   phase_step = led_effect_speed × 0.02
+             *   speed=1 → 0.02 rad/tick → ~31 s cycle  (very slow)
+             *   speed=5 → 0.10 rad/tick → ~6.3 s cycle (default)
+             *   speed=10→ 0.20 rad/tick → ~3.1 s cycle (fast) */
             static float breath_phase = 0.0f;
-            breath_phase += 0.10f;
+            breath_phase += 0.02f * (float)led_effect_speed;
             float val = (sinf(breath_phase) + 1.0f) / 2.0f;  /* 0.0 – 1.0 */
             for (int i = 0; i < LED_COUNT; i++) {
                 leds_set_color(i,
@@ -276,10 +281,35 @@ static void led_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(100));
             break;
         }
-        case BL_MODE_RAINBOW:
-            leds_effect_rainbow();
+        case BL_MODE_RAINBOW: {
+            /* Full-spectrum hue rotation across all 6 LEDs.
+             * Inlined here (instead of delegating to leds_effect_rainbow())
+             * so led_effect_speed can control the hue step directly.
+             *   hue_step = led_effect_speed  (1–10 degrees per 50 ms tick)
+             *   speed=1  →  1°/50 ms → ~18 s/revolution  (very slow)
+             *   speed=5  →  5°/50 ms →  3.6 s/revolution (default)
+             *   speed=10 → 10°/50 ms →  1.8 s/revolution (fast)  */
+            static int rainbow_hue = 0;
+            rainbow_hue = (rainbow_hue + (int)led_effect_speed) % 360;
+            for (int i = 0; i < LED_COUNT; i++) {
+                int hue    = (rainbow_hue + i * 60) % 360;
+                int sector = hue / 60;
+                int f      = (hue % 60) * 200 / 60;
+                uint8_t r, g, b;
+                switch (sector) {
+                    case 0:  r = 200; g = f;       b = 0;       break;
+                    case 1:  r = 200-f; g = 200;   b = 0;       break;
+                    case 2:  r = 0;   g = 200;     b = f;       break;
+                    case 3:  r = 0;   g = 200-f;   b = 200;     break;
+                    case 4:  r = f;   g = 0;       b = 200;     break;
+                    default: r = 200; g = 0;       b = 200-f;   break;
+                }
+                leds_set_color(i, r, g, b);
+            }
+            leds_update();
             vTaskDelay(pdMS_TO_TICKS(50));
             break;
+        }
         case BL_MODE_OFF:
         default:
             leds_off();

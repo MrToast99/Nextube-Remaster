@@ -58,6 +58,7 @@ typedef struct {
     backlight_mode_t backlight_mode;
     bool             backlight_on;
     uint8_t          backlight_rgb[6][3];
+    uint8_t          led_effect_speed;  /* Breath / Rainbow animation speed 1 (slow) – 10 (fast); default 5 */
     uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
     uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
     uint8_t          spectrum_led_source;   /* 0 = custom glow colour (amplitude-modulated),
@@ -163,6 +164,10 @@ typedef struct {
     uint32_t         burnin_auto_duration_s;   /* session length, 1–14400 s (default 3600 = 1 hr) */
     char             burnin_auto_interval[8];  /* "weekly" (Sunday) or "monthly" (1st) */
     uint8_t          burnin_auto_hour;         /* hour of day to fire, 0-23 (default 0 = midnight) */
+    char             burnin_auto_mode[16];     /* "colour-cycle" (default) or "snow" */
+
+    /* Date display format (Custom Clock / date panels) */
+    char             date_format[12];    /* "DD/MM/YY" (default, European) or "MM/DD/YY" (US) */
 } nextube_config_t;
 
 /** Initialise config module – loads from flash or sets defaults. */

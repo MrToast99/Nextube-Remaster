@@ -65,7 +65,7 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 | **Audio** | LTK8002D amplifier | DAC=GPIO25 |
 | **Microphone** | CMC-4015-25T electret capsule + LMV321IDBVR op-amp preamp | ADC=GPIO35 (ADC1_CH7, input-only) |
 
-> **Note on GPIO2 (MIDDLE touch):** GPIO2 is a strapping pin with an internal pull-down. It functions correctly as touch pad channel 2 in normal operation but must not be held LOW during boot.
+> **Note on GPIO2 (MIDDLE touch):** GPIO2 is a boot-strapping pin with an internal pull-down. The ESP32 requires GPIO2 LOW to enter download mode — holding the middle touch pad during a serial flash attempt can prevent the chip entering download mode even when GPIO0 is correctly held low. This has no effect during normal operation.
 
 ### Audio / DAC Notes
 

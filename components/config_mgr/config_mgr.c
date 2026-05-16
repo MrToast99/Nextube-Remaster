@@ -36,6 +36,7 @@ static void set_defaults(void)
     s_cfg.night_end_hour   = 7;
     s_cfg.backlight_mode  = BL_MODE_BREATH;
     s_cfg.backlight_on    = true;
+    s_cfg.led_effect_speed = 5;
     /* All modes enabled by default. Clock and Date are independent — both
      * can be active simultaneously in the touch cycle. */
     s_cfg.enabled_modes   = 0x1FF;   /* all 9 modes (bits 0–8) */
@@ -98,6 +99,7 @@ static void set_defaults(void)
     strcpy(s_cfg.weather_api_key, "");
     strcpy(s_cfg.city, "");
     strcpy(s_cfg.temp_format, "Celsius");
+    strcpy(s_cfg.date_format, "DD/MM/YY");
 
     strcpy(s_cfg.video_site, "youtube");
     strcpy(s_cfg.youtube_key, "");
@@ -147,6 +149,7 @@ static void set_defaults(void)
     s_cfg.burnin_auto_duration_s = 3600;   /* 1 hour */
     strcpy(s_cfg.burnin_auto_interval, "weekly");
     s_cfg.burnin_auto_hour       = 0;      /* midnight */
+    strcpy(s_cfg.burnin_auto_mode, "colour-cycle");
 }
 
 /* ── JSON helpers ──────────────────────────────────────────────────── */
@@ -229,6 +232,7 @@ static void parse_json(const char *json, size_t len)
      * new configs with the fixed key take precedence over legacy files. */
     json_read_str(root, "temperature_formate", s_cfg.temp_format, sizeof(s_cfg.temp_format));
     json_read_str(root, "temperature_format",  s_cfg.temp_format, sizeof(s_cfg.temp_format));
+    json_read_str(root, "date_format",         s_cfg.date_format, sizeof(s_cfg.date_format));
     json_read_str(root, "music_file",       s_cfg.music_file,      sizeof(s_cfg.music_file));
     json_read_str(root, "bell_file",        s_cfg.bell_file,       sizeof(s_cfg.bell_file));
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
@@ -329,6 +333,9 @@ static void parse_json(const char *json, size_t len)
     if (s_cfg.volume > 100) s_cfg.volume = 100;
     json_read_u8(root, "led_brightness", &s_cfg.led_brightness);
     if (s_cfg.led_brightness > 100) s_cfg.led_brightness = 100;
+    json_read_u8(root, "led_effect_speed", &s_cfg.led_effect_speed);
+    if (s_cfg.led_effect_speed < 1)  s_cfg.led_effect_speed = 1;
+    if (s_cfg.led_effect_speed > 10) s_cfg.led_effect_speed = 10;
     json_read_u8(root, "lcd_brightness", &s_cfg.lcd_brightness);
     if (s_cfg.lcd_brightness > 100) s_cfg.lcd_brightness = 100;
     {
@@ -447,6 +454,11 @@ static void parse_json(const char *json, size_t len)
         strcpy(s_cfg.burnin_auto_interval, "weekly");
     json_read_u8(root, "burnin_auto_hour", &s_cfg.burnin_auto_hour);
     if (s_cfg.burnin_auto_hour > 23) s_cfg.burnin_auto_hour = 0;
+    json_read_str(root, "burnin_auto_mode", s_cfg.burnin_auto_mode,
+                  sizeof(s_cfg.burnin_auto_mode));
+    /* Only "colour-cycle" and "snow" are valid; default to "colour-cycle" */
+    if (strcmp(s_cfg.burnin_auto_mode, "snow") != 0)
+        strcpy(s_cfg.burnin_auto_mode, "colour-cycle");
 
     /* Backlight RGB array */
     cJSON *bl_rgb = cJSON_GetObjectItem(root, "backlight_RGB");
@@ -732,6 +744,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "weather_api_key",  s_cfg.weather_api_key);
     cJSON_AddStringToObject(root, "City",             s_cfg.city);
     cJSON_AddStringToObject(root, "temperature_format",  s_cfg.temp_format);
+    cJSON_AddStringToObject(root, "date_format",         s_cfg.date_format);
     cJSON_AddStringToObject(root, "music_file",       s_cfg.music_file);
     cJSON_AddStringToObject(root, "bell_file",        s_cfg.bell_file);
     cJSON_AddStringToObject(root, "tone_file",        s_cfg.tone_file);
@@ -761,6 +774,7 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "leading_zero",     s_cfg.leading_zero);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
+    cJSON_AddNumberToObject(root, "led_effect_speed", s_cfg.led_effect_speed);
     cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);
     cJSON_AddBoolToObject  (root, "auto_brightness",  s_cfg.auto_brightness);
     cJSON_AddNumberToObject(root, "night_brightness", s_cfg.night_brightness);
@@ -795,6 +809,7 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "burnin_auto_duration_s", s_cfg.burnin_auto_duration_s);
     cJSON_AddStringToObject(root, "burnin_auto_interval",   s_cfg.burnin_auto_interval);
     cJSON_AddNumberToObject(root, "burnin_auto_hour",       s_cfg.burnin_auto_hour);
+    cJSON_AddStringToObject(root, "burnin_auto_mode",       s_cfg.burnin_auto_mode);
 
     cJSON *bl_rgb = cJSON_AddArrayToObject(root, "backlight_RGB");
     for (int i = 0; i < 6; i++) {
