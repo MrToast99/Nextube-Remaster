@@ -404,8 +404,14 @@ void mic_task_start(void)
     s_cal_done = xSemaphoreCreateBinary();
     configASSERT(s_cal_done);
 
-    /* Stack 4096: samples[512 B] + Goertzel locals + overhead */
-    xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 5, NULL, 0);
+    /* Stack 8192: samples[512 B] + peak/power arrays + Goertzel + cosf() call
+     * chain (Xtensa software-float trig can use 400–500 B of stack through
+     * multiple windowed-register rotations) + FreeRTOS context save (~400 B)
+     * + xSemaphoreTake / config_lock call depth.  The original 4096 B was
+     * too tight: under field conditions the combined depth triggered a stack
+     * overflow that corrupted the saved SP, causing Core 1's SPI flash IPC
+     * to hang while waiting for Core 0's (now-corrupted) acknowledgement. */
+    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 5, NULL, 0);
     ESP_LOGI(TAG, "mic_task started (core 0)");
 }
 

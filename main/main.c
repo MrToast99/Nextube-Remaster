@@ -16,6 +16,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -176,6 +178,17 @@ static void init_littlefs(void)
     size_t total = 0, used = 0;
     esp_littlefs_info("littlefs", &total, &used);
     ESP_LOGI(TAG, "LittleFS: total=%u  used=%u", (unsigned)total, (unsigned)used);
+
+    /* mklittlefs drops empty directories, so data/images/album/ only lands
+     * on the partition when the user uploads their first image via the web
+     * UI's mkdir call — or on a fresh flash if the .keep placeholder is
+     * present.  Create the directory here so album mode works immediately
+     * on devices whose partition was flashed before the .keep was added. */
+    if (mkdir("/spiffs/images/album", 0755) == 0) {
+        ESP_LOGI(TAG, "Created /spiffs/images/album");
+    } else if (errno != EEXIST) {
+        ESP_LOGW(TAG, "mkdir /spiffs/images/album: %s", strerror(errno));
+    }
 }
 
 /* ── NVS init ──────────────────────────────────────────────────────── */

@@ -1,0 +1,2 @@
+This file exists only to prevent mklittlefs from dropping the empty directory.
+album_load_list() filters for .jpg only — this file is never read or listed.

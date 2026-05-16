@@ -115,4 +115,10 @@ CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
 # on the original ESP32 in IDF 5.x), and no IRAM placement is required.
 # ESP_TIMER_TASK callbacks run in the esp_timer service task (priority 22),
 # where the normal mutex-based adc_oneshot_read() is perfectly safe.
+# The esp_timer service task stack is bumped to 8 KB (default 4 KB) because
+# adc_oneshot_read() → ADC HAL → ADC LL → hardware-access helpers adds ~3 KB
+# of call-chain depth on top of the task's own frame; the default 4 KB was
+# occasionally tight under production conditions when both WiFi events and
+# the timer callback fire concurrently on Core 0.
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192
 

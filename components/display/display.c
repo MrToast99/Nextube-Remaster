@@ -1819,13 +1819,26 @@ static void display_task(void *arg)
     bool          first              = true;
     int           last_hour             = -1;  /* for hourly burn-in shift update */
     int           burnin_last_run_yday  = -1;  /* day-of-year the scheduled burn-in last ran */
+    /* AP PIN exit guard: set true each AP-PIN tick so the FIRST normal-mode
+     * tick after a client connects does a blank fill instead of a JPEG read.
+     * Reason: WPA2 4-way handshake runs AES ops on Core 0 at a high interrupt
+     * level; if Core 1 issues a SPI flash IPC at that moment Core 0 can't ACK
+     * it in time and the IWDT fires.  One 500 ms blank tick is enough for the
+     * handshake to complete before the first colon/ampm JPEG is loaded. */
+    bool          ap_pin_transition     = false;
 
     TickType_t wake = xTaskGetTickCount();
     rotation_tick       = wake;
     theme_rotation_tick = wake;
 
+    /* Config snapshot — static so it lives in BSS rather than on the task
+     * stack.  nextube_config_t is ~1900 bytes; keeping it on the stack
+     * consumed nearly a quarter of the 12 KB budget and pushed the total
+     * frame depth (cfg_snap + JPEG decode call chain) over the limit,
+     * producing a truncated panic with no backtrace.  The display task is
+     * single-instance and single-threaded, so a static local is safe. */
+    static nextube_config_t cfg_snap;
     while (1) {
-        nextube_config_t cfg_snap;
         config_lock();
         cfg_snap = *config_get();
         config_unlock();
@@ -1995,7 +2008,23 @@ static void display_task(void *arg)
             last_hum      = -1.0f;
             last_wx_valid = false;
             first         = true;
+            ap_pin_transition = true;   /* arm the exit guard for the next tick */
             vTaskDelayUntil(&wake, pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        /* ── AP PIN exit guard ──────────────────────────────────────────
+         * First normal-mode tick after a client connects: fill tubes black
+         * and wait 500 ms before touching SPI flash.  During WPA2 4-way
+         * handshake the WiFi driver runs AES ops on Core 0 at a high
+         * interrupt level; a SPI flash IPC sent at that moment won't get
+         * an ACK and Core 1 waits with interrupts disabled until the IWDT
+         * fires.  display_fill() is pure SPI-to-LCD (no flash read), so
+         * it completes instantly without involving Core 0's IPC path. */
+        if (ap_pin_transition) {
+            ap_pin_transition = false;
+            for (int _t = 0; _t < LCD_COUNT; _t++) display_fill(_t, 0x0000);
+            vTaskDelayUntil(&wake, pdMS_TO_TICKS(500));
             continue;
         }
 
