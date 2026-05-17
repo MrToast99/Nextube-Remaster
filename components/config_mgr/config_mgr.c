@@ -24,9 +24,9 @@ static void set_defaults(void)
     memset(&s_cfg, 0, sizeof(s_cfg));
 
     s_cfg.current_mode    = APP_MODE_CLOCK;
-    strcpy(s_cfg.theme, "NixieOY");
-    strcpy(s_cfg.time_type, "24H");
-    strcpy(s_cfg.clock_tube5, "blank");
+    strncpy(s_cfg.theme, "NixieOY", sizeof(s_cfg.theme) - 1);
+    strncpy(s_cfg.time_type, "24H", sizeof(s_cfg.time_type) - 1);
+    strncpy(s_cfg.clock_tube5, "blank", sizeof(s_cfg.clock_tube5) - 1);
     s_cfg.leading_zero    = false;
     s_cfg.led_brightness  = 60;
     s_cfg.lcd_brightness  = 60;
@@ -88,28 +88,28 @@ static void set_defaults(void)
     };
     memcpy(s_cfg.backlight_rgb, defaults, sizeof(defaults));
 
-    strcpy(s_cfg.hostname, "nextube-remaster");
-    strcpy(s_cfg.timezone, "UTC0");
-    strcpy(s_cfg.ntp_servers[0], "0.pool.ntp.org");
-    strcpy(s_cfg.ntp_servers[1], "1.pool.ntp.org");
-    strcpy(s_cfg.ntp_servers[2], "2.pool.ntp.org");
-    strcpy(s_cfg.ntp_servers[3], "3.pool.ntp.org");
+    strncpy(s_cfg.hostname, "nextube-remaster", sizeof(s_cfg.hostname) - 1);
+    strncpy(s_cfg.timezone, "UTC0", sizeof(s_cfg.timezone) - 1);
+    strncpy(s_cfg.ntp_servers[0], "0.pool.ntp.org", sizeof(s_cfg.ntp_servers[0]) - 1);
+    strncpy(s_cfg.ntp_servers[1], "1.pool.ntp.org", sizeof(s_cfg.ntp_servers[1]) - 1);
+    strncpy(s_cfg.ntp_servers[2], "2.pool.ntp.org", sizeof(s_cfg.ntp_servers[2]) - 1);
+    strncpy(s_cfg.ntp_servers[3], "3.pool.ntp.org", sizeof(s_cfg.ntp_servers[3]) - 1);
 
-    strcpy(s_cfg.weather_source, "metno"); /* default: free, no API key needed */
-    strcpy(s_cfg.weather_api_key, "");
-    strcpy(s_cfg.city, "");
-    strcpy(s_cfg.temp_format, "Celsius");
-    strcpy(s_cfg.date_format, "DD/MM/YY");
+    strncpy(s_cfg.weather_source, "metno", sizeof(s_cfg.weather_source) - 1); /* default: free, no API key needed */
+    strncpy(s_cfg.weather_api_key, "", sizeof(s_cfg.weather_api_key) - 1);
+    strncpy(s_cfg.city, "", sizeof(s_cfg.city) - 1);
+    strncpy(s_cfg.temp_format, "Celsius", sizeof(s_cfg.temp_format) - 1);
+    strncpy(s_cfg.date_format, "DD/MM/YY", sizeof(s_cfg.date_format) - 1);
 
-    strcpy(s_cfg.video_site, "youtube");
-    strcpy(s_cfg.youtube_key, "");
-    strcpy(s_cfg.bili_uid, "1");
+    strncpy(s_cfg.video_site, "youtube", sizeof(s_cfg.video_site) - 1);
+    strncpy(s_cfg.youtube_key, "", sizeof(s_cfg.youtube_key) - 1);
+    strncpy(s_cfg.bili_uid, "1", sizeof(s_cfg.bili_uid) - 1);
 
-    strcpy(s_cfg.music_file, "");
-    strcpy(s_cfg.bell_file, "/spiffs/audio/bell.wav");
-    strcpy(s_cfg.tone_file, "/spiffs/audio/tremolo3.wav");
-    strcpy(s_cfg.timer_file, "/spiffs/audio/timer.wav");
-    strcpy(s_cfg.click_file, "/spiffs/audio/click.wav");
+    strncpy(s_cfg.music_file, "", sizeof(s_cfg.music_file) - 1);
+    strncpy(s_cfg.bell_file, "/spiffs/audio/bell.wav", sizeof(s_cfg.bell_file) - 1);
+    strncpy(s_cfg.tone_file, "/spiffs/audio/tremolo3.wav", sizeof(s_cfg.tone_file) - 1);
+    strncpy(s_cfg.timer_file, "/spiffs/audio/timer.wav", sizeof(s_cfg.timer_file) - 1);
+    strncpy(s_cfg.click_file, "/spiffs/audio/click.wav", sizeof(s_cfg.click_file) - 1);
     s_cfg.button_sound  = true;
     s_cfg.audio_enabled = true;
     s_cfg.volume = 20;
@@ -147,9 +147,9 @@ static void set_defaults(void)
     s_cfg.burnin_auto_enabled    = false;
     s_cfg.burnin_auto_mask       = 0x3F;   /* all 6 tubes */
     s_cfg.burnin_auto_duration_s = 3600;   /* 1 hour */
-    strcpy(s_cfg.burnin_auto_interval, "weekly");
+    strncpy(s_cfg.burnin_auto_interval, "weekly", sizeof(s_cfg.burnin_auto_interval) - 1);
     s_cfg.burnin_auto_hour       = 0;      /* midnight */
-    strcpy(s_cfg.burnin_auto_mode, "colour-cycle");
+    strncpy(s_cfg.burnin_auto_mode, "colour-cycle", sizeof(s_cfg.burnin_auto_mode) - 1);
 }
 
 /* ── JSON helpers ──────────────────────────────────────────────────── */
@@ -216,7 +216,7 @@ static void parse_json(const char *json, size_t len)
         json_read_str(app0, "theme", s_cfg.theme, sizeof(s_cfg.theme));
         json_read_str(app0, "type",  s_cfg.time_type, sizeof(s_cfg.time_type));
         json_read_str(app0, "clock_tube5", s_cfg.clock_tube5, sizeof(s_cfg.clock_tube5));
-        if (s_cfg.clock_tube5[0] == '\0') strcpy(s_cfg.clock_tube5, "blank");
+        if (s_cfg.clock_tube5[0] == '\0') strncpy(s_cfg.clock_tube5, "blank", sizeof(s_cfg.clock_tube5) - 1);
     }
 
     json_read_str(root, "ssid",             s_cfg.ssid,            sizeof(s_cfg.ssid));
@@ -451,14 +451,14 @@ static void parse_json(const char *json, size_t len)
                   sizeof(s_cfg.burnin_auto_interval));
     /* Only "weekly" and "monthly" are valid; default to "weekly" for any other string */
     if (strcmp(s_cfg.burnin_auto_interval, "monthly") != 0)
-        strcpy(s_cfg.burnin_auto_interval, "weekly");
+        strncpy(s_cfg.burnin_auto_interval, "weekly", sizeof(s_cfg.burnin_auto_interval) - 1);
     json_read_u8(root, "burnin_auto_hour", &s_cfg.burnin_auto_hour);
     if (s_cfg.burnin_auto_hour > 23) s_cfg.burnin_auto_hour = 0;
     json_read_str(root, "burnin_auto_mode", s_cfg.burnin_auto_mode,
                   sizeof(s_cfg.burnin_auto_mode));
     /* Only "colour-cycle" and "snow" are valid; default to "colour-cycle" */
     if (strcmp(s_cfg.burnin_auto_mode, "snow") != 0)
-        strcpy(s_cfg.burnin_auto_mode, "colour-cycle");
+        strncpy(s_cfg.burnin_auto_mode, "colour-cycle", sizeof(s_cfg.burnin_auto_mode) - 1);
 
     /* Backlight RGB array */
     cJSON *bl_rgb = cJSON_GetObjectItem(root, "backlight_RGB");

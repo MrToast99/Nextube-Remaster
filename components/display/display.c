@@ -2,6 +2,7 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "esp_timer.h"          /* esp_timer_get_time — AP PIN phase clock */
+#include "esp_heap_caps.h"      /* PSRAM_MALLOC / heap_caps_malloc */
 #include "driver/spi_master.h"
 #include "driver/ledc.h"
 #include "driver/gpio.h"
@@ -9,6 +10,10 @@
 #include "freertos/task.h"
 #include "weather.h"
 #include "wifi_manager.h"       /* AP PIN visibility (S1) */
+#include "jpeg_decoder.h"       /* espressif/esp_jpeg v1.x managed component */
+#include "esp_random.h"         /* esp_fill_random — static-snow burn-in */
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
@@ -31,6 +36,13 @@ static TaskHandle_t s_display_task_handle = NULL;
  * bottom of tube 5 on every frame.  Declared here (before display_show_digit)
  * so the function can read it.  Implementation: display_set_update_indicator(). */
 static volatile bool s_update_indicator = false;
+
+/* ── Timer / burn-in mutex ───────────────────────────────────────────────────
+ * Declared here (before the burn-in setter functions) so the setters can use
+ * it at any point in the file.  Initialised in display_task() before the first
+ * render tick.  Guards both the countdown/pomodoro timer fields and the paired
+ * burn-in/snow mask+end_time writes so they are never observed in a torn state. */
+static SemaphoreHandle_t s_timer_mutex = NULL;
 
 /* ── Anti burn-in ────────────────────────────────────────────────────────── */
 /* Hourly pixel shift: the CASET window is offset by s_burnin_shift_x pixels
@@ -61,13 +73,13 @@ static const uint16_t s_burnin_colors[] = {
     0x0000,   /* black — all min          */
 };
 #define BURNIN_COLOR_COUNT  ((int)(sizeof(s_burnin_colors)/sizeof(s_burnin_colors[0])))
+#define BURNIN_COLOR_SECS   30   /* seconds per colour step in the cycle */
 
 /* Static-snow burn-in: each frame writes truly random RGB565 pixels to every
  * tube in the mask, exercising each sub-pixel independently rather than as a
  * uniform colour block.  State mirrors the colour-cycle variables above. */
 static volatile uint8_t s_snow_mask     = 0;
 static volatile time_t  s_snow_end_time = 0;
-#define BURNIN_COLOR_SECS   30   /* seconds per step in the cycle */
 
 /* ── Panel profiles (VCOM + gamma) ──────────────────────────────────────────
  * The ST7735 "Green Tab" (original Nextube panels) and ST7735S (replacement
@@ -514,16 +526,29 @@ void display_debug_restore_pwm(void)
     ESP_LOGI(TAG, "debug PWM: restored to 50 kHz (duty restored by display task)");
 }
 
+/* Open an ST7735 pixel-write window (CASET + RASET + RAMWR) and leave the
+ * data/command line high so the caller can stream pixel bytes immediately.
+ * ox/oy are the physical column/row start addresses in the panel's frame buffer
+ * (LCD_OFFSET_X + per-tube corrections already applied by the caller). */
+static inline void open_lcd_window(uint8_t ox, uint8_t oy, uint8_t w, uint8_t h)
+{
+    lcd_cmd(0x2A);
+    uint8_t ca[] = {0, ox, 0, (uint8_t)(ox + w - 1)};
+    lcd_data(ca, 4);
+    lcd_cmd(0x2B);
+    uint8_t ra[] = {0, oy, 0, (uint8_t)(oy + h - 1)};
+    lcd_data(ra, 4);
+    lcd_cmd(0x2C);
+    gpio_set_level(PIN_LCD_DC, 1);
+}
+
 void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
     uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
-    lcd_cmd(0x2A); uint8_t ca[] = {0,ox,0,(uint8_t)(ox+LCD_WIDTH-1)};  lcd_data(ca,4);
-    lcd_cmd(0x2B); uint8_t ra[] = {0,oy,0,(uint8_t)(oy+LCD_HEIGHT-1)}; lcd_data(ra,4);
-    lcd_cmd(0x2C);
-    gpio_set_level(PIN_LCD_DC, 1);
+    open_lcd_window(ox, oy, LCD_WIDTH, LCD_HEIGHT);
     uint8_t line[LCD_WIDTH * 2];
     for (int x = 0; x < LCD_WIDTH; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
     for (int y = 0; y < LCD_HEIGHT; y++) {
@@ -539,10 +564,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
     uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
-    lcd_cmd(0x2A); uint8_t ca[] = {0,ox,0,(uint8_t)(ox+w-1)}; lcd_data(ca,4);
-    lcd_cmd(0x2B); uint8_t ra[] = {0,oy,0,(uint8_t)(oy+h-1)}; lcd_data(ra,4);
-    lcd_cmd(0x2C);
-    gpio_set_level(PIN_LCD_DC, 1);
+    open_lcd_window(ox, oy, (uint8_t)w, (uint8_t)h);
     /* `data` may be in PSRAM; ESP32 SPI DMA cannot access PSRAM directly.
      * Copy 8 rows at a time into a stack SRAM chunk buffer, optionally scale
      * brightness per-pixel (integer arithmetic, negligible overhead at 5 Hz),
@@ -630,8 +652,12 @@ void display_set_update_indicator(bool active)
  *             that many seconds (use 3600/7200/10800/14400 for 1–4 h).     */
 void display_set_burnin_mask(uint8_t mask, uint32_t duration_s)
 {
+    /* Take mutex so the two-field compound write is never observed as torn
+     * by the display task's expiry check running on the other core. */
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
     s_burnin_mask     = mask & 0x3F;
     s_burnin_end_time = (mask && duration_s) ? time(NULL) + (time_t)duration_s : 0;
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
     ESP_LOGI(TAG, "burn-in mask: 0x%02X  duration: %s",
              (unsigned)s_burnin_mask,
              duration_s ? "timed" : "manual");
@@ -643,21 +669,13 @@ void display_set_burnin_mask(uint8_t mask, uint32_t duration_s)
  * minimal (160 B) while ensuring every pixel is independently randomised.
  * The same s_burnin_shift_x hourly pixel-shift is applied to the CASET
  * window so snow co-operates with the column-drift anti-burn-in. */
-#include "esp_random.h"
 static void display_fill_snow(int tube)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
     uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
-    lcd_cmd(0x2A);
-    uint8_t ca[] = {0, ox, 0, (uint8_t)(ox + LCD_WIDTH - 1)};
-    lcd_data(ca, 4);
-    lcd_cmd(0x2B);
-    uint8_t ra[] = {0, oy, 0, (uint8_t)(oy + LCD_HEIGHT - 1)};
-    lcd_data(ra, 4);
-    lcd_cmd(0x2C);
-    gpio_set_level(PIN_LCD_DC, 1);
+    open_lcd_window(ox, oy, LCD_WIDTH, LCD_HEIGHT);
     uint8_t line[LCD_WIDTH * 2];   /* 160 B — always SRAM, within stack budget */
     for (int y = 0; y < LCD_HEIGHT; y++) {
         esp_fill_random(line, sizeof(line));
@@ -669,8 +687,10 @@ static void display_fill_snow(int tube)
 
 void display_set_snow_mask(uint8_t mask, uint32_t duration_s)
 {
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
     s_snow_mask     = mask & 0x3F;
     s_snow_end_time = (mask && duration_s) ? time(NULL) + (time_t)duration_s : 0;
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
     ESP_LOGI(TAG, "snow mask: 0x%02X  duration: %s",
              (unsigned)s_snow_mask,
              duration_s ? "timed" : "manual");
@@ -683,16 +703,26 @@ void display_set_snow_mask(uint8_t mask, uint32_t duration_s)
  * but called from within it for FlipClock theme paths. */
 static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 
-#include <stdio.h>
-#include <stdlib.h>
-#include "esp_heap_caps.h"
-#include "jpeg_decoder.h"   /* espressif/esp_jpeg v1.x managed component */
-
 /* Allocate decode buffer from PSRAM so we don't exhaust DRAM. */
 #define PSRAM_MALLOC(sz)  heap_caps_malloc((sz), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 
 /* TJpgDec workspace: ~3100 bytes for JD_FASTDECODE=0 – round up with margin. */
-#define JPEG_WORK_BUF_SIZE  3200
+#define JPEG_WORK_BUF_SIZE   3200
+
+/* Upper bound on a single JPEG asset read from LittleFS.  Files larger than
+ * this are almost certainly corrupt or wrongly-placed; reject before malloc. */
+#define MAX_JPEG_FILE_SIZE  200000
+
+/* Display task tick periods and stack size. */
+#define DISPLAY_TICK_MS_FAST    50   /* spectrum mode — 20 Hz to match LED task */
+#define DISPLAY_TICK_MS_SLOW   200   /* all other modes — 5 Hz */
+
+/* Weather panel indices — weather_panel local in display_task. */
+#define WEATHER_PANEL_TEMP  0   /* temperature + icon */
+#define WEATHER_PANEL_HUM   1   /* humidity */
+/* Stack: config snapshot (~1900 B) + JPEG decode call chain (~3-4 KB).
+ * 8 KB was too tight — panic handler couldn't print a backtrace. */
+#define DISPLAY_STACK_SIZE   12288
 
 /* ── Theme error tracking ────────────────────────────────────────────────
  * Holds the path of the last image that failed to decode (e.g. wrong size,
@@ -782,11 +812,14 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 200000) { fclose(f); return NULL; }
+    if (sz <= 0 || sz > MAX_JPEG_FILE_SIZE) { fclose(f); return NULL; }
 
     uint8_t *jpeg_buf = PSRAM_MALLOC(sz);
     if (!jpeg_buf) { fclose(f); return NULL; }
-    fread(jpeg_buf, 1, sz, f);
+    if (fread(jpeg_buf, 1, (size_t)sz, f) != (size_t)sz) {
+        ESP_LOGW(TAG, "Truncated read: %s", full);
+        fclose(f); free(jpeg_buf); return NULL;
+    }
     fclose(f);
 
     /* Allocate output buffer on first use of this slot (kept forever). */
@@ -1111,7 +1144,7 @@ static void render_ap_pin(const nextube_config_t *cfg)
 
     /* Scrolling marquee: the virtual tape is 3 blanks followed by the 8 PIN
      * digits (11 characters total), repeating endlessly.  The 6-tube window
-     * advances one position every 500 ms so digits scroll right-to-left —
+     * advances one position every 1 000 ms (1 s) so digits scroll right-to-left —
      * new digits enter on the rightmost tube and exit on the left, with a
      * 3-blank gap between each repetition to give the eye a reset point.
      *
@@ -1431,18 +1464,10 @@ static void render_spectrum(const nextube_config_t *cfg)
             }
         }
 
-        /* Open SPI window — identical to display_show_digit() preamble. */
         select_tube(tube);
         uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
         uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
-        lcd_cmd(0x2A);
-        uint8_t ca[] = {0, ox, 0, (uint8_t)(ox + LCD_WIDTH - 1)};
-        lcd_data(ca, 4);
-        lcd_cmd(0x2B);
-        uint8_t ra[] = {0, oy, 0, (uint8_t)(oy + LCD_HEIGHT - 1)};
-        lcd_data(ra, 4);
-        lcd_cmd(0x2C);
-        gpio_set_level(PIN_LCD_DC, 1);
+        open_lcd_window(ox, oy, LCD_WIDTH, LCD_HEIGHT);
 
         for (int y = 0; y < LCD_HEIGHT; y++) {
             /* Map row y → segment index (or -1 for a black gap/pad row).
@@ -1761,7 +1786,6 @@ static TickType_t s_timer_start       = 0;
 static bool       s_pomo_in_break     = false;
 static bool       s_timer_paused      = false;
 static uint32_t   s_paused_elapsed_ms = 0;   /* elapsed frozen at pause moment */
-static SemaphoreHandle_t s_timer_mutex = NULL;
 
 void display_timer_reset(void)
 {
@@ -1810,6 +1834,9 @@ static void display_task(void *arg)
 
     /* Per-render state for change detection */
     struct tm     last_t        = {0};
+    time_t        last_display_epoch = 0;   /* time_t of the last rendered clock second;
+                                             * used to clamp per-tick advance so large NTP
+                                             * jumps animate rather than teleport. */
     app_mode_t    last_mode     = (app_mode_t)-1;
     char          last_theme[32]     = {0};
     char          last_time_type[8]  = {0};
@@ -1824,7 +1851,7 @@ static void display_task(void *arg)
     TickType_t    album_switch        = 0;
     TickType_t    rotation_tick       = 0;     /* tick when current mode started */
     TickType_t    theme_rotation_tick = 0;     /* tick when current theme started */
-    int           weather_panel      = 0;      /* 0 = temp, 1 = humidity */
+    int           weather_panel      = WEATHER_PANEL_TEMP;
     TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
     bool          first              = true;
     int           last_hour             = -1;  /* for hourly burn-in shift update */
@@ -1836,6 +1863,7 @@ static void display_task(void *arg)
      * it in time and the IWDT fires.  One 500 ms blank tick is enough for the
      * handshake to complete before the first colon/ampm JPEG is loaded. */
     bool          ap_pin_transition     = false;
+    uint8_t       last_burnin_snap      = 0;    /* (s_burnin_mask|s_snow_mask) on previous tick */
 
     TickType_t wake = xTaskGetTickCount();
     rotation_tick       = wake;
@@ -1902,8 +1930,10 @@ static void display_task(void *arg)
             /* Reset album, timer, and weather panel state on mode/theme switch */
             s_album_loaded = false; s_album_index = 0; album_switch = 0;
             last_remain_s  = INT32_MAX;
-            weather_panel  = 0; weather_panel_tick = 0;
+            weather_panel  = WEATHER_PANEL_TEMP; weather_panel_tick = 0;
             display_timer_reset();
+            last_display_epoch = 0;   /* clear clock smoothing state so first fresh render
+                                       * uses the true system time without clamping */
         }
 
         /* Apply backlight on/off whenever the config changes.
@@ -1911,7 +1941,7 @@ static void display_task(void *arg)
         uint8_t target_brt = cfg->lcd_brightness;
         struct tm now_tm;
 
-        if (cfg->auto_brightness && ntp_time_synced()) {
+        if (cfg->auto_brightness && ntp_has_valid_time()) {
             ntp_get_local(&now_tm);
             int hr = now_tm.tm_hour;
             bool is_night = false;
@@ -2043,10 +2073,78 @@ static void display_task(void *arg)
             continue;
         }
 
+        /* ── Burn-in / snow: timer expiry pre-check ─────────────────────────
+         * Expire masks BEFORE the mode render so the same tick's render_*
+         * calls see mask=0 and write JPEGs immediately.  Without this the
+         * render skips JPEG writes (mask still set), the expiry fires after,
+         * and the last solid colour sits on screen until the next render tick
+         * — up to 2 s for clock modes; indefinitely for scoreboard / YouTube
+         * (which only re-render on data changes, not on every tick).
+         *
+         * burnin_force_render: true on any tick where the combined mask just
+         * transitioned non-zero → zero (either timed expiry above, or a Stop
+         * command sent from the web UI between ticks).  Added to each mode's
+         * render condition so restoration is immediate even when normal change
+         * detection would otherwise skip the draw. */
+        {
+            time_t _exp_now = time(NULL);
+            /* Hold mutex for both pairs of field clears so display_set_burnin_mask()
+             * called concurrently from the web-server task cannot observe a torn state
+             * (mask cleared, end_time still non-zero). */
+            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+            if (s_burnin_mask && s_burnin_end_time != 0 &&
+                    _exp_now >= s_burnin_end_time) {
+                s_burnin_mask     = 0;
+                s_burnin_end_time = 0;
+                ESP_LOGI(TAG, "burn-in timer expired — restoring normal display");
+            }
+            if (s_snow_mask && s_snow_end_time != 0 &&
+                    _exp_now >= s_snow_end_time) {
+                s_snow_mask     = 0;
+                s_snow_end_time = 0;
+                ESP_LOGI(TAG, "snow timer expired — restoring normal display");
+            }
+            xSemaphoreGive(s_timer_mutex);
+        }
+        uint8_t cur_burnin_snap     = (uint8_t)(s_burnin_mask | s_snow_mask);
+        bool    burnin_force_render = (last_burnin_snap != 0) && (cur_burnin_snap == 0);
+        last_burnin_snap = cur_burnin_snap;
+
         switch (mode) {
 
         case APP_MODE_CLOCK: {
-            struct tm t; ntp_get_local(&t);
+            /* ── Per-tick time clamping: smooth NTP step corrections ────────────
+             * The NTP layer uses SNTP_SYNC_MODE_IMMED: boot syncs always apply
+             * a hard settimeofday(); periodic re-syncs within 60 s use adjtime()
+             * to slew, while larger drifts keep the hard jump.  Without clamping
+             * here, any hard settimeofday() would teleport the clock tubes by
+             * 8+ digits at once.
+             *
+             * With clamping (CLOCK_MAX_STEP_S = 1):
+             *   Forward jump  → tubes fast-count at 5× real speed (one second
+             *                   per 200 ms tick) until display catches up.
+             *                   An 8-second correction animates in ~1.6 s.
+             *   Backward jump → tubes hold the current second; the system clock
+             *                   marches forward from its new position and meets
+             *                   the display after |delta| seconds, then resumes
+             *                   normally.  No tube ever shows a decreasing digit.
+             *
+             * Clamping is bypassed on first/mode-change ticks so a fresh render
+             * always shows the true system time immediately. */
+#define CLOCK_MAX_STEP_S  1
+            time_t now_epoch;
+            time(&now_epoch);
+            if (last_display_epoch > 0 && !first && !mode_changed && !theme_changed) {
+                time_t delta = now_epoch - last_display_epoch;
+                if (delta > CLOCK_MAX_STEP_S) {
+                    now_epoch = last_display_epoch + CLOCK_MAX_STEP_S; /* fast-forward */
+                } else if (delta < 0) {
+                    now_epoch = last_display_epoch;                    /* hold; never rewind */
+                }
+            }
+            struct tm t;
+            localtime_r(&now_epoch, &t);
+
             bool is_24ns = (strcmp(cfg->time_type, "24H_NS") == 0);
             bool is_flip = (strcmp(cfg->theme, "FlipClock")  == 0);
             bool time_type_changed  = (strcmp(cfg->time_type, last_time_type) != 0);
@@ -2061,11 +2159,14 @@ static void display_task(void *arg)
             bool colon_blink_changed = !is_flip &&
                                        (t.tm_sec % 2 != last_t.tm_sec % 2);
             if (first || mode_changed || theme_changed || time_type_changed ||
-                    time_changed || colon_blink_changed || leading_zero_changed) {
+                    time_changed || colon_blink_changed || leading_zero_changed ||
+                    burnin_force_render) {
                 render_clock(cfg, &t);
                 last_t = t;
+                last_display_epoch = now_epoch;  /* track the epoch of the rendered second */
             }
-            strlcpy(last_time_type, cfg->time_type, sizeof(last_time_type));
+            strncpy(last_time_type, cfg->time_type, sizeof(last_time_type) - 1);
+            last_time_type[sizeof(last_time_type) - 1] = '\0';
             last_leading_zero = cfg->leading_zero;
             break;
         }
@@ -2077,7 +2178,8 @@ static void display_task(void *arg)
             if (first || mode_changed || theme_changed ||
                 t.tm_mday != last_t.tm_mday ||
                 t.tm_mon  != last_t.tm_mon  ||
-                t.tm_year != last_t.tm_year) {
+                t.tm_year != last_t.tm_year ||
+                burnin_force_render) {
                 render_date(cfg, &t);
                 last_t = t;
             }
@@ -2093,7 +2195,8 @@ static void display_task(void *arg)
             int32_t total  = (int32_t)cfg->countdown_minutes * 60;
             int32_t remain = total - (int32_t)(elapsed_ms / 1000);
             if (remain < 0) remain = 0;
-            if (first || mode_changed || theme_changed || remain != last_remain_s) {
+            if (first || mode_changed || theme_changed || remain != last_remain_s ||
+                    burnin_force_render) {
                 render_countdown_display(cfg, remain);
                 last_remain_s = remain;
             }
@@ -2127,7 +2230,8 @@ static void display_task(void *arg)
                     remain = 0;   /* frozen at zero while paused */
                 }
             }
-            if (first || mode_changed || theme_changed || remain != last_remain_s) {
+            if (first || mode_changed || theme_changed || remain != last_remain_s ||
+                    burnin_force_render) {
                 render_pomodoro_display(cfg, remain, in_break);
                 last_remain_s = remain;
             }
@@ -2137,7 +2241,8 @@ static void display_task(void *arg)
         case APP_MODE_YOUTUBE: {
             const sub_count_t *sub = youtube_bili_get();
             uint32_t count = sub->valid ? (uint32_t)sub->subscriber_count : 0;
-            if (first || mode_changed || theme_changed || count != last_subs) {
+            if (first || mode_changed || theme_changed || count != last_subs ||
+                    burnin_force_render) {
                 render_subs(cfg);
                 last_subs = count;
             }
@@ -2145,7 +2250,7 @@ static void display_task(void *arg)
         }
 
         case APP_MODE_SCOREBOARD:
-            if (first || mode_changed || theme_changed)
+            if (first || mode_changed || theme_changed || burnin_force_render)
                 render_scoreboard(cfg);
             break;
 
@@ -2155,7 +2260,8 @@ static void display_task(void *arg)
             break;
 
         case APP_MODE_ALBUM:
-            render_album(cfg, &album_switch, first || mode_changed || theme_changed);
+            render_album(cfg, &album_switch,
+                         first || mode_changed || theme_changed || burnin_force_render);
             break;
 
         case APP_MODE_WEATHER: {
@@ -2173,10 +2279,10 @@ static void display_task(void *arg)
 
                 /* If the currently active panel has been disabled, jump to the
                  * other one immediately without waiting for the rotation timer. */
-                if (weather_panel == 0 && !p0 && p1) {
-                    weather_panel = 1; weather_panel_tick = 0; panel_flipped = true;
-                } else if (weather_panel == 1 && !p1 && p0) {
-                    weather_panel = 0; weather_panel_tick = 0; panel_flipped = true;
+                if (weather_panel == WEATHER_PANEL_TEMP && !p0 && p1) {
+                    weather_panel = WEATHER_PANEL_HUM; weather_panel_tick = 0; panel_flipped = true;
+                } else if (weather_panel == WEATHER_PANEL_HUM && !p1 && p0) {
+                    weather_panel = WEATHER_PANEL_TEMP; weather_panel_tick = 0; panel_flipped = true;
                 } else if (p0 && p1) {
                     /* Both enabled — rotate on the configured interval */
                     TickType_t now_t = xTaskGetTickCount();
@@ -2208,7 +2314,8 @@ static void display_task(void *arg)
                               (int)(w->humidity + 0.5f) != (int)(last_hum + 0.5f));
             }
             bool valid_changed = (now_valid != last_wx_valid);
-            if (first || mode_changed || theme_changed || wx_changed || valid_changed || panel_flipped) {
+            if (first || mode_changed || theme_changed || wx_changed || valid_changed ||
+                    panel_flipped || burnin_force_render) {
                 render_weather(cfg, weather_panel);
                 if (now_valid) { last_temp_c = w->temp_c; last_hum = w->humidity; }
                 last_wx_valid = now_valid;
@@ -2225,57 +2332,43 @@ static void display_task(void *arg)
          * Runs after normal mode render; unmasked tubes show live content.
          * Colour advances every BURNIN_COLOR_SECS seconds, cycling through
          * red→green→blue→white→black to stress every sub-pixel at both
-         * voltage extremes.  Timer expiry auto-restores all tubes. */
+         * voltage extremes.  Timer expiry is handled in the pre-check above. */
         if (s_burnin_mask) {
             time_t now_t = time(NULL);
-
-            /* Auto-restore when the requested duration has elapsed */
-            if (s_burnin_end_time != 0 && now_t >= s_burnin_end_time) {
-                s_burnin_mask     = 0;
-                s_burnin_end_time = 0;
-                ESP_LOGI(TAG, "burn-in timer expired — restoring normal display");
-            } else {
-                uint16_t col = s_burnin_colors[
-                    (size_t)(now_t / BURNIN_COLOR_SECS) % (size_t)BURNIN_COLOR_COUNT];
-                for (int _t = 0; _t < LCD_COUNT; _t++) {
-                    if (s_burnin_mask & (1u << _t))
-                        display_fill(_t, col);
-                }
+            uint16_t col = s_burnin_colors[
+                (size_t)(now_t / BURNIN_COLOR_SECS) % (size_t)BURNIN_COLOR_COUNT];
+            for (int _t = 0; _t < LCD_COUNT; _t++) {
+                if (s_burnin_mask & (1u << _t))
+                    display_fill(_t, col);
             }
         }
 
         /* Static-snow burn-in: write random RGB565 pixels to masked tubes.
          * Runs independently of the colour-cycle above — both modes can be
-         * active on different tube subsets simultaneously. */
+         * active on different tube subsets simultaneously.
+         * Timer expiry is handled in the pre-check above. */
         if (s_snow_mask) {
-            time_t now_t = time(NULL);
-            if (s_snow_end_time != 0 && now_t >= s_snow_end_time) {
-                s_snow_mask     = 0;
-                s_snow_end_time = 0;
-                ESP_LOGI(TAG, "snow timer expired — restoring normal display");
-            } else {
-                for (int _t = 0; _t < LCD_COUNT; _t++) {
-                    if (s_snow_mask & (1u << _t))
-                        display_fill_snow(_t);
-                }
+            for (int _t = 0; _t < LCD_COUNT; _t++) {
+                if (s_snow_mask & (1u << _t))
+                    display_fill_snow(_t);
             }
         }
 
         first = false;
 
-        /* Spectrum mode runs at 20 Hz (50 ms) to match the LED task refresh
-         * rate and give snappy bar response.  All other modes use 5 Hz (200 ms). */
+        /* Spectrum mode runs at 20 Hz to match the LED task refresh rate and
+         * give snappy bar response.  All other modes use 5 Hz. */
         TickType_t tick_ms = (mode == APP_MODE_SPECTRUM)
-                             ? pdMS_TO_TICKS(50)
-                             : pdMS_TO_TICKS(200);
+                             ? pdMS_TO_TICKS(DISPLAY_TICK_MS_FAST)
+                             : pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW);
 
         /* Re-sync wake timer when we've fallen behind (e.g. blocked on
-         * SPIFFS while audio pre-buffers).  Cap at 200 ms regardless of
-         * tick_ms so a spectrum stall doesn't cause a catch-up burst in
-         * a slower mode after switching. */
+         * SPIFFS while audio pre-buffers).  Cap at DISPLAY_TICK_MS_SLOW
+         * regardless of tick_ms so a spectrum stall doesn't cause a
+         * catch-up burst in a slower mode after switching. */
         {
             TickType_t now_tick = xTaskGetTickCount();
-            if ((TickType_t)(now_tick - wake) > pdMS_TO_TICKS(200))
+            if ((TickType_t)(now_tick - wake) > pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW))
                 wake = now_tick;
         }
         vTaskDelayUntil(&wake, tick_ms);
@@ -2284,11 +2377,7 @@ static void display_task(void *arg)
 
 void display_task_start(void)
 {
-    /* Stack bumped to 12 KB: the config snapshot (nextube_config_t, ~1900 B)
-     * lives on the stack, and the JPEG decode call chain adds another
-     * 3-4 KB of frames on the first full-mode render after AP-PIN exit.
-     * 8 KB was too tight — panic handler couldn't print a backtrace. */
-    xTaskCreatePinnedToCore(display_task, "display", 12288, NULL, 6,
+    xTaskCreatePinnedToCore(display_task, "display", DISPLAY_STACK_SIZE, NULL, 6,
                             &s_display_task_handle, 1);
     ESP_LOGI(TAG, "Display task started");
 }

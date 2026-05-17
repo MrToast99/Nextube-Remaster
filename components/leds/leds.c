@@ -57,10 +57,14 @@ static void ws2812_write(void)
         .loop_count      = 0,          /* transmit once */
         .flags.eot_level = 0,          /* line held low after tx = WS2812 reset */
     };
-    ESP_ERROR_CHECK(rmt_transmit(s_rmt_chan, s_bytes_enc,
-                                 grb, sizeof(grb), &tx_cfg));
-    /* Block until the frame is fully clocked out */
-    ESP_ERROR_CHECK(rmt_tx_wait_all_done(s_rmt_chan, pdMS_TO_TICKS(100)));
+    /* Use checked returns instead of ESP_ERROR_CHECK: a transient RMT error
+     * (channel busy, 100 ms timeout) should log and return gracefully rather
+     * than triggering an abort-and-reboot.  LEDs latch their last colour so
+     * a skipped frame is invisible. */
+    esp_err_t e = rmt_transmit(s_rmt_chan, s_bytes_enc, grb, sizeof(grb), &tx_cfg);
+    if (e != ESP_OK) { ESP_LOGW(TAG, "LED transmit failed: %d", e); return; }
+    e = rmt_tx_wait_all_done(s_rmt_chan, pdMS_TO_TICKS(100));
+    if (e != ESP_OK) { ESP_LOGW(TAG, "LED wait failed: %d", e); }
 }
 
 /* ════════════════════════════════════════════════════════════════════ */

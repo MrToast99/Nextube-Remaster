@@ -95,7 +95,10 @@ void display_show_image(int tube, const char *path);
 
 /** Returns a human-readable description of the last JPEG decode failure
  *  (path + decoded dimensions), or NULL if no error has occurred since
- *  the last theme change.  String is valid until the next theme switch. */
+ *  the last theme change.
+ *  The returned pointer is into an internal static buffer — valid only until
+ *  the next theme change.  Callers must NOT free() it or store it across a
+ *  theme switch. */
 const char *display_get_theme_error(void);
 
 /* ── Path builders ─────────────────────────────────────────────────── */
