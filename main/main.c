@@ -204,6 +204,89 @@ static void init_nvs(void)
     ESP_ERROR_CHECK(err);
 }
 
+/* ── Deferred audio + mic initialisation ──────────────────────────── */
+/* Started as a low-priority task from app_main so that audio/mic come up
+ * well after the WiFi AP is broadcasting and any auto-connecting client's
+ * WPA2 handshake has completed.
+ *
+ * AUDIO starts after a fixed 8 s delay — enough to clear the WPA2 window.
+ *
+ * MIC start is additionally gated on wifi_manager_ap_pin_visible().
+ * During the AP PIN phase the display task (Core 1) makes rapid SPIFFS reads
+ * to load the PIN-digit JPEGs.  Starting the mic concurrently adds SPI0 bus
+ * pressure that can trigger the ESP32 PSRAM cache errata → IWDT on Core 1.
+ * Waiting for the PIN phase to end eliminates this conflict. */
+static void audio_mic_deferred_start(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(8000));   /* 8 s — safely past the WPA2 window */
+
+    /* ── Audio ───────────────────────────────────────────────────────── */
+    config_lock();
+    const nextube_config_t *cfg = config_get();
+    uint8_t vol      = cfg->volume;
+    bool    audio_en = cfg->audio_enabled;
+    bool    mic_en   = cfg->mic_enabled;   /* preliminary — re-read after wait */
+    config_unlock();
+
+    audio_init();
+    audio_set_volume(vol);
+    audio_set_enabled(audio_en);
+
+    /* ── Mic — wait for the AP PIN phase to end ──────────────────────── */
+    bool mic_started = false;
+    if (mic_en) {
+        bool skip_mic = false;
+        if (wifi_manager_ap_pin_visible()) {
+            ESP_LOGI("main", "Mic start deferred: waiting for AP PIN phase to end");
+            /* Poll every second.  wifi_manager_ap_pin_visible() becomes false
+             * once (a) STA associates to the user's router, or (b) a client
+             * connects to the setup AP and the PIN display is dismissed. */
+            bool pin_gone = false;
+            for (int i = 0; i < 600; i++) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                if (!wifi_manager_ap_pin_visible()) { pin_gone = true; break; }
+            }
+            if (pin_gone) {
+                ESP_LOGI("main", "AP PIN phase ended — starting mic");
+            } else {
+                /* Device is still unconfigured after 10 minutes.  The mic is
+                 * not useful without time/WiFi, and the heavy SPIFFS reads for
+                 * the PIN-digit JPEGs are still in progress — skip the mic
+                 * entirely this boot.  A power-cycle after setup completes will
+                 * start it normally. */
+                ESP_LOGW("main", "Mic: device still unconfigured after 10 min — mic left off this boot");
+                skip_mic = true;
+            }
+        }
+
+        if (!skip_mic) {
+            /* Re-read mic config: the user may have changed settings via the
+             * web UI during the AP PIN / setup window. */
+            bool  cal_saved = false;
+            float noise_floor[CFG_MIC_BAND_COUNT];
+            config_lock();
+            cfg       = config_get();
+            mic_en    = cfg->mic_enabled;   /* re-check in case disabled via UI */
+            cal_saved = cfg->mic_calibration_saved;
+            if (cal_saved)
+                memcpy(noise_floor, cfg->mic_noise_floor, sizeof(noise_floor));
+            config_unlock();
+
+            if (mic_en) {
+                mic_init();
+                mic_task_start();
+                if (cal_saved)
+                    mic_apply_calibration(noise_floor);
+                mic_started = true;
+            }
+        }
+    }
+
+    ESP_LOGI("main", "Audio started (deferred)%s",
+             mic_started ? " + mic started" : " — mic not started");
+    vTaskDelete(NULL);
+}
+
 /* ── Application entry ─────────────────────────────────────────────── */
 void app_main(void)
 {
@@ -232,11 +315,9 @@ void app_main(void)
     /* Load configuration from /spiffs/config.json (or defaults) — /spiffs is the LittleFS mount point */
     config_mgr_init();
 
-    /* Read the small boot-time scalars under the config lock. */
-    uint8_t boot_volume;
-    bool    boot_audio_enabled;
-    bool    boot_mic_enabled;
-    bool    boot_mic_cal_saved;
+    /* Read the small boot-time scalars under the config lock.
+     * audio_enabled / volume / mic_* are NOT read here — the deferred audio
+     * task reads them fresh from config at start time (see audio_mic_deferred_start). */
     bool    boot_weather_enabled;
     bool    boot_youtube_enabled;
     uint8_t boot_invert_mask;
@@ -248,10 +329,6 @@ void app_main(void)
     uint8_t boot_tube_brightness[6];
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
-    boot_volume          = cfg_boot->volume;
-    boot_audio_enabled   = cfg_boot->audio_enabled;
-    boot_mic_enabled     = cfg_boot->mic_enabled;
-    boot_mic_cal_saved   = cfg_boot->mic_calibration_saved;
     boot_weather_enabled = cfg_boot->weather_enabled;
     boot_youtube_enabled = cfg_boot->youtube_enabled;
     boot_invert_mask     = cfg_boot->lcd_invert_mask;
@@ -273,26 +350,18 @@ void app_main(void)
     display_apply_tube_brightness(boot_tube_brightness);          /* per-tube brightness scale       */
     display_task_start();          /* launch 5 Hz FreeRTOS display task */
 
-    audio_init();
-    audio_set_volume(boot_volume);          /* restore saved volume level   */
-    audio_set_enabled(boot_audio_enabled);  /* tear down DAC if disabled    */
-
-    /* Microphone: only initialise the ADC and start the sampling task when
-     * mic is enabled.  The task self-gates anyway (checks config each frame),
-     * but skipping init entirely avoids touching ADC1 when the user has
-     * permanently disabled the mic (e.g. no mic fitted). */
-    if (boot_mic_enabled) {
-        mic_init();
-        mic_task_start();
-        /* Restore a user-captured noise baseline so Phase 1 is skipped on boot.
-         * mic_apply_calibration() only does a memcpy internally, so passing the
-         * locked config pointer is safe — no blocking or recursive lock needed. */
-        if (boot_mic_cal_saved) {
-            config_lock();
-            mic_apply_calibration(config_get()->mic_noise_floor);
-            config_unlock();
-        }
-    }
+    /* Audio + Microphone — deferred start (see audio_mic_deferred_start).
+     *
+     * AUDIO: starts after a fixed 8 s delay (clear of the WPA2 window).
+     * MIC:   additionally waits for wifi_manager_ap_pin_visible() to go false.
+     *        During the AP PIN phase, the display task (Core 1) reads SPIFFS
+     *        rapidly for PIN-digit JPEGs; starting the mic concurrently adds
+     *        SPI0 bus pressure that can trigger the ESP32 PSRAM cache errata
+     *        → IWDT.  Gating on PIN-phase exit eliminates this risk.
+     *
+     * Stack: audio_init() + mic_init() call chains exceed 4 KB combined.
+     * 8 KB matches CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192. */
+    xTaskCreate(audio_mic_deferred_start, "audio_defer", 8192, NULL, 4, NULL);
 
     leds_init();
     leds_task_start();
