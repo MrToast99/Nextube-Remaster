@@ -461,7 +461,7 @@ After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web
 
 **LittleFS update warning:** flashing `littlefs.bin` overwrites all LittleFS flash, including any custom themes or images you have uploaded. Back up custom files using the LittleFS file browser (**System → LittleFS Files**) before updating.
 
-#### Migrating from an older SPIFFS build
+#### Migrating from an older SPIFFS build (v1.0.10 or older, all releases past v1.1.0 are already LittleFS)
 
 Changing the partition subtype from `spiffs` to `littlefs` requires re-flashing the partition table — a firmware-only OTA is **not** sufficient. Perform a full USB re-flash using `nextube-fw-full.bin` (Option A or B above) once, then all subsequent OTA updates work normally.
 
