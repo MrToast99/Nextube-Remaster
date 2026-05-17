@@ -26,6 +26,8 @@
   - [Option B — esptool full flash](#option-b--first-time--full-flash-esptool-cli)
   - [Option C — Individual partitions](#option-c--individual-partitions-esptool-cli)
   - [Over-the-Air (OTA)](#over-the-air-ota)
+    - [Automatic Update Checks](#automatic-update-checks)
+    - [Returning to factory firmware](#returning-to-the-original-factory-firmware)
 - [Web Management UI](#web-management-ui)
   - [Admin Authentication](#admin-authentication-optional)
   - [Setup AP (WiFi Provisioning)](#setup-ap-wifi-provisioning)
@@ -316,6 +318,8 @@ The six original displays are **80×160 px ST7735 "Green Tab" IPS panels**. If o
 
 ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colours on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
 
+> 📹 **LCD swap guide:** For a step-by-step video walkthrough of the physical panel replacement process, see the [community discussion thread](https://github.com/MrToast99/Nextube-Remaster/discussions/35).
+
 #### Quick-start for LH096NT-IF09W replacement panels
 
 1. Flash firmware, open the web UI
@@ -461,9 +465,21 @@ After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web
 
 **LittleFS update warning:** flashing `littlefs.bin` overwrites all LittleFS flash, including any custom themes or images you have uploaded. Back up custom files using the LittleFS file browser (**System → LittleFS Files**) before updating.
 
-#### Migrating from an older SPIFFS build (v1.0.10 or older, all releases past v1.1.0 are already LittleFS)
+#### Automatic Update Checks
+
+The web UI automatically checks for new GitHub releases and shows a **dismissable toast notification** in the bottom-right corner if a newer version is available. The check runs once when the page loads and repeats every 24 hours while the page is open. No data leaves your network beyond the GitHub API query (`api.github.com/repos/MrToast99/Nextube-Remaster/releases/latest`).
+
+The notification tells you which partitions changed (firmware-only, LittleFS-only, or both) so you know which files to download. Dismiss it by clicking **✕** — it won't reappear until the next page load or 24-hour interval.
+
+**Clock-face indicator (tube 6):** when the update toast appears, the firmware can also paint a **4-row solid red bar at the physical bottom of tube 6** (the rightmost tube) on every render frame so you know an update is waiting without having the web UI open. This is opt-in — enable it under **Display → Enable clock face update notification**. The bar appears as soon as an update is detected and clears automatically when the toast is dismissed or the option is unchecked. The indicator state is RAM-only and resets on reboot (the update check re-runs on next page load).
+
+#### Migrating from an older SPIFFS build
 
 Changing the partition subtype from `spiffs` to `littlefs` requires re-flashing the partition table — a firmware-only OTA is **not** sufficient. Perform a full USB re-flash using `nextube-fw-full.bin` (Option A or B above) once, then all subsequent OTA updates work normally.
+
+#### Returning to the original factory firmware
+
+The release includes `Stock Recovery Firmware/full_bak-used_flash_0x0.bin` — a complete flash dump of the original Rotrics firmware taken before any modifications. **This file is provided solely as a safety net for restoring the device to its factory state.** Flash it the same way as `nextube-fw-full.bin` (Option A or B above) at offset `0x0`. Doing so will erase all Nextube-Remaster settings, themes, and configuration and put the device back exactly as it shipped from Rotrics.
 
 ## Web Management UI
 
@@ -736,11 +752,26 @@ python helpers/nextube_image_converter.py
 ```
 
 A browser UI opens at **http://localhost:5000**. Features:
+
+**Regular image conversion:**
 - Drag-and-drop individual images **or** click **📁 Browse Folder** to upload a whole directory at once
 - Interactive crop editor with aspect-ratio-locked drag box and live 80×160 preview
 - Auto center-crop and stretch modes
 - JPEG or PNG output
 - **Folder upload preserves the source directory structure and original filenames** in the output ZIP — ready to drag straight into the LittleFS file browser
+
+**`.zipper` theme import:**
+- Drag-and-drop a `.zipper` file onto the drop zone (or click **📦 Import .zipper Theme**) to import a theme package created by the original Nextube desktop software
+- A `.zipper` is a ZIP of PNG assets named `0.png`–`9.png`, `am.png`, `pm.png`, `blank.png`, and `colon.png`
+- The filename is used as the theme name (e.g. `neon yellow.zipper` → theme `neon yellow`) — editable before converting
+- Each asset is shown in a grid with a pre-computed suggested crop; click any thumbnail to fine-tune its crop individually in the editor
+- Missing assets (e.g. a `.zipper` that omits `colon.png`) are listed with a warning but do not block conversion
+- **Convert & Download Theme ZIP** packages all assets into the correct LittleFS folder structure:
+  ```
+  {ThemeName}/Numbers/0.jpg … 9.jpg
+  {ThemeName}/AMPM/am.jpg  pm.jpg  blank.jpg  colon.jpg
+  ```
+  Unzip the downloaded file directly into `/images/themes/` via the LittleFS file browser and the theme appears in the dropdown immediately
 
 Requires Python 3 and Pillow (`pip install Pillow` — auto-installed on first run).
 
@@ -787,6 +818,7 @@ POST /api/wifi/scan          → trigger WiFi scan
 GET  /api/wifi/scan          → scan results
 GET  /api/logs               → in-RAM device log (last 64 lines)
 POST /api/logs/clear         → clear in-RAM log buffer
+POST /api/update_notify      → {"active":true/false} — activate or clear the 4-row red update indicator on tube 6
 ```
 
 ## Project Structure
