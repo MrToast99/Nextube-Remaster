@@ -9,6 +9,39 @@
 
 [!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/mrtoast99)
 
+---
+
+## Contents
+
+- [What is this?](#what-is-this)
+- [Features](#features)
+- [Hardware](#hardware)
+  - [Audio / DAC Notes](#audio--dac-notes)
+  - [Microphone Notes](#microphone-notes)
+  - [Replacement LCD Panels](#replacement-lcd-panels)
+  - [Flash Layout](#flash-layout-16mb)
+- [Building](#building)
+- [Flashing](#flashing)
+  - [Option A — Browser / ESPConnect](#option-a--browser-based-no-tools-required)
+  - [Option B — esptool full flash](#option-b--first-time--full-flash-esptool-cli)
+  - [Option C — Individual partitions](#option-c--individual-partitions-esptool-cli)
+  - [Over-the-Air (OTA)](#over-the-air-ota)
+- [Web Management UI](#web-management-ui)
+  - [Admin Authentication](#admin-authentication-optional)
+  - [Setup AP (WiFi Provisioning)](#setup-ap-wifi-provisioning)
+  - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
+- [Modes](#modes)
+- [Weather](#weather)
+- [Themes](#themes)
+  - [Adding a Custom Theme](#adding-a-custom-theme)
+  - [Image Converter Helper](#image-converter-helper)
+- [REST API](#rest-api)
+- [Project Structure](#project-structure)
+- [Contributing](#contributing)
+- [License](#license)
+- [Community](#community)
+
+---
 
 ## What is this?
 
