@@ -473,7 +473,7 @@ The notification tells you which partitions changed (firmware-only, LittleFS-onl
 
 **Clock-face indicator (tube 6):** when the update toast appears, the firmware can also paint a **4-row solid red bar at the physical bottom of tube 6** (the rightmost tube) on every render frame so you know an update is waiting without having the web UI open. This is opt-in — enable it under **Display → Enable clock face update notification**. The bar appears as soon as an update is detected and clears automatically when the toast is dismissed or the option is unchecked. The indicator state is RAM-only and resets on reboot (the update check re-runs on next page load).
 
-#### Migrating from an older SPIFFS build
+#### Migrating from an older SPIFFS build (v1.0.10 or older, all releases past v1.1.0 are already LittleFS)
 
 Changing the partition subtype from `spiffs` to `littlefs` requires re-flashing the partition table — a firmware-only OTA is **not** sufficient. Perform a full USB re-flash using `nextube-fw-full.bin` (Option A or B above) once, then all subsequent OTA updates work normally.
 
