@@ -1220,7 +1220,7 @@ async function loadSettings() {
   $('f-wsrc').value = cfg.weather_source || 'wttr'; toggleWeatherKey();
   $('f-wkey').value = cfg.weather_api_key || '';
   $('f-city').value = cfg.City || '';
-  $('f-tempfmt').value = cfg.temperature_formate || 'Celsius';
+  $('f-tempfmt').value = cfg.temperature_format || 'Celsius';
   $('f-datefmt').value = cfg.date_format || 'DD/MM/YY';
   $('f-vsite').value = cfg.video_site || 'youtube';
   $('f-ytid').value = cfg.youtube_id || '';
@@ -1488,7 +1488,7 @@ async function saveSettings() {
     timezone: $('f-tz').value,
     ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
     date_format: $('f-datefmt').value,
-    weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
+    weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_format: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: !!$('m-spectrum').checked,
@@ -2311,10 +2311,17 @@ async function refreshStatus() {
   $('conn-status').innerHTML = '<span class="status-dot ok"></span>Connected';
   $('s-time').textContent = s.time ? s.time.split('T')[1] : '--:--';
   $('s-mode').textContent = s.mode || '--';
-  $('s-temp').textContent = s.weather ? s.weather.temp_c.toFixed(1) + '°C' : '--°';
+  const _useFahrenheit = (cfg.temperature_format || 'Celsius') === 'Fahrenheit';
+  if (s.weather) {
+    const _wt = _useFahrenheit ? (s.weather.temp_c * 9 / 5 + 32) : s.weather.temp_c;
+    $('s-temp').textContent = _wt.toFixed(1) + (_useFahrenheit ? '°F' : '°C');
+  } else {
+    $('s-temp').textContent = '--°';
+  }
   if (s.sensor) {
     $('s-sensor-wrap').style.display = '';
-    $('s-sensor').textContent = s.sensor.temp_c.toFixed(1) + '°C  ' + s.sensor.humidity.toFixed(0) + '%';
+    const _st = _useFahrenheit ? (s.sensor.temp_c * 9 / 5 + 32) : s.sensor.temp_c;
+    $('s-sensor').textContent = _st.toFixed(1) + (_useFahrenheit ? '°F' : '°C') + '  ' + s.sensor.humidity.toFixed(0) + '%';
   }
   $('s-subs').textContent = s.subscribers != null ? s.subscribers.toLocaleString() : '--';
   $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
