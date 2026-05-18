@@ -46,7 +46,10 @@ select option{background:var(--accent);color:var(--text)}
 .wifi-item{display:flex;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05)}
 .wifi-item .ssid{font-weight:500}.wifi-item .rssi{color:var(--dim);font-size:.8rem}
 .progress{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin-top:.5rem}
-.progress-bar{height:100%;background:var(--hi);transition:width .3s}
+.progress-bar{height:100%;background:var(--hi);transition:width .3s,background .5s}
+.progress.ota{height:8px;border-radius:4px;margin-top:.6rem}
+@keyframes ota-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.progress-bar.pulsing{animation:ota-pulse 1.1s ease-in-out infinite}
 .file-row{display:flex;justify-content:space-between;align-items:center;padding:.35rem .7rem;border-bottom:1px solid rgba(255,255,255,.05)}
 .file-row:last-child{border-bottom:none}
 .file-row:hover{background:rgba(255,255,255,.04)}
@@ -683,7 +686,8 @@ select option{background:var(--accent);color:var(--text)}
     <h2>Firmware Update (OTA)</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">Upload <strong>nextube-fw-ota.bin</strong> for over-the-air updates. Do <strong>not</strong> upload <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.</p>
     <input type="file" id="ota-file" accept=".bin" style="margin-bottom:.5rem">
-    <div class="progress" id="ota-progress" style="display:none"><div class="progress-bar" id="ota-bar"></div></div>
+    <div class="progress ota" id="ota-progress" style="display:none"><div class="progress-bar" id="ota-bar"></div></div>
+    <p id="ota-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
     <div class="btn-group"><button class="btn btn-primary" onclick="doOTA()">Upload & Flash</button></div>
   </div>
   <div class="card">
@@ -735,7 +739,7 @@ select option{background:var(--accent);color:var(--text)}
       ⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above, and download your config using Backup &amp; Restore before proceeding.
     </div>
     <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
-    <div class="progress" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
+    <div class="progress ota" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
     <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
     <div class="btn-group"><button class="btn btn-primary" onclick="doFSOTA()">Upload & Flash</button></div>
   </div>
@@ -1660,42 +1664,75 @@ async function doOTA() {
    * multi-MB transfer begins and routes the user to the login modal. */
   try { await secureFetch('/api/auth/check'); }
   catch(e) { return; } /* 401 → login modal shown by secureFetch */
-  $('ota-progress').style.display = 'block';
+
+  const prog = $('ota-progress');
+  const bar  = $('ota-bar');
+  const stat = $('ota-status');
+  prog.style.display = 'block';
+  stat.style.display = 'block';
+  bar.style.width = '0%';
+  bar.style.background = 'var(--hi)';
+  bar.classList.remove('pulsing');
+  stat.textContent = 'Starting upload…';
   _otaInProgress = true;
 
-  let uploadPct = 0;   /* track upload % so onerror can distinguish "upload done vs. mid-upload" */
-  const xhr = new XMLHttpRequest();
-  xhr.upload.onprogress = e => {
-    if (e.lengthComputable) {
-      uploadPct = (e.loaded / e.total * 100);
-      $('ota-bar').style.width = uploadPct + '%';
-    }
-  };
-  xhr.onload = () => {
+  /* ── helpers ── */
+  const otaDone = (ok, msg) => {
     _otaInProgress = false;
-    if (_xhrHandle401(xhr)) return;
+    bar.classList.remove('pulsing');
+    bar.style.width = '100%';
+    bar.style.background = ok ? 'var(--ok)' : 'var(--hi)';
+    stat.style.color = ok ? 'var(--ok)' : 'var(--hi)';
+    stat.textContent = msg;
+    if (ok) setTimeout(() => location.reload(), ok === 'fast' ? 15000 : 20000);
+  };
+
+  let uploadPct = 0;
+  const xhr = new XMLHttpRequest();
+
+  /* Phase 1 — Uploading: stream binary to PSRAM on device */
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    uploadPct = e.loaded / e.total * 100;
+    bar.style.width = uploadPct.toFixed(1) + '%';
+    stat.textContent = 'Uploading… ' + uploadPct.toFixed(0) + '%'
+      + '  (' + (e.loaded / 1048576).toFixed(1) + ' / ' + (e.total / 1048576).toFixed(1) + ' MB)';
+  };
+
+  /* Phase 2 — Flashing: upload complete, device writing PSRAM → flash */
+  xhr.upload.onload = () => {
+    bar.style.width = '100%';
+    bar.style.background = '#e67e22';   /* orange */
+    bar.classList.add('pulsing');
+    stat.style.color = '#e67e22';
+    stat.textContent = 'Flashing firmware… (do not close this page)';
+  };
+
+  /* Phase 3 — Response received (device sends 200 before reboot) */
+  xhr.onload = () => {
+    if (_xhrHandle401(xhr)) { _otaInProgress = false; return; }
     if (xhr.status === 200) {
-      $('ota-bar').style.width = '100%';
+      otaDone('fast', 'Rebooting… page reloads in 15 s');
       toast('OTA complete! Rebooting…');
-      setTimeout(() => location.reload(), 15000);
     } else {
+      otaDone(false, 'Failed: ' + (xhr.responseText || xhr.statusText));
       toast('OTA failed: ' + (xhr.responseText || xhr.statusText), true);
     }
   };
+
+  /* onerror fires when the device reboots and tears the TCP connection
+   * before the browser receives the HTTP response — treat as success when
+   * the full binary was uploaded (upload phase was complete). */
   xhr.onerror = () => {
-    _otaInProgress = false;
-    /* When the upload is 100% complete, the device reboots and tears down the
-     * TCP connection before the browser has received the HTTP response.  The
-     * browser fires onerror ("network error") even though the OTA succeeded.
-     * Treat this as a successful reboot rather than a failure. */
     if (uploadPct >= 99.9) {
-      $('ota-bar').style.width = '100%';
+      otaDone('slow', 'Rebooting… page reloads in 20 s');
       toast('OTA complete — device rebooting…');
-      setTimeout(() => location.reload(), 18000);
     } else {
-      toast('OTA failed: network error (upload stalled at ' + Math.round(uploadPct) + '%)', true);
+      otaDone(false, 'Upload stalled at ' + Math.round(uploadPct) + '% — check WiFi and retry');
+      toast('OTA failed: upload stalled at ' + Math.round(uploadPct) + '%', true);
     }
   };
+
   xhr.open('POST', '/api/update_firmware');
   _xhrAuthHeader(xhr);
   xhr.send(file);
@@ -1723,32 +1760,69 @@ async function doFSOTA() {
   prog.style.display = 'block';
   stat.style.display = 'block';
   bar.style.width = '0%';
-  stat.textContent = 'Uploading… (this may take 30–90 seconds)';
+  bar.style.background = 'var(--hi)';
+  bar.classList.remove('pulsing');
+  stat.style.color = 'var(--dim)';
+  stat.textContent = 'Starting upload…';
+  _otaInProgress = true;
 
-  const xhr = new XMLHttpRequest();
-  xhr.upload.onprogress = e => {
-    if (e.lengthComputable) {
-      const pct = (e.loaded / e.total * 100).toFixed(0);
-      bar.style.width = pct + '%';
-      stat.textContent = 'Uploading… ' + pct + '%  (' + (e.loaded/1024/1024).toFixed(1) + ' / ' + (e.total/1024/1024).toFixed(1) + ' MB)';
-    }
+  /* ── helpers ── */
+  const fsDone = (ok, msg) => {
+    _otaInProgress = false;
+    bar.classList.remove('pulsing');
+    bar.style.width = '100%';
+    bar.style.background = ok ? 'var(--ok)' : 'var(--hi)';
+    stat.style.color = ok ? 'var(--ok)' : 'var(--hi)';
+    stat.textContent = msg;
+    if (ok) setTimeout(() => location.reload(), ok === 'fast' ? 15000 : 30000);
   };
+
+  let uploadPct = 0;
+  const xhr = new XMLHttpRequest();
+
+  /* Phase 1 — Uploading: stream image to device (PSRAM buffer if it fits) */
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    uploadPct = e.loaded / e.total * 100;
+    bar.style.width = uploadPct.toFixed(1) + '%';
+    stat.textContent = 'Uploading… ' + uploadPct.toFixed(0) + '%'
+      + '  (' + (e.loaded / 1048576).toFixed(1) + ' / ' + (e.total / 1048576).toFixed(1) + ' MB)';
+  };
+
+  /* Phase 2 — Flashing: upload complete, device erasing + writing flash.
+   * LittleFS images are large (4–7 MB); flashing can take 30–60 s. */
+  xhr.upload.onload = () => {
+    bar.style.width = '100%';
+    bar.style.background = '#e67e22';   /* orange */
+    bar.classList.add('pulsing');
+    stat.style.color = '#e67e22';
+    stat.textContent = 'Flashing LittleFS… this can take up to 60 s — do not close this page';
+  };
+
+  /* Phase 3 — Response received */
   xhr.onload = () => {
-    if (_xhrHandle401(xhr)) { stat.textContent = 'Sign in required'; return; }
+    if (_xhrHandle401(xhr)) { _otaInProgress = false; stat.textContent = 'Sign in required'; return; }
     if (xhr.status === 200) {
-      bar.style.width = '100%';
-      stat.textContent = 'Done! Device is rebooting — page will reload in 15 s…';
+      fsDone('fast', 'Rebooting… page reloads in 15 s');
       toast('LittleFS updated! Rebooting…');
-      setTimeout(() => location.reload(), 15000);
     } else {
-      stat.textContent = 'Failed: ' + (xhr.responseText || xhr.statusText);
+      fsDone(false, 'Failed: ' + (xhr.responseText || xhr.statusText));
       toast('LittleFS update failed: ' + (xhr.responseText || xhr.statusText), true);
     }
   };
+
+  /* onerror: device reboots after flashing and tears the TCP connection —
+   * treat as success when the full image was uploaded successfully. */
   xhr.onerror = () => {
-    stat.textContent = 'Network error during upload.';
-    toast('LittleFS update failed: network error', true);
+    if (uploadPct >= 99.9) {
+      fsDone('slow', 'Rebooting… page reloads in 30 s (LittleFS flash takes time)');
+      toast('LittleFS updated — device rebooting…');
+    } else {
+      fsDone(false, 'Upload stalled at ' + Math.round(uploadPct) + '% — check WiFi and retry');
+      toast('LittleFS update failed: upload stalled at ' + Math.round(uploadPct) + '%', true);
+    }
   };
+
   xhr.open('POST', '/api/update_fs');
   _xhrAuthHeader(xhr);
   xhr.send(file);

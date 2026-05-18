@@ -172,6 +172,13 @@ static uint8_t s_init_profiles[LCD_COUNT];
 static int8_t  s_col_offsets[LCD_COUNT];   /* default 0 — zero-init by linker */
 static int8_t  s_row_offsets[LCD_COUNT];   /* default 0 — zero-init by linker */
 
+/* Set by display_invalidate() (and internally by display_apply_tube_offsets) to
+ * signal the display task to force-repaint every tube on its next tick.
+ * Without this, a tube whose content hasn't changed (e.g. the hours digit in
+ * no-seconds mode) will not pick up a new col/row offset until its digit finally
+ * ticks over — leaving the right-edge static artifact visible for up to an hour. */
+static volatile bool s_full_repaint_request = false;
+
 /* Per-tube software brightness scale (0-100).  Must be initialised to 100 in
  * display_init() because the linker zero-initialises static arrays, which would
  * render every pixel black.  Updated by display_apply_tube_brightness(). */
@@ -378,6 +385,11 @@ void display_apply_invert_mask(uint8_t mask)
     ESP_LOGI(TAG, "lcd_invert_mask 0x%02X applied", s_invert_mask);
 }
 
+void display_invalidate(void)
+{
+    s_full_repaint_request = true;
+}
+
 void display_apply_tube_offsets(const int8_t col_off[6], const int8_t row_off[6])
 {
     for (int i = 0; i < LCD_COUNT; i++) {
@@ -387,6 +399,10 @@ void display_apply_tube_offsets(const int8_t col_off[6], const int8_t row_off[6]
     ESP_LOGI(TAG, "tube col_offsets [%d,%d,%d,%d,%d,%d]  row_offsets [%d,%d,%d,%d,%d,%d]",
              col_off[0], col_off[1], col_off[2], col_off[3], col_off[4], col_off[5],
              row_off[0], row_off[1], row_off[2], row_off[3], row_off[4], row_off[5]);
+    /* Signal the display task to force-repaint all tubes on the next tick so
+     * the corrected window position takes effect immediately regardless of
+     * whether tube content has changed (see s_full_repaint_request comment). */
+    display_invalidate();
 }
 
 void display_apply_tube_brightness(const uint8_t br[6])
@@ -1558,6 +1574,14 @@ static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
 static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
                         uint16_t fg, const uint8_t *bg_rgb565)
 {
+    /* Clamp to the physical tube height.  Without this, a blit that starts
+     * near the bottom (e.g. HALF+23=103 with rows=64 → 167 > LCD_HEIGHT=160)
+     * would (a) read past the end of the 80×160×2-byte bg_rgb565 buffer and
+     * (b) send extra pixel data to the ST7735 after its window closes, which
+     * some panel variants wrap to a visible row, producing a phantom colour bar. */
+    if (y_tube >= LCD_HEIGHT) return;
+    if (rows > LCD_HEIGHT - y_tube) rows = LCD_HEIGHT - y_tube;
+
     {
         uint8_t  br     = s_tube_brightness[tube];
         bool     do_br  = (br < 100);
@@ -1709,14 +1733,14 @@ static void ht_draw_str(const char *str, int dst_y, uint16_t fg)
  *                            composited over AMPM/blank.jpg background.
  *              Colour auto-sampled from Numbers/0.jpg centre pixel.
  *
- *   INDOOR   — Rows   0– 23 : "In" label   (logisoso20, HT_LABEL_H=24 px)
- *              Rows  24– 79 : indoor temperature   (logisoso28, 56-px band)
- *              Rows  80–159 : indoor humidity       (logisoso28, centred in 80 px)
+ *   INDOOR   — Rows  10– 33 : "In" label   (logisoso20, HT_LABEL_H=24 px, +10 shift)
+ *              Rows  34– 89 : indoor temperature   (logisoso28, 56-px band)
+ *              Rows  90–153 : indoor humidity       (logisoso28, centred in 64-px blit)
  *              Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
  *
- *   OUTDOOR H/T — Rows   0– 23 : "Out" label  (logisoso20, HT_LABEL_H=24 px)
- *              Rows  24– 79 : outdoor temperature  (logisoso28, 56-px band)
- *              Rows  80–159 : outdoor humidity     (logisoso28, centred in 80 px)
+ *   OUTDOOR H/T — Rows  10– 33 : "Out" label  (logisoso20, HT_LABEL_H=24 px, +10 shift)
+ *              Rows  34– 89 : outdoor temperature  (logisoso28, 56-px band)
+ *              Rows  90–153 : outdoor humidity     (logisoso28, centred in 64-px blit)
  *              Colour auto-sampled from Numbers/0.jpg centre pixel.
  *              Falls back to black when weather API has no data.
  *
@@ -1802,20 +1826,20 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
             { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
         const char *day = (t->tm_wday >= 0 && t->tm_wday <= 6)
                           ? day_names[t->tm_wday] : "Mon";
-        ht_draw_str_at(day, 8, 64, u8g2_font_logisoso28_tf, fg, bg);
+        ht_draw_str_at(day, 26, 64, u8g2_font_logisoso28_tf, fg, bg);
 
-        /* Date "MMDD" — bottom half, centred in 64-row U8g2 band (rows 88–151) */
+        /* Date "MMDD" — bottom half, centred in 64-row U8g2 band (rows 98–161) */
         {
             char buf[16];
             snprintf(buf, sizeof(buf), "%02d%02d", t->tm_mon + 1, t->tm_mday);
-            ht_draw_str_at(buf, HALF + 8, 64, u8g2_font_logisoso28_tf, fg, bg);
+            ht_draw_str_at(buf, HALF + 26, 64, u8g2_font_logisoso28_tf, fg, bg);
         }
 
     } else if (kind == 2) {
         /* ── Indoor H/T panel — U8g2 embedded font ──────────────────────── */
-        /* Rows   0– 23 : "In" label   (logisoso20, HT_LABEL_H=24 rows)
-         * Rows  24– 79 : indoor temperature  (logisoso28, 56-row band)
-         * Rows  80–159 : indoor humidity     (logisoso28, centred in 80-px half)
+        /* Rows  10– 33 : "In" label   (logisoso20, HT_LABEL_H=24 rows, +10 shift)
+         * Rows  34– 89 : indoor temperature  (logisoso28, 56-row band)
+         * Rows  90–153 : indoor humidity     (logisoso28, centred in 64-px blit)
          * Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
          * The 60 *-sm.jpg symbol files previously required by this panel are
          * no longer needed and have been removed from the filesystem image.  */
@@ -1838,10 +1862,10 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
 
             uint16_t fg = ht_sample_theme_color(cfg->theme);
 
-            /* "In" label — rows 0–23 (HT_LABEL_H=24) */
-            ht_draw_label("In", 0, fg, bg);
+            /* "In" label — rows 15–38 (HT_LABEL_H=24, shifted +15) */
+            ht_draw_label("In", 18, fg, bg);
 
-            /* Indoor temperature — rows 24–79 (56-row band, logisoso28) */
+            /* Indoor temperature — rows 39–94 (56-row band, logisoso28, shifted +15) */
             {
                 bool  use_f = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
                 float ftemp = use_f ? (s->temp_c * 9.0f / 5.0f + 32.0f) : s->temp_c;
@@ -1851,26 +1875,26 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 char buf[16];
                 /* UTF-8 degree symbol U+00B0 = 0xC2 0xB0 (supported by _tf fonts) */
                 snprintf(buf, sizeof(buf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
-                ht_draw_str_at(buf, HT_LABEL_H, 56, u8g2_font_logisoso28_tf, fg, bg);
+                ht_draw_str_at(buf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
             }
 
-            /* Indoor humidity — rows 80–143 (64-row blit centred in 80-px half;
-             * rows 144–159 remain from the background image above).            */
+            /* Indoor humidity — rows 95–158 (64-row blit centred in 80-px half,
+             * shifted +15; rows 159 remain from the background image above). */
             {
                 int hum = (int)(s->humidity + 0.5f);
                 if (hum > 99) hum = 99;
                 if (hum <  0) hum = 0;
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%d%%", hum);
-                ht_draw_str_at(buf, HALF, 64, u8g2_font_logisoso28_tf, fg, bg);
+                ht_draw_str_at(buf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
             }
         }
 
     } else {
         /* ── Outdoor H/T panel — mirrors indoor layout with weather data ──── */
-        /* Rows   0– 23 : "Out" label  (logisoso20, HT_LABEL_H=24 rows)
-         * Rows  24– 79 : outdoor temperature  (logisoso28, 56-row band)
-         * Rows  80–159 : outdoor humidity     (logisoso28, centred in 80-px half)
+        /* Rows  10– 33 : "Out" label  (logisoso20, HT_LABEL_H=24 rows, +10 shift)
+         * Rows  34– 89 : outdoor temperature  (logisoso28, 56-row band)
+         * Rows  90–153 : outdoor humidity     (logisoso28, centred in 64-px blit)
          * Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
          * Falls back to black when weather API has no valid data.            */
         const weather_data_t *ow = weather_get();
@@ -1892,10 +1916,10 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
 
             uint16_t fg = ht_sample_theme_color(cfg->theme);
 
-            /* "Out" label — rows 0–23 */
-            ht_draw_label("Out", 0, fg, bg);
+            /* "Out" label — rows 15–38 (HT_LABEL_H=24, shifted +15) */
+            ht_draw_label("Out", 18, fg, bg);
 
-            /* Outdoor temperature — rows 24–79 (56-row band) */
+            /* Outdoor temperature — rows 39–94 (56-row band, shifted +15) */
             {
                 bool  use_f = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
                 float ftemp = use_f ? (ow->temp_c * 9.0f / 5.0f + 32.0f) : ow->temp_c;
@@ -1904,18 +1928,18 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 if (temp < -99) temp = -99;
                 char buf[16];
                 snprintf(buf, sizeof(buf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
-                ht_draw_str_at(buf, HT_LABEL_H, 56, u8g2_font_logisoso28_tf, fg, bg);
+                ht_draw_str_at(buf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
             }
 
-            /* Outdoor humidity — rows 80–143 (64-row blit centred in 80-px half;
-             * rows 144–159 remain from the background image above).            */
+            /* Outdoor humidity — rows 95–158 (64-row blit centred in 80-px half,
+             * shifted +15; rows 159 remain from the background image above). */
             {
                 int hum = (int)(ow->humidity + 0.5f);
                 if (hum > 99) hum = 99;
                 if (hum <  0) hum = 0;
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%d%%", hum);
-                ht_draw_str_at(buf, HALF, 64, u8g2_font_logisoso28_tf, fg, bg);
+                ht_draw_str_at(buf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
             }
         }
     }
@@ -2633,6 +2657,33 @@ static void display_task(void *arg)
         app_mode_t mode = cfg->current_mode;
         bool mode_changed  = (mode != last_mode);
         bool theme_changed = (strcmp(cfg->theme, last_theme) != 0);
+
+        /* ── Forced full repaint ─────────────────────────────────────────────
+         * display_invalidate() (called automatically by display_apply_tube_offsets
+         * and available to other callers) sets s_full_repaint_request to signal
+         * that all tubes must be redrawn at their current settings this tick.
+         *
+         * Without this, a tube whose content hasn't changed (e.g. the hours digit
+         * in 24H_NS / 24H_CX mode) won't pick up a new col/row offset until its
+         * digit finally ticks over — leaving right-edge static visible for up to
+         * an hour.  Handled inside the display task so there is no SPI bus
+         * contention with the calling task (web server).
+         *
+         * Setting mode_changed = true propagates into every downstream render
+         * condition (first || mode_changed || ...) and fires the state-reset block
+         * below, which resets album / weather-panel / timer as on a normal mode
+         * switch.  The explicit sentinel resets cover render paths that don't check
+         * mode_changed (e.g. YouTube subscriber count, weather data values). */
+        if (s_full_repaint_request) {
+            s_full_repaint_request = false;
+            for (int _t = 0; _t < LCD_COUNT; _t++) display_fill(_t, 0x0000);
+            mode_changed  = true;
+            last_t        = (struct tm){0};
+            last_subs     = UINT32_MAX;
+            last_temp_c   = -9999.0f;
+            last_hum      = -1.0f;
+            last_wx_valid = false;
+        }
 
         /* ── Mode rotation ───────────────────────────────────────────
          * Only fires when rotation_enabled is true.  Any mode change

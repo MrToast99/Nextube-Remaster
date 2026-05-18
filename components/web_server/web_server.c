@@ -23,6 +23,7 @@
 #include "cJSON.h"
 
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -741,6 +742,46 @@ static esp_err_t api_status(httpd_req_t *r)
     return ret;
 }
 
+/* ── OTA task suspension ─────────────────────────────────────────────────────
+ * Suspend every non-essential background task before any flash write so we
+ * reduce CPU/bus contention during esp_ota_write()'s sector erase+program
+ * cycles.  Each erase (≈25 ms) disables the ESP32 data cache; concurrent SPI
+ * DMA (LED RMT), I2S (mic), HTTPS polls (weather / yt_bili / ntp) and I2C
+ * reads (sht30) all compete for CPU during those windows, contributing to TCP
+ * packet loss that stretches OTA transfers and eventually trips the recv timeout.
+ *
+ * We resolve tasks by their registered FreeRTOS name — no task handle needs to
+ * be exposed from each component (INCLUDE_xTaskGetHandle is always 1 in the
+ * ESP-IDF FreeRTOS build).  Since both OTA paths always end with esp_restart(),
+ * there is no matching resume call.
+ *
+ * The display task is handled separately by display_show_wait(), which also
+ * ensures the SPI bus is free before the first flash write. */
+static void ota_suspend_tasks(void)
+{
+    static const char *const k_tasks[] = {
+        "weather",    /* HTTPS polling — competes with OTA TCP stream + heap */
+        "yt_bili",    /* HTTPS polling — competes with OTA TCP stream + heap */
+        "ntp",        /* SNTP/UDP      — adds lwIP load during flash writes  */
+        "sht30",      /* I2C sensor    — periodic wakeups, CPU cycles        */
+        "leds",       /* RMT DMA       — Core 1 bus traffic during writes    */
+        "mic",        /* I2S/ADC DMA   — continuous DMA, CPU interrupts      */
+        "audio_play", /* DAC/I2S       — ephemeral, only present if playing  */
+        NULL,
+    };
+    for (int i = 0; k_tasks[i]; i++) {
+        TaskHandle_t h = xTaskGetHandle(k_tasks[i]);
+        if (h) {
+            vTaskSuspend(h);
+            ESP_LOGI(TAG, "OTA: suspended '%s'", k_tasks[i]);
+        }
+    }
+    /* Brief yield so any task currently executing its current time-slice
+     * can finish its current instruction and reach a safe stack state before
+     * the flash cache is disabled by the first esp_ota_write(). */
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+
 static esp_err_t api_ota(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
@@ -767,47 +808,112 @@ static esp_err_t api_ota(httpd_req_t *r)
         }
     }
 
-    /* Show wait screen on all tubes and suspend the display task before
-     * touching flash.  esp_ota_write() erases 4 KB sectors while briefly
-     * disabling the data cache; a concurrent SPI JPEG load from the display
-     * task would race for the same bus and risk a cache-disable fault. */
+    /* Show wait screen and suspend the display task before touching flash.
+     * esp_ota_write() erases 4 KB sectors while briefly disabling the data
+     * cache; a concurrent SPI JPEG load from the display task would race for
+     * the same bus and risk a cache-disable fault. */
     display_show_wait();
+
+    /* Suspend all other background tasks to eliminate CPU/bus contention
+     * during sector erase+program cycles (see ota_suspend_tasks comment). */
+    ota_suspend_tasks();
 
     const esp_partition_t *upd = esp_ota_get_next_update_partition(NULL);
     if (!upd) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition"), ESP_FAIL;
-    esp_ota_handle_t h;
-    if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK)
-        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin fail"), ESP_FAIL;
 
-    char *buf = malloc(4096);
-    if (!buf) { esp_ota_abort(h); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
-    int rem = r->content_len;
-    bool first_chunk = true;
+    int img_len = r->content_len;
 
-    while (rem > 0) {
-        int n = httpd_req_recv(r, buf, rem > 4096 ? 4096 : rem);
-        if (n <= 0) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
+    /* ── Two-phase PSRAM-buffered OTA ───────────────────────────────────────
+     * Phase 1 (network):  Receive the entire firmware image into PSRAM before
+     *   touching flash.  The WiFi driver ACKs packets without interference from
+     *   flash-erase cache-disable windows (~25 ms/sector); the TCP window stays
+     *   open and errno 11 (EAGAIN) cannot fire mid-transfer.
+     * Phase 2 (flash):    Write from PSRAM via esp_ota_write().  The network is
+     *   idle so cache-disable windows cause no TCP stalls at all.
+     * Falls back to the original 4 KB interleaved loop when PSRAM cannot
+     * satisfy the allocation (image larger than free PSRAM). */
+    uint8_t *img_buf = (uint8_t *)heap_caps_malloc((size_t)img_len, MALLOC_CAP_SPIRAM);
 
-        /* Validate on the very first chunk: ESP32 app images start with magic
-         * byte 0xE9.  The merged full-flash binary (nextube-fw-full.bin) starts
-         * with the bootloader at offset 0x1000, not an app header, so its first
-         * byte is NOT 0xE9.  Reject it early with a human-readable message. */
-        if (first_chunk) {
-            first_chunk = false;
-            if ((uint8_t)buf[0] != 0xE9) {
-                free(buf);
-                esp_ota_abort(h);
-                return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
-                    "Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin"), ESP_FAIL;
+    if (img_buf) {
+        ESP_LOGI(TAG, "OTA: receiving %d B into PSRAM buffer…", img_len);
+
+        /* Phase 1 — receive the full image into PSRAM */
+        {
+            int rem = img_len;
+            uint8_t *p = img_buf;
+            while (rem > 0) {
+                int n = httpd_req_recv(r, (char *)p, rem);
+                if (n <= 0) { heap_caps_free(img_buf); return ESP_FAIL; }
+                p += n; rem -= n;
             }
         }
 
-        if (esp_ota_write(h, buf, n) != ESP_OK) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
-        rem -= n;
+        /* Validate magic byte: valid ESP32 app images start with 0xE9.
+         * The merged full-flash binary starts with the bootloader (not 0xE9). */
+        if (img_buf[0] != 0xE9) {
+            heap_caps_free(img_buf);
+            return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                "Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin"), ESP_FAIL;
+        }
+
+        ESP_LOGI(TAG, "OTA: receive done, flashing %d B from PSRAM…", img_len);
+
+        /* Phase 2 — flash from PSRAM; network is idle, no TCP contention */
+        esp_ota_handle_t h;
+        if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK) {
+            heap_caps_free(img_buf);
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin fail"), ESP_FAIL;
+        }
+        {
+            int rem = img_len;
+            const uint8_t *p = img_buf;
+            while (rem > 0) {
+                int chunk = (rem > 4096) ? 4096 : rem;
+                if (esp_ota_write(h, p, chunk) != ESP_OK) {
+                    heap_caps_free(img_buf); esp_ota_abort(h); return ESP_FAIL;
+                }
+                p += chunk; rem -= chunk;
+            }
+        }
+        heap_caps_free(img_buf);
+
+        if (esp_ota_end(h) != ESP_OK || esp_ota_set_boot_partition(upd) != ESP_OK)
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA finalize fail"), ESP_FAIL;
+
+    } else {
+        /* Fallback: interleaved 4 KB receive+write (PSRAM unavailable).
+         * Higher EAGAIN risk — relies on task suspension + 60 s socket timeout. */
+        ESP_LOGW(TAG, "OTA: PSRAM unavailable for %d B — using 4 KB chunk loop", img_len);
+
+        esp_ota_handle_t h;
+        if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK)
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin fail"), ESP_FAIL;
+
+        char *buf = malloc(4096);
+        if (!buf) { esp_ota_abort(h); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
+
+        int rem = img_len;
+        bool first_chunk = true;
+        while (rem > 0) {
+            int n = httpd_req_recv(r, buf, rem > 4096 ? 4096 : rem);
+            if (n <= 0) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
+            if (first_chunk) {
+                first_chunk = false;
+                if ((uint8_t)buf[0] != 0xE9) {
+                    free(buf); esp_ota_abort(h);
+                    return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                        "Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin"), ESP_FAIL;
+                }
+            }
+            if (esp_ota_write(h, buf, n) != ESP_OK) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
+            rem -= n;
+        }
+        free(buf);
+
+        if (esp_ota_end(h) != ESP_OK || esp_ota_set_boot_partition(upd) != ESP_OK)
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA finalize fail"), ESP_FAIL;
     }
-    free(buf);
-    if (esp_ota_end(h) != ESP_OK || esp_ota_set_boot_partition(upd) != ESP_OK)
-        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA finalize fail"), ESP_FAIL;
+
     send_json(r, "{\"status\":\"ok\",\"message\":\"Rebooting...\"}");
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
@@ -842,23 +948,93 @@ static esp_err_t api_fs_ota(httpd_req_t *r)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
                                    "Bad content length"), ESP_FAIL;
 
-    char *buf = malloc(FS_SECTOR);
-    if (!buf)
-        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "Out of memory"), ESP_FAIL;
+    /* Extend socket recv timeout — LittleFS images are large (4–7 MB); the
+     * default 5-second per-recv timeout fires during flash-erase windows. */
+    {
+        int sock = httpd_req_to_sockfd(r);
+        if (sock >= 0) {
+            struct timeval tv = { .tv_sec = 120, .tv_usec = 0 };
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
+    }
 
-    /* Show wait screen on all tubes and suspend the display task.  This must
-     * happen BEFORE unmounting LittleFS so the JPEG can still be read from
-     * /images/system/wait.jpg.  Once suspended the task cannot issue SPI
-     * transactions that would race the raw partition writes below. */
-    display_show_wait();
+    /* ── Two-phase PSRAM-buffered LittleFS OTA ──────────────────────────────
+     * Phase 1 (network):  Receive entire image into PSRAM while LittleFS is
+     *   still mounted (display_show_wait can still load wait.jpg) and TCP ACKs
+     *   flow freely — no flash writes during receive means no cache-disable
+     *   stalls and no EAGAIN timeouts.
+     * Phase 2 (flash):    Unmount LittleFS, then erase+write from PSRAM.
+     *   Network is idle — cache-disable windows cause no TCP stalls.
+     * Allocation is rounded up to FS_SECTOR so the last write is always clean.
+     * Falls back to original 4 KB sector loop when image is too large for PSRAM. */
+    size_t alloc_len = (size_t)(((content_len + FS_SECTOR - 1) / FS_SECTOR) * FS_SECTOR);
+    uint8_t *img_buf = (uint8_t *)heap_caps_malloc(alloc_len, MALLOC_CAP_SPIRAM);
 
-    /* Unmount LittleFS before touching flash.  The HTTP server itself runs
-     * from firmware (app partition), so it stays alive. */
-    esp_vfs_littlefs_unregister("littlefs");
+    if (img_buf) {
+        /* Pad the tail with 0xFF (erased-flash value) so the last sector write
+         * always sees clean data even when content_len is not sector-aligned. */
+        memset(img_buf + content_len, 0xFF, alloc_len - (size_t)content_len);
 
-/* Re-mount LittleFS and return an error response.  Called on any flash
- * failure so the VFS is never left dead after a failed LittleFS OTA. */
+        ESP_LOGI(TAG, "FS OTA: receiving %d B into PSRAM…", content_len);
+
+        /* Show wait screen BEFORE Phase 1: gives user immediate feedback AND
+         * must happen before unmounting so wait.jpg is still on LittleFS.   */
+        display_show_wait();
+        ota_suspend_tasks();
+
+        /* Phase 1 — receive (LittleFS still mounted, flash untouched) */
+        {
+            int rem = content_len;
+            uint8_t *p = img_buf;
+            while (rem > 0) {
+                int n = httpd_req_recv(r, (char *)p, rem);
+                if (n <= 0) { heap_caps_free(img_buf); return ESP_FAIL; }
+                p += n; rem -= n;
+            }
+        }
+        ESP_LOGI(TAG, "FS OTA: receive done, unmounting + flashing %zu B…", alloc_len);
+
+        /* Unmount LittleFS — receive is complete, safe to touch the partition. */
+        esp_vfs_littlefs_unregister("littlefs");
+
+        /* Phase 2 — erase + write from PSRAM (network idle, no TCP risk) */
+        bool flash_ok = true;
+        for (int off = 0; off < (int)alloc_len; off += FS_SECTOR) {
+            if (esp_partition_erase_range(part, (uint32_t)off, FS_SECTOR) != ESP_OK ||
+                esp_partition_write(part, (uint32_t)off, img_buf + off, FS_SECTOR) != ESP_OK) {
+                flash_ok = false;
+                break;
+            }
+        }
+        heap_caps_free(img_buf);
+
+        if (!flash_ok) {
+            /* Attempt remount so the web server can still serve error pages. */
+            esp_vfs_littlefs_conf_t _c = { .base_path = "/spiffs",
+                .partition_label = "littlefs", .dont_mount = false,
+                .grow_on_mount = false };
+            esp_vfs_littlefs_register(&_c);
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       "Flash write failed"), ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "FS OTA: %d bytes written (PSRAM path)", content_len);
+
+    } else {
+        /* Fallback: original interleaved 4 KB sector loop.
+         * Used when the image is too large to buffer in PSRAM (>3.5 MB free).
+         * Higher EAGAIN risk — relies on task suspension + 120 s socket timeout. */
+        ESP_LOGW(TAG, "FS OTA: PSRAM unavailable for %zu B — 4 KB sector loop", alloc_len);
+
+        char *buf = malloc(FS_SECTOR);
+        if (!buf)
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       "Out of memory"), ESP_FAIL;
+
+        /* Show wait screen and suspend tasks BEFORE unmounting LittleFS. */
+        display_show_wait();
+        ota_suspend_tasks();
+        esp_vfs_littlefs_unregister("littlefs");
+
 #define FS_OTA_FAIL(msg) do { \
     free(buf); \
     esp_vfs_littlefs_conf_t _c = { \
@@ -868,35 +1044,30 @@ static esp_err_t api_fs_ota(httpd_req_t *r)
     return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, (msg)), ESP_FAIL; \
 } while(0)
 
-    int written = 0;
-    while (written < content_len) {
-        /* Fill one sector from the network stream */
-        int to_recv = content_len - written;
-        if (to_recv > FS_SECTOR) to_recv = FS_SECTOR;
+        int written = 0;
+        while (written < content_len) {
+            int to_recv = content_len - written;
+            if (to_recv > FS_SECTOR) to_recv = FS_SECTOR;
+            memset(buf, 0xFF, FS_SECTOR);
 
-        /* Pad the buffer with 0xFF (erased flash value) so the final
-         * write is always a full sector and satisfies the 4-byte alignment
-         * requirement for raw partition writes. */
-        memset(buf, 0xFF, FS_SECTOR);
+            int rx = 0;
+            while (rx < to_recv) {
+                int n = httpd_req_recv(r, buf + rx, to_recv - rx);
+                if (n <= 0) { FS_OTA_FAIL("Receive failed"); }
+                rx += n;
+            }
 
-        int rx = 0;
-        while (rx < to_recv) {
-            int n = httpd_req_recv(r, buf + rx, to_recv - rx);
-            if (n <= 0) { FS_OTA_FAIL("Receive failed"); }
-            rx += n;
+            if (esp_partition_erase_range(part, written, FS_SECTOR) != ESP_OK)
+                FS_OTA_FAIL("Erase failed");
+            if (esp_partition_write(part, written, buf, FS_SECTOR) != ESP_OK)
+                FS_OTA_FAIL("Write failed");
+            written += rx;
         }
-
-        /* Erase this sector then write it */
-        if (esp_partition_erase_range(part, written, FS_SECTOR) != ESP_OK)
-            FS_OTA_FAIL("Erase failed");
-        if (esp_partition_write(part, written, buf, FS_SECTOR) != ESP_OK)
-            FS_OTA_FAIL("Write failed");
-        written += rx;
-    }
-    free(buf);
+        free(buf);
 #undef FS_OTA_FAIL
+        ESP_LOGI(TAG, "FS OTA: %d bytes written (sector loop)", written);
+    }
 
-    ESP_LOGI(TAG, "LittleFS updated: %d bytes written", written);
     send_json(r, "{\"status\":\"ok\",\"message\":\"LittleFS updated, rebooting...\"}");
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();

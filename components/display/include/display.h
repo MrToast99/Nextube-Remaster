@@ -193,6 +193,14 @@ void display_timer_toggle(void);
  *  on its next render cycle. */
 void display_album_invalidate(void);
 
+/** Force a full repaint of all six tubes on the next display-task tick.
+ *  Use after changing display-config properties at runtime (e.g. col/row
+ *  offsets, gamma, brightness) so the new settings are visible immediately
+ *  rather than waiting for each tube's content to change naturally.
+ *  Called automatically by display_apply_tube_offsets().
+ *  Thread-safe: safe to call from any task. */
+void display_invalidate(void);
+
 #ifdef __cplusplus
 }
 #endif

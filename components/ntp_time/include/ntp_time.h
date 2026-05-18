@@ -19,6 +19,10 @@ bool ntp_rtc_battery_ok(void);  /* true if the RTC seed at boot was >= 2025-01-0
 void ntp_get_local(struct tm *t);
 void ntp_apply_timezone(void);  /* re-apply TZ from current config (call after settings change) */
 void ntp_apply_servers(void);   /* update SNTP server list from current config (call after settings change) */
+void ntp_seed_rtc_early(void);  /* call from app_main BEFORE display_task_start() — reads RTC once and
+                                  * seeds the system clock synchronously so the first display render
+                                  * never shows the stopwatch.  No-op if the RTC value fails the
+                                  * epoch sanity check (dead battery / never set). */
 #ifdef __cplusplus
 }
 #endif

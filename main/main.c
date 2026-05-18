@@ -348,6 +348,9 @@ void app_main(void)
     display_apply_init_profiles(boot_init_profile);               /* gamma per-tube profile          */
     display_apply_tube_offsets(boot_col_offset, boot_row_offset); /* ST7735S window alignment        */
     display_apply_tube_brightness(boot_tube_brightness);          /* per-tube brightness scale       */
+    pcf8563_init();        /* must come before ntp_seed_rtc_early — initialises the I²C driver */
+    ntp_seed_rtc_early();  /* seed system clock from RTC before the display task starts so the
+                            * first render sees a valid wall-clock time instead of a stopwatch */
     display_task_start();          /* launch 5 Hz FreeRTOS display task */
 
     /* Audio + Microphone — deferred start (see audio_mic_deferred_start).
@@ -367,7 +370,6 @@ void app_main(void)
     leds_task_start();
     touch_input_init();
     touch_input_register_callback(on_touch);
-    pcf8563_init();
     sht30_init();          /* probe optional sensor; safe no-op if absent */
 
     /* Networking – start AP+STA, then web server */

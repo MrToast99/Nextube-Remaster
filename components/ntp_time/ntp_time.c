@@ -124,30 +124,80 @@ static void time_sync_cb(struct timeval *tv)
     }
 }
 
+/* ── RTC validity floor ──────────────────────────────────────────────────
+ * EPOCH_JAN1(y): Unix epoch for 01-Jan of year y, 00:00:00 UTC.
+ *   days  = (y − 1970) × 365  +  leap-days-between-1970-and-y
+ *   leaps = ⌊(y−1)/4⌋ − ⌊(y−1)/100⌋ + ⌊(y−1)/400⌋  (relative to 1969)
+ * GCC/Clang evaluate __DATE__[N] as a compile-time constant, so the
+ * entire expression folds to a single integer at compile time.
+ *
+ * Floor = Jan 1 of (build_year − 1).  A healthy device always holds a
+ * recent NTP-written date; anything older means the coin cell died before
+ * a fresh sync could be stored.  Using (build_year − 1) keeps the check
+ * meaningful for the entire serviceable life of a firmware build without
+ * requiring a hardcoded year constant that goes stale each release.       */
+#define EPOCH_JAN1(y) \
+    ((time_t)( \
+        ((long long)((y) - 1970) * 365LL \
+        + (long long)(((y)-1)/4   - ((y)-1)/100 + ((y)-1)/400 \
+                    - (1969/4     -   1969/100   +   1969/400))) \
+        * 86400LL))
+#define BUILD_YEAR \
+    ((__DATE__[7]-'0')*1000 + (__DATE__[8]-'0')*100 + \
+     (__DATE__[9]-'0')*10   + (__DATE__[10]-'0'))
+#define RTC_MIN_VALID_EPOCH  EPOCH_JAN1(BUILD_YEAR - 1)
+
+/* ── Early RTC seed ───────────────────────────────────────────────────────
+ * Called from app_main() BEFORE display_task_start() so the very first
+ * render tick sees a correct wall-clock time instead of the epoch-0
+ * stopwatch that appeared while power-cycling between firmware builds.
+ *
+ * Also applies the POSIX TZ string so localtime_r() is correct from the
+ * moment the display task starts.  The NTP task re-applies TZ and retries
+ * the RTC read if this call failed for any reason.                        */
+void ntp_seed_rtc_early(void)
+{
+    char tz[64];
+    config_lock();
+    strncpy(tz, config_get()->timezone, sizeof(tz) - 1);
+    tz[sizeof(tz) - 1] = '\0';
+    config_unlock();
+    setenv("TZ", tz, 1);
+    tzset();
+    ESP_LOGI(TAG, "Timezone set: %s", tz);
+
+    struct tm rtc_t = {0};
+    if (!rtc_get_time(&rtc_t)) {
+        ESP_LOGW(TAG, "early RTC seed: read failed (VL flag or I²C error)");
+        return;
+    }
+    time_t seed = mktime(&rtc_t);
+    ESP_LOGI(TAG, "RTC read OK: %04d-%02d-%02d %02d:%02d:%02d (local) → epoch %lld",
+             rtc_t.tm_year + 1900, rtc_t.tm_mon + 1, rtc_t.tm_mday,
+             rtc_t.tm_hour, rtc_t.tm_min, rtc_t.tm_sec, (long long)seed);
+    if (seed < RTC_MIN_VALID_EPOCH) {
+        ESP_LOGW(TAG, "early RTC seed: year %d < floor %d — waiting for NTP",
+                 rtc_t.tm_year + 1900, BUILD_YEAR - 1);
+        return;
+    }
+    struct timeval tv = { .tv_sec = seed, .tv_usec = 0 };
+    if (settimeofday(&tv, NULL) != 0) {
+        ESP_LOGW(TAG, "early RTC seed: settimeofday failed");
+        return;
+    }
+    s_time_valid     = true;
+    s_rtc_battery_ok = true;
+    ESP_LOGI(TAG, "system clock seeded before display start ✓");
+}
+
 static void ntp_task(void *arg)
 {
-    /* ── Phase 1: apply TZ + seed from RTC immediately ───────────────────
-     * This happens before the WiFi-wait delay so the display shows the
-     * correct local time from the very first render tick after boot.
-     * Reading TZ from config and seeding from RTC require neither WiFi
-     * nor SNTP — they are purely local operations and are always safe to
-     * run at task start.
-     *
-     * Minimum plausible time_t: 2025-01-01 00:00:00 UTC.
-     * Anything earlier is treated as stale/uninitialised and ignored.
-     *
-     * Why 2025 and not 2024?
-     *   The original 2024-01-01 cutoff caused a "stopwatch" symptom: a device
-     *   whose battery was weak (VL=0, oscillator running) but whose last NTP
-     *   sync was from early 2024 would seed the clock to e.g. "2024-01-01
-     *   00:02:34" — the display would show "00:02" with seconds counting up,
-     *   indistinguishable from the epoch-0 stopwatch.  Raising the floor to
-     *   2025-01-01 rejects all such stale early-2024 seeds.  Devices with a
-     *   healthy battery and a recent NTP sync (any date in 2025 or later) are
-     *   unaffected.  Devices whose last sync was in 2024 simply wait for the
-     *   next NTP sync — which completes in a few seconds once WiFi connects. */
-#define RTC_MIN_VALID_EPOCH  1735689600LL  /* 2025-01-01 00:00:00 UTC */
-
+    /* ── Phase 1: apply TZ; fallback RTC seed if early seed was skipped ──
+     * ntp_seed_rtc_early() (called from app_main before display_task_start)
+     * normally handles both TZ and the RTC seed.  Re-apply TZ here
+     * unconditionally (idempotent), and retry the RTC seed only when
+     * s_time_valid is still false — e.g. if pcf8563_init hadn't completed
+     * at the time of the early call.                                        */
     char timezone[64];
     char ntp_servers[4][64];
     config_lock();
@@ -160,39 +210,33 @@ static void ntp_task(void *arg)
     }
     config_unlock();
 
-    /* Apply POSIX TZ string — newlib handles DST transition rules natively. */
     setenv("TZ", timezone, 1);
     tzset();
-    ESP_LOGI(TAG, "Timezone set: %s", timezone);
 
-    /* Seed the system clock from the battery-backed RTC so the display shows
-     * a reasonable time immediately, before the first NTP sync completes.
-     * rtc_get_time() returns local time; mktime() interprets it as local
-     * (TZ is already set above), producing a correct time_t. */
-    struct tm rtc_t = {0};
-    if (rtc_get_time(&rtc_t)) {
-        time_t seed = mktime(&rtc_t);
-        ESP_LOGI(TAG, "RTC read OK: %04d-%02d-%02d %02d:%02d:%02d (local) → epoch %lld",
-                 rtc_t.tm_year + 1900, rtc_t.tm_mon + 1, rtc_t.tm_mday,
-                 rtc_t.tm_hour, rtc_t.tm_min, rtc_t.tm_sec, (long long)seed);
-        if (seed >= RTC_MIN_VALID_EPOCH) {
-            struct timeval tv_seed = { .tv_sec = seed, .tv_usec = 0 };
-            if (settimeofday(&tv_seed, NULL) == 0) {
-                s_time_valid     = true;   /* RTC gave us a plausible wall-clock time */
-                s_rtc_battery_ok = true;   /* battery is healthy — RTC survived power-off */
-                ESP_LOGI(TAG, "System clock seeded from RTC ✓");
+    if (!s_time_valid) {
+        /* Early seed was skipped or failed — attempt RTC read now as fallback. */
+        struct tm rtc_t = {0};
+        if (rtc_get_time(&rtc_t)) {
+            time_t seed = mktime(&rtc_t);
+            ESP_LOGI(TAG, "RTC read OK: %04d-%02d-%02d %02d:%02d:%02d (local) → epoch %lld",
+                     rtc_t.tm_year + 1900, rtc_t.tm_mon + 1, rtc_t.tm_mday,
+                     rtc_t.tm_hour, rtc_t.tm_min, rtc_t.tm_sec, (long long)seed);
+            if (seed >= RTC_MIN_VALID_EPOCH) {
+                struct timeval tv_seed = { .tv_sec = seed, .tv_usec = 0 };
+                if (settimeofday(&tv_seed, NULL) == 0) {
+                    s_time_valid     = true;
+                    s_rtc_battery_ok = true;
+                    ESP_LOGI(TAG, "System clock seeded from RTC ✓ (fallback)");
+                } else {
+                    ESP_LOGW(TAG, "settimeofday failed — clock not seeded from RTC");
+                }
             } else {
-                ESP_LOGW(TAG, "settimeofday failed — clock not seeded from RTC");
+                ESP_LOGW(TAG, "RTC time too old (year %d < floor %d) — waiting for NTP",
+                         rtc_t.tm_year + 1900, BUILD_YEAR - 1);
             }
         } else {
-            ESP_LOGW(TAG, "RTC time too old (epoch %lld < min %lld, year %d) — "
-                     "treating as stale; waiting for NTP",
-                     (long long)seed, (long long)RTC_MIN_VALID_EPOCH,
-                     rtc_t.tm_year + 1900);
+            ESP_LOGW(TAG, "RTC read failed (VL flag set or I²C error) — waiting for NTP");
         }
-    } else {
-        ESP_LOGW(TAG, "RTC read failed (VL flag set or I²C error) — "
-                 "clock starts at epoch 0 until NTP sync");
     }
 
     /* ── Phase 2: wait for WiFi, then start SNTP polling ────────────────
