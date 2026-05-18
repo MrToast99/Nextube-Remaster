@@ -152,6 +152,7 @@ select option{background:var(--accent);color:var(--text)}
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-ht" style="width:14px;height:14px"> Indoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(SHT30 sensor)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem"></span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem"></span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-sunrise" style="width:14px;height:14px"> Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(calculated from weather location)</span></label>
       </div>
       <div style="display:flex;align-items:center;gap:.6rem;font-size:.85rem">
         <label for="f-cx-panel-ms" style="white-space:nowrap;margin:0">Panel duration</label>
@@ -1188,6 +1189,7 @@ async function loadSettings() {
   $('f-cx-ht').checked       = cfg.tube6_panel_ht       !== false;
   $('f-cx-weather').checked  = cfg.tube6_panel_weather  === true;
   $('f-cx-temp').checked     = cfg.tube6_panel_temp     === true;
+  $('f-cx-sunrise').checked  = cfg.tube6_panel_sunrise  === true;
   $('f-cx-panel-ms').value   = Math.round((cfg.tube6_panel_ms || 5000) / 1000);
   $('f-leading-zero').checked = cfg.leading_zero === true;
   { const gg = Array.isArray(cfg.lcd_gamma) ? cfg.lcd_gamma : [1,1,1,1,1,1];
@@ -1538,6 +1540,7 @@ async function saveSettings() {
     tube6_panel_weekdate: $('f-cx-weekdate').checked,
     tube6_panel_ht:       $('f-cx-ht').checked,
     tube6_panel_temp:     $('f-cx-temp').checked,
+    tube6_panel_sunrise:  $('f-cx-sunrise').checked,
     tube6_panel_ms:       Math.max(1, +$('f-cx-panel-ms').value) * 1000,
     notify_update_on_display: $('f-notify-update').checked,
     burnin_auto_enabled:    $('bi-sched-en').checked,

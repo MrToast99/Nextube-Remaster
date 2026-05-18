@@ -1718,6 +1718,128 @@ static void ht_draw_str(const char *str, int dst_y, uint16_t fg)
     ht_blit(5, u8g2_GetBufferPtr(&s_u8g2), dst_y, fg);
 }
 
+/* ── NOAA solar calculator ───────────────────────────────────────────────────
+ * Computes local sunrise and sunset as minutes past midnight (0–1439).
+ * lat_deg / lon_deg: WGS-84 decimal degrees (N/E positive).
+ * t: local struct tm for the desired date; uses tm_year/mon/mday/gmtoff.
+ * Returns -1 for both outputs on polar day/night (sun never crosses horizon). */
+static void solar_calc(float lat_deg, float lon_deg, const struct tm *t,
+                       int *rise_min, int *set_min)
+{
+    int Y = t->tm_year + 1900, M = t->tm_mon + 1, D = t->tm_mday;
+    /* Gregorian-to-JDN: months Jan/Feb treated as 13/14 of the previous year. */
+    if (M <= 2) { Y--; M += 12; }
+    int A = Y / 100;
+    double JD = (int)(365.25*(Y+4716)) + (int)(30.6001*(M+1)) + D
+              + (2 - A + A/4) - 1524.5;
+    double JC  = (JD - 2451545.0) / 36525.0;
+    double L0  = fmod(280.46646 + JC*(36000.76983 + JC*0.0003032), 360.0);
+    double M0  = 357.52911 + JC*(35999.05029 - 0.0001537*JC);
+    double Mr  = M0 * M_PI / 180.0;
+    double e   = 0.016708634 - JC*(0.000042037 + 0.0000001267*JC);
+    double C   = sin(Mr)*(1.914602 - JC*(0.004817 + 0.000014*JC))
+               + sin(2*Mr)*(0.019993 - 0.000101*JC) + sin(3*Mr)*0.000289;
+    double om  = 125.04 - 1934.136*JC;
+    double lam = (L0 + C) - 0.00569 - 0.00478*sin(om*M_PI/180.0);
+    double eps = (23.0 + (26.0 + (21.448 - JC*(46.815 + JC*(0.00059 - JC*0.001813)))/60.0)/60.0)
+               + 0.00256*cos(om*M_PI/180.0);
+    double decl = asin(sin(eps*M_PI/180.0)*sin(lam*M_PI/180.0));
+    double yy   = tan((eps/2.0)*M_PI/180.0); yy *= yy;
+    double L0r  = L0*M_PI/180.0, M0r = M0*M_PI/180.0;
+    double eot  = 4.0*180.0/M_PI*(yy*sin(2*L0r) - 2*e*sin(M0r)
+                + 4*e*yy*sin(M0r)*cos(2*L0r) - 0.5*yy*yy*sin(4*L0r)
+                - 1.25*e*e*sin(2*M0r));
+    double latr  = lat_deg * M_PI / 180.0;
+    double cosHA = cos(90.833*M_PI/180.0) / (cos(latr)*cos(decl))
+                 - tan(latr)*tan(decl);
+    if (cosHA < -1.0 || cosHA > 1.0) { *rise_min = -1; *set_min = -1; return; }
+    double HA   = acos(cosHA) * 180.0 / M_PI;
+    double noon = 720.0 - 4.0*lon_deg - eot;
+    /* UTC offset in minutes (east = positive), computed portably without
+     * tm_gmtoff (GNU/BSD) or the 'timezone' global (not exported by ESP-IDF
+     * newlib).  We compare localtime and gmtime for the same instant:
+     *   tz_m = (local_hour*60 + local_min) - (utc_hour*60 + utc_min)
+     *          + day_diff * 1440
+     * tm_yday avoids month-boundary issues; multiplying by tm_year*365
+     * handles the single edge case of a UTC offset spanning a year end.    */
+    {
+        time_t ts = time(NULL);
+        struct tm ltm, utm;
+        localtime_r(&ts, &ltm);
+        gmtime_r(&ts, &utm);
+        int day_diff = (ltm.tm_yday + ltm.tm_year * 365)
+                     - (utm.tm_yday + utm.tm_year * 365);
+        double tz_m = (double)(day_diff * 1440
+                               + (ltm.tm_hour - utm.tm_hour) * 60
+                               + (ltm.tm_min  - utm.tm_min));
+        *rise_min = (int)(noon - HA*4.0 + tz_m + 0.5);
+        *set_min  = (int)(noon + HA*4.0 + tz_m + 0.5);
+    }
+}
+
+/* ── ht_draw_suntime ─────────────────────────────────────────────────────────
+ * Renders one half of the Sunrise/Sunset panel onto tube 5 using U8g2 primitives.
+ *
+ * Layout (within the 128×64 U8g2 frame buffer, LCD_WIDTH=80 columns used):
+ *   Rows  0–31  : sun icon — semicircle (radius 9, centred at x=40, y=16)
+ *                 above a horizon line, three rays, and a direction caret:
+ *                   rising=true  → ^ caret below horizon (sunrise)
+ *                   rising=false → v caret below horizon (sunset)
+ *   Rows 30–55  : "HH:MM" time string — logisoso20_tf, baseline at y=50,
+ *                 centred in 80-px width.
+ *
+ * y_tube: absolute tube row for the top of the blit (56 rows written).
+ * fg: RGB565 foreground colour (from ht_sample_theme_color).
+ * bg: optional decoded RGB565 background image (LCD_WIDTH × LCD_HEIGHT);
+ *     NULL = solid black background for "off" pixels.                          */
+static void ht_draw_suntime(const char *timestr, bool rising,
+                             int y_tube, uint16_t fg, const uint8_t *bg)
+{
+    u8g2_ClearBuffer(&s_u8g2);
+
+    /* ── Sun icon — centred at (40, 16) ─────────────────────────────── */
+    const int cx = 40, cy = 16, r = 9;
+
+    /* Filled upper semicircle */
+    u8g2_DrawDisc(&s_u8g2, (u8g2_uint_t)cx, (u8g2_uint_t)cy, (u8g2_uint_t)r,
+                  U8G2_DRAW_UPPER_RIGHT | U8G2_DRAW_UPPER_LEFT);
+    /* Horizon line */
+    u8g2_DrawHLine(&s_u8g2, (u8g2_uint_t)(cx - r - 3), (u8g2_uint_t)cy,
+                   (u8g2_uint_t)((r + 3) * 2 + 1));
+    /* Three rays above the arc */
+    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)cx,       (u8g2_uint_t)(cy-r-2),
+                            (u8g2_uint_t)cx,       (u8g2_uint_t)(cy-r-5));  /* straight up  */
+    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-r-1), (u8g2_uint_t)(cy-2),
+                            (u8g2_uint_t)(cx-r-4), (u8g2_uint_t)(cy-5));    /* upper-left   */
+    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+r+1), (u8g2_uint_t)(cy-2),
+                            (u8g2_uint_t)(cx+r+4), (u8g2_uint_t)(cy-5));    /* upper-right  */
+    /* Direction caret just below the horizon */
+    if (rising) {
+        /* ^ pointing up = sunrise */
+        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-4), (u8g2_uint_t)(cy+5),
+                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+2));
+        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+4), (u8g2_uint_t)(cy+5),
+                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+2));
+    } else {
+        /* v pointing down = sunset */
+        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-4), (u8g2_uint_t)(cy+2),
+                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+5));
+        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+4), (u8g2_uint_t)(cy+2),
+                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+5));
+    }
+
+    /* ── Time string — logisoso20, centred in 80 px, baseline at row 50 ── */
+    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso20_tf);
+    u8g2_uint_t tw = u8g2_GetStrWidth(&s_u8g2, timestr);
+    int tx = ((int)LCD_WIDTH - (int)tw) / 2;
+    if (tx < 0) tx = 0;
+    u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)tx, 50, timestr);
+
+    /* Blit 56 rows (0-55): captures icon (top ~y=2) and text (baseline y=50,
+     * descent to y=54).  ht_blit_at clamps if y_tube+56 > LCD_HEIGHT.        */
+    ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), 56, y_tube, fg, bg);
+}
+
 /* ── render_cx_tube6 ─────────────────────────────────────────────────────────
  * Render the current 24H-Custom info panel onto tube 5 (the rightmost tube).
  * Each panel occupies the full 80×160 display by compositing two 80×80 halves:
@@ -1744,23 +1866,24 @@ static void ht_draw_str(const char *str, int dst_y, uint16_t fg)
  *              Colour auto-sampled from Numbers/0.jpg centre pixel.
  *              Falls back to black when weather API has no data.
  *
- * panel_id is an index into the ordered list [weather, weekdate, ht, temp];
+ * panel_id is an index into the ordered list [weather, weekdate, ht, temp, sunrise];
  * the caller resolves which concrete panel this maps to.                       */
 static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                              uint8_t panel_id)
 {
     /* Resolve panel_id → concrete panel type.
-     * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor H/T
+     * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise/sunset
      * We iterate through the ordered list and pick the panel_id-th enabled entry. */
-    const bool enabled[4] = {
+    const bool enabled[5] = {
         cfg->tube6_panel_weather,
         cfg->tube6_panel_weekdate,
         cfg->tube6_panel_ht,
         cfg->tube6_panel_temp,
+        cfg->tube6_panel_sunrise,
     };
-    int kind = -1;   /* 0=weather icon, 1=weekdate, 2=indoor H/T, 3=outdoor H/T */
+    int kind = -1;   /* 0=weather icon, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise/sunset */
     int count = 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         if (enabled[i]) {
             if (count == (int)panel_id) { kind = i; break; }
             count++;
@@ -1890,7 +2013,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
             }
         }
 
-    } else {
+    } else if (kind == 3) {
         /* ── Outdoor H/T panel — mirrors indoor layout with weather data ──── */
         /* Rows  10– 33 : "Out" label  (logisoso20, HT_LABEL_H=24 rows, +10 shift)
          * Rows  34– 89 : outdoor temperature  (logisoso28, 56-row band)
@@ -1941,6 +2064,52 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 snprintf(buf, sizeof(buf), "%d%%", hum);
                 ht_draw_str_at(buf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
             }
+        }
+
+    } else if (kind == 4) {
+        /* ── Sunrise & Sunset panel ─────────────────────────────────────────
+         * Top half    (rows  14– 69) : sunrise icon + "HH:MM" local time
+         * Bottom half (rows  94–149) : sunset  icon + "HH:MM" local time
+         *
+         * Solar times are calculated via the NOAA algorithm from the geocoded
+         * lat/lon stored by the weather component.  Falls back to "--:--" while
+         * the weather task has not yet resolved the configured city.
+         *
+         * Background: AMPM/blank.jpg (same as weekdate / H/T panels).
+         * Colour: auto-sampled from Numbers/0.jpg centre pixel.               */
+        float lat = 0.0f, lon = 0.0f;
+        bool have_loc = weather_get_location(&lat, &lon);
+
+        {
+            char bg_path[256];
+            snprintf(bg_path, sizeof(bg_path),
+                     "/images/themes/%s/AMPM/blank.jpg", cfg->theme);
+            int bg_w = 0, bg_h = 0;
+            const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
+            if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
+            if (bg) display_show_image(5, bg_path);
+            else    display_fill(5, 0x0000);
+
+            uint16_t fg = ht_sample_theme_color(cfg->theme);
+
+            char rise_str[8] = "--:--";
+            char set_str[8]  = "--:--";
+
+            if (have_loc) {
+                int rise_min = 0, set_min = 0;
+                solar_calc(lat, lon, t, &rise_min, &set_min);
+                if (rise_min >= 0)
+                    snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
+                             (rise_min / 60) % 24, rise_min % 60);
+                if (set_min >= 0)
+                    snprintf(set_str, sizeof(set_str), "%02d:%02d",
+                             (set_min / 60) % 24, set_min % 60);
+            }
+
+            /* Top half: sunrise — icon + time, starting at y_tube=14 */
+            ht_draw_suntime(rise_str, /*rising=*/true,  14,         fg, bg);
+            /* Bottom half: sunset  — icon + time, starting at y_tube=HALF+14=94 */
+            ht_draw_suntime(set_str,  /*rising=*/false, HALF + 14,  fg, bg);
         }
     }
 
@@ -3028,7 +3197,8 @@ static void display_task(void *arg)
                 int cx_panel_count = (cfg->tube6_panel_weather  ? 1 : 0)
                                    + (cfg->tube6_panel_weekdate ? 1 : 0)
                                    + (cfg->tube6_panel_ht       ? 1 : 0)
-                                   + (cfg->tube6_panel_temp     ? 1 : 0);
+                                   + (cfg->tube6_panel_temp     ? 1 : 0)
+                                   + (cfg->tube6_panel_sunrise  ? 1 : 0);
                 if (cx_panel_count < 1) cx_panel_count = 1;  /* config enforces ≥1 */
                 uint32_t panel_ms = cfg->tube6_panel_ms < 1000 ? 5000
                                                                 : cfg->tube6_panel_ms;

@@ -17,6 +17,12 @@ static const char *TAG = "weather";
 static weather_data_t s_weather = {0};
 static SemaphoreHandle_t s_wx_mutex = NULL;
 
+/* Geocoded coordinates from the last successful city lookup.
+ * Written by fetch_open_meteo() and fetch_met_no() after each geocode.
+ * Protected by s_wx_mutex so readers always see a consistent pair. */
+static float s_wx_lat = 0.0f, s_wx_lon = 0.0f;
+static bool  s_wx_location_valid = false;
+
 /* Snapshot of the weather-relevant config fields, copied under config_lock()
  * before any blocking HTTP call so we never hold a pointer into s_cfg across
  * a network operation. */
@@ -449,6 +455,10 @@ static void fetch_open_meteo(const wx_cfg_snap_t *cfg)
         }
         strncpy(s_last_city, cfg->city, sizeof(s_last_city) - 1);
         ESP_LOGI(TAG, "Open-Meteo: geocoded '%s' → %.4f, %.4f", cfg->city, s_lat, s_lon);
+        /* Cache for weather_get_location() */
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        s_wx_lat = s_lat; s_wx_lon = s_lon; s_wx_location_valid = true;
+        xSemaphoreGive(s_wx_mutex);
     }
 
     char url[256];
@@ -644,6 +654,10 @@ static void fetch_met_no(const wx_cfg_snap_t *cfg)
         strncpy(s_last_city, cfg->city, sizeof(s_last_city) - 1);
         ESP_LOGI(TAG, "Met.no: geocoded '%s' → %.4f, %.4f  alt=%d m",
                  cfg->city, s_lat, s_lon, s_alt);
+        /* Cache for weather_get_location() */
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        s_wx_lat = s_lat; s_wx_lon = s_lon; s_wx_location_valid = true;
+        xSemaphoreGive(s_wx_mutex);
     }
 
     char url[256];
@@ -768,4 +782,14 @@ const weather_data_t *weather_get(void)
         copy = s_weather;
     }
     return &copy;
+}
+
+bool weather_get_location(float *lat, float *lon)
+{
+    if (!s_wx_mutex) return false;
+    xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+    bool ok = s_wx_location_valid;
+    if (ok) { *lat = s_wx_lat; *lon = s_wx_lon; }
+    xSemaphoreGive(s_wx_mutex);
+    return ok;
 }

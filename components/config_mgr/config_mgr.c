@@ -138,6 +138,7 @@ static void set_defaults(void)
     s_cfg.tube6_panel_weekdate = true;
     s_cfg.tube6_panel_ht       = true;
     s_cfg.tube6_panel_temp     = false;
+    s_cfg.tube6_panel_sunrise  = false;
     s_cfg.tube6_panel_ms       = 5000;
 
     /* Rotation off by default; user must explicitly enable it */
@@ -379,12 +380,15 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_ht = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tube6_panel_temp");
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_temp = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_sunrise");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_sunrise = cJSON_IsTrue(v);
     }
     json_read_u16(root, "tube6_panel_ms", &s_cfg.tube6_panel_ms);
     if (s_cfg.tube6_panel_ms < 1000) s_cfg.tube6_panel_ms = 5000;
     /* Guard: fall back to weekdate if every panel is disabled */
     if (!s_cfg.tube6_panel_weather && !s_cfg.tube6_panel_weekdate &&
-        !s_cfg.tube6_panel_ht      && !s_cfg.tube6_panel_temp)
+        !s_cfg.tube6_panel_ht      && !s_cfg.tube6_panel_temp     &&
+        !s_cfg.tube6_panel_sunrise)
         s_cfg.tube6_panel_weekdate = true;
 
     /* Backlight mode */
@@ -817,6 +821,7 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "tube6_panel_weekdate",   s_cfg.tube6_panel_weekdate);
     cJSON_AddBoolToObject  (root, "tube6_panel_ht",         s_cfg.tube6_panel_ht);
     cJSON_AddBoolToObject  (root, "tube6_panel_temp",       s_cfg.tube6_panel_temp);
+    cJSON_AddBoolToObject  (root, "tube6_panel_sunrise",    s_cfg.tube6_panel_sunrise);
     cJSON_AddNumberToObject(root, "tube6_panel_ms",         s_cfg.tube6_panel_ms);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off"};

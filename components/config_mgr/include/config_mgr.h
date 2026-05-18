@@ -176,6 +176,7 @@ typedef struct {
     bool             tube6_panel_weekdate;   /* Day name (top half) + MMDD date (bottom half) */
     bool             tube6_panel_ht;         /* SHT30 temp (top half) + humidity (bottom half) */
     bool             tube6_panel_temp;       /* Outdoor temperature (placeholder — shows blank for now) */
+    bool             tube6_panel_sunrise;    /* Sunrise & sunset times (U8g2 icon + local time) */
     uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
 } nextube_config_t;
 
