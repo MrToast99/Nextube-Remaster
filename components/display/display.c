@@ -1,5 +1,6 @@
 #include "display.h"
 #include "board_pins.h"
+#include "u8g2.h"
 #include "esp_log.h"
 #include "esp_timer.h"          /* esp_timer_get_time — AP PIN phase clock */
 #include "esp_heap_caps.h"      /* PSRAM_MALLOC / heap_caps_malloc */
@@ -9,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "weather.h"
+#include "sht30.h"              /* sht30_get() — indoor H/T for 24H_CX panel */
 #include "wifi_manager.h"       /* AP PIN visibility (S1) */
 #include "jpeg_decoder.h"       /* espressif/esp_jpeg v1.x managed component */
 #include "esp_random.h"         /* esp_fill_random — static-snow burn-in */
@@ -32,10 +34,36 @@ static spi_device_handle_t spi_dev;
  * NULL until display_task_start() is called; checked before use. */
 static TaskHandle_t s_display_task_handle = NULL;
 
+/* ── U8g2 virtual display for 24H-CX H/T panel text rendering ────────────────
+ * We configure U8g2 for a 128×64 "nodisp" (no hardware) display.  The 128-px
+ * width gives ample room for our 80-px tube; a 28-px font centred in 80 rows
+ * produces a baseline at row ≈53, keeping all glyph pixels within the 64-row
+ * buffer.  The 16 physical rows below (64–79 of each half) are left as the
+ * black fill laid down by display_fill() at the start of every kind==2 render.
+ * Buffer: 128 cols × 8 tile-rows = 1024 bytes, allocated internally by
+ * u8g2_Setup_sh1106_128x64_noname_f (via u8g2_m_16_8_f).  Access via
+ * u8g2_GetBufferPtr(&s_u8g2) after any draw call.
+ * Callbacks are no-ops — all rendering stays in RAM. */
+static u8g2_t s_u8g2;
+
+static uint8_t ht_byte_cb(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
+    { (void)u8x8; (void)msg; (void)arg_int; (void)arg_ptr; return 1; }
+static uint8_t ht_gpio_cb(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
+    { (void)u8x8; (void)msg; (void)arg_int; (void)arg_ptr; return 1; }
+
 /* Update indicator flag — set true to overlay 4 red rows at the physical
  * bottom of tube 5 on every frame.  Declared here (before display_show_digit)
  * so the function can read it.  Implementation: display_set_update_indicator(). */
 static volatile bool s_update_indicator = false;
+
+/* ── 24H Custom clock — tube 6 panel rotation state ─────────────────────────
+ * Tracks which info panel is currently on tube 6 and when it started.
+ * Both variables are only ever read/written from the display task, so no
+ * additional mutex is required. */
+static uint8_t  s_cx_panel        = 0;   /* index into the enabled panel list */
+static int64_t  s_cx_panel_start  = 0;   /* esp_timer_get_time() µs when panel began */
+static struct tm s_cx_last_t;            /* last struct tm at which tube 6 was rendered */
+static int8_t   s_cx_last_kind    = -1;  /* panel kind (0-3) last drawn; -1 = none rendered yet */
 
 /* ── Timer / burn-in mutex ───────────────────────────────────────────────────
  * Declared here (before the burn-in setter functions) so the setters can use
@@ -74,6 +102,11 @@ static const uint16_t s_burnin_colors[] = {
 };
 #define BURNIN_COLOR_COUNT  ((int)(sizeof(s_burnin_colors)/sizeof(s_burnin_colors[0])))
 #define BURNIN_COLOR_SECS   30   /* seconds per colour step in the cycle */
+
+/* SPI pixel transfer chunk height — 8 rows × 80 px × 2 B = 1280 B on the
+ * stack (SRAM).  Used by display_show_image() and display_show_image_region().
+ * Defined at file scope so both functions can share the same constant. */
+#define DISP_CHUNK_ROWS 8
 
 /* Static-snow burn-in: each frame writes truly random RGB565 pixels to every
  * tube in the mask, exercising each sub-pixel independently rather than as a
@@ -305,6 +338,19 @@ void display_init(void)
     /* display_apply_invert_mask(), display_apply_tube_offsets(), and
      * display_apply_tube_brightness() are called by app_main() after display_init()
      * once config_mgr has loaded the saved values. */
+
+    /* Initialise U8g2 virtual display for H/T panel text rendering.
+     * 128×64 full-framebuffer, no hardware I/O.  Buffer allocated internally
+     * by U8g2 (static array inside u8g2_m_16_8_f).  Access via
+     * u8g2_GetBufferPtr(&s_u8g2) after any draw call. */
+    /* u8g2_Setup_bitmap_128x64_nodisp_f is not compiled into every U8g2 build.
+     * Use the SH1106 128×64 variant instead — same full-framebuffer geometry,
+     * identical tile-buffer layout; the SH1106 hardware callbacks are never
+     * reached because ht_byte_cb / ht_gpio_cb are no-ops. */
+    u8g2_Setup_sh1106_128x64_noname_f(&s_u8g2, U8G2_R0, ht_byte_cb, ht_gpio_cb);
+    u8g2_InitDisplay(&s_u8g2);
+    u8g2_SetPowerSave(&s_u8g2, 0);
+
     ESP_LOGI(TAG, "Displays ready");
 }
 
@@ -553,7 +599,7 @@ void display_fill(int tube, uint16_t color)
     for (int x = 0; x < LCD_WIDTH; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
     for (int y = 0; y < LCD_HEIGHT; y++) {
         spi_transaction_t t = { .length = sizeof(line)*8, .tx_buffer = line };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -566,11 +612,11 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
     uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
     open_lcd_window(ox, oy, (uint8_t)w, (uint8_t)h);
     /* `data` may be in PSRAM; ESP32 SPI DMA cannot access PSRAM directly.
-     * Copy 8 rows at a time into a stack SRAM chunk buffer, optionally scale
-     * brightness per-pixel (integer arithmetic, negligible overhead at 5 Hz),
-     * then send via polling transmit.  8 rows reduces transaction count 160→20
-     * per tube, cutting per-transaction GPIO/controller overhead by ~8×. */
-#define DISP_CHUNK_ROWS 8
+     * Copy DISP_CHUNK_ROWS rows at a time into a stack SRAM chunk buffer,
+     * optionally scale brightness per-pixel (integer arithmetic, negligible
+     * overhead at 5 Hz), then send via polling transmit.  8 rows reduces
+     * transaction count 160→20 per tube, cutting per-transaction
+     * GPIO/controller overhead by ~8×. */
     uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];  /* 1280 B — always SRAM */
     uint8_t br        = s_tube_brightness[tube];
     bool    do_br     = (br < 100);
@@ -608,7 +654,6 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
         spi_transaction_t t = { .length = (size_t)(rows * w * 2) * 8, .tx_buffer = chunk };
         spi_device_polling_transmit(spi_dev, &t);
     }
-#undef DISP_CHUNK_ROWS
 
     /* ── Update indicator overlay ──────────────────────────────────────── */
     /* When s_update_indicator is set, paint 4 rows of solid red at the
@@ -680,7 +725,7 @@ static void display_fill_snow(int tube)
     for (int y = 0; y < LCD_HEIGHT; y++) {
         esp_fill_random(line, sizeof(line));
         spi_transaction_t t = {.length = sizeof(line) * 8, .tx_buffer = line};
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -894,6 +939,107 @@ void display_show_image(int tube, const char *path)
     /* Cache owns the buffer — no free() here */
 }
 
+/* ── display_show_image_region ───────────────────────────────────────────────
+ * Render a rectangular sub-region of a decoded image to a specific position
+ * within a tube's LCD address space.  Used by the 24H Custom tube-6 panel
+ * renderer to composite two half-images (e.g. day name + date digits) into
+ * the single tube without a separate PSRAM compose buffer.
+ *
+ * path          : LittleFS path, loaded through the normal img_cache
+ * src_x, src_y  : top-left of the crop rectangle in decoded image coordinates
+ * src_w, src_h  : size of the crop rectangle (clamped to image bounds)
+ * dst_x, dst_y  : destination top-left on the tube (added to ox/oy offsets)
+ *
+ * Burns the tube-select / deselect cycle internally so multiple calls for
+ * the same tube re-select it each time — acceptable at 5 Hz.              */
+static void display_show_image_region(int tube, const char *path,
+                                      int src_x, int src_y, int src_w, int src_h,
+                                      int dst_x, int dst_y)
+{
+    if (tube < 0 || tube >= LCD_COUNT) return;
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
+
+    if (!path) {
+        /* NULL path = fill the destination region with black.
+         * Used by the H/T panel to clear digit slots that are unused on a
+         * given frame (e.g. single-digit number occupying only the right
+         * slot), preventing stale pixels from a previous larger value. */
+        if (src_w <= 0 || src_h <= 0) return;
+        select_tube(tube);
+        uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
+                               + (int)s_col_offsets[tube] + dst_x);
+        uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + dst_y);
+        open_lcd_window(ox, oy, (uint8_t)src_w, (uint8_t)src_h);
+        uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];
+        memset(chunk, 0, (size_t)src_w * 2 * DISP_CHUNK_ROWS);
+        for (int y = 0; y < src_h; y += DISP_CHUNK_ROWS) {
+            int rows = (y + DISP_CHUNK_ROWS <= src_h) ? DISP_CHUNK_ROWS : src_h - y;
+            spi_transaction_t tr = { .length = (size_t)(rows * src_w * 2) * 8,
+                                     .tx_buffer = chunk };
+            spi_device_polling_transmit(spi_dev, &tr);
+        }
+        deselect_all();
+        return;
+    }
+
+    int img_w = 0, img_h = 0;
+    const uint8_t *buf = img_cache_get(path, &img_w, &img_h);
+    if (!buf || img_w == 0 || img_h == 0) return;
+
+    /* Clamp crop to image bounds */
+    if (src_x < 0) src_x = 0;
+    if (src_y < 0) src_y = 0;
+    if (src_x >= img_w) return;
+    if (src_y >= img_h) return;
+    if (src_w <= 0 || src_x + src_w > img_w) src_w = img_w - src_x;
+    if (src_h <= 0 || src_y + src_h > img_h) src_h = img_h - src_y;
+
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
+                           + (int)s_col_offsets[tube] + dst_x);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + dst_y);
+    open_lcd_window(ox, oy, (uint8_t)src_w, (uint8_t)src_h);
+
+    uint8_t  chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];
+    uint8_t  br     = s_tube_brightness[tube];
+    bool     do_br  = (br < 100);
+    bool     do_gam = s_gamma_lut_active[tube];
+    bool     do_px  = do_br || do_gam;
+
+    for (int y = src_y; y < src_y + src_h; y += DISP_CHUNK_ROWS) {
+        int rows = DISP_CHUNK_ROWS;
+        if (y + rows > src_y + src_h) rows = (src_y + src_h) - y;
+        for (int r = 0; r < rows; r++)
+            memcpy(chunk + r * src_w * 2,
+                   buf + (y + r) * img_w * 2 + src_x * 2,
+                   (size_t)(src_w * 2));
+        if (do_px) {
+            int npx = rows * src_w;
+            for (int j = 0; j < npx; j++) {
+                uint16_t px = ((uint16_t)chunk[j*2] << 8) | chunk[j*2+1];
+                uint32_t r5 = (px >> 11) & 0x1Fu;
+                uint32_t g6 = (px >>  5) & 0x3Fu;
+                uint32_t b5 =  px        & 0x1Fu;
+                if (do_br) { r5=r5*br/100u; g6=g6*br/100u; b5=b5*br/100u; }
+                if (do_gam) {
+                    r5 = s_gamma_lut_5bit[tube][r5];
+                    g6 = s_gamma_lut_6bit[tube][g6];
+                    b5 = s_gamma_lut_5bit[tube][b5];
+                }
+                px = (uint16_t)((r5<<11)|(g6<<5)|b5);
+                chunk[j*2]   = (uint8_t)(px>>8);
+                chunk[j*2+1] = (uint8_t)(px&0xFF);
+            }
+        }
+        spi_transaction_t tr = {
+            .length    = (size_t)(rows * src_w * 2) * 8,
+            .tx_buffer = chunk,
+        };
+        spi_device_polling_transmit(spi_dev, &tr);
+    }
+    deselect_all();
+}
+
 /* ════════════════════════════════════════════════════════════════════
  *  FlipClock split-flap animation
  *
@@ -1084,17 +1230,6 @@ void display_path_temperature(char *buf, size_t n, const char *theme, const char
 void display_path_humidity(char *buf, size_t n, const char *theme, const char *name)
 { snprintf(buf, n, "/images/themes/%s/MutiInfo/Humidity/%s.jpg", theme, name); }
 
-void display_path_weekday(char *buf, size_t n, const char *theme, int wday)
-{
-    /* struct tm: 0=Sunday … 6=Saturday */
-    const char *days[] = {"sunday","monday","tuesday","wednesday","thursday","friday","saturday"};
-    snprintf(buf, n, "/images/themes/%s/MutiInfo/WeekDate/week/%s.jpg",
-             theme, (wday >= 0 && wday <= 6) ? days[wday] : "monday");
-}
-
-void display_path_date_digit(char *buf, size_t n, const char *theme, int digit)
-{ snprintf(buf, n, "/images/themes/%s/MutiInfo/WeekDate/date/%d.jpg", theme, digit); }
-
 
 /* ── High-level helpers ────────────────────────────────────────────── */
 void display_show_number(int tube, int digit, const char *theme)
@@ -1121,49 +1256,185 @@ void display_show_ampm(int tube, const char *name, const char *theme)
 
 /* ── Mode render helpers ────────────────────────────────────────────── */
 
+/* Forward declaration: defined in the H/T helpers section below render_ap_pin. */
+static uint16_t ht_sample_theme_color(const char *theme);
+
 /* ── S1 — AP PIN renderer ────────────────────────────────────────────
  * Called from the display task whenever the setup AP is broadcasting and
- * no client is associated.  Shows the 8-digit PIN across 6 tubes in two
- * 3-second phases:
+ * no client is associated.  Shows the 8-digit PIN as a scrolling marquee
+ * across the 6 tubes — the virtual tape is 3 blanks + 8 PIN digits (11
+ * positions), advancing one step per second so all digits cycle past.
  *
- *   Phase 0 (3 s):  tubes show pin[0..5]
- *   Phase 1 (3 s):  tubes show pin[2..7]
+ * Digits are rendered with the U8g2 logisoso42 embedded font — no theme
+ * artwork required, so the PIN is always legible regardless of which theme
+ * is active or whether any theme images have been cached yet.
  *
- * The 4-digit overlap (pin[2..5] visible in both phases) gives the user a
- * stable anchor while their eyes piece the full PIN together.  Themes need
- * no new artwork — this leverages each theme's existing Numbers/0..9.jpg.
+ * Colour is auto-sampled from the theme's Numbers/0.jpg centre pixel
+ * (falls back to white 0xFFFF when the image cache is cold, e.g. first
+ * boot before any theme image has been decoded).
  *
- * Defined here (after the include of config_mgr.h above) rather than next
- * to display_show_number, because nextube_config_t is only visible from
- * this point in the translation unit forward.
+ * Defined here (after nextube_config_t becomes visible) rather than next
+ * to display_show_number.
  */
+
+/* Draw one tube for the AP-PIN marquee using U8g2 embedded font.
+ * ch = '0'..'9' → digit centred on the full 80×160 tube.
+ * Any other value → fills tube black (blank marquee gap).
+ *
+ * The U8g2 buffer (128×64) is blitted with 2× pixel scaling in both axes
+ * so each source pixel maps to a 2×2 block on the physical tube.
+ *
+ * Layout (single 160-row SPI window per tube):
+ *   Rows   0– 15  : black  (top margin, (160 - 64×2)/2 = 16 px)
+ *   Rows  16–143  : U8g2 logisoso42 digit, 2× pixel-scaled (128 rows)
+ *   Rows 144–159  : black  (bottom margin, 16 px)
+ *
+ * Horizontal: source columns 0..39 (40 px) → output columns 0..79 (80 px, 2×).
+ * The digit is centred in the 40-column virtual space before scaling.
+ */
+static void pin_draw_tube(int tube, char ch, uint16_t fg)
+{
+    if (ch < '0' || ch > '9') {
+        display_fill(tube, 0x0000);
+        return;
+    }
+
+    /* Render single digit into shared U8g2 buffer (128×64 px, 1 bpp). */
+    char str[2] = { ch, '\0' };
+    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso42_tf);
+
+    /* 2× pixel-scale factor: each U8g2 source pixel → 2×2 output pixels.
+     * Horizontal: centre the glyph in LCD_WIDTH/SCALE = 40 virtual columns.
+     * The blit loop doubles these to fill the 80-px physical tube width.   */
+    const int SCALE = 2;
+    u8g2_uint_t glyph_w = u8g2_GetUTF8Width(&s_u8g2, str);
+    int x = ((int)(LCD_WIDTH / SCALE) - (int)glyph_w) / 2;
+    if (x < 0) x = 0;
+
+    /* Vertically centre digit cap height (ascent) in the 64-row buffer.
+     * Digits have no descenders so we anchor on ascent alone:
+     *   y_baseline = (BUF_H + ascent) / 2
+     * e.g. logisoso42 ascent≈42 → y = (64+42)/2 = 53,
+     *   glyph rows 11–53, centred at row 32 = 64/2.                     */
+    const int BUF_H = 64;
+    int ascent = (int)u8g2_GetAscent(&s_u8g2);
+    int y = (BUF_H + ascent) / 2;
+    if (y < ascent) y = ascent;
+    if (y > BUF_H)  y = BUF_H;
+
+    u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)y, str);
+
+    /* Get U8g2's internal 1-bpp tile buffer after the draw call.
+     * The _f setup function allocates its own buffer via u8g2_m_16_8_f;
+     * s_ht_buf no longer exists — this pointer is the canonical source. */
+    const uint8_t *tile_buf = u8g2_GetBufferPtr(&s_u8g2);
+
+    /* Apply per-tube brightness and gamma to fg once before the pixel loop
+     * (bg is always 0x0000; scaling zero stays zero, no special case).   */
+    {
+        uint8_t  br     = s_tube_brightness[tube];
+        bool     do_br  = (br < 100);
+        bool     do_gam = s_gamma_lut_active[tube];
+        if (do_br || do_gam) {
+            uint32_t r5 = (fg >> 11) & 0x1Fu;
+            uint32_t g6 = (fg >>  5) & 0x3Fu;
+            uint32_t b5 =  fg        & 0x1Fu;
+            if (do_br)  { r5=r5*br/100u; g6=g6*br/100u; b5=b5*br/100u; }
+            if (do_gam) { r5=s_gamma_lut_5bit[tube][r5];
+                          g6=s_gamma_lut_6bit[tube][g6];
+                          b5=s_gamma_lut_5bit[tube][b5]; }
+            fg = (uint16_t)((r5<<11)|(g6<<5)|b5);
+        }
+    }
+    uint8_t fg_hi = (uint8_t)(fg >> 8);
+    uint8_t fg_lo = (uint8_t)(fg & 0xFF);
+
+    /* Open one full-tube SPI window and stream all 160 rows in
+     * DISP_CHUNK_ROWS-row batches (same strategy as display_show_digit). */
+    const int BUF_W  = 128;
+    const int OUT_H  = BUF_H * SCALE;              /* 64 × 2 = 128 output rows */
+    const int MARGIN = (LCD_HEIGHT - OUT_H) / 2;   /* (160 - 128) / 2 = 16 rows */
+
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
+                            + (int)s_col_offsets[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube]);
+    open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)LCD_HEIGHT);
+
+    uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];   /* 1280 B — SRAM stack */
+
+    /* ── Top black margin (16 rows) ── */
+    memset(chunk, 0, sizeof(chunk));
+    for (int r = 0; r < MARGIN; r += DISP_CHUNK_ROWS) {
+        int rows = (r + DISP_CHUNK_ROWS <= MARGIN) ? DISP_CHUNK_ROWS : MARGIN - r;
+        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
+                                 .tx_buffer = chunk };
+        spi_device_polling_transmit(spi_dev, &t);
+    }
+
+    /* ── Text region: 2× pixel-scaled blit (128 output rows) ──────────
+     * Each output row maps to src_row = out_row / SCALE.
+     * Each output column maps to src_col = out_col / SCALE.
+     * Source cols 0..(LCD_WIDTH/SCALE - 1) = 0..39 → output cols 0..79. */
+    for (int out_row = 0; out_row < OUT_H; out_row += DISP_CHUNK_ROWS) {
+        int rows = (out_row + DISP_CHUNK_ROWS <= OUT_H) ? DISP_CHUNK_ROWS
+                                                        : OUT_H - out_row;
+        for (int r = 0; r < rows; r++) {
+            int src_row  = (out_row + r) / SCALE;
+            int tile_row = src_row / 8;
+            int bit      = src_row % 8;
+            for (int src_col = 0; src_col < LCD_WIDTH / SCALE; src_col++) {
+                bool    lit     = (tile_buf[tile_row * BUF_W + src_col] >> bit) & 1;
+                uint8_t hi      = lit ? fg_hi : 0x00;
+                uint8_t lo      = lit ? fg_lo : 0x00;
+                int     out_col = src_col * SCALE;
+                chunk[(r * LCD_WIDTH + out_col    ) * 2]     = hi;
+                chunk[(r * LCD_WIDTH + out_col    ) * 2 + 1] = lo;
+                chunk[(r * LCD_WIDTH + out_col + 1) * 2]     = hi;
+                chunk[(r * LCD_WIDTH + out_col + 1) * 2 + 1] = lo;
+            }
+        }
+        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
+                                 .tx_buffer = chunk };
+        spi_device_polling_transmit(spi_dev, &t);
+    }
+
+    /* ── Bottom black margin (16 rows) ── */
+    memset(chunk, 0, sizeof(chunk));
+    int bot = LCD_HEIGHT - MARGIN - OUT_H;   /* 160 - 16 - 128 = 16 rows */
+    for (int r = 0; r < bot; r += DISP_CHUNK_ROWS) {
+        int rows = (r + DISP_CHUNK_ROWS <= bot) ? DISP_CHUNK_ROWS : bot - r;
+        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
+                                 .tx_buffer = chunk };
+        spi_device_polling_transmit(spi_dev, &t);
+    }
+
+    deselect_all();
+}
+
 static void render_ap_pin(const nextube_config_t *cfg)
 {
     const char *pin = wifi_manager_get_ap_pin();
     if (!pin || strlen(pin) < 8) return;
 
-    /* Scrolling marquee: the virtual tape is 3 blanks followed by the 8 PIN
-     * digits (11 characters total), repeating endlessly.  The 6-tube window
-     * advances one position every 1 000 ms (1 s) so digits scroll right-to-left —
-     * new digits enter on the rightmost tube and exit on the left, with a
-     * 3-blank gap between each repetition to give the eye a reset point.
-     *
-     * Example at scroll=3: [d0][d1][d2][d3][d4][d5]
-     *           at scroll=8: [d5][d6][d7][ ][ ][ ]
-     *           at scroll=0: [ ][ ][ ][d0][d1][d2]  */
-    const int seq_len = 11;   /* 3 blanks + 8 digits */
+    /* Scrolling marquee: 3 blanks + 8 digits = 11-position tape, 1 step/s.
+     *   scroll=0 → tubes: [ ][ ][ ][d0][d1][d2]
+     *   scroll=3 → tubes: [d0][d1][d2][d3][d4][d5]
+     *   scroll=8 → tubes: [d5][d6][d7][ ][ ][ ]    */
+    const int seq_len = 11;
     const int step_ms = 1000;
 
     int64_t now_ms = esp_timer_get_time() / 1000;
     int     scroll  = (int)((now_ms / step_ms) % seq_len);
 
+    /* Sample theme colour once; white fallback when cache is cold. */
+    uint16_t fg = ht_sample_theme_color(cfg->theme);
+
     for (int tube = 0; tube < LCD_COUNT; tube++) {
-        int pos = (scroll + tube) % seq_len;
-        if (pos < 3) {
-            display_fill(tube, 0x0000);   /* blank gap */
-        } else {
-            display_show_number(tube, pin[pos - 3] - '0', cfg->theme);
-        }
+        int  pos = (scroll + tube) % seq_len;
+        char ch  = (pos < 3) ? '\0' : pin[pos - 3];
+        pin_draw_tube(tube, ch, fg);
     }
 }
 
@@ -1191,10 +1462,474 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
         display_show_number(i, digits[i], cfg->theme);
 }
 
+/* ── H/T panel helpers (U8g2 embedded-font rendering for kind==2) ────────────
+ * render_cx_tube6 kind==2 renders temperature and humidity as text using the
+ * U8g2 virtual frame buffer (s_u8g2, 128×64, configured in
+ * display_init).  The three helpers below handle colour sampling, pixel blitting,
+ * and string rendering respectively.
+ *
+ * Tube half geometry:
+ *   Physical half  : 80 × 80 px  (LCD_WIDTH × LCD_HEIGHT/2)
+ *   U8g2 buffer    : 128 wide × 64 tall, 1 bpp column-major tiles
+ *   Blit offset    : dst_y + 8 px → centres the 64-row block in each 80-row half
+ */
+
+/* Sample the centre pixel of the theme's '1' digit from the PSRAM image cache
+ * to extract the dominant foreground colour used by the active theme.
+ * Falls back to white (0xFFFF) when the image is not yet cached or its centre
+ * pixel is too dark to be visible against a black background.               */
+static uint16_t ht_sample_theme_color(const char *theme)
+{
+    char path[256];
+    display_path_number(path, sizeof(path), theme, 1);
+    int w = 0, h = 0;
+    const uint8_t *px = img_cache_get(path, &w, &h);
+    if (!px || w <= 0 || h <= 0) return 0xFFFF;
+    int idx = ((h / 2) * w + (w / 2)) * 2;   /* centre pixel, big-endian RGB565 */
+    uint16_t c = ((uint16_t)px[idx] << 8) | px[idx + 1];
+    return (c < 0x2000) ? 0xFFFF : c;          /* too dark → fall back to white */
+}
+
+/* Convert the U8g2 1-bpp tile buffer to RGB565 and push 64 rows to tube 5,
+ * centred within the physical 80-row half (8 px top margin, 8 px bottom margin).
+ *   dst_y  : 0 for top half, LCD_HEIGHT/2 (80) for bottom half
+ *   fg     : RGB565 foreground colour; background is always black (0x0000)   */
+static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
+{
+    /* Apply per-tube brightness and gamma to fg once so the inner loop is
+     * branch-free (bg is always 0x0000; brightness/gamma of 0 stays 0).    */
+    {
+        uint8_t  br     = s_tube_brightness[tube];
+        bool     do_br  = (br < 100);
+        bool     do_gam = s_gamma_lut_active[tube];
+        if (do_br || do_gam) {
+            uint32_t r = (fg >> 11) & 0x1Fu;
+            uint32_t g = (fg >>  5) & 0x3Fu;
+            uint32_t b =  fg        & 0x1Fu;
+            if (do_br)  { r = r * br / 100u; g = g * br / 100u; b = b * br / 100u; }
+            if (do_gam) { r = s_gamma_lut_5bit[tube][r];
+                          g = s_gamma_lut_6bit[tube][g];
+                          b = s_gamma_lut_5bit[tube][b]; }
+            fg = (uint16_t)((r << 11) | (g << 5) | b);
+        }
+    }
+    uint8_t fg_hi = (uint8_t)(fg >> 8);
+    uint8_t fg_lo = (uint8_t)(fg & 0xFF);
+
+    /* Centre the 64-row buffer in the 80-row physical half: 8 px top margin. */
+    const int BUF_H = 64;
+    const int BUF_W = 128;
+    int y_start = dst_y + (LCD_HEIGHT / 2 - BUF_H) / 2;   /* dst_y + 8 */
+
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
+                            + (int)s_col_offsets[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + y_start);
+    open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)BUF_H);
+
+    /* U8g2 tile layout: byte[tile_row * BUF_W + col] stores 8 vertical pixel
+     * rows; bit 0 is the topmost row of that tile.  We only read the leftmost
+     * LCD_WIDTH (80) columns — the extra 48 cols of the 128-wide buffer are
+     * ignored (off-screen on the tube).                                       */
+    uint8_t line[LCD_WIDTH * 2];
+    for (int row = 0; row < BUF_H; row++) {
+        int tile_row = row / 8;
+        int bit      = row % 8;
+        for (int col = 0; col < LCD_WIDTH; col++) {
+            bool lit = (tile_buf[tile_row * BUF_W + col] >> bit) & 1;
+            line[col * 2]     = lit ? fg_hi : 0x00;
+            line[col * 2 + 1] = lit ? fg_lo : 0x00;
+        }
+        spi_transaction_t t = { .length = sizeof(line) * 8, .tx_buffer = line };
+        spi_device_polling_transmit(spi_dev, &t);
+    }
+    deselect_all();
+}
+
+/* Like ht_blit() but blits exactly `rows` rows of the U8g2 1-bpp buffer to
+ * tube at absolute tube row y_tube, without adding any centring margin.
+ * Used by the label and region-text helpers that need arbitrary y positions.
+ *
+ * bg_rgb565: optional decoded RGB565 background image (LCD_WIDTH × LCD_HEIGHT,
+ *            big-endian, as returned by img_cache_get).  When non-NULL each
+ *            U8g2 zero-bit pixel is replaced by the corresponding background
+ *            pixel from the source image rather than solid black.  Pass NULL
+ *            for a solid-black background (original behaviour).              */
+static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
+                        uint16_t fg, const uint8_t *bg_rgb565)
+{
+    {
+        uint8_t  br     = s_tube_brightness[tube];
+        bool     do_br  = (br < 100);
+        bool     do_gam = s_gamma_lut_active[tube];
+        if (do_br || do_gam) {
+            uint32_t r = (fg >> 11) & 0x1Fu;
+            uint32_t g = (fg >>  5) & 0x3Fu;
+            uint32_t b =  fg        & 0x1Fu;
+            if (do_br)  { r = r * br / 100u; g = g * br / 100u; b = b * br / 100u; }
+            if (do_gam) { r = s_gamma_lut_5bit[tube][r];
+                          g = s_gamma_lut_6bit[tube][g];
+                          b = s_gamma_lut_5bit[tube][b]; }
+            fg = (uint16_t)((r << 11) | (g << 5) | b);
+        }
+    }
+    uint8_t fg_hi = (uint8_t)(fg >> 8);
+    uint8_t fg_lo = (uint8_t)(fg & 0xFF);
+    const int BUF_W = 128;
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
+                            + (int)s_col_offsets[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + y_tube);
+    open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)rows);
+    uint8_t line[LCD_WIDTH * 2];
+    for (int row = 0; row < rows; row++) {
+        int tile_row = row / 8;
+        int bit      = row % 8;
+        for (int col = 0; col < LCD_WIDTH; col++) {
+            bool lit = (tile_buf[tile_row * BUF_W + col] >> bit) & 1;
+            if (lit) {
+                line[col * 2]     = fg_hi;
+                line[col * 2 + 1] = fg_lo;
+            } else if (bg_rgb565) {
+                /* Sample the corresponding pixel from the background image.
+                 * Layout: big-endian RGB565, stride = LCD_WIDTH pixels.     */
+                int bg_idx = ((y_tube + row) * LCD_WIDTH + col) * 2;
+                line[col * 2]     = bg_rgb565[bg_idx];
+                line[col * 2 + 1] = bg_rgb565[bg_idx + 1];
+            } else {
+                line[col * 2]     = 0x00;
+                line[col * 2 + 1] = 0x00;
+            }
+        }
+        spi_transaction_t t = { .length = sizeof(line) * 8, .tx_buffer = line };
+        spi_device_polling_transmit(spi_dev, &t);
+    }
+    deselect_all();
+}
+
+/* Height (rows) reserved for an "In" / "Out" label rendered with
+ * u8g2_font_logisoso20_tf.  logisoso20: ascent=20, |descent|=4 → 24 rows.
+ * Must match the blit_h computed inside ht_draw_label().                    */
+#define HT_LABEL_H  24
+
+/* Render a short label string (e.g. "In" / "Out") centred horizontally using
+ * u8g2_font_logisoso20_tf (ascent=20, descent=−4, total glyph height=24 px).
+ * y_tube: absolute tube row where the top of the label should appear.
+ * bg: optional RGB565 background buffer (see ht_blit_at); NULL = solid black.*/
+static void ht_draw_label(const char *str, int y_tube, uint16_t fg,
+                           const uint8_t *bg)
+{
+    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso20_tf);
+    int ascent  = (int)u8g2_GetAscent(&s_u8g2);
+    int descent = (int)u8g2_GetDescent(&s_u8g2);   /* negative */
+    int blit_h  = ascent - descent;                 /* = HT_LABEL_H */
+    u8g2_uint_t w = u8g2_GetStrWidth(&s_u8g2, str);
+    int x = ((int)LCD_WIDTH - (int)w) / 2;
+    if (x < 0) x = 0;
+    /* Place baseline at `ascent` so glyphs start at buffer row 0.           */
+    u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)ascent, str);
+    ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), blit_h, y_tube, fg, bg);
+}
+
+/* Render a UTF-8 string centred horizontally (within LCD_WIDTH=80 px) and
+ * vertically within a band of `height` rows placed at absolute tube row y_tube.
+ * font: pointer to any compiled-in U8g2 font constant.
+ * Blits at most 64 rows (the U8g2 buffer height limit).
+ * bg: optional RGB565 background buffer (see ht_blit_at); NULL = solid black.*/
+static void ht_draw_str_at(const char *str, int y_tube, int height,
+                            const uint8_t *font, uint16_t fg,
+                            const uint8_t *bg)
+{
+    const int BUF_H = 64;
+    int blit_h = (height < BUF_H) ? height : BUF_H;
+
+    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_SetFont(&s_u8g2, font);
+
+    u8g2_uint_t str_w = u8g2_GetUTF8Width(&s_u8g2, str);
+    int x = ((int)LCD_WIDTH - (int)str_w) / 2;
+    if (x < 0) x = 0;
+
+    int ascent  = (int)u8g2_GetAscent(&s_u8g2);
+    int descent = (int)u8g2_GetDescent(&s_u8g2);   /* negative */
+    /* Vertical centre within blit_h (same formula as ht_draw_str). */
+    int y = (blit_h + ascent + descent) / 2;
+    if (y < ascent) y = ascent;
+    if (y > BUF_H)  y = BUF_H;
+
+    u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)y, str);
+    ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), blit_h, y_tube, fg, bg);
+}
+
+/* Render a UTF-8 string into the U8g2 buffer using the 28-px
+ * logisoso font, centred horizontally (within LCD_WIDTH=80) and vertically
+ * (within the 64-row buffer), then blit to tube 5 at the given half offset.  */
+static void ht_draw_str(const char *str, int dst_y, uint16_t fg)
+{
+    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso28_tf);
+
+    /* Horizontal centre: measure with the UTF-8-aware width function so that
+     * multi-byte characters (° = 0xC2 0xB0) are counted as one glyph.       */
+    u8g2_uint_t str_w = u8g2_GetUTF8Width(&s_u8g2, str);
+    int x = ((int)LCD_WIDTH - (int)str_w) / 2;
+    if (x < 0) x = 0;
+
+    /* Vertical centre: place the baseline so the glyph span [ascent..descent]
+     * is centred in the 64-row buffer.
+     *   baseline = (BUF_H + ascent + descent) / 2
+     * For logisoso28: ascent≈28, descent≈-7 → baseline ≈ (64+28-7)/2 = 42.
+     * Glyph span: top≈14, bottom≈49, centre≈31.5 ≈ 32 = 64/2.              */
+    const int BUF_H = 64;
+    int ascent  = (int)u8g2_GetAscent(&s_u8g2);
+    int descent = (int)u8g2_GetDescent(&s_u8g2);   /* negative value */
+    int y = (BUF_H + ascent + descent) / 2;
+    if (y < ascent) y = ascent;   /* clamp: don't draw above buffer top */
+    if (y > BUF_H)  y = BUF_H;   /* clamp: don't draw below buffer bottom */
+
+    u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)y, str);
+    /* u8g2_SendBuffer is intentionally omitted: byte_cb is a no-op.
+     * Read the rendered pixels directly from U8g2's internal buffer. */
+    ht_blit(5, u8g2_GetBufferPtr(&s_u8g2), dst_y, fg);
+}
+
+/* ── render_cx_tube6 ─────────────────────────────────────────────────────────
+ * Render the current 24H-Custom info panel onto tube 5 (the rightmost tube).
+ * Each panel occupies the full 80×160 display by compositing two 80×80 halves:
+ *
+ *   WEATHER  — Full tube (80×160) : current weather condition icon JPEG.
+ *              Falls back to black when weather API has no data.
+ *
+ *   WEEKDATE — Rows   0– 79 : day name — "Sun" … "Sat"
+ *                            U8g2 logisoso28, centred in 64-row band (rows 8–71)
+ *                            composited over AMPM/blank.jpg background.
+ *              Rows  80–159 : date "MMDD" (no separator)
+ *                            U8g2 logisoso28, centred in 64-row band (rows 88–151)
+ *                            composited over AMPM/blank.jpg background.
+ *              Colour auto-sampled from Numbers/0.jpg centre pixel.
+ *
+ *   INDOOR   — Rows   0– 23 : "In" label   (logisoso20, HT_LABEL_H=24 px)
+ *              Rows  24– 79 : indoor temperature   (logisoso28, 56-px band)
+ *              Rows  80–159 : indoor humidity       (logisoso28, centred in 80 px)
+ *              Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
+ *
+ *   OUTDOOR H/T — Rows   0– 23 : "Out" label  (logisoso20, HT_LABEL_H=24 px)
+ *              Rows  24– 79 : outdoor temperature  (logisoso28, 56-px band)
+ *              Rows  80–159 : outdoor humidity     (logisoso28, centred in 80 px)
+ *              Colour auto-sampled from Numbers/0.jpg centre pixel.
+ *              Falls back to black when weather API has no data.
+ *
+ * panel_id is an index into the ordered list [weather, weekdate, ht, temp];
+ * the caller resolves which concrete panel this maps to.                       */
+static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
+                             uint8_t panel_id)
+{
+    /* Resolve panel_id → concrete panel type.
+     * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor H/T
+     * We iterate through the ordered list and pick the panel_id-th enabled entry. */
+    const bool enabled[4] = {
+        cfg->tube6_panel_weather,
+        cfg->tube6_panel_weekdate,
+        cfg->tube6_panel_ht,
+        cfg->tube6_panel_temp,
+    };
+    int kind = -1;   /* 0=weather icon, 1=weekdate, 2=indoor H/T, 3=outdoor H/T */
+    int count = 0;
+    for (int i = 0; i < 4; i++) {
+        if (enabled[i]) {
+            if (count == (int)panel_id) { kind = i; break; }
+            count++;
+        }
+    }
+    if (kind < 0) kind = 1;   /* fallback: weekdate */
+
+    const int HALF = LCD_HEIGHT / 2;   /* 80 */
+
+    if (kind == 0) {
+        /* ── Weather icon panel ─────────────────────────────────────────────
+         * Displays the current weather condition icon full-tube (80×160).
+         * Falls back to black when the weather API has no valid data.       */
+        const weather_data_t *w = weather_get();
+        if (!w || !w->valid) {
+            if (kind != s_cx_last_kind) display_fill(5, 0x0000);
+            goto cx_tube6_done;
+        }
+        {
+            const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
+            char path[256];
+            display_path_weather(path, sizeof(path), cfg->theme, icon);
+            display_show_image(5, path);
+        }
+
+    } else if (kind == 1) {
+        /* ── Week/Date panel — U8g2 text over blank.jpg background ──────────
+         * Top half    (rows   0– 79) : day name — "Sun" … "Sat"
+         *                             U8g2 logisoso28, centred in 64-row band
+         *                             at tube rows 8–71 (8-px fringe each side)
+         * Bottom half (rows  80–159) : date "MM/DD"
+         *                             U8g2 logisoso28, centred in 64-row band
+         *                             at tube rows 88–151 (8-px fringe each side)
+         *
+         * Background: theme's AMPM/blank.jpg decoded via image cache.  The
+         * 8-px fringes at the top/bottom of each half are preserved from the
+         * full-tube display_show_image() call made before the text blits, so
+         * the entire 80×160 surface shows the theme background.
+         * Text colour: auto-sampled from Numbers/0.jpg centre pixel.
+         * Fallback: if blank.jpg is absent or wrong size, solid black fill.  */
+
+        char bg_path[256];
+        snprintf(bg_path, sizeof(bg_path),
+                 "/images/themes/%s/AMPM/blank.jpg", cfg->theme);
+        int bg_w = 0, bg_h = 0;
+        const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
+        /* Only use bg for compositing when dimensions match the tube exactly. */
+        if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
+
+        if (bg) {
+            /* Write the full background so rows not covered by ht_draw_str_at
+             * (the 8-px fringes) show the theme image rather than stale pixels. */
+            display_show_image(5, bg_path);
+        } else {
+            /* No valid background — clear to black on panel switch only. */
+            if (kind != s_cx_last_kind) display_fill(5, 0x0000);
+        }
+
+        uint16_t fg = ht_sample_theme_color(cfg->theme);
+
+        /* Day name — top half, centred in 64-row U8g2 band (rows 8–71)     */
+        static const char *const day_names[] =
+            { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+        const char *day = (t->tm_wday >= 0 && t->tm_wday <= 6)
+                          ? day_names[t->tm_wday] : "Mon";
+        ht_draw_str_at(day, 8, 64, u8g2_font_logisoso28_tf, fg, bg);
+
+        /* Date "MMDD" — bottom half, centred in 64-row U8g2 band (rows 88–151) */
+        {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%02d%02d", t->tm_mon + 1, t->tm_mday);
+            ht_draw_str_at(buf, HALF + 8, 64, u8g2_font_logisoso28_tf, fg, bg);
+        }
+
+    } else if (kind == 2) {
+        /* ── Indoor H/T panel — U8g2 embedded font ──────────────────────── */
+        /* Rows   0– 23 : "In" label   (logisoso20, HT_LABEL_H=24 rows)
+         * Rows  24– 79 : indoor temperature  (logisoso28, 56-row band)
+         * Rows  80–159 : indoor humidity     (logisoso28, centred in 80-px half)
+         * Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
+         * The 60 *-sm.jpg symbol files previously required by this panel are
+         * no longer needed and have been removed from the filesystem image.  */
+        const sht30_reading_t *s = sht30_get();
+        if (!s || !s->valid) {
+            if (kind != s_cx_last_kind) display_fill(5, 0x0000);
+            goto cx_tube6_done;
+        }
+
+        /* Background: theme's AMPM/blank.jpg — same approach as weekdate panel. */
+        {
+            char bg_path[256];
+            snprintf(bg_path, sizeof(bg_path),
+                     "/images/themes/%s/AMPM/blank.jpg", cfg->theme);
+            int bg_w = 0, bg_h = 0;
+            const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
+            if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
+            if (bg) display_show_image(5, bg_path);
+            else    display_fill(5, 0x0000);
+
+            uint16_t fg = ht_sample_theme_color(cfg->theme);
+
+            /* "In" label — rows 0–23 (HT_LABEL_H=24) */
+            ht_draw_label("In", 0, fg, bg);
+
+            /* Indoor temperature — rows 24–79 (56-row band, logisoso28) */
+            {
+                bool  use_f = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
+                float ftemp = use_f ? (s->temp_c * 9.0f / 5.0f + 32.0f) : s->temp_c;
+                int   temp  = (int)(ftemp + (ftemp >= 0.0f ? 0.5f : -0.5f));
+                if (temp >  99) temp =  99;
+                if (temp < -99) temp = -99;
+                char buf[16];
+                /* UTF-8 degree symbol U+00B0 = 0xC2 0xB0 (supported by _tf fonts) */
+                snprintf(buf, sizeof(buf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
+                ht_draw_str_at(buf, HT_LABEL_H, 56, u8g2_font_logisoso28_tf, fg, bg);
+            }
+
+            /* Indoor humidity — rows 80–143 (64-row blit centred in 80-px half;
+             * rows 144–159 remain from the background image above).            */
+            {
+                int hum = (int)(s->humidity + 0.5f);
+                if (hum > 99) hum = 99;
+                if (hum <  0) hum = 0;
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%d%%", hum);
+                ht_draw_str_at(buf, HALF, 64, u8g2_font_logisoso28_tf, fg, bg);
+            }
+        }
+
+    } else {
+        /* ── Outdoor H/T panel — mirrors indoor layout with weather data ──── */
+        /* Rows   0– 23 : "Out" label  (logisoso20, HT_LABEL_H=24 rows)
+         * Rows  24– 79 : outdoor temperature  (logisoso28, 56-row band)
+         * Rows  80–159 : outdoor humidity     (logisoso28, centred in 80-px half)
+         * Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
+         * Falls back to black when weather API has no valid data.            */
+        const weather_data_t *ow = weather_get();
+        if (!ow || !ow->valid) {
+            if (kind != s_cx_last_kind) display_fill(5, 0x0000);
+            goto cx_tube6_done;
+        }
+
+        /* Background: theme's AMPM/blank.jpg — same approach as other H/T panels. */
+        {
+            char bg_path[256];
+            snprintf(bg_path, sizeof(bg_path),
+                     "/images/themes/%s/AMPM/blank.jpg", cfg->theme);
+            int bg_w = 0, bg_h = 0;
+            const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
+            if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
+            if (bg) display_show_image(5, bg_path);
+            else    display_fill(5, 0x0000);
+
+            uint16_t fg = ht_sample_theme_color(cfg->theme);
+
+            /* "Out" label — rows 0–23 */
+            ht_draw_label("Out", 0, fg, bg);
+
+            /* Outdoor temperature — rows 24–79 (56-row band) */
+            {
+                bool  use_f = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
+                float ftemp = use_f ? (ow->temp_c * 9.0f / 5.0f + 32.0f) : ow->temp_c;
+                int   temp  = (int)(ftemp + (ftemp >= 0.0f ? 0.5f : -0.5f));
+                if (temp >  99) temp =  99;
+                if (temp < -99) temp = -99;
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
+                ht_draw_str_at(buf, HT_LABEL_H, 56, u8g2_font_logisoso28_tf, fg, bg);
+            }
+
+            /* Outdoor humidity — rows 80–143 (64-row blit centred in 80-px half;
+             * rows 144–159 remain from the background image above).            */
+            {
+                int hum = (int)(ow->humidity + 0.5f);
+                if (hum > 99) hum = 99;
+                if (hum <  0) hum = 0;
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%d%%", hum);
+                ht_draw_str_at(buf, HALF, 64, u8g2_font_logisoso28_tf, fg, bg);
+            }
+        }
+    }
+
+    s_cx_last_kind = (int8_t)kind;   /* record which panel was just drawn */
+
+cx_tube6_done:;
+}
+
 static void render_clock(const nextube_config_t *cfg, const struct tm *t)
 {
     bool is_12h  = (strcmp(cfg->time_type, "12H")    == 0);
     bool is_24ns = (strcmp(cfg->time_type, "24H_NS") == 0);
+    bool is_24cx = (strcmp(cfg->time_type, "24H_CX") == 0);
     bool is_flip = (strcmp(cfg->theme, "FlipClock")  == 0);
     /* Colon blinks every other second on all themes except FlipClock,
      * which has its own flip animation and always shows a solid colon. */
@@ -1219,9 +1954,11 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
         display_show_number(3, m / 10,        cfg->theme);
         display_show_number(4, m % 10,        cfg->theme);
         display_show_ampm  (5, pm ? "pm" : "am", cfg->theme);
-    } else if (is_24ns) {
-        /* 24H no-seconds: H1  H2  colon  M1  M2  [tube5]
-         * tube5 is user-configurable: "blank" or "weather" */
+    } else if (is_24ns || is_24cx) {
+        /* 24H no-seconds / 24H Custom: H1  H2  colon  M1  M2  [tube5]
+         * For 24H_NS, tube5 is user-configurable: "blank" or "weather".
+         * For 24H_CX, tube5 is rendered separately by render_cx_tube6()
+         * so render_clock() leaves it alone. */
         if (h / 10 == 0) {
             if (cfg->leading_zero)
                 display_show_number(0, 0,     cfg->theme);
@@ -1234,18 +1971,21 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
         display_show_ampm  (2, colon_img,     cfg->theme);
         display_show_number(3, m / 10,        cfg->theme);
         display_show_number(4, m % 10,        cfg->theme);
-        if (strcmp(cfg->clock_tube5, "weather") == 0) {
-            const weather_data_t *w = weather_get();
-            if (w && w->valid && w->icon[0] != '\0') {
-                char path[128];
-                display_path_weather(path, sizeof(path), cfg->theme, w->icon);
-                display_show_image(5, path);
+        if (is_24ns) {
+            if (strcmp(cfg->clock_tube5, "weather") == 0) {
+                const weather_data_t *w = weather_get();
+                if (w && w->valid && w->icon[0] != '\0') {
+                    char path[128];
+                    display_path_weather(path, sizeof(path), cfg->theme, w->icon);
+                    display_show_image(5, path);
+                } else {
+                    display_show_ampm(5, "blank", cfg->theme);
+                }
             } else {
                 display_show_ampm(5, "blank", cfg->theme);
             }
-        } else {
-            display_show_ampm(5, "blank", cfg->theme);
         }
+        /* is_24cx: tube 5 handled by render_cx_tube6() — do nothing here */
     } else {
         /* 24H: all six tubes = H1 H2 M1 M2 S1 S2 (no colon tube) */
         if (!cfg->leading_zero && h / 10 == 0)
@@ -1832,6 +2572,13 @@ static void display_task(void *arg)
     if (!s_jpeg_work_buf || !s_flip_frame_buf)
         ESP_LOGW(TAG, "Failed to pre-allocate decode buffers — performance degraded");
 
+    /* Boot splash: show wait screen on all tubes while the rest of the system
+     * initialises (WiFi, NTP, weather, etc.).  The first normal render cycle
+     * (first = true) overwrites this as soon as real content is ready. */
+    for (int _i = 0; _i < LCD_COUNT; _i++) {
+        display_show_image(_i, "/images/system/wait.jpg");
+    }
+
     /* Per-render state for change detection */
     struct tm     last_t        = {0};
     time_t        last_display_epoch = 0;   /* time_t of the last rendered clock second;
@@ -1864,6 +2611,8 @@ static void display_task(void *arg)
      * handshake to complete before the first colon/ampm JPEG is loaded. */
     bool          ap_pin_transition     = false;
     uint8_t       last_burnin_snap      = 0;    /* (s_burnin_mask|s_snow_mask) on previous tick */
+    bool          last_ntp_synced       = false; /* detect boot-NTP sync transition; reset clamp */
+    bool          last_time_valid       = false; /* detect invalid→valid time transition (RTC or NTP) */
 
     TickType_t wake = xTaskGetTickCount();
     rotation_tick       = wake;
@@ -2065,10 +2814,17 @@ static void display_task(void *arg)
          * interrupt level; a SPI flash IPC sent at that moment won't get
          * an ACK and Core 1 waits with interrupts disabled until the IWDT
          * fires.  display_fill() is pure SPI-to-LCD (no flash read), so
-         * it completes instantly without involving Core 0's IPC path. */
+         * it completes instantly without involving Core 0's IPC path.
+         *
+         * Also resets the active mode to Clock (RAM-only, no flash write)
+         * so the first rendered frame after connection is always the clock
+         * face — confirming NTP time is working and giving the user a clean
+         * entry point regardless of what mode was active before setup. */
         if (ap_pin_transition) {
             ap_pin_transition = false;
             for (int _t = 0; _t < LCD_COUNT; _t++) display_fill(_t, 0x0000);
+            config_set_mode(APP_MODE_CLOCK);
+            ESP_LOGI(TAG, "AP PIN exit — mode reset to Clock");
             vTaskDelayUntil(&wake, pdMS_TO_TICKS(500));
             continue;
         }
@@ -2113,6 +2869,43 @@ static void display_task(void *arg)
         switch (mode) {
 
         case APP_MODE_CLOCK: {
+            /* ── Time-valid guard ────────────────────────────────────────────
+             * When the RTC seed is absent or too old (< 2025-01-01) AND NTP has
+             * not yet completed its first sync, time() returns seconds since boot
+             * starting from epoch 0.  Without this guard the clock tubes show
+             * "00:00:XX" counting up every second — indistinguishable from a
+             * stopwatch.
+             *
+             * Behaviour:
+             *   • Invalid time → tubes go black; no render; log once on entry.
+             *   • Invalid → valid transition → reset last_display_epoch so the
+             *     very next tick (which falls through to render) shows the true
+             *     time immediately with no clamp hold or fast-forward. */
+            {
+                bool time_valid = ntp_has_valid_time();
+                if (!time_valid) {
+                    /* Only issue the fill when ENTERING the invalid state —
+                     * i.e. on the first tick after losing/not-yet-having valid
+                     * time (last_time_valid was true coming in, or first/mode
+                     * changed).  Subsequent ticks stay blank with no SPI write. */
+                    if (first || mode_changed || last_time_valid) {
+                        for (int _t = 0; _t < LCD_COUNT; _t++)
+                            display_fill(_t, 0x0000);
+                        ESP_LOGI(TAG, "Clock: no valid time source — tubes blanked");
+                    }
+                    last_time_valid = false;
+                    break;   /* skip all render logic until time is known-good */
+                }
+                if (!last_time_valid) {
+                    /* Time just became valid (RTC seeded or NTP synced).
+                     * Reset the clamp reference so the first real render is
+                     * instantaneous — no hold or fast-forward animation. */
+                    last_display_epoch = 0;
+                    ESP_LOGI(TAG, "Clock: valid time acquired — display clamp reset");
+                }
+                last_time_valid = true;
+            }
+
             /* ── Per-tick time clamping: smooth NTP step corrections ────────────
              * The NTP layer uses SNTP_SYNC_MODE_IMMED: boot syncs always apply
              * a hard settimeofday(); periodic re-syncs within 60 s use adjtime()
@@ -2130,10 +2923,25 @@ static void display_task(void *arg)
              *                   normally.  No tube ever shows a decreasing digit.
              *
              * Clamping is bypassed on first/mode-change ticks so a fresh render
-             * always shows the true system time immediately. */
+             * always shows the true system time immediately.
+             *
+             * Boot-NTP bypass: when the NTP layer completes its first sync it
+             * may hard-set the clock by many hours (stale/missing RTC battery).
+             * Detecting the false→true transition of ntp_time_synced() and
+             * resetting last_display_epoch ensures the display jumps directly to
+             * the correct NTP time rather than backward-holding for hours. */
 #define CLOCK_MAX_STEP_S  1
             time_t now_epoch;
             time(&now_epoch);
+
+            /* Detect first NTP sync — reset clamp reference so the next render
+             * uses the true NTP time with no hold or fast-forward animation. */
+            if (!last_ntp_synced && ntp_time_synced()) {
+                last_ntp_synced    = true;
+                last_display_epoch = 0;   /* bypass clamping on this tick */
+                ESP_LOGI(TAG, "Boot NTP sync detected — display clamp reset");
+            }
+
             if (last_display_epoch > 0 && !first && !mode_changed && !theme_changed) {
                 time_t delta = now_epoch - last_display_epoch;
                 if (delta > CLOCK_MAX_STEP_S) {
@@ -2145,25 +2953,84 @@ static void display_task(void *arg)
             struct tm t;
             localtime_r(&now_epoch, &t);
 
-            bool is_24ns = (strcmp(cfg->time_type, "24H_NS") == 0);
-            bool is_flip = (strcmp(cfg->theme, "FlipClock")  == 0);
-            bool time_type_changed  = (strcmp(cfg->time_type, last_time_type) != 0);
+            bool is_24ns  = (strcmp(cfg->time_type, "24H_NS") == 0);
+            bool is_24cx  = (strcmp(cfg->time_type, "24H_CX") == 0);
+            bool is_nosec = is_24ns || is_24cx;
+            bool is_flip  = (strcmp(cfg->theme, "FlipClock")  == 0);
+            bool time_type_changed    = (strcmp(cfg->time_type, last_time_type) != 0);
             bool leading_zero_changed = (cfg->leading_zero != last_leading_zero);
-            /* 24H_NS shows no seconds — only re-render on minute/hour change.
+            /* 24H_NS / 24H_CX show no seconds — only re-render on minute/hour change.
              * Standard 24H shows seconds and re-renders every second. */
             bool time_changed = (t.tm_hour != last_t.tm_hour ||
                                  t.tm_min  != last_t.tm_min);
-            if (!is_24ns) time_changed |= (t.tm_sec != last_t.tm_sec);
+            if (!is_nosec) time_changed |= (t.tm_sec != last_t.tm_sec);
             /* Colon blinks every other second — need a re-render on each
              * even/odd transition even when only the colon image changes. */
             bool colon_blink_changed = !is_flip &&
                                        (t.tm_sec % 2 != last_t.tm_sec % 2);
+
+            /* 24H_CX: track tube-6 info panel rotation.
+             * s_cx_panel is an index into the ordered list of enabled panels;
+             * it advances once per tube6_panel_ms milliseconds. */
+            bool panel_changed = false;
+            if (is_24cx) {
+                int cx_panel_count = (cfg->tube6_panel_weather  ? 1 : 0)
+                                   + (cfg->tube6_panel_weekdate ? 1 : 0)
+                                   + (cfg->tube6_panel_ht       ? 1 : 0)
+                                   + (cfg->tube6_panel_temp     ? 1 : 0);
+                if (cx_panel_count < 1) cx_panel_count = 1;  /* config enforces ≥1 */
+                uint32_t panel_ms = cfg->tube6_panel_ms < 1000 ? 5000
+                                                                : cfg->tube6_panel_ms;
+                int64_t  now_us = esp_timer_get_time();
+                if (first || mode_changed || time_type_changed || s_cx_panel_start == 0) {
+                    s_cx_panel       = 0;
+                    s_cx_panel_start = now_us;
+                    s_cx_last_kind   = -1;   /* force background clear on first draw */
+                    panel_changed    = true;
+                } else if ((now_us - s_cx_panel_start) >= (int64_t)panel_ms * 1000LL) {
+                    uint8_t next = (uint8_t)((s_cx_panel + 1) % cx_panel_count);
+                    s_cx_panel_start = now_us;   /* always reset timer */
+                    if (next != s_cx_panel) {    /* only flag changed when index moves */
+                        s_cx_panel    = next;
+                        panel_changed = true;
+                    }
+                }
+            }
+
+            /* ── Tubes 0-4: clock digits + colon ─────────────────────────── */
             if (first || mode_changed || theme_changed || time_type_changed ||
-                    time_changed || colon_blink_changed || leading_zero_changed ||
-                    burnin_force_render) {
+                    time_changed || leading_zero_changed || burnin_force_render) {
                 render_clock(cfg, &t);
                 last_t = t;
-                last_display_epoch = now_epoch;  /* track the epoch of the rendered second */
+                last_display_epoch = now_epoch;
+            } else if (colon_blink_changed) {
+                /* Only the colon image changed — update tube 2 alone.
+                 * Avoids re-rendering all clock tubes every second in 24H_NS
+                 * and 24H_CX where time_changed only fires on minute boundaries.
+                 * In plain 24H the seconds digits change every second so
+                 * time_changed fires first and this branch is never reached.
+                 * FlipClock: colon_blink_changed is always false so also safe. */
+                display_show_ampm(2, (t.tm_sec % 2 == 0) ? "colon" : "blank",
+                                  cfg->theme);
+                last_t = t;
+                last_display_epoch = now_epoch;
+            }
+
+            /* ── Tube 6: 24H_CX info panel ────────────────────────────────
+             * Only re-render when the panel rotates, the displayed data
+             * changes, or a mode/theme change forces a full redraw.
+             * Colon blinks and second ticks do NOT affect tube 6 content.
+             * s_cx_last_t tracks the last time tube 6 was actually drawn. */
+            if (is_24cx) {
+                bool cx6_render =
+                    first || mode_changed || theme_changed || time_type_changed ||
+                    panel_changed || burnin_force_render ||
+                    t.tm_min  != s_cx_last_t.tm_min  ||  /* H/T: refresh each minute */
+                    t.tm_mday != s_cx_last_t.tm_mday;    /* date panel: new day      */
+                if (cx6_render) {
+                    render_cx_tube6(cfg, &t, s_cx_panel);
+                    s_cx_last_t = t;
+                }
             }
             strncpy(last_time_type, cfg->time_type, sizeof(last_time_type) - 1);
             last_time_type[sizeof(last_time_type) - 1] = '\0';
@@ -2380,4 +3247,19 @@ void display_task_start(void)
     xTaskCreatePinnedToCore(display_task, "display", DISPLAY_STACK_SIZE, NULL, 6,
                             &s_display_task_handle, 1);
     ESP_LOGI(TAG, "Display task started");
+}
+
+void display_show_wait(void)
+{
+    /* Suspend the display task first so it cannot issue SPI transactions
+     * while we write, and so it does not overwrite the wait screen after
+     * we return.  Flash operations (OTA / LittleFS) always end in
+     * esp_restart() so the task is never resumed. */
+    if (s_display_task_handle) {
+        vTaskSuspend(s_display_task_handle);
+    }
+    for (int i = 0; i < LCD_COUNT; i++) {
+        display_show_image(i, "/images/system/wait.jpg");
+    }
+    ESP_LOGI(TAG, "Wait screen shown on all tubes — display task suspended");
 }

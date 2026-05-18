@@ -11,8 +11,16 @@
 #include <sys/time.h>
 
 static const char *TAG = "ntp";
-static bool s_synced     = false;
-static bool s_time_valid = false;  /* true once RTC seed or NTP sync has given us a plausible time */
+/* volatile: read by the display task (Core 1) while written by the NTP task
+ * (Core 0).  Without volatile the compiler or CPU may serve a stale cached
+ * value across cores; these flags are only ever set false→true so the only
+ * risk is a delayed true, but volatile makes the intent explicit. */
+static volatile bool s_synced         = false;
+static volatile bool s_time_valid     = false;  /* true once RTC seed or NTP sync has given us a plausible time */
+static volatile bool s_rtc_battery_ok = false;  /* true only if the RTC seed at boot was >= RTC_MIN_VALID_EPOCH.
+                                                  * Never set true by NTP — reflects the battery/RTC state at
+                                                  * power-on.  Exposed via ntp_rtc_battery_ok() for the web UI
+                                                  * "dead battery" warning toast. */
 
 /* ── Smooth-sync state ──────────────────────────────────────────────────────
  * Boot window  (any NTP packet within NTP_BOOT_WINDOW_S of the previous one):
@@ -56,21 +64,23 @@ static void time_sync_cb(struct timeval *tv)
          * FreeRTOS tick counter is monotonic and unaffected by any time
          * adjustment, so elapsed real-time is accurate.                   */
         TickType_t elapsed_ticks = now_ticks - s_last_ntp_ticks;  /* wraps safely */
-        time_t     elapsed_s     = (time_t)(pdTICKS_TO_MS(elapsed_ticks) / 1000UL);
+        int64_t    elapsed_ms    = (int64_t)pdTICKS_TO_MS(elapsed_ticks);
+        time_t     elapsed_s     = (time_t)(elapsed_ms / 1000LL);
         time_t     expected      = s_last_ntp_sec + elapsed_s;
         int64_t    offset_s      = (int64_t)ntp_sec - (int64_t)expected;
+        int64_t    offset_ms     = offset_s * 1000LL + (tv ? (int64_t)(tv->tv_usec / 1000) : 0LL);
         int64_t    abs_offset    = offset_s >= 0 ? offset_s : -offset_s;
 
-        ESP_LOGI(TAG, "NTP re-sync: offset %+lld s  elapsed %lld s",
-                 (long long)offset_s, (long long)elapsed_s);
+        ESP_LOGI(TAG, "NTP re-sync: offset %+lld ms  elapsed %lld ms",
+                 (long long)offset_ms, (long long)elapsed_ms);
 
         if (elapsed_s < NTP_BOOT_WINDOW_S) {
             /* Still in the boot window — additional pool-server responses
              * arrive within seconds of the first sync.  Treat them all as
              * hard sets: the RTC seed may have been inaccurate and we want
              * the clock locked to NTP as quickly as possible.             */
-            ESP_LOGI(TAG, "NTP re-sync: hard set (boot window, %lld s elapsed)",
-                     (long long)elapsed_s);
+            ESP_LOGI(TAG, "NTP re-sync: hard set (boot window, %lld ms elapsed)",
+                     (long long)elapsed_ms);
 
         } else if (abs_offset <= NTP_SMOOTH_MAX_S) {
             /* Genuine hourly re-sync with small drift — slew with adjtime().
@@ -83,12 +93,12 @@ static void time_sync_cb(struct timeval *tv)
                                        .tv_usec = tv ? tv->tv_usec : 0 };
             settimeofday(&tv_old, NULL);   /* restore pre-correction position */
             adjtime(&tv_corr, NULL);       /* slew to NTP target gradually    */
-            ESP_LOGI(TAG, "NTP re-sync: adjtime %+lld s (within %d s window)",
-                     (long long)offset_s, NTP_SMOOTH_MAX_S);
+            ESP_LOGI(TAG, "NTP re-sync: adjtime %+lld ms (within %d s window)",
+                     (long long)offset_ms, NTP_SMOOTH_MAX_S);
         } else {
             /* Large drift — leave the hard settimeofday() in place.       */
-            ESP_LOGI(TAG, "NTP re-sync: hard set (%+lld s exceeds %d s window)",
-                     (long long)offset_s, NTP_SMOOTH_MAX_S);
+            ESP_LOGI(TAG, "NTP re-sync: hard set (%+lld ms exceeds %d s window)",
+                     (long long)offset_ms, NTP_SMOOTH_MAX_S);
         }
     }
 
@@ -123,12 +133,20 @@ static void ntp_task(void *arg)
      * nor SNTP — they are purely local operations and are always safe to
      * run at task start.
      *
-     * Minimum plausible time_t: 2024-01-01 00:00:00 UTC.
-     * Anything earlier means the RTC was never set or has lost power. */
-#define RTC_MIN_VALID_EPOCH  1704067200LL  /* 2024-01-01 UTC — arbitrary but reasonable
-                                             * cutoff: device was manufactured no earlier
-                                             * than 2024; anything before this means the
-                                             * RTC battery is dead or was never set. */
+     * Minimum plausible time_t: 2025-01-01 00:00:00 UTC.
+     * Anything earlier is treated as stale/uninitialised and ignored.
+     *
+     * Why 2025 and not 2024?
+     *   The original 2024-01-01 cutoff caused a "stopwatch" symptom: a device
+     *   whose battery was weak (VL=0, oscillator running) but whose last NTP
+     *   sync was from early 2024 would seed the clock to e.g. "2024-01-01
+     *   00:02:34" — the display would show "00:02" with seconds counting up,
+     *   indistinguishable from the epoch-0 stopwatch.  Raising the floor to
+     *   2025-01-01 rejects all such stale early-2024 seeds.  Devices with a
+     *   healthy battery and a recent NTP sync (any date in 2025 or later) are
+     *   unaffected.  Devices whose last sync was in 2024 simply wait for the
+     *   next NTP sync — which completes in a few seconds once WiFi connects. */
+#define RTC_MIN_VALID_EPOCH  1735689600LL  /* 2025-01-01 00:00:00 UTC */
 
     char timezone[64];
     char ntp_servers[4][64];
@@ -154,19 +172,27 @@ static void ntp_task(void *arg)
     struct tm rtc_t = {0};
     if (rtc_get_time(&rtc_t)) {
         time_t seed = mktime(&rtc_t);
+        ESP_LOGI(TAG, "RTC read OK: %04d-%02d-%02d %02d:%02d:%02d (local) → epoch %lld",
+                 rtc_t.tm_year + 1900, rtc_t.tm_mon + 1, rtc_t.tm_mday,
+                 rtc_t.tm_hour, rtc_t.tm_min, rtc_t.tm_sec, (long long)seed);
         if (seed >= RTC_MIN_VALID_EPOCH) {
             struct timeval tv_seed = { .tv_sec = seed, .tv_usec = 0 };
-            settimeofday(&tv_seed, NULL);
-            s_time_valid = true;   /* RTC gave us a plausible wall-clock time */
-            ESP_LOGI(TAG, "System clock seeded from RTC: %04d-%02d-%02d %02d:%02d:%02d (local)",
-                     rtc_t.tm_year + 1900, rtc_t.tm_mon + 1, rtc_t.tm_mday,
-                     rtc_t.tm_hour, rtc_t.tm_min, rtc_t.tm_sec);
+            if (settimeofday(&tv_seed, NULL) == 0) {
+                s_time_valid     = true;   /* RTC gave us a plausible wall-clock time */
+                s_rtc_battery_ok = true;   /* battery is healthy — RTC survived power-off */
+                ESP_LOGI(TAG, "System clock seeded from RTC ✓");
+            } else {
+                ESP_LOGW(TAG, "settimeofday failed — clock not seeded from RTC");
+            }
         } else {
-            ESP_LOGW(TAG, "RTC time too old (seed=%lld, min=%lld) — ignoring, waiting for NTP",
-                     (long long)seed, (long long)RTC_MIN_VALID_EPOCH);
+            ESP_LOGW(TAG, "RTC time too old (epoch %lld < min %lld, year %d) — "
+                     "treating as stale; waiting for NTP",
+                     (long long)seed, (long long)RTC_MIN_VALID_EPOCH,
+                     rtc_t.tm_year + 1900);
         }
     } else {
-        ESP_LOGW(TAG, "RTC read failed — clock starts at epoch until NTP sync");
+        ESP_LOGW(TAG, "RTC read failed (VL flag set or I²C error) — "
+                 "clock starts at epoch 0 until NTP sync");
     }
 
     /* ── Phase 2: wait for WiFi, then start SNTP polling ────────────────
@@ -247,6 +273,7 @@ void ntp_time_start(void)
 
 bool ntp_time_synced(void)    { return s_synced; }
 bool ntp_has_valid_time(void) { return s_time_valid; }
+bool ntp_rtc_battery_ok(void) { return s_rtc_battery_ok; }
 
 void ntp_get_local(struct tm *t)
 {

@@ -16,3 +16,6 @@
 # IMPORTANT: clear this file (leave only comments) after a full LittleFS
 # flash release — the full flash already delivers every asset, so carrying
 # old entries forward would bloat every subsequent hotpatch unnecessarily.
+
+# ── System ────────────────────────────────────────────────────────────────────
+images/system/wait.jpg

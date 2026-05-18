@@ -12,6 +12,10 @@ bool ntp_has_valid_time(void);   /* true once any valid time source is available
                                   *  ntp_time_synced() wherever the display needs a
                                   *  valid wall-clock time but doesn't require NTP
                                   *  specifically — e.g. the night-mode brightness check. */
+bool ntp_rtc_battery_ok(void);  /* true if the RTC seed at boot was >= 2025-01-01.
+                                  * Never becomes true from an NTP sync alone — reflects
+                                  * the physical battery/RTC state at power-on.  When
+                                  * false the web UI shows a "replace CR1220" warning. */
 void ntp_get_local(struct tm *t);
 void ntp_apply_timezone(void);  /* re-apply TZ from current config (call after settings change) */
 void ntp_apply_servers(void);   /* update SNTP server list from current config (call after settings change) */

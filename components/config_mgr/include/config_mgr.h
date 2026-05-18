@@ -168,6 +168,15 @@ typedef struct {
 
     /* Date display format (Custom Clock / date panels) */
     char             date_format[12];    /* "DD/MM/YY" (default, European) or "MM/DD/YY" (US) */
+
+    /* 24H Custom clock — tube 6 rotating info panels.
+     * Each bool gates one panel; at least one must be enabled (enforced on load).
+     * Rotation advances to the next enabled panel every tube6_panel_ms ms.      */
+    bool             tube6_panel_weather;    /* Weather icon (placeholder — shows blank for now) */
+    bool             tube6_panel_weekdate;   /* Day name (top half) + MMDD date (bottom half) */
+    bool             tube6_panel_ht;         /* SHT30 temp (top half) + humidity (bottom half) */
+    bool             tube6_panel_temp;       /* Outdoor temperature (placeholder — shows blank for now) */
+    uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
 } nextube_config_t;
 
 /** Initialise config module – loads from flash or sets defaults. */

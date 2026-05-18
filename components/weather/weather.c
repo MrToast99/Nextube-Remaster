@@ -104,7 +104,7 @@ static char *http_get(const char *url)
 
     esp_http_client_config_t hcfg = {
         .url               = url,
-        .timeout_ms        = 10000,
+        .timeout_ms        = 5000,   /* fail fast — frees TLS heap for web server */
         .user_agent        = HTTP_USER_AGENT,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
@@ -716,13 +716,14 @@ static void weather_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    /* Give the DNS resolver ~3 s to settle after DHCP assigns an IP.
-     * Without this delay the first geocoding lookup hits an EAI_AGAIN
-     * (getaddrinfo code 202) because the resolver isn't ready yet, which
-     * produces a noisy error and delays the first weather update by the
-     * full 5 s backoff.  3 s is enough for virtually all routers; the
-     * exponential backoff below handles the rare case where it isn't. */
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    /* Give the DNS resolver ~8 s to settle after DHCP assigns an IP.
+     * 3 s proved insufficient on some routers — the first geocoding lookup
+     * still hits EAI_AGAIN (getaddrinfo code 202) because the lwIP resolver
+     * isn't ready yet.  8 s matches the audio task's post-WPA2 delay and
+     * eliminates the error in practice.  The exponential backoff below
+     * (2 s → 4 s → 8 s → … capped at 5 min) handles any remaining edge cases
+     * without hammering the resolver with rapid-fire failing queries. */
+    vTaskDelay(pdMS_TO_TICKS(8000));
 
     /* First fetch: attempt immediately, then retry with exponential backoff
      * (2 s → 4 s → 8 s → … capped at 5 min) until it succeeds.

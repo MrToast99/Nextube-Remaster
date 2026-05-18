@@ -97,10 +97,12 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 | | | CS: 33, 26, 21, 0, 5, 18 (left→right) |
 | **LEDs** | 6× WS2812B RGB | Data=GPIO32 |
 | **Touch** | 3× capacitive pads | LEFT=GPIO4(pad0), MIDDLE=GPIO2(pad2), RIGHT=GPIO15(pad3) |
-| **RTC** | PCF8563 | I²C: SCL=22, SDA=23 (addr 0x51) |
+| **RTC** | PCF8563 + CR1220 coin cell | I²C: SCL=22, SDA=23 (addr 0x51) |
 | **Temp/Humidity** | SHT30 | I²C: SCL=22, SDA=23 (addr 0x44) |
 | **Audio** | LTK8002D amplifier | DAC=GPIO25 |
 | **Microphone** | CMC-4015-25T electret capsule + LMV321IDBVR op-amp preamp | ADC=GPIO35 (ADC1_CH7, input-only) |
+
+> **RTC battery:** The PCF8563 is backed by a **CR1220** coin cell on the underside of the PCB. Without a charged battery the RTC loses its time on every power-cycle. The firmware detects this condition (seed epoch < 2024-01-01) and blanks the clock tubes until the first NTP sync completes, rather than displaying the incorrect epoch-0 time.
 
 > **Note on GPIO2 (MIDDLE touch):** GPIO2 is a boot-strapping pin with an internal pull-down. The ESP32 requires GPIO2 LOW to enter download mode — holding the middle touch pad during a serial flash attempt can prevent the chip entering download mode even when GPIO0 is correctly held low. This has no effect during normal operation.
 

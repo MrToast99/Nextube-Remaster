@@ -10,8 +10,6 @@
  *   /images/themes/{theme}/MutiInfo/Weather/{sun,rain,…}.jpg
  *   /images/themes/{theme}/MutiInfo/Temperature/{degreec,degreef,minus}.jpg
  *   /images/themes/{theme}/MutiInfo/Humidity/{degree,humidity}.jpg
- *   /images/themes/{theme}/MutiInfo/WeekDate/week/{monday,…}.jpg
- *   /images/themes/{theme}/MutiInfo/WeekDate/date/{0-9}.jpg
  *
  * Available themes: NixieOY, FlipClock, DarkSlate, DotMatrixRG, DotMatrixY,
  *   Formula1, GlitchGR, LightFuture, NotionRain, RedDigits, RetroPaper,
@@ -107,8 +105,6 @@ void display_path_ampm       (char *buf, size_t n, const char *theme, const char
 void display_path_weather    (char *buf, size_t n, const char *theme, const char *cond);
 void display_path_temperature(char *buf, size_t n, const char *theme, const char *name);
 void display_path_humidity   (char *buf, size_t n, const char *theme, const char *name);
-void display_path_weekday    (char *buf, size_t n, const char *theme, int wday);
-void display_path_date_digit (char *buf, size_t n, const char *theme, int digit);
 
 /* ── High-level helpers ────────────────────────────────────────────── */
 void display_show_number(int tube, int digit,        const char *theme);
@@ -171,6 +167,19 @@ void display_debug_restore_pwm(void);
  *  whenever mode / time / weather / subscriber count changes.
  *  Call once after display_init(). */
 void display_task_start(void);
+
+/** Show the system wait screen on all six tubes and permanently suspend
+ *  the display task so it cannot contest the SPI bus.
+ *
+ *  Call this immediately before starting any flash operation (OTA firmware
+ *  update or LittleFS bin flash).  The image is loaded from
+ *  /images/system/wait.jpg while the filesystem is still mounted.
+ *
+ *  There is no matching resume call: both flash paths always end with
+ *  esp_restart(), so the display task is never un-suspended.
+ *
+ *  Safe to call from any task after display_task_start(). */
+void display_show_wait(void);
 
 /** Reset the countdown / pomodoro internal timer (call on mode entry). */
 void display_timer_reset(void);

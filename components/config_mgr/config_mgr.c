@@ -133,6 +133,13 @@ static void set_defaults(void)
     s_cfg.weather_panel0_en = true;  /* temperature panel on by default */
     s_cfg.weather_panel1_en = true;  /* humidity panel on by default */
 
+    /* 24H Custom — tube 6 panel rotation */
+    s_cfg.tube6_panel_weather  = false;
+    s_cfg.tube6_panel_weekdate = true;
+    s_cfg.tube6_panel_ht       = true;
+    s_cfg.tube6_panel_temp     = false;
+    s_cfg.tube6_panel_ms       = 5000;
+
     /* Rotation off by default; user must explicitly enable it */
     s_cfg.rotation_enabled    = false;
     s_cfg.rotation_interval_s = 60;
@@ -360,6 +367,25 @@ static void parse_json(const char *json, size_t len)
     s_cfg.weather_panel1_en = p1 ? cJSON_IsTrue(p1) : true;
     if (!s_cfg.weather_panel0_en && !s_cfg.weather_panel1_en)
         s_cfg.weather_panel0_en = true; /* guard: at least one panel must be on */
+
+    /* 24H Custom — tube 6 panel rotation */
+    {
+        cJSON *v;
+        v = cJSON_GetObjectItem(root, "tube6_panel_weather");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_weather = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_weekdate");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_weekdate = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_ht");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_ht = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_temp");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_temp = cJSON_IsTrue(v);
+    }
+    json_read_u16(root, "tube6_panel_ms", &s_cfg.tube6_panel_ms);
+    if (s_cfg.tube6_panel_ms < 1000) s_cfg.tube6_panel_ms = 5000;
+    /* Guard: fall back to weekdate if every panel is disabled */
+    if (!s_cfg.tube6_panel_weather && !s_cfg.tube6_panel_weekdate &&
+        !s_cfg.tube6_panel_ht      && !s_cfg.tube6_panel_temp)
+        s_cfg.tube6_panel_weekdate = true;
 
     /* Backlight mode */
     char bl_mode[16] = {0};
@@ -787,6 +813,11 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "weather_panel_ms",       s_cfg.weather_panel_ms);
     cJSON_AddBoolToObject  (root, "weather_panel0_en",      s_cfg.weather_panel0_en);
     cJSON_AddBoolToObject  (root, "weather_panel1_en",      s_cfg.weather_panel1_en);
+    cJSON_AddBoolToObject  (root, "tube6_panel_weather",    s_cfg.tube6_panel_weather);
+    cJSON_AddBoolToObject  (root, "tube6_panel_weekdate",   s_cfg.tube6_panel_weekdate);
+    cJSON_AddBoolToObject  (root, "tube6_panel_ht",         s_cfg.tube6_panel_ht);
+    cJSON_AddBoolToObject  (root, "tube6_panel_temp",       s_cfg.tube6_panel_temp);
+    cJSON_AddNumberToObject(root, "tube6_panel_ms",         s_cfg.tube6_panel_ms);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off"};
     unsigned bl_idx = (unsigned)s_cfg.backlight_mode;

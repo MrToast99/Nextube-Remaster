@@ -125,7 +125,7 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
     <div class="field"><label>Time Format</label>
-      <select id="f-timetype" onchange="onTimeTypeChange()"><option value="24H">24 Hour</option><option value="24H_NS">24 Hour (No Sec)</option><option value="12H">12 Hour</option></select>
+      <select id="f-timetype" onchange="onTimeTypeChange()"><option value="24H">24 Hour</option><option value="24H_NS">24 Hour (No Sec)</option><option value="24H_CX">24 Hour (Custom)</option><option value="12H">12 Hour</option></select>
     </div>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
@@ -141,6 +141,21 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <div class="field" id="tube5-section" style="display:none"><label>Tube 6 Display</label>
       <select id="f-tube5"><option value="blank">Blank</option><option value="weather">Weather Icon</option></select>
+    </div>
+    <div id="tube6cx-section" style="display:none;border:1px solid var(--accent);padding:.8rem;border-radius:8px;margin-bottom:1rem">
+      <div style="font-size:.85rem;font-weight:600;margin-bottom:.6rem">Tube 6 Info Panels <span style="color:var(--dim);font-weight:normal;font-size:.8rem">(24H Custom — rotate when enabled)</span></div>
+      <div style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.7rem">
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weekdate" style="width:14px;height:14px"> Day &amp; Date <span style="color:var(--dim);font-size:.78rem">(day name / MM-DD)</span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-ht" style="width:14px;height:14px"> Indoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(SHT30 sensor)</span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem"></span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem"></span></label>
+      </div>
+      <div style="display:flex;align-items:center;gap:.6rem;font-size:.85rem">
+        <label for="f-cx-panel-ms" style="white-space:nowrap;margin:0">Panel duration</label>
+        <input type="number" id="f-cx-panel-ms" min="1" max="300" step="1"
+               style="width:60px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px">
+        <span style="color:var(--dim)">s</span>
+      </div>
     </div>
 
     <div class="field meter"><label>LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">60</span>%</div>
@@ -267,6 +282,40 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
   </div>
+  <!-- Theme Rotation -->
+  <div class="card">
+    <h2>Theme Rotation</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
+      Automatically cycles through themes on a timer. Choose which themes to
+      include, or leave all checked to rotate every installed theme.
+    </p>
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
+        <input type="checkbox" id="theme-rot-enabled" onchange="onThemeRotToggle()">
+        Enable Theme Rotation
+      </label>
+      <div id="theme-rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;opacity:0.4">
+        <label for="theme-rot-interval" style="white-space:nowrap">Interval per theme:</label>
+        <select id="theme-rot-interval" class="select">
+          <option value="60">1 minute</option>
+          <option value="300" selected>5 minutes</option>
+          <option value="600">10 minutes</option>
+          <option value="1800">30 minutes</option>
+          <option value="3600">1 hour</option>
+          <option value="7200">2 hours</option>
+          <option value="14400">4 hours</option>
+        </select>
+      </div>
+    </div>
+    <div id="theme-rot-themes-wrap" style="opacity:0.4">
+      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.4rem">
+        <span style="font-size:.85rem;color:var(--dim)">Themes to include:</span>
+        <button onclick="themeRotSelectAll(true)"  style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">All</button>
+        <button onclick="themeRotSelectAll(false)" style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">None</button>
+      </div>
+      <div id="theme-rot-list" style="display:flex;flex-wrap:wrap;gap:.4rem .8rem"></div>
+    </div>
+  </div>
   <div class="card">
     <h2>LED Accent Lighting</h2>
     <div class="field"><label>Mode</label>
@@ -372,41 +421,6 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
   </div>
-  <!-- Theme Rotation -->
-  <div class="card">
-    <h2>Theme Rotation</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
-      Automatically cycles through themes on a timer. Choose which themes to
-      include, or leave all checked to rotate every installed theme.
-    </p>
-    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
-        <input type="checkbox" id="theme-rot-enabled" onchange="onThemeRotToggle()">
-        Enable Theme Rotation
-      </label>
-      <div id="theme-rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;opacity:0.4">
-        <label for="theme-rot-interval" style="white-space:nowrap">Interval per theme:</label>
-        <select id="theme-rot-interval" class="select">
-          <option value="60">1 minute</option>
-          <option value="300" selected>5 minutes</option>
-          <option value="600">10 minutes</option>
-          <option value="1800">30 minutes</option>
-          <option value="3600">1 hour</option>
-          <option value="7200">2 hours</option>
-          <option value="14400">4 hours</option>
-        </select>
-      </div>
-    </div>
-    <div id="theme-rot-themes-wrap" style="opacity:0.4">
-      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.4rem">
-        <span style="font-size:.85rem;color:var(--dim)">Themes to include:</span>
-        <button onclick="themeRotSelectAll(true)"  style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">All</button>
-        <button onclick="themeRotSelectAll(false)" style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">None</button>
-      </div>
-      <div id="theme-rot-list" style="display:flex;flex-wrap:wrap;gap:.4rem .8rem"></div>
-    </div>
-  </div>
-
   <!-- Scheduled Anti Burn-in / LCD Refresh -->
   <div class="card">
     <h2>Scheduled Anti Burn-in / LCD Refresh</h2>
@@ -1166,6 +1180,11 @@ async function loadSettings() {
   $('f-theme').value = a.theme || 'NixieOY';
   $('f-timetype').value = a.type || '24H'; onTimeTypeChange();
   $('f-tube5').value = a.clock_tube5 || 'blank';
+  $('f-cx-weekdate').checked = cfg.tube6_panel_weekdate !== false;
+  $('f-cx-ht').checked       = cfg.tube6_panel_ht       !== false;
+  $('f-cx-weather').checked  = cfg.tube6_panel_weather  === true;
+  $('f-cx-temp').checked     = cfg.tube6_panel_temp     === true;
+  $('f-cx-panel-ms').value   = Math.round((cfg.tube6_panel_ms || 5000) / 1000);
   $('f-leading-zero').checked = cfg.leading_zero === true;
   { const gg = Array.isArray(cfg.lcd_gamma) ? cfg.lcd_gamma : [1,1,1,1,1,1];
     document.querySelectorAll('.f-tube-gamma').forEach(el => {
@@ -1342,9 +1361,12 @@ async function loadSettings() {
   clearDirty();
 }
 
-/* ── Time format change – show tube-6 option only for 24H (No Sec) ── */
+/* ── Time format change – show tube-6 option only for 24H (No Sec),
+ *   and show Custom panel selector only for 24H (Custom) ── */
 function onTimeTypeChange() {
-  $('tube5-section').style.display = $('f-timetype').value === '24H_NS' ? '' : 'none';
+  const tt = $('f-timetype').value;
+  $('tube5-section').style.display   = (tt === '24H_NS') ? '' : 'none';
+  $('tube6cx-section').style.display = (tt === '24H_CX') ? '' : 'none';
 }
 
 /* ── Timezone dropdown → populate POSIX text field ── */
@@ -1508,6 +1530,11 @@ async function saveSettings() {
     weather_panel_ms:  Math.max(1000, +$('f-wx-panel').value * 1000),
     weather_panel0_en: $('f-wx-p0').checked,
     weather_panel1_en: $('f-wx-p1').checked,
+    tube6_panel_weather:  $('f-cx-weather').checked,
+    tube6_panel_weekdate: $('f-cx-weekdate').checked,
+    tube6_panel_ht:       $('f-cx-ht').checked,
+    tube6_panel_temp:     $('f-cx-temp').checked,
+    tube6_panel_ms:       Math.max(1, +$('f-cx-panel-ms').value) * 1000,
     notify_update_on_display: $('f-notify-update').checked,
     burnin_auto_enabled:    $('bi-sched-en').checked,
     burnin_auto_mask:       biSchedMask(),
@@ -2373,6 +2400,19 @@ async function refreshStatus() {
   } else {
     teBanner.style.display = 'none';
   }
+
+  /* RTC battery warning — show amber toast when firmware reports the RTC seed
+   * at boot was before 2024-01-01 (dead/missing CR1220 coin cell).
+   * Dismissed per browser session via sessionStorage; clears automatically if
+   * the battery is replaced and the device reboots with a valid RTC time. */
+  if (s.rtc_battery_ok === false && !sessionStorage.getItem('rtc_bat_dismissed')) {
+    $('rtc-toast').style.display = 'flex';
+  } else if (s.rtc_battery_ok !== false) {
+    /* Battery good (or field absent on older firmware) — hide toast and clear
+     * any stale dismiss flag so it shows again if the battery fails later. */
+    $('rtc-toast').style.display = 'none';
+    sessionStorage.removeItem('rtc_bat_dismissed');
+  }
 }
 
 /* ── Firmware update check (browser → GitHub API) ─── */
@@ -2456,6 +2496,15 @@ function dismissUpdateVersion() {
                                JSON.stringify({ version: v, permanent: true }));
   $('update-toast').style.display = 'none';
   setClockFaceUpdateIndicator(false);
+}
+
+/* Dismiss the RTC battery warning for this browser session.
+ * The toast reappears on the next page load as a reminder until the CR1220
+ * is replaced — at which point the firmware reports rtc_battery_ok:true and
+ * the toast never shows again. */
+function dismissRtcBatteryToast() {
+  sessionStorage.setItem('rtc_bat_dismissed', '1');
+  $('rtc-toast').style.display = 'none';
 }
 
 /* silent=true: suppress "up to date" toast (used for automatic checks).
@@ -2629,6 +2678,16 @@ function onAuthSucceeded() {
 <div id="toast-stack" style="position:fixed;bottom:1rem;right:1rem;z-index:200;
   display:flex;flex-direction:column-reverse;gap:.5rem;align-items:flex-end;
   pointer-events:none">
+  <!-- RTC battery warning toast (amber) -->
+  <div id="rtc-toast" style="display:none;pointer-events:auto;
+    background:rgba(255,160,0,.95);color:#000;padding:.55rem 1rem;border-radius:8px;
+    font-size:.85rem;align-items:center;gap:.75rem;flex-wrap:wrap;
+    box-shadow:0 2px 8px rgba(0,0,0,.3)">
+    <span>🔋 RTC battery may be flat — replace the <strong>CR1220</strong> coin cell on the underside of the PCB to keep time across power cuts.</span>
+    <button onclick="dismissRtcBatteryToast()"
+       style="background:rgba(0,0,0,.15);border:none;cursor:pointer;padding:.2rem .6rem;
+              border-radius:4px;font-size:.8rem;color:#000;white-space:nowrap">Dismiss</button>
+  </div>
   <div id="update-toast" style="display:none;pointer-events:auto;
     background:rgba(78,204,163,.92);color:#000;padding:.55rem 1rem;border-radius:8px;
     font-size:.85rem;align-items:center;gap:.75rem;flex-wrap:wrap;

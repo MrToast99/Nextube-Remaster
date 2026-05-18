@@ -656,7 +656,8 @@ static esp_err_t api_status(httpd_req_t *r)
     struct tm t; ntp_get_local(&t);
     char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &t);
     cJSON_AddStringToObject(root, "time", ts);
-    cJSON_AddBoolToObject(root, "ntp_synced", ntp_time_synced());
+    cJSON_AddBoolToObject(root, "ntp_synced",      ntp_time_synced());
+    cJSON_AddBoolToObject(root, "rtc_battery_ok",  ntp_rtc_battery_ok());
     cJSON_AddBoolToObject(root, "wifi_connected", wifi_manager_is_connected());
     cJSON_AddStringToObject(root, "ip", wifi_manager_get_ip());
     const weather_data_t *w = weather_get();
@@ -766,6 +767,12 @@ static esp_err_t api_ota(httpd_req_t *r)
         }
     }
 
+    /* Show wait screen on all tubes and suspend the display task before
+     * touching flash.  esp_ota_write() erases 4 KB sectors while briefly
+     * disabling the data cache; a concurrent SPI JPEG load from the display
+     * task would race for the same bus and risk a cache-disable fault. */
+    display_show_wait();
+
     const esp_partition_t *upd = esp_ota_get_next_update_partition(NULL);
     if (!upd) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition"), ESP_FAIL;
     esp_ota_handle_t h;
@@ -839,6 +846,12 @@ static esp_err_t api_fs_ota(httpd_req_t *r)
     if (!buf)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "Out of memory"), ESP_FAIL;
+
+    /* Show wait screen on all tubes and suspend the display task.  This must
+     * happen BEFORE unmounting LittleFS so the JPEG can still be read from
+     * /images/system/wait.jpg.  Once suspended the task cannot issue SPI
+     * transactions that would race the raw partition writes below. */
+    display_show_wait();
 
     /* Unmount LittleFS before touching flash.  The HTTP server itself runs
      * from firmware (app partition), so it stays alive. */
@@ -1952,7 +1965,15 @@ void web_server_start(void)
     httpd_uri_t wildcard = R(HTTP_GET, "/*", serve_static);
     httpd_register_uri_handler(s_server, &wildcard);
 
-    ESP_LOGI(TAG, "HTTP server started on port 80");
+    /* Log the direct IP so users can reach the UI before mDNS propagates.
+     * mDNS (nextube.local) takes 10–30 s to register after boot; this
+     * fallback URL works immediately from the moment the server starts. */
+    const char *ip = wifi_manager_get_ip();
+    if (ip && strcmp(ip, "0.0.0.0") != 0) {
+        ESP_LOGI(TAG, "Web UI ready → http://%s  (or http://nextube.local once mDNS registers)", ip);
+    } else {
+        ESP_LOGI(TAG, "HTTP server started on port 80 (IP not yet assigned — check again after WiFi connects)");
+    }
 }
 
 void web_server_stop(void)
