@@ -18,6 +18,7 @@
 - [Hardware](#hardware)
   - [Audio / DAC Notes](#audio--dac-notes)
   - [Microphone Notes](#microphone-notes)
+  - [SHT30 Temperature / Humidity Sensor](#sht30-temperature--humidity-sensor)
   - [Replacement LCD Panels](#replacement-lcd-panels)
   - [Flash Layout](#flash-layout-16mb)
 - [Building](#building)
@@ -97,6 +98,7 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 | **LEDs** | 6× WS2812B RGB | Data=GPIO32 |
 | **Touch** | 3× capacitive pads | LEFT=GPIO4(pad0), MIDDLE=GPIO2(pad2), RIGHT=GPIO15(pad3) |
 | **RTC** | PCF8563 | I²C: SCL=22, SDA=23 (addr 0x51) |
+| **Temp/Humidity** | SHT30 | I²C: SCL=22, SDA=23 (addr 0x44) |
 | **Audio** | LTK8002D amplifier | DAC=GPIO25 |
 | **Microphone** | CMC-4015-25T electret capsule + LMV321IDBVR op-amp preamp | ADC=GPIO35 (ADC1_CH7, input-only) |
 
@@ -307,6 +309,19 @@ The LED ring behaviour in Spectrum mode is independently configurable under **Di
 | **Follow accent mode** | The LEDs ignore the audio entirely and animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colours from the LED settings. The LCD bars still respond to the microphone normally. |
 
 The **LCD Bar Colour** picker is separate from the LED source and always applies — it controls the colour of the frequency bars drawn on the LCDs regardless of which LED source is selected.
+
+### SHT30 Temperature / Humidity Sensor
+
+The **SHT30** is fitted on the Nextube PCB and shares the I²C bus with the PCF8563 RTC.
+
+| Parameter | Value |
+|---|---|
+| I²C address | 0x44 (ADDR pin low) |
+| Bus | Shared with PCF8563 RTC — SCL=GPIO22, SDA=GPIO23 |
+| Poll interval | Every 30 seconds (background FreeRTOS task) |
+| Detection | Probed at boot via `i2c_master_probe()`; if the probe fails the driver disables itself silently |
+
+Readings appear on the **Dashboard** under *Local Sensor* (temperature and humidity) and are included in the `/api/status` response as `sensor.temp_c` and `sensor.humidity`. The displayed temperature respects the **Units** setting (Celsius / Fahrenheit).
 
 ### Replacement LCD Panels
 
