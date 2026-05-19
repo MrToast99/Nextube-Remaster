@@ -329,6 +329,10 @@ Readings appear on the **Dashboard** under *Local Sensor* (temperature and humid
 
 The six original displays are **80×160 px ST7735 "Green Tab" IPS panels**. If one or more tubes fail they can be replaced with compatible ST7735S modules — the most common drop-in replacement confirmed to work with this firmware is:
 
+ <img width="335" height="100" alt="image" src="https://github.com/user-attachments/assets/8837cff8-df31-41ae-81ee-644e3794f72e" />
+
+Note the connector when purchasing
+
 | Part number | Notes | Source |
 |---|---|---|
 | **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working | [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
