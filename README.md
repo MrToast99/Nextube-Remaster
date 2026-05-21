@@ -656,7 +656,7 @@ Weather mode cycles through all enabled weather APIs until one succeeds. Support
 |---|---|---|
 | **wttr.in** | None | City can be `Name,CC` format |
 | **Open-Meteo** | None | Geocoding via Open-Meteo; strips country code automatically |
-| **OpenWeatherMap** | Free-tier key | Configure at openweathermap.org |
+| **OpenWeatherMap** | Free-tier key | Register at [openweathermap.org](https://home.openweathermap.org/users/sign_up) — free tier includes 1 000 calls/day |
 | **Met.no** | None | **Default.** Elevation-aware (fetched from geocoding API for accurate results) |
 
 Weather fetching: On WiFi connect the first fetch happens immediately with automatic 5-second retries until data arrives. After the first successful fetch, weather is refreshed every 10 minutes.
@@ -709,6 +709,17 @@ Five platforms are supported. Tube 0 shows the platform icon; tubes 1–5 show t
 | **Mastodon** | Direct Mastodon instance API | No |
 
 Configure all platforms under **Services → Social Media Counters** in the web UI.
+
+### Optional API Keys
+
+By default all platforms use unofficial or keyless fetch methods. Official API keys are optional but improve reliability and are less likely to be rate-limited or blocked.
+
+| Platform | Field | Where to get a key |
+|---|---|---|
+| **YouTube** | `YouTube API Key` | [Google Cloud Console — YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) — free quota is 10 000 units/day; a single subscriber-count lookup costs 1 unit. Create a project → Enable the API → Credentials → API Key. |
+| **TikTok** | `TikTok Research API Key` | [TikTok for Developers — Research API](https://developers.tiktok.com/products/research-api/) — requires a developer account and application approval. Use a bearer token from the approved app. If no key is set, the relay's browser-based method is used instead. |
+
+Both keys are entirely optional. Leave the field blank to use the default keyless method.
 
 **Master switch (`Enable`)** — when unchecked the polling task never starts. Changes require a device restart to take effect.
 
