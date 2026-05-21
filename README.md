@@ -993,7 +993,6 @@ nextube-fw/
 ├── helpers/
 │   ├── image_converter/
 │   │   └── nextube_image_converter.py # Standalone Python tool: convert & crop images to 80×160 JPEG
-│   ├── nextube_emulator/          # Display emulator for local development
 │   └── social_relay/
 │       ├── social_relay.py        # Local HTTP proxy for YouTube & TikTok counters (auto-installs Playwright)
 │       └── requirements.txt       # Optional: manual pip install list for social_relay.py
