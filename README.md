@@ -848,6 +848,11 @@ All paths are relative to `/images/themes/{ThemeName}/`.
 │   ├── instagram.jpg    ← Instagram mode icon (tube 0)
 │   ├── tiktok.jpg       ← TikTok mode icon (tube 0)
 │   └── mastodon.jpg     ← Mastodon mode icon (tube 0)
+│
+│   * The four social media icons (youtube, instagram, tiktok, mastodon) fall
+│     back to /images/system/{name}.jpg when absent from a theme — so older or
+│     custom themes that predate these icons still display correctly.
+│     All other missing AMPM assets render as black.
 ├── MutiInfo/
 │   ├── Temperature/
 │   │   ├── degreec.jpg  ← °C symbol
