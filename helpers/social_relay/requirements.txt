@@ -1,0 +1,10 @@
+# social_relay.py — optional dependencies
+#
+# The relay works with no packages installed (uses curl + urllib).
+# Install everything below for best bot-detection bypass:
+#
+#   pip install -r requirements.txt
+#   playwright install chromium
+#
+playwright>=1.40
+playwright-stealth>=1.0.6
