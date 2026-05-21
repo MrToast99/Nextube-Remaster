@@ -727,6 +727,12 @@ Both keys are entirely optional. Leave the field blank to use the default keyles
 
 ### Local Relay (`social_relay.py`)
 
+> **Do you need the relay?**
+> - **No interest in social counters** — skip this section entirely. The relay is not required for any other feature.
+> - **YouTube with an API key** — skip the relay. Enter your [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) key in the web UI and the device fetches counts directly.
+> - **YouTube without an API key, or TikTok** — the relay is required. TikTok's bot detection blocks direct ESP32 fetches; YouTube without a key is also often blocked. Run the relay on any PC on the same network.
+> - **Instagram / Mastodon / Bilibili** — no relay needed; these platforms are fetched directly from the device.
+
 `helpers/social_relay/social_relay.py` is a lightweight Python HTTP proxy that runs on any PC on the same network as the Nextube. It fetches YouTube and TikTok counts using a real Chromium browser (Playwright), bypassing bot-detection checks that block the ESP32's plain HTTP client, then serves the result as simple JSON at `http://<relay-host>:8888/`.
 
 #### Quick start
