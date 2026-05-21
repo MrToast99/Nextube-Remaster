@@ -735,6 +735,8 @@ Both keys are entirely optional. Leave the field blank to use the default keyles
 python helpers/social_relay/social_relay.py
 ```
 
+> **Firewall note:** The relay listens on port **8888**. If your machine's firewall prompts you when the script first starts, allow access for Python on your **private/home network**. Without this the Nextube cannot reach the relay. On Windows, Defender Firewall will show a pop-up the first time — click *Allow access*. On macOS, accept the incoming-connection prompt. On Linux, allow the port with e.g. `sudo ufw allow 8888/tcp`.
+
 **All dependencies are installed automatically on first run** — no `pip install` step needed. The script detects missing packages at startup and installs them:
 
 - `playwright` (the browser automation library)
