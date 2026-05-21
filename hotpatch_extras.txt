@@ -19,3 +19,7 @@
 
 # ── System ────────────────────────────────────────────────────────────────────
 images/system/wait.jpg
+images/system/youtube.jpg
+images/system/instagram.jpg
+images/system/tiktok.jpg
+images/system/mastodon.jpg

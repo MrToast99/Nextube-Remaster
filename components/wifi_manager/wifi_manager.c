@@ -258,6 +258,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         ip_event_got_ip_t *ev = data;
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
+        ESP_LOGI(TAG, "STA IP: %s", s_ip_str);
         /* STA made it — cancel the AP-fallback timer if still running. */
         if (s_ap_fallback_timer) esp_timer_stop(s_ap_fallback_timer);
         /* If the AP is currently up (either because we never had STA
@@ -267,13 +268,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
          * LAN-side IP / mDNS hostname.  When STA succeeded directly
          * (no AP up) there's nothing to close — skip. */
         if (s_ap_active) {
-            ESP_LOGI(TAG, "STA got IP: %s – AP will stop in 60 s", s_ip_str);
+            ESP_LOGI(TAG, "AP will stop in 60 s (browser session can migrate to %s)", s_ip_str);
             if (s_ap_disable_timer) {
                 esp_timer_stop(s_ap_disable_timer);
                 esp_timer_start_once(s_ap_disable_timer, AP_DISABLE_DELAY_US);
             }
-        } else {
-            ESP_LOGI(TAG, "STA got IP: %s", s_ip_str);
         }
         /* Start mDNS once — only after the STA interface has a routable IP.
          * Initialising mDNS earlier (at wifi_start) causes it to probe using

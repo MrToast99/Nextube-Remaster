@@ -17,6 +17,7 @@ static const char *CONFIG_PATH = "/spiffs/config.json";
 
 static nextube_config_t s_cfg;
 static SemaphoreHandle_t s_mutex;
+static SemaphoreHandle_t s_tls_sem;
 
 /* ── Defaults ──────────────────────────────────────────────────────── */
 static void set_defaults(void)
@@ -39,7 +40,7 @@ static void set_defaults(void)
     s_cfg.led_effect_speed = 5;
     /* All modes enabled by default. Clock and Date are independent — both
      * can be active simultaneously in the touch cycle. */
-    s_cfg.enabled_modes   = 0x1FF;   /* all 9 modes (bits 0–8) */
+    s_cfg.enabled_modes   = 0xFFF;   /* all 12 modes (bits 0–11) */
 
     /* Spectrum mode LED colour — matches stock firmware spectrum_RGB default */
     s_cfg.spectrum_rgb[0] = 50;
@@ -122,16 +123,28 @@ static void set_defaults(void)
     /* Background-feature toggles (boot-time gates).  Default true so
      * existing behaviour is preserved on upgrade. */
     s_cfg.weather_enabled = true;
-    s_cfg.youtube_enabled = true;
-    s_cfg.mdns_enabled    = true;
+    s_cfg.social_enabled           = false; /* opt-in: user must enable explicitly */
+    s_cfg.youtube_enabled          = true;
+    s_cfg.sub_poll_interval_min    = 30;
+    s_cfg.instagram_enabled        = false;
+    s_cfg.tiktok_enabled    = false;
+    s_cfg.instagram_user[0] = '\0';
+    s_cfg.tiktok_user[0]          = '\0';
+    s_cfg.tiktok_key[0]           = '\0';
+    s_cfg.tiktok_relay_host[0]    = '\0';
+    s_cfg.mastodon_enabled        = false;
+    s_cfg.mastodon_user[0]        = '\0';
+    s_cfg.mastodon_instance[0]    = '\0';
+    s_cfg.mdns_enabled            = true;
 
     s_cfg.countdown_minutes = 1;
     s_cfg.pomodoro_work     = 25;
     s_cfg.pomodoro_break    = 5;
     s_cfg.album_switch_ms   = 2000;
     s_cfg.weather_panel_ms  = 5000;  /* 5 s between temp and humidity panels */
-    s_cfg.weather_panel0_en = true;  /* temperature panel on by default */
-    s_cfg.weather_panel1_en = true;  /* humidity panel on by default */
+    s_cfg.weather_panel0_en = true;   /* temperature panel on by default */
+    s_cfg.weather_panel1_en = true;   /* humidity panel on by default */
+    s_cfg.weather_panel2_en = false;  /* sunrise/sunset panel off by default */
 
     /* 24H Custom — tube 6 panel rotation */
     s_cfg.tube6_panel_weather  = false;
@@ -220,6 +233,9 @@ static void parse_json(const char *json, size_t len)
         else if (strcmp(app_name, "Album")       == 0) s_cfg.current_mode = APP_MODE_ALBUM;
         else if (strcmp(app_name, "Weather")     == 0) s_cfg.current_mode = APP_MODE_WEATHER;
         else if (strcmp(app_name, "Spectrum")    == 0) s_cfg.current_mode = APP_MODE_SPECTRUM;
+        else if (strcmp(app_name, "Instagram")   == 0) s_cfg.current_mode = APP_MODE_INSTAGRAM;
+        else if (strcmp(app_name, "TikTok")      == 0) s_cfg.current_mode = APP_MODE_TIKTOK;
+        else if (strcmp(app_name, "Mastodon")    == 0) s_cfg.current_mode = APP_MODE_MASTODON;
 
         json_read_str(app0, "theme", s_cfg.theme, sizeof(s_cfg.theme));
         json_read_str(app0, "type",  s_cfg.time_type, sizeof(s_cfg.time_type));
@@ -266,8 +282,29 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(we)) s_cfg.weather_enabled = cJSON_IsTrue(we);
     }
     {
+        cJSON *se = cJSON_GetObjectItem(root, "social_enabled");
+        if (cJSON_IsBool(se)) s_cfg.social_enabled = cJSON_IsTrue(se);
+    }
+    {
         cJSON *ye = cJSON_GetObjectItem(root, "youtube_enabled");
         if (cJSON_IsBool(ye)) s_cfg.youtube_enabled = cJSON_IsTrue(ye);
+        cJSON *pi = cJSON_GetObjectItem(root, "sub_poll_interval_min");
+        if (cJSON_IsNumber(pi) && pi->valueint >= 5)
+            s_cfg.sub_poll_interval_min = (uint16_t)pi->valueint;
+    }
+    {
+        cJSON *v = cJSON_GetObjectItem(root, "instagram_enabled");
+        if (cJSON_IsBool(v)) s_cfg.instagram_enabled = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tiktok_enabled");
+        if (cJSON_IsBool(v)) s_cfg.tiktok_enabled = cJSON_IsTrue(v);
+        json_read_str(root, "instagram_user", s_cfg.instagram_user, sizeof(s_cfg.instagram_user));
+        json_read_str(root, "tiktok_user",         s_cfg.tiktok_user,         sizeof(s_cfg.tiktok_user));
+        json_read_str(root, "tiktok_key",          s_cfg.tiktok_key,          sizeof(s_cfg.tiktok_key));
+        json_read_str(root, "tiktok_relay_host",   s_cfg.tiktok_relay_host,   sizeof(s_cfg.tiktok_relay_host));
+        v = cJSON_GetObjectItem(root, "mastodon_enabled");
+        if (cJSON_IsBool(v)) s_cfg.mastodon_enabled = cJSON_IsTrue(v);
+        json_read_str(root, "mastodon_user",     s_cfg.mastodon_user,     sizeof(s_cfg.mastodon_user));
+        json_read_str(root, "mastodon_instance", s_cfg.mastodon_instance, sizeof(s_cfg.mastodon_instance));
     }
     {
         cJSON *de = cJSON_GetObjectItem(root, "mdns_enabled");
@@ -361,13 +398,15 @@ static void parse_json(const char *json, size_t len)
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
     json_read_u16(root, "weather_panel_ms",       &s_cfg.weather_panel_ms);
     if (s_cfg.weather_panel_ms < 1000) s_cfg.weather_panel_ms = 5000; /* resets to default 5 s if below 1 s */
-    /* Panel enable flags — default true; force true if both would be false */
+    /* Panel enable flags — guard: at least one of p0/p1 must be on */
     cJSON *p0 = cJSON_GetObjectItem(root, "weather_panel0_en");
     cJSON *p1 = cJSON_GetObjectItem(root, "weather_panel1_en");
+    cJSON *p2 = cJSON_GetObjectItem(root, "weather_panel2_en");
     s_cfg.weather_panel0_en = p0 ? cJSON_IsTrue(p0) : true;
     s_cfg.weather_panel1_en = p1 ? cJSON_IsTrue(p1) : true;
+    s_cfg.weather_panel2_en = p2 ? cJSON_IsTrue(p2) : false;
     if (!s_cfg.weather_panel0_en && !s_cfg.weather_panel1_en)
-        s_cfg.weather_panel0_en = true; /* guard: at least one panel must be on */
+        s_cfg.weather_panel0_en = true;
 
     /* 24H Custom — tube 6 panel rotation */
     {
@@ -715,19 +754,25 @@ static void save_to_flash(void)
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */
+
 void config_mgr_init(void)
 {
     /* Recursive mutex: config_to_json() may be called from within an
      * already-locked context (config_set_json → save_to_flash → config_to_json),
      * so a plain mutex would deadlock.  A recursive mutex allows the same
      * task to re-acquire it without blocking. */
-    s_mutex = xSemaphoreCreateRecursiveMutex();
+    s_mutex   = xSemaphoreCreateRecursiveMutex();
+    /* Plain mutex: TLS semaphore is never re-acquired by the same task. */
+    s_tls_sem = xSemaphoreCreateMutex();
     set_defaults();
     load_from_flash();
 }
 
 void config_lock(void)   { xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY); }
 void config_unlock(void) { xSemaphoreGiveRecursive(s_mutex); }
+
+void tls_sem_take(void) { if (s_tls_sem) xSemaphoreTake(s_tls_sem, portMAX_DELAY); }
+void tls_sem_give(void) { if (s_tls_sem) xSemaphoreGive(s_tls_sem); }
 
 const nextube_config_t *config_get(void)
 {
@@ -791,8 +836,19 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);
     cJSON_AddBoolToObject  (root, "weather_enabled",   s_cfg.weather_enabled);
-    cJSON_AddBoolToObject  (root, "youtube_enabled",   s_cfg.youtube_enabled);
-    cJSON_AddBoolToObject  (root, "mdns_enabled",      s_cfg.mdns_enabled);
+    cJSON_AddBoolToObject  (root, "social_enabled",    s_cfg.social_enabled);
+    cJSON_AddBoolToObject  (root, "youtube_enabled",         s_cfg.youtube_enabled);
+    cJSON_AddNumberToObject(root, "sub_poll_interval_min",   s_cfg.sub_poll_interval_min);
+    cJSON_AddBoolToObject  (root, "instagram_enabled",       s_cfg.instagram_enabled);
+    cJSON_AddBoolToObject  (root, "tiktok_enabled",    s_cfg.tiktok_enabled);
+    cJSON_AddStringToObject(root, "instagram_user",    s_cfg.instagram_user);
+    cJSON_AddStringToObject(root, "tiktok_user",         s_cfg.tiktok_user);
+    cJSON_AddStringToObject(root, "tiktok_key",          s_cfg.tiktok_key);
+    cJSON_AddStringToObject(root, "tiktok_relay_host",   s_cfg.tiktok_relay_host);
+    cJSON_AddBoolToObject  (root, "mastodon_enabled",    s_cfg.mastodon_enabled);
+    cJSON_AddStringToObject(root, "mastodon_user",       s_cfg.mastodon_user);
+    cJSON_AddStringToObject(root, "mastodon_instance",   s_cfg.mastodon_instance);
+    cJSON_AddBoolToObject  (root, "mdns_enabled",        s_cfg.mdns_enabled);
     cJSON_AddNumberToObject(root, "mic_adc_channel",   s_cfg.mic_adc_channel);
     cJSON_AddNumberToObject(root, "mic_silence_gate",  (double)s_cfg.mic_silence_gate);
     {
@@ -817,6 +873,7 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "weather_panel_ms",       s_cfg.weather_panel_ms);
     cJSON_AddBoolToObject  (root, "weather_panel0_en",      s_cfg.weather_panel0_en);
     cJSON_AddBoolToObject  (root, "weather_panel1_en",      s_cfg.weather_panel1_en);
+    cJSON_AddBoolToObject  (root, "weather_panel2_en",      s_cfg.weather_panel2_en);
     cJSON_AddBoolToObject  (root, "tube6_panel_weather",    s_cfg.tube6_panel_weather);
     cJSON_AddBoolToObject  (root, "tube6_panel_weekdate",   s_cfg.tube6_panel_weekdate);
     cJSON_AddBoolToObject  (root, "tube6_panel_ht",         s_cfg.tube6_panel_ht);
@@ -982,6 +1039,9 @@ const char *app_mode_name(app_mode_t mode)
         [APP_MODE_ALBUM]        = "Album",
         [APP_MODE_WEATHER]      = "Weather",
         [APP_MODE_SPECTRUM]     = "Spectrum",
+        [APP_MODE_INSTAGRAM]    = "Instagram",
+        [APP_MODE_TIKTOK]       = "TikTok",
+        [APP_MODE_MASTODON]     = "Mastodon",
     };
     if ((unsigned)mode >= APP_MODE_MAX) return names[APP_MODE_CLOCK];
     return names[mode];

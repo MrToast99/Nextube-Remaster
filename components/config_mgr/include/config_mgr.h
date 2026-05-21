@@ -30,7 +30,10 @@ typedef enum {
     APP_MODE_ALBUM,
     APP_MODE_WEATHER,
     APP_MODE_SPECTRUM,  /* = 8 — microphone audio visualiser */
-    APP_MODE_MAX,
+    APP_MODE_INSTAGRAM, /* = 9  — Instagram follower counter */
+    APP_MODE_TIKTOK,    /* = 10 — TikTok follower counter    */
+    APP_MODE_MASTODON,  /* = 11 — Mastodon follower counter  */
+    APP_MODE_MAX,       /* = 12 */
 } app_mode_t;
 
 /* ── Backlight effect modes ────────────────────────────────────────── */
@@ -125,7 +128,18 @@ typedef struct {
      * the periodic polling — useful for users who don't want weather data,
      * subscriber counts, or LAN-side mDNS advertisement. */
     bool             weather_enabled;    /* gate weather_task creation */
-    bool             youtube_enabled;    /* gate yt_bili_task creation */
+    bool             social_enabled;     /* master gate — if false, subscribers_task never starts */
+    bool             youtube_enabled;       /* gate subscribers_task YouTube fetch */
+    uint16_t         sub_poll_interval_min; /* social counter re-poll interval in minutes (default 30, min 5) */
+    bool             instagram_enabled; /* enable Instagram follower fetches (default true) */
+    bool             tiktok_enabled;    /* enable TikTok follower fetches (default true) */
+    char             instagram_user[48]; /* public Instagram username, no @ prefix */
+    char             tiktok_user[48];       /* public TikTok username, no @ prefix */
+    char             tiktok_key[64];        /* TikTok Research API bearer token; empty = use relay */
+    char             tiktok_relay_host[64]; /* LAN IP of social_relay.py server, e.g. "192.168.1.100" */
+    bool             mastodon_enabled;      /* enable Mastodon follower fetches (default false) */
+    char             mastodon_user[48];     /* Mastodon username, no @ prefix */
+    char             mastodon_instance[64]; /* Mastodon instance domain, e.g. "mastodon.social" */
     bool             mdns_enabled;       /* gate mDNS advertisement */
 
     /* Countdown / Pomodoro */
@@ -138,8 +152,9 @@ typedef struct {
 
     /* Weather panel rotation interval (ms between temp/humidity panel switch) */
     uint16_t         weather_panel_ms;
-    bool             weather_panel0_en;  /* true = show temperature panel */
-    bool             weather_panel1_en;  /* true = show humidity panel    */
+    bool             weather_panel0_en;  /* true = show temperature panel    */
+    bool             weather_panel1_en;  /* true = show humidity panel       */
+    bool             weather_panel2_en;  /* true = show sunrise/sunset panel */
 
     /* Mode Rotation – auto-cycle through enabled modes on a timer.
      * When rotation_enabled is false the mode never changes automatically;
@@ -182,6 +197,13 @@ typedef struct {
 
 /** Initialise config module – loads from flash or sets defaults. */
 void config_mgr_init(void);
+
+/** Global TLS serialisation – acquire before any esp_http_client HTTPS call,
+ *  release after esp_http_client_cleanup().  Guarantees only one mbedTLS
+ *  SSL context exists at a time, preventing internal-SRAM exhaustion when
+ *  the weather task and the social-counter task would otherwise overlap. */
+void tls_sem_take(void);
+void tls_sem_give(void);
 
 /** Acquire / release the config mutex.
  *  Must bracket any code that reads multiple fields from config_get() to

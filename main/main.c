@@ -44,7 +44,7 @@
 #include "web_server.h"
 #include "ntp_time.h"
 #include "weather.h"
-#include "youtube_bili.h"
+#include "subscribers.h"
 #include "microphone.h"
 #include "fw_version.h"
 
@@ -319,7 +319,7 @@ void app_main(void)
      * audio_enabled / volume / mic_* are NOT read here — the deferred audio
      * task reads them fresh from config at start time (see audio_mic_deferred_start). */
     bool    boot_weather_enabled;
-    bool    boot_youtube_enabled;
+    bool    boot_social_enabled;
     uint8_t boot_invert_mask;
     uint8_t boot_init_profile[6];
     uint8_t boot_vcom[6];
@@ -329,8 +329,8 @@ void app_main(void)
     uint8_t boot_tube_brightness[6];
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
-    boot_weather_enabled = cfg_boot->weather_enabled;
-    boot_youtube_enabled = cfg_boot->youtube_enabled;
+    boot_weather_enabled   = cfg_boot->weather_enabled;
+    boot_social_enabled    = cfg_boot->social_enabled;
     boot_invert_mask     = cfg_boot->lcd_invert_mask;
     memcpy(boot_init_profile,    cfg_boot->lcd_init_profile,    sizeof(boot_init_profile));
     memcpy(boot_vcom,            cfg_boot->lcd_vcom,            sizeof(boot_vcom));
@@ -378,18 +378,22 @@ void app_main(void)
 
     /* Background services — gated by their respective config flags so users
      * can disable features they don't use, freeing each task's stack and
-     * stopping the periodic HTTPS polling.  Boot-time only — toggling the
-     * UI checkboxes requires a reboot to take effect. */
+     * stopping the periodic HTTPS polling.  Weather requires a reboot to
+     * enable; the social counter task reads config dynamically each cycle. */
     ntp_time_start();
     if (boot_weather_enabled) {
         weather_start();
     } else {
         ESP_LOGI(TAG, "Weather disabled in config — task not started");
     }
-    if (boot_youtube_enabled) {
-        youtube_bili_start();
+    /* Social counter task — only started when the user has opted in via the
+     * "Enable Social Media Counters" toggle.  Requires a reboot to take effect
+     * (same gate pattern as weather_enabled).  When disabled, no HTTPS polling
+     * occurs and no stack is allocated for the task. */
+    if (boot_social_enabled) {
+        subscribers_start();
     } else {
-        ESP_LOGI(TAG, "YouTube/Bilibili disabled in config — task not started");
+        ESP_LOGI(TAG, "Social counters disabled in config — task not started");
     }
     sht30_task_start();    /* no-op task if sensor absent */
 

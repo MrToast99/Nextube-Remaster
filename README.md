@@ -35,6 +35,8 @@
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
 - [Modes](#modes)
 - [Weather](#weather)
+- [Social Media Counters](#social-media-counters)
+  - [Local Relay (`social_relay.py`)](#local-relay-social_relaypy)
 - [Themes](#themes)
   - [Adding a Custom Theme](#adding-a-custom-theme)
   - [Image Converter Helper](#image-converter-helper)
@@ -71,8 +73,12 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Open-Meteo weather (free, no key) | ✅ Working |
 | OpenWeatherMap weather (free-tier API key) | ✅ Working |
 | Met.no weather (free, no key, elevation-aware) | ✅ Working |
-| YouTube subscriber counter | ✅ Working |
-| Bilibili follower counter | ✅ Working |
+| YouTube subscriber counter (direct + relay) | ✅ Working |
+| Bilibili follower counter (direct) | ✅ Working |
+| Instagram follower counter (direct unofficial API) | ✅ Working |
+| TikTok follower counter (via local relay) | ✅ Working |
+| Mastodon follower counter (direct API) | ✅ Working |
+| Local social counter relay (`social_relay.py`) | ✅ Working |
 | DAC audio playback (LTK8002D amp, WAV files) | ✅ Working |
 | Clock themes (Nixie/Digital/Flip art) | ✅ Working |
 | Countdown / Pomodoro timer modes | ✅ Working |
@@ -550,7 +556,7 @@ The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
 - **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, auto theme rotation (cycle all or selected themes on a timer), Spectrum LED source (custom amplitude-modulated glow colour **or** follow configured accent mode), Spectrum LCD bar colour, Spectrum noise floor threshold, **Advanced Display** (see below)
 - **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
-- **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
+- **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; **Social Media Counters** (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters)); countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
 - **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (automatic on page load and every 24 h; compares against latest GitHub release with dismissable toast notification), **Lock Webui** (enable/disable password protection, change password, sign out), WiFi Setup AP PIN management (show/regenerate), factory reset (settings-only or full), about (shows firmware + web UI versions independently)
 
@@ -612,7 +618,10 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 | **Date** | Date display (DD/MM/YY). Can be enabled alongside Clock — both appear as separate stops in the touch cycle. |
 | **Countdown** | Configurable countdown timer. Middle touch pauses/resumes. |
 | **Pomodoro** | Work/break timer with configurable work and break durations. Middle touch pauses/resumes. Automatically flips between work and break phases. |
-| **YouTube** | Live subscriber/follower count |
+| **YouTube** | Live subscriber count. Direct fetch or via local relay (recommended — see [Social Media Counters](#social-media-counters)). |
+| **Instagram** | Live follower count. Fetched directly from Instagram's unofficial public API — no account or relay required. |
+| **TikTok** | Live follower count. Requires the local relay (`social_relay.py`) — TikTok's bot detection blocks direct ESP32 fetches. |
+| **Mastodon** | Live follower count. Fetched directly from the configured Mastodon instance API — no relay required. |
 | **Weather** | Two panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon. Either panel can be disabled (but not both). Temperatures rounded to whole degrees; leading zeros suppressed; minus sign position shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
 | **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
@@ -687,6 +696,95 @@ MutiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
                         sand.jpg  tornado.jpg  volcanicAsh.jpg
 ```
 
+## Social Media Counters
+
+Five platforms are supported. Tube 0 shows the platform icon; tubes 1–5 show the follower/subscriber count with K/M scaling (e.g. 1 230 000 → `1230 K`).
+
+| Platform | Fetch method | Relay required? |
+|---|---|---|
+| **YouTube** | Direct fetch **or** via local relay | Optional (relay strongly recommended — direct ESP32 fetches are often bot-blocked) |
+| **Bilibili** | Direct unofficial API | No |
+| **Instagram** | Direct unofficial public-profile API | No |
+| **TikTok** | Via local relay | **Yes** — TikTok's JS fingerprinting blocks direct device fetches |
+| **Mastodon** | Direct Mastodon instance API | No |
+
+Configure all platforms under **Services → Social Media Counters** in the web UI.
+
+**Master switch (`Enable`)** — when unchecked the polling task never starts. Changes require a device restart to take effect.
+
+**Polling interval** — applies to all platforms. Preset buttons: 5 m, 10 m, 30 m, 1 h, 6 h, 12 h, 24 h. Minimum 5 minutes. Changes take effect after the current sleep expires — no restart needed.
+
+### Local Relay (`social_relay.py`)
+
+`helpers/social_relay/social_relay.py` is a lightweight Python HTTP proxy that runs on any PC on the same network as the Nextube. It fetches YouTube and TikTok counts using a real Chromium browser (Playwright), bypassing bot-detection checks that block the ESP32's plain HTTP client, then serves the result as simple JSON at `http://<relay-host>:8888/`.
+
+#### Quick start
+
+```bash
+python helpers/social_relay/social_relay.py
+```
+
+**All dependencies are installed automatically on first run** — no `pip install` step needed. The script detects missing packages at startup and installs them:
+
+- `playwright` (the browser automation library)
+- Chromium browser binary (`playwright install chromium`)
+- `playwright-stealth` (suppresses headless-browser fingerprint signals)
+
+On subsequent runs the packages are already present and startup is instant.
+
+#### What gets installed
+
+| Package | Purpose |
+|---|---|
+| `playwright>=1.40` | Chromium browser control |
+| `playwright-stealth>=1.0.6` | Patches ~12 browser signals (navigator.webdriver, WebGL vendor, plugin arrays, etc.) that TikTok and YouTube use to detect automation |
+
+To install manually instead (e.g. in a virtual environment):
+
+```bash
+pip install playwright playwright-stealth
+playwright install chromium
+```
+
+#### Routes
+
+| Route | Returns |
+|---|---|
+| `GET /youtube?channel=<id>` | `{"subscribers": 12345}` |
+| `GET /tiktok?user=<username>` | `{"followers": 12345}` |
+| `GET /health` | `OK` |
+
+#### YouTube channel identifier
+
+The relay accepts any of these formats in the `channel=` parameter:
+
+| Format | Example | URL built |
+|---|---|---|
+| Channel ID | `UCvFu9z6btYUaK3PEtsg6zoA` | `youtube.com/channel/UC…` |
+| Handle with `@` | `@MrToast99` | `youtube.com/@MrToast99` |
+| Bare handle | `mrtoast99` | `youtube.com/@mrtoast99` |
+
+Find a channel ID in the channel URL or via `youtube.com/@handle/about`.
+
+#### Fetch strategy
+
+Both platforms use the same layered fallback:
+
+1. **Playwright/Chromium** — real browser with stealth patches; passes TLS fingerprinting and JS bot-detection checks. Primary method.
+2. **curl** — correct OS TLS fingerprint; no JS execution. TikTok fallback.
+3. **urllib** — pure Python; may be WAF-blocked. Last resort.
+
+Results are cached for 5 minutes. The ESP32 HTTP timeout for relay requests is 45 seconds, giving Playwright time to launch Chromium on cold start.
+
+#### Configuring the relay host
+
+1. Start the relay — it prints the relay address on startup, e.g. `http://192.168.1.50:8888`
+2. Open the Nextube web UI → **Services → Social Media Counters**
+3. Enter the IP address (without port) in **Relay host**
+4. Save
+
+The relay must be running whenever the device polls. It does not need to be running continuously — the Nextube caches the last received count and only re-fetches on the next polling interval.
+
 ## Themes
 
 ### Adding a Custom Theme
@@ -727,7 +825,10 @@ All paths are relative to `/images/themes/{ThemeName}/`.
 │   ├── pomodoro.jpg     ← pomodoro mode label (tube 0)
 │   ├── pomodorosb.jpg   ← pomodoro work-session indicator (tube 5)
 │   ├── pomodorolb.jpg   ← pomodoro break indicator (tube 5)
-│   └── youtube.jpg      ← YouTube mode label (tube 0)
+│   ├── youtube.jpg      ← YouTube mode icon (tube 0)
+│   ├── instagram.jpg    ← Instagram mode icon (tube 0)
+│   ├── tiktok.jpg       ← TikTok mode icon (tube 0)
+│   └── mastodon.jpg     ← Mastodon mode icon (tube 0)
 ├── MutiInfo/
 │   ├── Temperature/
 │   │   ├── degreec.jpg  ← °C symbol
@@ -766,10 +867,10 @@ All tube images must be exactly **80 × 160 pixels** (portrait), saved as JPEG. 
 
 ### Image Converter Helper
 
-`helpers/nextube_image_converter.py` is a standalone Python tool for preparing images for the device. Run it with:
+`helpers/image_converter/nextube_image_converter.py` is a standalone Python tool for preparing images for the device. Run it with:
 
 ```bash
-python helpers/nextube_image_converter.py
+python helpers/image_converter/nextube_image_converter.py
 ```
 
 A browser UI opens at **http://localhost:5000**. Features:
@@ -866,12 +967,17 @@ nextube-fw/
 │   ├── web_server/                # HTTP server + REST API + OTA handlers + log viewer
 │   ├── ntp_time/                  # NTP synchronisation
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
-│   └── youtube_bili/              # YouTube/Bilibili API client
+│   └── subscribers/               # Subscriber/follower counter (YouTube, Bilibili, Instagram, TikTok)
 ├── data/web/                      # Web UI source (bundled into LittleFS)
 │   ├── index.html                 # Self-contained SPA
 │   └── version.txt                # Auto-generated by CMake — do not edit manually
 ├── helpers/
-│   └── nextube_image_converter.py # Standalone Python tool: convert & crop images to 80×160 JPEG
+│   ├── image_converter/
+│   │   └── nextube_image_converter.py # Standalone Python tool: convert & crop images to 80×160 JPEG
+│   ├── nextube_emulator/          # Display emulator for local development
+│   └── social_relay/
+│       ├── social_relay.py        # Local HTTP proxy for YouTube & TikTok counters (auto-installs Playwright)
+│       └── requirements.txt       # Optional: manual pip install list for social_relay.py
 ├── version.json                   # Single source of truth for firmware + LittleFS version numbers
 ├── partitions.csv                 # Flash partition layout (LittleFS at 0x910000, 7 MB)
 ├── sdkconfig.defaults             # ESP-IDF SDK config overrides

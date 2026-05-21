@@ -5,7 +5,7 @@
 #include "wifi_manager.h"
 #include "ntp_time.h"
 #include "weather.h"
-#include "youtube_bili.h"
+#include "subscribers.h"
 #include "display.h"
 #include "leds.h"
 #include "audio.h"
@@ -674,8 +674,14 @@ static esp_err_t api_status(httpd_req_t *r)
         cJSON_AddNumberToObject(sj, "temp_c",   sensor->temp_c);
         cJSON_AddNumberToObject(sj, "humidity", sensor->humidity);
     }
-    const sub_count_t *s = youtube_bili_get();
+    const sub_count_t *s = subscribers_get();
     if (s && s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
+    const sub_count_t *insta = instagram_get();
+    if (insta && insta->valid) cJSON_AddNumberToObject(root, "instagram_followers", insta->subscriber_count);
+    const sub_count_t *tt = tiktok_get();
+    if (tt && tt->valid) cJSON_AddNumberToObject(root, "tiktok_followers", tt->subscriber_count);
+    const sub_count_t *mt = mastodon_get();
+    if (mt && mt->valid) cJSON_AddNumberToObject(root, "mastodon_followers", mt->subscriber_count);
     /* Heap / PSRAM telemetry — surfaced in the System tab so a slowly leaking
      * build is visible long before allocations actually start failing.
      * heap_*    = INTERNAL SRAM specifically (~320 KB total on ESP32-WROVER).
@@ -746,7 +752,7 @@ static esp_err_t api_status(httpd_req_t *r)
  * Suspend every non-essential background task before any flash write so we
  * reduce CPU/bus contention during esp_ota_write()'s sector erase+program
  * cycles.  Each erase (≈25 ms) disables the ESP32 data cache; concurrent SPI
- * DMA (LED RMT), I2S (mic), HTTPS polls (weather / yt_bili / ntp) and I2C
+ * DMA (LED RMT), I2S (mic), HTTPS polls (weather / subscribers / ntp) and I2C
  * reads (sht30) all compete for CPU during those windows, contributing to TCP
  * packet loss that stretches OTA transfers and eventually trips the recv timeout.
  *
@@ -761,7 +767,7 @@ static void ota_suspend_tasks(void)
 {
     static const char *const k_tasks[] = {
         "weather",    /* HTTPS polling — competes with OTA TCP stream + heap */
-        "yt_bili",    /* HTTPS polling — competes with OTA TCP stream + heap */
+        "subscribers", /* HTTPS polling — competes with OTA TCP stream + heap */
         "ntp",        /* SNTP/UDP      — adds lwIP load during flash writes  */
         "sht30",      /* I2C sensor    — periodic wakeups, CPU cycles        */
         "leds",       /* RMT DMA       — Core 1 bus traffic during writes    */

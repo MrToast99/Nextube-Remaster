@@ -17,9 +17,10 @@ static const char *TAG = "weather";
 static weather_data_t s_weather = {0};
 static SemaphoreHandle_t s_wx_mutex = NULL;
 
-/* Geocoded coordinates from the last successful city lookup.
- * Written by fetch_open_meteo() and fetch_met_no() after each geocode.
- * Protected by s_wx_mutex so readers always see a consistent pair. */
+/* Location coordinates from the last successful weather fetch.
+ * All four providers (wttr.in, Open-Meteo, Met.no, OpenWeatherMap) populate
+ * these from the coordinates returned in their respective responses.
+ * Protected by s_wx_mutex so readers always see a consistent lat/lon pair. */
 static float s_wx_lat = 0.0f, s_wx_lon = 0.0f;
 static bool  s_wx_location_valid = false;
 
@@ -108,18 +109,24 @@ static char *http_get(const char *url)
 {
     rl_wait();      /* enforce Open-Meteo free-tier rate limits */
 
+    /* Serialise TLS connections: only one mbedTLS SSL context at a time.
+     * Prevents internal-SRAM exhaustion when the social-counter task runs
+     * an HTTPS fetch concurrently with a weather retry. */
+    tls_sem_take();
+
     esp_http_client_config_t hcfg = {
         .url               = url,
         .timeout_ms        = 5000,   /* fail fast — frees TLS heap for web server */
         .user_agent        = HTTP_USER_AGENT,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
+    char *result = NULL;
+
     esp_http_client_handle_t c = esp_http_client_init(&hcfg);
-    if (!c) return NULL;
+    if (!c) goto done;
 
     if (esp_http_client_open(c, 0) != ESP_OK) {
-        esp_http_client_cleanup(c);
-        return NULL;
+        esp_http_client_cleanup(c); c = NULL; goto done;
     }
     esp_http_client_fetch_headers(c);
 
@@ -127,25 +134,30 @@ static char *http_get(const char *url)
     if (status != 200) {
         ESP_LOGW(TAG, "HTTP %d: %s", status, url);
         esp_http_client_close(c);
-        esp_http_client_cleanup(c);
-        return NULL;
+        esp_http_client_cleanup(c); c = NULL; goto done;
     }
 
-    char *buf = malloc(HTTP_MAX_BODY + 1);
-    if (!buf) { esp_http_client_close(c); esp_http_client_cleanup(c); return NULL; }
+    result = malloc(HTTP_MAX_BODY + 1);
+    if (!result) {
+        esp_http_client_close(c);
+        esp_http_client_cleanup(c); c = NULL; goto done;
+    }
 
     int total = 0, r;
     do {
-        r = esp_http_client_read(c, buf + total, HTTP_MAX_BODY - total);
+        r = esp_http_client_read(c, result + total, HTTP_MAX_BODY - total);
         if (r > 0) total += r;
     } while (r > 0 && total < HTTP_MAX_BODY);
-    buf[total] = '\0';
+    result[total] = '\0';
 
     esp_http_client_close(c);
-    esp_http_client_cleanup(c);
+    esp_http_client_cleanup(c); c = NULL;
 
-    if (total == 0) { free(buf); return NULL; }
-    return buf;
+    if (total == 0) { free(result); result = NULL; }
+
+done:
+    tls_sem_give();
+    return result;
 }
 
 /* ── wttr.in  (no API key required) ────────────────────────────────── */
@@ -172,20 +184,38 @@ static void fetch_wttr(const wx_cfg_snap_t *cfg)
     free(body);
     if (!root) { ESP_LOGW(TAG, "wttr.in: JSON parse failed"); return; }
 
+    /* Parse values into locals before taking the mutex */
+    float  parsed_temp = 0.0f;
+    float  parsed_hum  = 0.0f;
+    bool   have_temp = false, have_hum = false;
+    char   parsed_condition[64] = {0};
+    char   parsed_icon[32] = {0};
+    bool   have_desc = false;
+
+    /* wttr.in j1: nearest_area[0].latitude / .longitude (string fields).
+     * Extracting these here lets the Sunrise & Sunset panel work regardless
+     * of which weather provider the user has selected. */
+    float  parsed_lat = 0.0f, parsed_lon = 0.0f;
+    bool   have_loc = false;
+    {
+        cJSON *area0 = cJSON_GetArrayItem(cJSON_GetObjectItem(root, "nearest_area"), 0);
+        if (area0) {
+            cJSON *jlat = cJSON_GetObjectItem(area0, "latitude");
+            cJSON *jlon = cJSON_GetObjectItem(area0, "longitude");
+            if (jlat && jlat->valuestring && jlon && jlon->valuestring) {
+                parsed_lat = (float)atof(jlat->valuestring);
+                parsed_lon = (float)atof(jlon->valuestring);
+                have_loc = true;
+            }
+        }
+    }
+
     cJSON *cur = cJSON_GetArrayItem(
                      cJSON_GetObjectItem(root, "current_condition"), 0);
     if (cur) {
         cJSON *tc       = cJSON_GetObjectItem(cur, "temp_C");
         cJSON *hum      = cJSON_GetObjectItem(cur, "humidity");
         cJSON *desc_arr = cJSON_GetObjectItem(cur, "weatherDesc");
-
-        /* Parse values into locals before taking the mutex */
-        float  parsed_temp = 0.0f;
-        float  parsed_hum  = 0.0f;
-        bool   have_temp = false, have_hum = false;
-        char   parsed_condition[64] = {0};
-        char   parsed_icon[32] = {0};
-        bool   have_desc = false;
 
         if (tc  && tc->valuestring)  { parsed_temp = (float)atof(tc->valuestring);  have_temp = true; }
         if (hum && hum->valuestring) { parsed_hum  = (float)atof(hum->valuestring); have_hum  = true; }
@@ -215,20 +245,25 @@ static void fetch_wttr(const wx_cfg_snap_t *cfg)
                 have_desc = true;
             }
         }
-
-        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
-        if (have_temp) s_weather.temp_c   = parsed_temp;
-        if (have_hum)  s_weather.humidity = parsed_hum;
-        if (have_desc) {
-            strncpy(s_weather.condition, parsed_condition, sizeof(s_weather.condition) - 1);
-            strncpy(s_weather.icon, parsed_icon, sizeof(s_weather.icon) - 1);
-        }
-        s_weather.valid = true;
-        xSemaphoreGive(s_wx_mutex);
-
-        ESP_LOGI(TAG, "wttr.in: %.0f°C  %d%%  %s",
-                 parsed_temp, (int)parsed_hum, parsed_condition);
     }
+
+    xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+    if (have_temp) s_weather.temp_c   = parsed_temp;
+    if (have_hum)  s_weather.humidity = parsed_hum;
+    if (have_desc) {
+        strncpy(s_weather.condition, parsed_condition, sizeof(s_weather.condition) - 1);
+        strncpy(s_weather.icon, parsed_icon, sizeof(s_weather.icon) - 1);
+    }
+    s_weather.valid = true;
+    if (have_loc) {
+        s_wx_lat = parsed_lat; s_wx_lon = parsed_lon;
+        s_wx_location_valid = true;
+    }
+    xSemaphoreGive(s_wx_mutex);
+
+    ESP_LOGI(TAG, "wttr.in: %.0f°C  %d%%  %s",
+             parsed_temp, (int)parsed_hum, parsed_condition);
+    if (have_loc) ESP_LOGI(TAG, "wttr.in: location %.4f, %.4f", parsed_lat, parsed_lon);
     cJSON_Delete(root);
 }
 
@@ -259,6 +294,23 @@ static void fetch_openweather(const wx_cfg_snap_t *cfg)
     char  parsed_condition[64] = {0};
     char  parsed_icon[32] = {0};
     bool  have_condition = false, have_icon = false;
+
+    /* OWM response includes "coord": {"lat": ..., "lon": ...} at the top level.
+     * Extract it so the Sunrise & Sunset panel works on this provider too. */
+    float parsed_lat = 0.0f, parsed_lon = 0.0f;
+    bool  have_loc = false;
+    {
+        cJSON *coord = cJSON_GetObjectItem(root, "coord");
+        if (coord) {
+            cJSON *jlat = cJSON_GetObjectItem(coord, "lat");
+            cJSON *jlon = cJSON_GetObjectItem(coord, "lon");
+            if (jlat && jlon) {
+                parsed_lat = (float)jlat->valuedouble;
+                parsed_lon = (float)jlon->valuedouble;
+                have_loc = true;
+            }
+        }
+    }
 
     cJSON *main_obj = cJSON_GetObjectItem(root, "main");
     if (main_obj) {
@@ -301,10 +353,15 @@ static void fetch_openweather(const wx_cfg_snap_t *cfg)
     if (have_condition) strncpy(s_weather.condition, parsed_condition, sizeof(s_weather.condition) - 1);
     if (have_icon)      strncpy(s_weather.icon, parsed_icon, sizeof(s_weather.icon) - 1);
     s_weather.valid = true;
+    if (have_loc) {
+        s_wx_lat = parsed_lat; s_wx_lon = parsed_lon;
+        s_wx_location_valid = true;
+    }
     xSemaphoreGive(s_wx_mutex);
 
     ESP_LOGI(TAG, "OWM: %.0f°C  %d%%  %s",
              parsed_temp, (int)parsed_hum, parsed_condition);
+    if (have_loc) ESP_LOGI(TAG, "OWM: location %.4f, %.4f", parsed_lat, parsed_lon);
     cJSON_Delete(root);
 }
 

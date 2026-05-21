@@ -15,6 +15,6 @@ idf_component_register(
         web_server
         ntp_time
         weather
-        youtube_bili
+        subscribers
         app_update
 )

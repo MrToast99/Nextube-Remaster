@@ -17,7 +17,42 @@ CONFIG_ESP32_SPIRAM_SUPPORT=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_BOOT_INIT=y
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+# SPIRAM_MALLOC_ALWAYSINTERNAL threshold — malloc calls ≤ this value are
+# forced to internal SRAM; calls > this value fall through to PSRAM.
+#
+# 4096 was tested and rejected: CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+# produces OUT_BUFFER_LEN = exactly 4096 bytes in IDF 5.5.3.  That sits
+# exactly at the old threshold (≤ 4096 → SRAM), so mbedtls_ssl_setup()
+# still allocates the OUT buffer from internal SRAM.  Subscriber-build
+# additions (3 mutexes, larger config struct, task TCBs all via pvPortMalloc)
+# fragmented SRAM such that no contiguous 4096-byte block survives to t≈20 s;
+# ssl_setup() returns MBEDTLS_ERR_SSL_ALLOC_FAILED (-0x7F00) on every retry.
+#
+# 3072 was tested and rejected: ssl_setup() now succeeds (both IN=16 KB and
+# OUT=4 KB exceed the threshold → PSRAM), but api.met.no's cert chain roots
+# at an RSA-4096 CA.  Certificate verification calls mbedtls_mpi_exp_mod()
+# via the hardware RSA path, which calls mbedtls_mpi_grow(&X, 128_words) =
+# a 512-byte calloc.  512 < 3072 → still forced to internal SRAM → SRAM is
+# too fragmented at t≈23 s to satisfy a 512-byte contiguous request →
+# MBEDTLS_ERR_MPI_ALLOC_FAILED ORed into MBEDTLS_ERR_RSA_PUBLIC_FAILED = 0x4290.
+#
+# 511 is the working value:
+#   • 512-byte RSA-4096 limb arrays  > 511 → PSRAM.
+#     The ESP32 hardware RSA engine loads operands via CPU I/O writes to
+#     dedicated peripheral registers (not DMA), so PSRAM limb-array pointers
+#     are safe — the CPU fetches each 32-bit word through the SPI cache and
+#     writes it to the RSA peripheral; no DMA mapping required.
+#   • 4096-byte SSL OUT buffer       > 511 → PSRAM  (ssl_setup succeeds)
+#   • 16384-byte SSL IN buffer       > 511 → PSRAM  (was already PSRAM)
+#   • WPA2-PSK AES context (~280 B)  ≤ 511 → SRAM  ← critical for DMA safety
+#   • WPA2-PSK SHA context (~120 B)  ≤ 511 → SRAM
+#   • HMAC context (~400 B)          ≤ 511 → SRAM
+#   (Hardware AES/SHA on original ESP32 use DMA and require internal-SRAM
+#    buffers.  Keeping all crypto contexts ≤ 511 B keeps them in SRAM and
+#    avoids the "DNS fails with error 202" failure that
+#    MBEDTLS_MEM_ALLOC_MODE_EXTERNAL produced by routing ALL mbedTLS
+#    allocations — including AES context structs — to PSRAM.)
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=511
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_MEMTEST=y
 CONFIG_SPIRAM_TYPE_AUTO=y
@@ -81,10 +116,63 @@ CONFIG_LWIP_LOCAL_HOSTNAME="nextube-remaster"
 # works in the weather HTTP client.  Without this the bundle is empty and
 # esp-tls rejects the connection with "No server verification option set".
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
-# Partial bundle (~40 KB, 40 most common CAs) covers Let's Encrypt / DigiCert /
-# GlobalSign used by wttr.in, Open-Meteo, and Met.no.  The full bundle (~70 KB,
-# 150+ CAs) wastes heap and was causing HTTP server connection-slot exhaustion.
+# Partial bundle (~30 KB, ~40 curated CAs).
+# The full bundle (~70 KB, 150+ CAs) was tested and rejected.
+# With HARDWARE_MPI=y (enabled) cert verification uses the hardware RSA engine
+# which requires dedicated SRAM scratch registers.  The full bundle's larger
+# initialisation footprint leaves less SRAM headroom; at t≈20 s the scratch
+# allocation inside ssl_setup() fails even on the second attempt, still
+# producing the 0x4290 error (MBEDTLS_ERR_RSA_PUBLIC_FAILED |
+# MBEDTLS_ERR_MPI_ALLOC_FAILED).  The partial bundle's smaller footprint
+# leaves enough headroom for the hardware RSA scratch on the retry.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_PARTIAL=y
+#
+# TLS I/O buffer sizing.
+# IN must stay at 16 384 — Met.no sends TLS records that fill the maximum
+# record size; mbedtls_ssl_read returns -0x7100 (CONN_EOF) with anything
+# smaller.  OUT can safely be 4 096: device→server HTTP requests are always
+# well under 4 KB.
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+#
+# TLS memory strategy.
+#
+# MBEDTLS_DYNAMIC_BUFFER was tested and rejected: its "Dynamic Impl" path calls
+# heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) explicitly, so
+# the 16 KB IN buffer is still internal SRAM.  Worse, it allocates that buffer
+# *after* cert validation, when bignum/RSA ops have fragmented the heap — the
+# alloc fails even though cert validation itself just succeeded.
+#
+# MBEDTLS_MEM_ALLOC_MODE_EXTERNAL and custom mbedtls_platform_set_calloc_free()
+# were also tested and rejected: both route ALL mbedTLS calls to PSRAM, which
+# breaks the WPA2/WPA3 supplicant's hardware-crypto paths (hardware AES/SHA on
+# original ESP32 requires DMA-accessible = internal SRAM buffers), causing DNS
+# to fail with error 202 after WiFi connects.
+#
+# Working strategy — three parts:
+#  1. No DYNAMIC_BUFFER + ALWAYSINTERNAL=3072: ssl_setup() allocates the IN/OUT
+#     buffers at connection open time.  Both exceed the 3072-byte threshold
+#     (IN = 16 KB, OUT = 4 KB) so they are allocated from PSRAM — 8 MB of
+#     unfragmented heap — rather than the scarce internal SRAM.  ssl_setup()
+#     therefore succeeds regardless of how fragmented internal SRAM becomes.
+#  2. TLS semaphore (tls_sem_take/give in config_mgr): only one ssl_context
+#     lives at a time, preventing concurrent PSRAM pressure.
+#  3. DHCP DNS: left as-is; the router's DNS resolves external hostnames
+#     correctly without intervention.
+#
+# Hardware RSA accelerator — left at default (ENABLED).
+# CONFIG_MBEDTLS_HARDWARE_MPI=n was tested and rejected.  The software RSA
+# path allocates a sliding-window precomputation table W[2 << WINDOW_SIZE]
+# of temporary MPIs.  For the RSA-4096 key in ISRG Root X1 (the root CA for
+# the Open-Meteo / Let's Encrypt chain) each W[i] limb array is 512 bytes.
+# With SPIRAM_MALLOC_ALWAYSINTERNAL=4096, these 512-byte allocations cannot
+# fall back to PSRAM; at t≈20 s they exhaust the remaining internal SRAM,
+# causing mbedtls_mpi_exp_mod() to return MBEDTLS_ERR_MPI_ALLOC_FAILED.
+# This ORs with MBEDTLS_ERR_RSA_PUBLIC_FAILED to produce the observed 0x4290
+# error ("PK verify failed / Certificate matched but signature verification
+# failed").  The hardware RSA engine bypasses W[] entirely — it loads N and E
+# directly into dedicated hardware registers and performs the modular
+# exponentiation there, so no SRAM window arrays are needed.
 
 # LWIP
 CONFIG_LWIP_MAX_SOCKETS=32

@@ -781,6 +781,7 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 /* Weather panel indices — weather_panel local in display_task. */
 #define WEATHER_PANEL_TEMP  0   /* temperature + icon */
 #define WEATHER_PANEL_HUM   1   /* humidity */
+#define WEATHER_PANEL_SUN   2   /* sunrise + sunset times */
 /* Stack: config snapshot (~1900 B) + JPEG decode call chain (~3-4 KB).
  * 8 KB was too tight — panic handler couldn't print a backtrace. */
 #define DISPLAY_STACK_SIZE   12288
@@ -1257,6 +1258,16 @@ void display_show_number(int tube, int digit, const char *theme)
 void display_show_ampm(int tube, const char *name, const char *theme)
 {
     char p[256]; display_path_ampm(p, sizeof(p), theme, name);
+    /* Fall back to /images/system/{name}.jpg when the theme-specific asset is
+     * absent (e.g. a custom theme that predates the Instagram/TikTok icons).
+     * img_cache_get returns NULL without touching the SPI bus when the file
+     * cannot be decoded; the system path is then substituted so
+     * display_show_image gets a path that resolves to actual pixels. */
+    {
+        int _w = 0, _h = 0;
+        if (!img_cache_get(p, &_w, &_h))
+            snprintf(p, sizeof(p), "/images/system/%s.jpg", name);
+    }
     display_show_image(tube, p);
 }
 
@@ -1266,7 +1277,7 @@ void display_show_ampm(int tube, const char *name, const char *theme)
 #include "config_mgr.h"
 #include "ntp_time.h"
 #include "weather.h"
-#include "youtube_bili.h"
+#include "subscribers.h"
 #include "microphone.h"
 #include "freertos/semphr.h"
 
@@ -1872,7 +1883,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                              uint8_t panel_id)
 {
     /* Resolve panel_id → concrete panel type.
-     * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise/sunset
+     * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise+sunset
      * We iterate through the ordered list and pick the panel_id-th enabled entry. */
     const bool enabled[5] = {
         cfg->tube6_panel_weather,
@@ -1881,7 +1892,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
         cfg->tube6_panel_temp,
         cfg->tube6_panel_sunrise,
     };
-    int kind = -1;   /* 0=weather icon, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise/sunset */
+    int kind = -1;   /* 0=weather icon, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise+sunset */
     int count = 0;
     for (int i = 0; i < 5; i++) {
         if (enabled[i]) {
@@ -2067,16 +2078,12 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
         }
 
     } else if (kind == 4) {
-        /* ── Sunrise & Sunset panel ─────────────────────────────────────────
-         * Top half    (rows  14– 69) : sunrise icon + "HH:MM" local time
-         * Bottom half (rows  94–149) : sunset  icon + "HH:MM" local time
-         *
-         * Solar times are calculated via the NOAA algorithm from the geocoded
-         * lat/lon stored by the weather component.  Falls back to "--:--" while
-         * the weather task has not yet resolved the configured city.
-         *
-         * Background: AMPM/blank.jpg (same as weekdate / H/T panels).
-         * Colour: auto-sampled from Numbers/0.jpg centre pixel.               */
+        /* ── Sunrise + Sunset combined panel ────────────────────────────────
+         * Top half    : sunrise icon + local rise time "HH:MM"
+         * Bottom half : sunset  icon + local set  time "HH:MM"
+         * Solar times via NOAA algorithm from geocoded lat/lon; falls back to
+         * "--:--" until the weather task has resolved the configured city.
+         * Background: AMPM/blank.jpg.  Colour: theme's Numbers/0 centre px.  */
         float lat = 0.0f, lon = 0.0f;
         bool have_loc = weather_get_location(&lat, &lon);
 
@@ -2094,7 +2101,6 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
 
             char rise_str[8] = "--:--";
             char set_str[8]  = "--:--";
-
             if (have_loc) {
                 int rise_min = 0, set_min = 0;
                 solar_calc(lat, lon, t, &rise_min, &set_min);
@@ -2106,10 +2112,9 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                              (set_min / 60) % 24, set_min % 60);
             }
 
-            /* Top half: sunrise — icon + time, starting at y_tube=14 */
-            ht_draw_suntime(rise_str, /*rising=*/true,  14,         fg, bg);
-            /* Bottom half: sunset  — icon + time, starting at y_tube=HALF+14=94 */
-            ht_draw_suntime(set_str,  /*rising=*/false, HALF + 14,  fg, bg);
+            /* Top half: sunrise (y_tube=14), bottom half: sunset (y_tube=HALF+14) */
+            ht_draw_suntime(rise_str, /*rising=*/true,  14,        fg, bg);
+            ht_draw_suntime(set_str,  /*rising=*/false, HALF + 14, fg, bg);
         }
     }
 
@@ -2225,23 +2230,81 @@ static void render_number6(uint32_t value, const char *theme,
         display_show_number(5, value % 10, theme);
 }
 
-static void render_subs(const nextube_config_t *cfg)
+/* Generic follower/subscriber renderer.
+ * icon: AMPM asset name for tube 0 (e.g. "youtube", "instagram", "tiktok").
+ * count: the follower/subscriber count to display.
+ *
+ * Decimal logic for K/M ranges — only when the integer part is a single digit
+ * (fits in 4 tubes 2-5 alongside the dot, decimal digit(s), and suffix):
+ *
+ *   dec2 != 0  → 2 decimals  "N.DD K/M"  T1=int  T2=dot  T3=d1  T4=d2  T5=suffix
+ *   dec1 != 0  → 1 decimal   "_.N.D K/M" T1=blank T2=int T3=dot T4=d1  T5=suffix
+ *   both zero  → no decimal  "_._._.N K/M"                T4=int T5=suffix (blanks)
+ *
+ * 2+ digit K/M integers have no room for a decimal alongside the suffix,
+ * so they fall through to render_number6 (3 significant digits, no dot). */
+static void render_followers(const nextube_config_t *cfg,
+                             uint32_t count, const char *icon)
 {
-    const sub_count_t *s = youtube_bili_get();
-    uint32_t count = s->valid ? (uint32_t)s->subscriber_count : 0;
-
     if (count >= 1000000) {
-        render_number6(count / 1000, cfg->theme, "youtube", "m-sub");
+        uint32_t int_m = count / 1000000;
+        if (int_m < 10) {
+            uint32_t dec1 = (count % 1000000) / 100000;
+            uint32_t dec2 = (count % 100000)  / 10000;
+            display_show_ampm(0, icon, cfg->theme);
+            if (dec2) {
+                display_show_number(1, (uint8_t)int_m, cfg->theme);
+                display_show_ampm  (2, "dot",          cfg->theme);
+                display_show_number(3, (uint8_t)dec1,  cfg->theme);
+                display_show_number(4, (uint8_t)dec2,  cfg->theme);
+            } else if (dec1) {
+                display_show_ampm  (1, "blank",        cfg->theme);
+                display_show_number(2, (uint8_t)int_m, cfg->theme);
+                display_show_ampm  (3, "dot",          cfg->theme);
+                display_show_number(4, (uint8_t)dec1,  cfg->theme);
+            } else {
+                display_show_ampm  (1, "blank",        cfg->theme);
+                display_show_ampm  (2, "blank",        cfg->theme);
+                display_show_ampm  (3, "blank",        cfg->theme);
+                display_show_number(4, (uint8_t)int_m, cfg->theme);
+            }
+            display_show_ampm(5, "m-sub", cfg->theme);
+        } else {
+            render_number6(count / 100000, cfg->theme, icon, "m-sub");
+        }
     } else if (count >= 1000) {
-        render_number6(count / 1000, cfg->theme, "youtube", "k-sub");
+        uint32_t int_k = count / 1000;
+        if (int_k < 10) {
+            uint32_t dec1 = (count % 1000) / 100;
+            uint32_t dec2 = (count % 100)  / 10;
+            display_show_ampm(0, icon, cfg->theme);
+            if (dec2) {
+                display_show_number(1, (uint8_t)int_k, cfg->theme);
+                display_show_ampm  (2, "dot",          cfg->theme);
+                display_show_number(3, (uint8_t)dec1,  cfg->theme);
+                display_show_number(4, (uint8_t)dec2,  cfg->theme);
+            } else if (dec1) {
+                display_show_ampm  (1, "blank",        cfg->theme);
+                display_show_number(2, (uint8_t)int_k, cfg->theme);
+                display_show_ampm  (3, "dot",          cfg->theme);
+                display_show_number(4, (uint8_t)dec1,  cfg->theme);
+            } else {
+                display_show_ampm  (1, "blank",        cfg->theme);
+                display_show_ampm  (2, "blank",        cfg->theme);
+                display_show_ampm  (3, "blank",        cfg->theme);
+                display_show_number(4, (uint8_t)int_k, cfg->theme);
+            }
+            display_show_ampm(5, "k-sub", cfg->theme);
+        } else {
+            render_number6(count / 100, cfg->theme, icon, "k-sub");
+        }
     } else {
-        /* tube 0 = youtube icon, tubes 1-5 = 5-digit count, leading zeros blanked */
-        display_show_ampm(0, "youtube", cfg->theme);
+        /* Raw count < 1 K — use all five digit tubes, suppress leading zeros */
+        display_show_ampm(0, icon, cfg->theme);
         static const uint32_t div5[5] = { 10000, 1000, 100, 10, 1 };
         bool leading = true;
         for (int i = 0; i < 5; i++) {
             uint8_t d = (count / div5[i]) % 10;
-            /* Suppress leading zeros but always show the units digit (i == 4) */
             if (leading && d == 0 && i < 4)
                 display_show_ampm(i + 1, "blank", cfg->theme);
             else {
@@ -2599,9 +2662,130 @@ static void render_album(const nextube_config_t *cfg,
  *                  rain  snow  squalls  thunderstorm
  *                  sand  tornado  volcanicAsh
  */
-/* render_weather – panel 0 = temperature + icon, panel 1 = humidity + icon.
+/* ── wx_sun_draw_icon ────────────────────────────────────────────────────────
+ * Draw a large sun-semicircle icon centred in a full 80×160 tube using U8g2
+ * primitives.  rising=true for sunrise (^-caret), false for sunset (v-caret).
+ * bg: decoded RGB565 background (LCD_WIDTH × LCD_HEIGHT); NULL = solid black. */
+static void wx_sun_draw_icon(int tube, bool rising, uint16_t fg,
+                              const uint8_t *bg)
+{
+    u8g2_ClearBuffer(&s_u8g2);
+
+    const int cx = 40, cy = 28, r = 16;   /* large semicircle */
+
+    /* Filled upper semicircle */
+    u8g2_DrawDisc(&s_u8g2, (u8g2_uint_t)cx, (u8g2_uint_t)cy, (u8g2_uint_t)r,
+                  U8G2_DRAW_UPPER_RIGHT | U8G2_DRAW_UPPER_LEFT);
+    /* Horizon line */
+    u8g2_DrawHLine(&s_u8g2, (u8g2_uint_t)(cx - r - 4), (u8g2_uint_t)cy,
+                   (u8g2_uint_t)((r + 4) * 2 + 1));
+    /* Three rays above the arc */
+    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)cx,       (u8g2_uint_t)(cy-r-2),
+                            (u8g2_uint_t)cx,       (u8g2_uint_t)(cy-r-6));   /* straight up */
+    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-r-1), (u8g2_uint_t)(cy-3),
+                            (u8g2_uint_t)(cx-r-5), (u8g2_uint_t)(cy-7));     /* upper-left  */
+    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+r+1), (u8g2_uint_t)(cy-3),
+                            (u8g2_uint_t)(cx+r+5), (u8g2_uint_t)(cy-7));     /* upper-right */
+    /* Direction caret just below horizon */
+    if (rising) {
+        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-6), (u8g2_uint_t)(cy+7),
+                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+3));
+        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+6), (u8g2_uint_t)(cy+7),
+                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+3));
+    } else {
+        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-6), (u8g2_uint_t)(cy+3),
+                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+7));
+        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+6), (u8g2_uint_t)(cy+3),
+                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+7));
+    }
+
+    /* Icon spans rows 0 (ray tip) through ~35 (caret bottom) = 36 rows.
+     * Centre vertically: y_tube = (160 - 36) / 2 = 62. */
+    ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), 36, 62, fg, bg);
+}
+
+/* ── wx_sun_draw_time ────────────────────────────────────────────────────────
+ * Render "HH:MM" time centred both axes in a full 80×160 tube (logisoso28).
+ * bg: decoded RGB565 background (LCD_WIDTH × LCD_HEIGHT); NULL = solid black. */
+static void wx_sun_draw_time(int tube, const char *timestr, uint16_t fg,
+                              const uint8_t *bg)
+{
+    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso28_tf);
+    int ascent  = (int)u8g2_GetAscent(&s_u8g2);
+    int descent = (int)u8g2_GetDescent(&s_u8g2);   /* negative */
+    int glyph_h = ascent - descent;                  /* ~32 rows */
+    u8g2_uint_t tw = u8g2_GetStrWidth(&s_u8g2, timestr);
+    int tx = ((int)LCD_WIDTH - (int)tw) / 2;
+    if (tx < 0) tx = 0;
+    u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)tx, (u8g2_uint_t)ascent, timestr);
+
+    int y_tube = (LCD_HEIGHT - glyph_h) / 2;
+    ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), glyph_h, y_tube, fg, bg);
+}
+
+/* ── render_weather_sun ──────────────────────────────────────────────────────
+ * Weather panel 2 — Sunrise & Sunset:
+ *   tube 0 : sunrise icon (large sun ^ rising)
+ *   tube 1 : sunrise time "HH:MM"
+ *   tube 2 : blank
+ *   tube 3 : blank
+ *   tube 4 : sunset  icon (large sun v setting)
+ *   tube 5 : sunset  time "HH:MM"
+ * Background: theme's AMPM/blank.jpg composited behind U8g2 content.
+ * Solar times from NOAA algorithm; "--:--" fallback while geocoding pending.  */
+static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t)
+{
+    uint16_t fg = ht_sample_theme_color(cfg->theme);
+
+    /* Load theme background once — used for all four U8g2 tubes */
+    char bg_path[256];
+    snprintf(bg_path, sizeof(bg_path), "/images/themes/%s/AMPM/blank.jpg",
+             cfg->theme);
+    int bg_w = 0, bg_h = 0;
+    const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
+    if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
+
+    char rise_str[8] = "--:--";
+    char set_str[8]  = "--:--";
+
+    float lat = 0.0f, lon = 0.0f;
+    if (weather_get_location(&lat, &lon)) {
+        int rise_min = 0, set_min = 0;
+        solar_calc(lat, lon, t, &rise_min, &set_min);
+        if (rise_min >= 0)
+            snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
+                     (rise_min / 60) % 24, rise_min % 60);
+        if (set_min >= 0)
+            snprintf(set_str, sizeof(set_str), "%02d:%02d",
+                     (set_min / 60) % 24, set_min % 60);
+    }
+
+    /* Paint full background on each tube first, then composite U8g2 content */
+    if (bg) {
+        display_show_image(0, bg_path);
+        display_show_image(1, bg_path);
+        display_show_image(4, bg_path);
+        display_show_image(5, bg_path);
+    } else {
+        display_fill(0, 0x0000);
+        display_fill(1, 0x0000);
+        display_fill(4, 0x0000);
+        display_fill(5, 0x0000);
+    }
+
+    wx_sun_draw_icon(0, /*rising=*/true,  fg, bg);
+    wx_sun_draw_time(1, rise_str,          fg, bg);
+    display_show_ampm(2, "blank", cfg->theme);
+    display_show_ampm(3, "blank", cfg->theme);
+    wx_sun_draw_icon(4, /*rising=*/false, fg, bg);
+    wx_sun_draw_time(5, set_str,           fg, bg);
+}
+
+/* render_weather – panel 0 = temperature + icon, panel 1 = humidity + icon,
+ *                  panel 2 = sunrise + sunset times.
  *
- * Two-panel layout (auto-cycles in the display task):
+ * Three-panel layout (auto-cycles in the display task):
  *
  *  Panel 0 — temperature (tubes 0-indexed):
  *    positive 1-digit:  0=blank  1=blank  2=blank  3=units  4=°C/°F
@@ -2612,6 +2796,9 @@ static void render_album(const nextube_config_t *cfg,
  *
  *  Panel 1 — humidity:
  *    [blank] [blank] [blank] [hum_tens/blank] [hum_units] [icon]
+ *
+ *  Panel 2 — sunrise + sunset:
+ *    [rise_icon] [rise_time] [blank] [blank] [set_icon] [set_time]
  */
 static void render_weather(const nextube_config_t *cfg, int panel)
 {
@@ -2622,6 +2809,19 @@ static void render_weather(const nextube_config_t *cfg, int panel)
         /* No weather data yet – show "·" (dot) on every tube. */
         for (int i = 0; i < LCD_COUNT; i++)
             display_show_ampm(i, "dot", cfg->theme);
+        return;
+    }
+
+    /* Panel 2 — sunrise/sunset — handled by a dedicated renderer */
+    if (panel == WEATHER_PANEL_SUN) {
+        /* render_weather_sun needs local time — use a stack tm struct here.
+         * The caller (display_task) already holds a fresh struct tm in `t`, but
+         * render_weather doesn't receive it; re-derive from time() for simplicity
+         * (only called on panel switch or solar-time change, ≤once/minute). */
+        time_t now = time(NULL);
+        struct tm lt;
+        localtime_r(&now, &lt);
+        render_weather_sun(cfg, &lt);
         return;
     }
 
@@ -2785,6 +2985,7 @@ static void display_task(void *arg)
     float         last_temp_c   = -9999.0f;   /* weather change detection */
     float         last_hum      = -1.0f;
     bool          last_wx_valid = false;       /* detect when data first arrives */
+    int           last_wx_min   = -1;          /* solar time change detection (minute) */
     bool          last_leading_zero = false;    /* leading-zero change detection */
     bool          last_bl_on    = true;        /* backlight on/off tracking */
     uint8_t       last_bl_brt   = 255;         /* sentinel: force-apply on first tick */
@@ -2852,6 +3053,7 @@ static void display_task(void *arg)
             last_temp_c   = -9999.0f;
             last_hum      = -1.0f;
             last_wx_valid = false;
+            last_wx_min   = -1;
         }
 
         /* ── Mode rotation ───────────────────────────────────────────
@@ -3021,6 +3223,7 @@ static void display_task(void *arg)
             last_temp_c   = -9999.0f;
             last_hum      = -1.0f;
             last_wx_valid = false;
+            last_wx_min   = -1;
             first         = true;
             ap_pin_transition = true;   /* arm the exit guard for the next tick */
             vTaskDelayUntil(&wake, pdMS_TO_TICKS(200));
@@ -3327,12 +3530,48 @@ static void display_task(void *arg)
         }
 
         case APP_MODE_YOUTUBE: {
-            const sub_count_t *sub = youtube_bili_get();
+            const sub_count_t *sub = subscribers_get();
             uint32_t count = sub->valid ? (uint32_t)sub->subscriber_count : 0;
             if (first || mode_changed || theme_changed || count != last_subs ||
                     burnin_force_render) {
-                render_subs(cfg);
+                render_followers(cfg, count, "youtube");
                 last_subs = count;
+            }
+            break;
+        }
+
+        case APP_MODE_INSTAGRAM: {
+            static uint32_t last_insta = UINT32_MAX;
+            const sub_count_t *s = instagram_get();
+            uint32_t count = s->valid ? (uint32_t)s->subscriber_count : 0;
+            if (first || mode_changed || theme_changed || count != last_insta ||
+                    burnin_force_render) {
+                render_followers(cfg, count, "instagram");
+                last_insta = count;
+            }
+            break;
+        }
+
+        case APP_MODE_TIKTOK: {
+            static uint32_t last_tiktok = UINT32_MAX;
+            const sub_count_t *s = tiktok_get();
+            uint32_t count = s->valid ? (uint32_t)s->subscriber_count : 0;
+            if (first || mode_changed || theme_changed || count != last_tiktok ||
+                    burnin_force_render) {
+                render_followers(cfg, count, "tiktok");
+                last_tiktok = count;
+            }
+            break;
+        }
+
+        case APP_MODE_MASTODON: {
+            static uint32_t last_mastodon = UINT32_MAX;
+            const sub_count_t *s = mastodon_get();
+            uint32_t count = s->valid ? (uint32_t)s->subscriber_count : 0;
+            if (first || mode_changed || theme_changed || count != last_mastodon ||
+                    burnin_force_render) {
+                render_followers(cfg, count, "mastodon");
+                last_mastodon = count;
             }
             break;
         }
@@ -3353,42 +3592,57 @@ static void display_task(void *arg)
             break;
 
         case APP_MODE_WEATHER: {
+            struct tm wx_tm; ntp_get_local(&wx_tm);
             const weather_data_t *w = weather_get();
             bool now_valid  = (w != NULL && w->valid);
 
-            /* Panel auto-switch: cycle temp (0) ↔ humidity (1) on a timer.
-             * Respects weather_panel0_en / weather_panel1_en — if only one
-             * panel is enabled it is shown exclusively; if both are enabled
-             * they alternate every weather_panel_ms ms. */
+            /* Panel auto-switch: cycle enabled panels on a timer.
+             * Respects weather_panel0/1/2_en — panels not enabled are skipped.
+             * If the currently active panel has been disabled, jumps to the next
+             * enabled one immediately without waiting for the rotation timer.   */
             bool panel_flipped = false;
             if (now_valid) {
-                bool p0 = cfg->weather_panel0_en;
-                bool p1 = cfg->weather_panel1_en;
+                bool pen[3] = { cfg->weather_panel0_en,
+                                cfg->weather_panel1_en,
+                                cfg->weather_panel2_en };
 
-                /* If the currently active panel has been disabled, jump to the
-                 * other one immediately without waiting for the rotation timer. */
-                if (weather_panel == WEATHER_PANEL_TEMP && !p0 && p1) {
-                    weather_panel = WEATHER_PANEL_HUM; weather_panel_tick = 0; panel_flipped = true;
-                } else if (weather_panel == WEATHER_PANEL_HUM && !p1 && p0) {
-                    weather_panel = WEATHER_PANEL_TEMP; weather_panel_tick = 0; panel_flipped = true;
-                } else if (p0 && p1) {
-                    /* Both enabled — rotate on the configured interval */
+                /* Build ordered list of enabled panel indices */
+                int elist[3]; int ecnt = 0;
+                for (int _i = 0; _i < 3; _i++)
+                    if (pen[_i]) elist[ecnt++] = _i;
+
+                if (ecnt == 0) {
+                    /* Nothing explicitly enabled — force temp panel */
+                    elist[0] = WEATHER_PANEL_TEMP; ecnt = 1;
+                }
+
+                /* If current panel was disabled, jump to first enabled */
+                bool cur_ok = false;
+                for (int _i = 0; _i < ecnt; _i++)
+                    if (elist[_i] == weather_panel) { cur_ok = true; break; }
+                if (!cur_ok) {
+                    weather_panel = elist[0]; weather_panel_tick = 0; panel_flipped = true;
+                } else if (ecnt > 1) {
+                    /* More than one panel enabled — rotate on the configured interval */
                     TickType_t now_t = xTaskGetTickCount();
                     if (weather_panel_tick == 0) {
-                        weather_panel_tick = now_t;       /* arm timer on first valid frame */
+                        weather_panel_tick = now_t;
                     } else if ((now_t - weather_panel_tick) >= pdMS_TO_TICKS(
                                    cfg->weather_panel_ms ? cfg->weather_panel_ms : 5000)) {
-                        weather_panel      = 1 - weather_panel;
+                        /* Advance to next panel in the enabled list */
+                        int cur_pos = 0;
+                        for (int _i = 0; _i < ecnt; _i++)
+                            if (elist[_i] == weather_panel) { cur_pos = _i; break; }
+                        weather_panel      = elist[(cur_pos + 1) % ecnt];
                         weather_panel_tick = now_t;
                         panel_flipped      = true;
                     }
                 }
-                /* Single-panel-only case: weather_panel is already correct (clamped above),
-                 * timer is irrelevant — no further action needed. */
             }
 
             /* Trigger re-render when: first draw, mode/theme change, new data
-             * values arrived, validity flips, OR the panel just switched. */
+             * values arrived, validity flips, panel switched, or solar-time
+             * minute changed (only relevant on panel 2). */
             bool wx_changed = false;
             if (now_valid && last_wx_valid) {
                 bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
@@ -3400,12 +3654,18 @@ static void display_task(void *arg)
                 bool last_neg = (last_tf < -0.5f);
                 wx_changed = (cur_t_i != last_t_i || cur_neg != last_neg ||
                               (int)(w->humidity + 0.5f) != (int)(last_hum + 0.5f));
+                if (!wx_changed && weather_panel == WEATHER_PANEL_SUN)
+                    wx_changed = (wx_tm.tm_min != last_wx_min);
             }
             bool valid_changed = (now_valid != last_wx_valid);
             if (first || mode_changed || theme_changed || wx_changed || valid_changed ||
                     panel_flipped || burnin_force_render) {
                 render_weather(cfg, weather_panel);
-                if (now_valid) { last_temp_c = w->temp_c; last_hum = w->humidity; }
+                if (now_valid) {
+                    last_temp_c = w->temp_c;
+                    last_hum    = w->humidity;
+                    last_wx_min = wx_tm.tm_min;
+                }
                 last_wx_valid = now_valid;
             }
             break;
@@ -3450,13 +3710,26 @@ static void display_task(void *arg)
                              ? pdMS_TO_TICKS(DISPLAY_TICK_MS_FAST)
                              : pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW);
 
-        /* Re-sync wake timer when we've fallen behind (e.g. blocked on
-         * SPIFFS while audio pre-buffers).  Cap at DISPLAY_TICK_MS_SLOW
-         * regardless of tick_ms so a spectrum stall doesn't cause a
-         * catch-up burst in a slower mode after switching. */
+        /* Re-sync wake timer when we've fallen behind the current tick budget.
+         *
+         * Background: spi_device_polling_transmit() is a busy-wait spin that
+         * never yields the CPU.  In Spectrum mode (tick = 50 ms) a full frame
+         * is 6 tubes × 160 row-transactions; total render time can exceed 50 ms.
+         * When that happens vTaskDelayUntil's target is already in the past —
+         * it returns immediately without sleeping, so IDLE1 on CPU 1 never runs
+         * and the Task Watchdog fires after 5 s.
+         *
+         * The threshold must be tick_ms (the CURRENT tick budget), NOT the
+         * hardcoded SLOW value.  Using SLOW (200 ms) as the threshold while
+         * tick_ms = FAST (50 ms) means 30–40 consecutive no-sleep frames
+         * accumulate before re-sync fires, starving IDLE1 for 2+ s per cycle.
+         *
+         * With tick_ms as threshold: any single render that overshoots its
+         * budget causes an immediate re-sync, and the next vTaskDelayUntil
+         * sleeps a full tick period.  IDLE1 always gets CPU within two ticks. */
         {
             TickType_t now_tick = xTaskGetTickCount();
-            if ((TickType_t)(now_tick - wake) > pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW))
+            if ((TickType_t)(now_tick - wake) >= tick_ms)
                 wake = now_tick;
         }
         vTaskDelayUntil(&wake, tick_ms);

@@ -97,6 +97,9 @@ select option{background:var(--accent);color:var(--text)}
       <div class="stat"><div class="val" id="s-temp">--°</div><div class="lbl">Weather</div></div>
       <div class="stat" id="s-sensor-wrap" style="display:none"><div class="val" id="s-sensor">--°</div><div class="lbl">Local Sensor</div></div>
       <div class="stat"><div class="val" id="s-subs">--</div><div class="lbl">Subscribers</div></div>
+      <div class="stat"><div class="val" id="s-insta">--</div><div class="lbl">Instagram</div></div>
+      <div class="stat"><div class="val" id="s-tiktok">--</div><div class="lbl">TikTok</div></div>
+      <div class="stat"><div class="val" id="s-mastodon">--</div><div class="lbl">Mastodon</div></div>
       <div class="stat"><div class="val" id="s-heap">--</div><div class="lbl">Free Heap</div></div>
       <div class="stat"><div class="val" id="s-wifi">--</div><div class="lbl">WiFi</div></div>
     </div>
@@ -108,11 +111,14 @@ select option{background:var(--accent);color:var(--text)}
       <button class="btn btn-outline" onclick="setMode('Countdown')">Countdown</button>
       <button class="btn btn-outline" onclick="setMode('Scoreboard')">Scoreboard</button>
       <button class="btn btn-outline" onclick="setMode('Pomodoro')">Pomodoro</button>
-      <button class="btn btn-outline" onclick="setMode('YouTube')">YouTube</button>
       <button class="btn btn-outline" onclick="setMode('Date')">Date</button>
       <button class="btn btn-outline" onclick="setMode('Album')">Album</button>
       <button class="btn btn-outline" onclick="setMode('Weather')">Weather</button>
       <button class="btn btn-outline" onclick="setMode('Spectrum')">Spectrum</button>
+      <button class="btn btn-outline" onclick="setMode('YouTube')">YouTube</button>
+      <button class="btn btn-outline" onclick="setMode('Instagram')">Instagram</button>
+      <button class="btn btn-outline" onclick="setMode('TikTok')">TikTok</button>
+      <button class="btn btn-outline" onclick="setMode('Mastodon')">Mastodon</button>
     </div>
   </div>
 </div>
@@ -387,15 +393,18 @@ select option{background:var(--accent);color:var(--text)}
     <h2>Enabled Modes</h2>
     <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Choose which modes are accessible via the touch buttons. Clock and Date can both be enabled at the same time.</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem">
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-clock" checked> Clock <span style="font-size:.73rem;color:var(--dim)">(time)</span></label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-countdown"> Countdown</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-scoreboard"> Scoreboard</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-pomodoro"> Pomodoro</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-youtube"> YouTube</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-date"> Date <span style="font-size:.73rem;color:var(--dim)">(full date)</span></label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album"> Album</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather"> Weather</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum"> Spectrum <span style="color:var(--dim);font-size:.78rem">(mic required)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-clock" checked onchange="markDirty()"> Clock <span style="font-size:.73rem;color:var(--dim)">(time)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-countdown" onchange="markDirty()"> Countdown</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-scoreboard" onchange="markDirty()"> Scoreboard</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-pomodoro" onchange="markDirty()"> Pomodoro</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-youtube" onchange="markDirty()"> YouTube</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-date" onchange="markDirty()"> Date <span style="font-size:.73rem;color:var(--dim)">(full date)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album" onchange="markDirty()"> Album</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather" onchange="markDirty()"> Weather</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum" onchange="markDirty()"> Spectrum <span style="color:var(--dim);font-size:.78rem">(mic required)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-instagram" onchange="markDirty()"> Instagram</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-tiktok" onchange="markDirty()"> TikTok</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-mastodon" onchange="markDirty()"> Mastodon</label>
     </div>
   </div>
   <!-- Mode Rotation -->
@@ -570,7 +579,7 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <div class="field" id="f-wkey-row" style="display:none"><label>API Key</label><input id="f-wkey" type="text"></div>
     <div class="row">
-      <div class="field"><label>City</label><input id="f-city" type="text" placeholder="e.g. Ottawa,CA or London"></div>
+      <div class="field"><label>City</label><input id="f-city" type="text" placeholder="City name"></div>
       <div class="field"><label>Units</label>
         <select id="f-tempfmt"><option value="Celsius">Celsius</option><option value="Fahrenheit">Fahrenheit</option></select>
       </div>
@@ -590,29 +599,164 @@ select option{background:var(--accent);color:var(--text)}
           <input type="checkbox" id="f-wx-p1" onchange="onWxPanelToggle('f-wx-p1')" checked>
           <span>Humidity (panel 1)</span>
         </label>
+        <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer">
+          <input type="checkbox" id="f-wx-p2" onchange="onWxPanelToggle('f-wx-p2')">
+          <span>Sunrise &amp; Sunset (panel 2)</span>
+        </label>
       </div>
-      <small style="color:var(--dim);margin-top:.3rem;display:block">At least one panel must remain enabled.</small>
+      <small style="color:var(--dim);margin-top:.3rem;display:block">At least one panel must remain enabled. Panel 2 requires a city to be configured.</small>
     </div>
   </div>
-  <div class="card">
-    <h2>YouTube / Bilibili</h2>
-    <div class="field" style="padding-bottom:4px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-youtube-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
-        <label for="f-youtube-en" style="cursor:pointer">Enable YouTube / Bilibili</label>
+  <div class="card" id="social-card">
+    <!-- Header row — click anywhere to expand/collapse -->
+    <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleSocialCard()">
+      <span id="social-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
+      <h2 style="margin:0;border:none;padding:0;flex:1">Social Media Counters</h2>
+    </div>
+    <label style="display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.88rem;margin:.55rem 0 0 1.3rem">
+      <input type="checkbox" id="f-social-en" style="width:15px;height:15px" onchange="markDirty()">
+      Enable
+    </label>
+    <p style="color:var(--dim);font-size:.78rem;margin:.25rem 0 0 1.3rem">
+      Master switch — when off the polling task never starts. <strong>Restart required to apply.</strong>
+    </p>
+
+    <div id="social-body" style="display:none;margin-top:.9rem">
+
+      <!-- ── Shared settings ───────────────────────────────── -->
+      <div class="field">
+        <label>Polling Interval <span style="color:var(--dim);font-size:.8rem">(minutes between fetches)</span></label>
+        <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+          <input id="f-sub-interval" type="number" min="5" max="1440" step="1" style="width:80px" oninput="markDirty()">
+          <span style="color:var(--dim);font-size:.82rem">Presets:</span>
+          <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=5;   markDirty()">5 m</button>
+          <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=10;  markDirty()">10 m</button>
+          <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=30;  markDirty()">30 m</button>
+          <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=60;  markDirty()">1 h</button>
+          <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=360; markDirty()">6 h</button>
+          <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=720; markDirty()">12 h</button>
+          <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=1440;markDirty()">24 h</button>
+        </div>
+        <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Applies to all platforms. Minimum 5 minutes. Changes take effect after the current sleep expires.</p>
       </div>
-      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
-        Periodic subscriber-count fetch. Disabling frees ~8 KB RAM.
-        <strong>Restart required.</strong>
-      </p>
-    </div>
-    <div class="field"><label>Platform</label>
-      <select id="f-vsite"><option value="youtube">YouTube</option><option value="bilibili">Bilibili</option></select>
-    </div>
-    <div class="field"><label>YouTube Channel ID</label><input id="f-ytid" type="text"></div>
-    <div class="field"><label>YouTube API Key</label><input id="f-ytkey" type="text"></div>
-    <div class="field"><label>Bilibili UID</label><input id="f-buid" type="text"></div>
-  </div>
+      <div class="field">
+        <label>Relay host <span style="color:var(--dim);font-size:.8rem">(LAN IP of PC running social_relay.py)</span></label>
+        <input id="f-tiktok-relay" type="text" placeholder="e.g. 192.168.1.100" maxlength="63" oninput="markDirty();validateSubs()">
+        <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">
+          Run <code>python helpers/social_relay.py</code> on any PC on your network and paste the IP here.
+          Used by YouTube and TikTok when their fetch method is set to Relay.
+        </p>
+        <p id="warn-relay-host" style="display:none;color:var(--hi);font-size:.8rem;margin:.4rem 0 0;padding:.4rem .6rem;background:rgba(255,160,0,.08);border:1px solid rgba(255,160,0,.3);border-radius:5px">
+          ⚠ Relay host is required — one or more platforms above use <strong>Relay</strong> as their fetch method but no host is set. Enter the IP shown when you run <code>social_relay.py</code>, or switch the fetch method to a non-relay option.
+        </p>
+      </div>
+
+      <hr style="border:none;border-top:1px solid rgba(255,255,255,.07);margin:.9rem 0">
+
+      <!-- ── YouTube / Bilibili ─────────────────────────────── -->
+      <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">YouTube / Bilibili</div>
+      <div class="field" style="padding-bottom:4px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="f-youtube-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-youtube-en','m-youtube');markDirty();validateSubs()">
+          <label for="f-youtube-en" style="cursor:pointer">Enable YouTube / Bilibili</label>
+        </div>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
+          Periodic subscriber-count fetch. Disabling frees ~8 KB RAM.
+          <strong>Restart required.</strong>
+        </p>
+      </div>
+      <div class="field"><label>Platform</label>
+        <select id="f-vsite" onchange="onVsiteChange()"><option value="youtube">YouTube</option><option value="bilibili">Bilibili</option></select>
+      </div>
+      <div id="yt-fields">
+        <div class="field"><label>YouTube Channel ID</label><input id="f-ytid" type="text" oninput="validateSubs()"></div>
+        <p id="warn-yt-id" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px">⚠ Channel ID is required. Find yours at <a href="https://www.youtube.com/account_advanced" target="_blank">youtube.com/account_advanced</a>.</p>
+        <div class="field">
+          <label>Fetch method</label>
+          <select id="yt-method" onchange="onYtMethodChange(); markDirty(); validateSubs()">
+            <option value="relay">Relay — no API key needed (recommended)</option>
+            <option value="apikey">YouTube Data API v3 key</option>
+          </select>
+          <p id="yt-method-relay-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Uses <code>social_relay.py</code> — set the relay host above.</p>
+          <p id="yt-method-key-hint"   style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none">Free API key from <a href="https://console.cloud.google.com" target="_blank">console.cloud.google.com</a> → Enable "YouTube Data API v3" → Credentials → API Key.</p>
+        </div>
+        <div id="yt-key-row" style="display:none">
+          <div class="field"><label>API Key</label><input id="f-ytkey" type="text" oninput="validateSubs()"></div>
+          <p id="warn-yt-key" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px">⚠ Paste your YouTube Data API v3 key above.</p>
+        </div>
+      </div>
+      <div id="bili-fields">
+        <div class="field"><label>Bilibili UID</label><input id="f-buid" type="text" oninput="validateSubs()"></div>
+        <p id="warn-bili" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px">⚠ Bilibili UID is required for the follower counter to work.</p>
+      </div>
+
+      <hr style="border:none;border-top:1px solid rgba(255,255,255,.07);margin:.9rem 0">
+
+      <!-- ── Instagram ──────────────────────────────────────── -->
+      <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">Instagram</div>
+      <div class="field" style="padding-bottom:4px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="f-insta-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-insta-en','m-instagram');markDirty();validateSubs()">
+          <label for="f-insta-en" style="cursor:pointer">Enable Instagram follower counter</label>
+        </div>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Fetches public follower count. <strong>Restart required.</strong></p>
+      </div>
+      <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(no @ prefix)</span></label>
+        <input id="f-insta-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()">
+      </div>
+      <p id="warn-insta" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px">⚠ Username is required for the follower counter to work.</p>
+
+      <hr style="border:none;border-top:1px solid rgba(255,255,255,.07);margin:.9rem 0">
+
+      <!-- ── TikTok ──────────────────────────────────────────── -->
+      <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">TikTok</div>
+      <div class="field" style="padding-bottom:4px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="f-tiktok-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-tiktok-en','m-tiktok');markDirty();validateSubs()">
+          <label for="f-tiktok-en" style="cursor:pointer">Enable TikTok follower counter</label>
+        </div>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Fetches public follower count. <strong>Restart required.</strong></p>
+      </div>
+      <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(no @ prefix)</span></label>
+        <input id="f-tiktok-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()">
+      </div>
+      <div class="field">
+        <label>Fetch method</label>
+        <select id="tt-method" onchange="onTtMethodChange(); markDirty(); validateSubs()">
+          <option value="relay">Relay — no API key needed (recommended)</option>
+          <option value="apikey">TikTok Research API token</option>
+        </select>
+        <p id="tt-method-relay-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Uses <code>social_relay.py</code> — set the relay host above.</p>
+        <p id="tt-method-key-hint"   style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none">Apply for Research API access at <a href="https://developers.tiktok.com" target="_blank">developers.tiktok.com</a> → Research API → Client Token.</p>
+      </div>
+      <div id="tt-key-row" style="display:none">
+        <div class="field"><label>Research API Bearer Token</label><input id="f-tiktok-key" type="text" oninput="validateSubs()"></div>
+        <p id="warn-tiktok-key" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px">⚠ Paste your TikTok Research API bearer token above.</p>
+      </div>
+      <p id="warn-tiktok" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px">⚠ Username is required for the follower counter to work.</p>
+
+      <hr style="border:none;border-top:1px solid rgba(255,255,255,.07);margin:.9rem 0">
+
+      <!-- ── Mastodon ────────────────────────────────────────── -->
+      <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">Mastodon</div>
+      <div class="field" style="padding-bottom:4px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="f-mast-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-mast-en','m-mastodon');markDirty();validateSubs()">
+          <label for="f-mast-en" style="cursor:pointer">Enable Mastodon follower counter</label>
+        </div>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Uses the official public API — no authentication or relay needed. <strong>Restart required.</strong></p>
+      </div>
+      <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(no @ prefix)</span></label>
+        <input id="f-mast-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()">
+      </div>
+      <div class="field"><label>Instance <span style="color:var(--dim);font-size:.8rem">(domain only)</span></label>
+        <input id="f-mast-instance" type="text" placeholder="mastodon.social" maxlength="63" oninput="validateSubs()">
+      </div>
+      <p id="warn-mastodon" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px">⚠ Both username and instance are required.</p>
+
+    </div><!-- #social-body -->
+  </div><!-- #social-card -->
+
   <div class="card">
     <h2>Timer Settings</h2>
     <div class="row">
@@ -695,7 +839,7 @@ select option{background:var(--accent);color:var(--text)}
     <h2>Web UI Update</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>nextube-WebUI-v*.zip</strong> to apply only the changed web UI files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
     <input type="file" id="hotpatch-file" accept=".zip" style="margin-bottom:.5rem">
-    <div class="progress" id="hotpatch-progress" style="display:none"><div class="progress-bar" id="hotpatch-bar"></div></div>
+    <div class="progress ota" id="hotpatch-progress" style="display:none"><div class="progress-bar" id="hotpatch-bar"></div></div>
     <p id="hotpatch-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
     <div class="btn-group"><button class="btn btn-primary" onclick="doHotPatch()">Upload & Apply</button></div>
   </div>
@@ -1019,10 +1163,10 @@ function toast(msg, err) {
   }, 3000);
 }
 
-/* ── Weather panel enable guard (either but not both may be off) ── */
+/* ── Weather panel enable guard (at least one must remain on) ── */
 function onWxPanelToggle(changedId) {
-  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked) {
-    /* Prevent both being unchecked — restore the one that was just changed */
+  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked && !$('f-wx-p2').checked) {
+    /* Prevent all being unchecked — restore the one that was just changed */
     $(changedId).checked = true;
   }
 }
@@ -1032,6 +1176,12 @@ function toggleWeatherKey() {
   const src = $('f-wsrc') ? $('f-wsrc').value : 'wttr';
   /* Only OpenWeatherMap needs an API key; wttr.in and Open-Meteo are keyless */
   $('f-wkey-row').style.display = (src === 'openweather') ? '' : 'none';
+  /* City placeholder varies by service */
+  if ($('f-city')) {
+    $('f-city').placeholder = (src === 'openweather')
+      ? 'e.g. London or London,GB'
+      : 'e.g. Ottawa or Ottawa,Canada';
+  }
 }
 
 /* ── Unsaved-changes banner ────────────────────────── */
@@ -1233,8 +1383,21 @@ async function loadSettings() {
    * upgrading from older firmware (no key in config.json yet) keep their
    * current behaviour until the user chooses to disable. */
   $('f-weather-en').checked = cfg.weather_enabled !== false;
-  $('f-youtube-en').checked = cfg.youtube_enabled !== false;
-  $('f-mdns-en').checked    = cfg.mdns_enabled    !== false;
+  $('f-sub-interval').value  = cfg.sub_poll_interval_min || 30;
+  $('f-youtube-en').checked  = cfg.youtube_enabled    !== false;
+  $('f-insta-en').checked    = cfg.instagram_enabled  === true;
+  $('f-tiktok-en').checked   = cfg.tiktok_enabled     === true;
+  $('f-insta-user').value    = cfg.instagram_user  || '';
+  $('f-tiktok-user').value   = cfg.tiktok_user        || '';
+  $('f-tiktok-key').value    = cfg.tiktok_key          || '';
+  $('f-tiktok-relay').value  = cfg.tiktok_relay_host  || '';
+  /* Select method based on whether an API token is stored */
+  $('tt-method').value = (cfg.tiktok_key && cfg.tiktok_key.trim()) ? 'apikey' : 'relay';
+  onTtMethodChange(); /* sync API token row visibility */
+  $('f-mast-en').checked     = cfg.mastodon_enabled   === true;
+  $('f-mast-user').value     = cfg.mastodon_user      || '';
+  $('f-mast-instance').value = cfg.mastodon_instance  || '';
+  $('f-mdns-en').checked     = cfg.mdns_enabled    !== false;
   const tzStr = cfg.timezone || 'UTC0';
   $('f-tz').value = tzStr;
   $('f-tz-sel').value = tzStr; /* pre-selects matching option; stays blank for custom strings */
@@ -1248,9 +1411,13 @@ async function loadSettings() {
   $('f-tempfmt').value = cfg.temperature_format || 'Celsius';
   $('f-datefmt').value = cfg.date_format || 'DD/MM/YY';
   $('f-vsite').value = cfg.video_site || 'youtube';
-  $('f-ytid').value = cfg.youtube_id || '';
+  $('f-ytid').value  = cfg.youtube_id  || '';
   $('f-ytkey').value = cfg.youtube_key || '';
+  /* Select method based on whether an API key is stored */
+  $('yt-method').value = (cfg.youtube_key && cfg.youtube_key.trim()) ? 'apikey' : 'relay';
   $('f-buid').value = cfg.bili_uid || '';
+  onVsiteChange();    /* sync YouTube/Bilibili field visibility */
+  onYtMethodChange(); /* sync API key row visibility */
   $('f-vol').value = cfg.volume || 20; $('v-vol').textContent = cfg.volume || 20;
   $('f-music').value = cfg.music_file || '';
   $('f-bell').value = cfg.bell_file || '';
@@ -1270,6 +1437,7 @@ async function loadSettings() {
   $('f-wx-panel').value   = Math.round((cfg.weather_panel_ms || 5000) / 1000);
   $('f-wx-p0').checked    = cfg.weather_panel0_en !== false;
   $('f-wx-p1').checked    = cfg.weather_panel1_en !== false;
+  $('f-wx-p2').checked    = cfg.weather_panel2_en === true;
 
   /* Enabled modes bitmask.  Default 0xFF = all modes on (Clock and Date are independent). */
   const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
@@ -1282,6 +1450,17 @@ async function loadSettings() {
   $('m-album').checked       = !!(em & (1 << 6));
   $('m-weather').checked     = !!(em & (1 << 7));
   $('m-spectrum').checked    = !!(em & (1 << 8));
+  $('m-instagram').checked  = !!(em & (1 << 9));
+  $('m-tiktok').checked     = !!(em & (1 << 10));
+  $('m-mastodon').checked   = !!(em & (1 << 11));
+  /* If a counter fetch is enabled but its mode bit wasn't saved, add the mode */
+  [['f-youtube-en','m-youtube'],['f-insta-en','m-instagram'],
+   ['f-tiktok-en','m-tiktok'],['f-mast-en','m-mastodon']].forEach(([f,m])=>{
+    if ($(f) && $(m) && $(f).checked && !$(m).checked) $(m).checked = true;
+  });
+  /* Social master toggle */
+  const socialEnEl = $('f-social-en');
+  if (socialEnEl) socialEnEl.checked = cfg.social_enabled === true;
 
   /* Spectrum colours and LED source */
   const sc = cfg.spectrum_RGB || [50, 80, 100];
@@ -1373,6 +1552,90 @@ function onTimeTypeChange() {
   const tt = $('f-timetype').value;
   $('tube5-section').style.display   = (tt === '24H_NS') ? '' : 'none';
   $('tube6cx-section').style.display = (tt === '24H_CX') ? '' : 'none';
+}
+
+/* ── Platform select – show/hide YouTube vs Bilibili fields ── */
+function onVsiteChange() {
+  const bili = $('f-vsite').value === 'bilibili';
+  $('yt-fields').style.display   = bili ? 'none' : '';
+  $('bili-fields').style.display = bili ? '' : 'none';
+  markDirty();
+  validateSubs();
+}
+
+/* ── YouTube fetch method – show/hide API key row ── */
+function onYtMethodChange() {
+  const relay = $('yt-method').value === 'relay';
+  $('yt-key-row').style.display           = relay ? 'none' : '';
+  $('yt-method-relay-hint').style.display = relay ? '' : 'none';
+  $('yt-method-key-hint').style.display   = relay ? 'none' : '';
+}
+
+/* ── TikTok fetch method – show/hide API token row ── */
+function onTtMethodChange() {
+  const relay = $('tt-method').value === 'relay';
+  $('tt-key-row').style.display           = relay ? 'none' : '';
+  $('tt-method-relay-hint').style.display = relay ? '' : 'none';
+  $('tt-method-key-hint').style.display   = relay ? 'none' : '';
+}
+
+/* ── Social card collapsible ── */
+function toggleSocialCard() {
+  const body  = $('social-body');
+  const arrow = $('social-arrow');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
+}
+
+/* ── Sync counter-fetch enable ↔ display-mode checkbox ─────────────────
+ * When the user enables a social counter, automatically add it to the mode
+ * rotation (and remove it when the counter is disabled).  Called both from
+ * the onchange handler and once during loadConfig() so that saved configs
+ * where the counter is on but the mode bit was never set get fixed. ── */
+function syncCounterMode(fetchId, modeId) {
+  const fetchEl = $(fetchId), modeEl = $(modeId);
+  if (!fetchEl || !modeEl) return;
+  if (fetchEl.checked) { if (!modeEl.checked) { modeEl.checked = true; markDirty(); } }
+  else                 { if (modeEl.checked)  { modeEl.checked = false; markDirty(); } }
+}
+
+/* ── Subscriber counter validation – show inline warnings when a counter
+ *   is enabled but the required credentials / username are missing ── */
+function validateSubs() {
+  function showWarn(id, visible) {
+    const el = $(id); if (el) el.style.display = visible ? '' : 'none';
+  }
+  const ytEn    = $('f-youtube-en').checked;
+  const bili    = $('f-vsite').value === 'bilibili';
+  const instaEn = $('f-insta-en').checked;
+  const ttEn    = $('f-tiktok-en').checked;
+
+  /* YouTube — Channel ID always required; API key only required when method=apikey */
+  const ytRelay = $('yt-method') && $('yt-method').value === 'relay';
+  showWarn('warn-yt-id',  ytEn && !bili && !$('f-ytid').value.trim());
+  showWarn('warn-yt-key', ytEn && !bili && !ytRelay && !$('f-ytkey').value.trim());
+
+  /* Bilibili — UID required */
+  showWarn('warn-bili', ytEn && bili && !$('f-buid').value.trim());
+
+  const mastEn  = $('f-mast-en').checked;
+
+  /* Instagram / TikTok — username required; TikTok key required when method=apikey */
+  const ttRelay = $('tt-method') && $('tt-method').value === 'relay';
+  showWarn('warn-insta',       instaEn && !$('f-insta-user').value.trim());
+  showWarn('warn-tiktok',      ttEn    && !$('f-tiktok-user').value.trim());
+  showWarn('warn-tiktok-key',  ttEn    && !ttRelay && !$('f-tiktok-key').value.trim());
+
+  /* Mastodon — both username and instance required */
+  showWarn('warn-mastodon', mastEn  &&
+           (!$('f-mast-user').value.trim() || !$('f-mast-instance').value.trim()));
+
+  /* Relay host — required when any enabled platform uses relay fetch method */
+  const relayHost = $('f-tiktok-relay').value.trim();
+  const needsRelay = (ytEn && !bili && ytRelay) || (ttEn && ttRelay);
+  showWarn('warn-relay-host', needsRelay && !relayHost);
 }
 
 /* ── Timezone dropdown → populate POSIX text field ── */
@@ -1473,6 +1736,13 @@ function biSchedMask() {
 
 /* ── Save settings ─────────────────────────────────── */
 async function saveSettings() {
+  /* Block save when a relay-dependent platform is enabled but no host is set */
+  if ($('warn-relay-host') && $('warn-relay-host').style.display !== 'none') {
+    toast('Set a relay host before saving — see the warning in Social Media Counters.');
+    $('f-tiktok-relay').focus();
+    return;
+  }
+
   const colors = [...document.querySelectorAll('#color-swatches input')].map(el => {
     const h = el.value.replace('#','');
     return [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)];
@@ -1486,7 +1756,10 @@ async function saveSettings() {
     ($('m-date').checked ? (1 << 5) : 0) |
     ($('m-album').checked       ? (1 << 6) : 0) |
     ($('m-weather').checked     ? (1 << 7) : 0) |
-    ($('m-spectrum').checked    ? (1 << 8) : 0);
+    ($('m-spectrum').checked    ? (1 << 8)  : 0) |
+    ($('m-instagram').checked  ? (1 << 9)  : 0) |
+    ($('m-tiktok').checked     ? (1 << 10) : 0) |
+    ($('m-mastodon').checked   ? (1 << 11) : 0);
   const body = {
     apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value, clock_tube5: $('f-tube5').value }],
     lcd_brightness: +$('f-lcdbr').value,
@@ -1517,10 +1790,25 @@ async function saveSettings() {
     ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
     date_format: $('f-datefmt').value,
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_format: $('f-tempfmt').value,
-    video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
+    video_site: $('f-vsite').value, youtube_id: $('f-ytid').value,
+    /* Send empty key when relay method selected so firmware uses the relay path */
+    youtube_key: ($('yt-method').value === 'relay') ? '' : $('f-ytkey').value,
+    bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: !!$('m-spectrum').checked,
-    weather_enabled: $('f-weather-en').checked, youtube_enabled: $('f-youtube-en').checked, mdns_enabled: $('f-mdns-en').checked,
+    weather_enabled: $('f-weather-en').checked,
+    social_enabled: $('f-social-en') ? $('f-social-en').checked : false,
+    youtube_enabled: $('f-youtube-en').checked,
+    sub_poll_interval_min: Math.max(5, parseInt($('f-sub-interval').value) || 30),
+    instagram_enabled: $('f-insta-en').checked, tiktok_enabled: $('f-tiktok-en').checked,
+    instagram_user: $('f-insta-user').value.trim(), tiktok_user: $('f-tiktok-user').value.trim(),
+    /* Send empty token when relay method selected so firmware uses relay path */
+    tiktok_key: ($('tt-method').value === 'relay') ? '' : $('f-tiktok-key').value.trim(),
+    tiktok_relay_host: $('f-tiktok-relay').value.trim(),
+    mastodon_enabled: $('f-mast-en').checked,
+    mastodon_user: $('f-mast-user').value.trim(),
+    mastodon_instance: $('f-mast-instance').value.trim(),
+    mdns_enabled: $('f-mdns-en').checked,
     mic_silence_gate: parseFloat($('f-gate-num').value) || 0,
     leading_zero: $('f-leading-zero').checked,
     lcd_gamma: Array.from(document.querySelectorAll('.f-tube-gamma')).map(el => Math.round(parseFloat(el.value) * 100) / 100),
@@ -1536,6 +1824,7 @@ async function saveSettings() {
     weather_panel_ms:  Math.max(1000, +$('f-wx-panel').value * 1000),
     weather_panel0_en: $('f-wx-p0').checked,
     weather_panel1_en: $('f-wx-p1').checked,
+    weather_panel2_en: $('f-wx-p2').checked,
     tube6_panel_weather:  $('f-cx-weather').checked,
     tube6_panel_weekdate: $('f-cx-weekdate').checked,
     tube6_panel_ht:       $('f-cx-ht').checked,
@@ -2427,7 +2716,10 @@ async function refreshStatus() {
     const _st = _useFahrenheit ? (s.sensor.temp_c * 9 / 5 + 32) : s.sensor.temp_c;
     $('s-sensor').textContent = _st.toFixed(1) + (_useFahrenheit ? '°F' : '°C') + '  ' + s.sensor.humidity.toFixed(0) + '%';
   }
-  $('s-subs').textContent = s.subscribers != null ? s.subscribers.toLocaleString() : '--';
+  $('s-subs').textContent   = s.subscribers         != null ? s.subscribers.toLocaleString()         : '--';
+  $('s-insta').textContent  = s.instagram_followers != null ? s.instagram_followers.toLocaleString() : '--';
+  $('s-tiktok').textContent    = s.tiktok_followers    != null ? s.tiktok_followers.toLocaleString()    : '--';
+  $('s-mastodon').textContent  = s.mastodon_followers  != null ? s.mastodon_followers.toLocaleString()  : '--';
   $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
   $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';
 
