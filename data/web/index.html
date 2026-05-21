@@ -40,6 +40,9 @@ select option{background:var(--accent);color:var(--text)}
 .toast{display:none;background:var(--ok);color:#000;padding:.6rem 1.2rem;border-radius:8px;font-size:.85rem;opacity:0;transform:translateY(10px);transition:opacity .3s,transform .3s}
 .toast.show{opacity:1;transform:translateY(0)}
 .toast.err{background:var(--hi);color:#fff}
+.toast.warn{background:#c07820;color:#fff}
+.toast.warn .toast-btn{background:#fff3;border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:5px;padding:.2rem .65rem;font-size:.8rem;font-weight:600;cursor:pointer;margin-left:.9rem;white-space:nowrap}
+.toast.warn .toast-btn:hover{background:#fff5}
 .tab-content{display:none}.tab-content.active{display:block}
 #unsaved-banner{display:none;width:100%;background:rgba(160,100,50,.22);border-top:1px solid rgba(180,120,60,.65);color:#d4a57a;padding:.5rem 1rem;margin-top:.5rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
 #unsaved-banner.show{display:flex}
@@ -505,7 +508,7 @@ select option{background:var(--accent);color:var(--text)}
     <div class="field"><label>Hostname</label><input id="f-hostname" type="text" placeholder="nextube-remaster"></div>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-mdns-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
+        <input type="checkbox" id="f-mdns-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded(this.checked)">
         <label for="f-mdns-en" style="cursor:pointer">Advertise via mDNS (.local)</label>
       </div>
       <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
@@ -561,7 +564,7 @@ select option{background:var(--accent);color:var(--text)}
     <h2>Weather</h2>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty()">
+        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded(this.checked)">
         <label for="f-weather-en" style="cursor:pointer">Enable weather</label>
       </div>
       <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
@@ -613,15 +616,12 @@ select option{background:var(--accent);color:var(--text)}
       <span id="social-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
       <h2 style="margin:0;border:none;padding:0;flex:1">Social Media Counters</h2>
     </div>
-    <label style="display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.88rem;margin:.55rem 0 0 1.3rem">
-      <input type="checkbox" id="f-social-en" style="width:15px;height:15px" onchange="markDirty()">
-      Enable
-    </label>
-    <p style="color:var(--dim);font-size:.78rem;margin:.25rem 0 0 1.3rem">
-      Master switch — when off the polling task never starts. <strong>Restart required to apply.</strong>
-    </p>
 
     <div id="social-body" style="display:none;margin-top:.9rem">
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
+        <input type="checkbox" id="f-social-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded(this.checked)">
+        Enable &nbsp;<small style="color:var(--dim)">(restart required — master switch for all social counters)</small>
+      </label>
 
       <!-- ── Shared settings ───────────────────────────────── -->
       <div class="field">
@@ -643,7 +643,7 @@ select option{background:var(--accent);color:var(--text)}
         <label>Relay host <span style="color:var(--dim);font-size:.8rem">(LAN IP of PC running social_relay.py)</span></label>
         <input id="f-tiktok-relay" type="text" placeholder="e.g. 192.168.1.100" maxlength="63" oninput="markDirty();validateSubs()">
         <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">
-          Run <code>python helpers/social_relay.py</code> on any PC on your network and paste the IP here.
+          Run <code>python helpers/social_relay/social_relay.py</code> on any PC on your network and paste the IP here.
           Used by YouTube and TikTok when their fetch method is set to Relay.
         </p>
         <p id="warn-relay-host" style="display:none;color:var(--hi);font-size:.8rem;margin:.4rem 0 0;padding:.4rem .6rem;background:rgba(255,160,0,.08);border:1px solid rgba(255,160,0,.3);border-radius:5px">
@@ -704,6 +704,15 @@ select option{background:var(--accent);color:var(--text)}
       <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(no @ prefix)</span></label>
         <input id="f-insta-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()">
       </div>
+      <div class="field">
+        <label>Fetch method</label>
+        <select id="ig-method" onchange="onIgMethodChange(); markDirty(); validateSubs()">
+          <option value="internal">Internal — direct Instagram API</option>
+          <option value="relay">Relay — via social_relay.py</option>
+        </select>
+        <p id="ig-method-internal-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Calls Instagram's internal API directly. No relay needed, but may return 401 if rate-limited.</p>
+        <p id="ig-method-relay-hint"    style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none">Uses <code>social_relay.py</code> — set the relay host above.</p>
+      </div>
       <p id="warn-insta" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px">⚠ Username is required for the follower counter to work.</p>
 
       <hr style="border:none;border-top:1px solid rgba(255,255,255,.07);margin:.9rem 0">
@@ -756,6 +765,45 @@ select option{background:var(--accent);color:var(--text)}
 
     </div><!-- #social-body -->
   </div><!-- #social-card -->
+
+  <!-- ── Home Assistant MQTT ──────────────────────────────────────────── -->
+  <div class="card" id="mqtt-card">
+    <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleMqttCard()">
+      <span id="mqtt-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
+      <h2 style="margin:0;border:none;padding:0;flex:1">Home Assistant MQTT</h2>
+    </div>
+    <div id="mqtt-body" style="display:none;padding-top:.8rem">
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
+        <input type="checkbox" id="f-mqtt-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded(this.checked)">
+        Enable &nbsp;<small style="color:var(--dim)">(restart required)</small>
+      </label>
+      <div class="row">
+        <div class="field"><label>Broker</label>
+          <input id="f-mqtt-broker" type="text" placeholder="192.168.1.x or hostname" maxlength="63" oninput="markDirty()">
+        </div>
+        <div class="field"><label>Port</label>
+          <input id="f-mqtt-port" type="number" min="1" max="65535" value="1883" oninput="markDirty()">
+        </div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(leave blank for anonymous)</span></label>
+          <input id="f-mqtt-user" type="text" maxlength="31" oninput="markDirty()">
+        </div>
+        <div class="field"><label>Password</label>
+          <input id="f-mqtt-pass" type="password" maxlength="63" oninput="markDirty()">
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;cursor:pointer">
+        <input type="checkbox" id="f-mqtt-disc" style="width:15px;height:15px" onchange="markDirty()" checked>
+        Publish Home Assistant auto-discovery payloads
+      </label>
+      <p style="color:var(--dim);font-size:.78rem;margin:.6rem 0 0">
+        Exposes temperature, humidity (SHT30), display mode, backlight on/off, and brightness as HA entities.
+        Uses MQTT auto-discovery — no manual HA configuration required.
+        Uses plain <code>mqtt://</code> (no TLS).
+      </p>
+    </div>
+  </div><!-- #mqtt-card -->
 
   <div class="card">
     <h2>Timer Settings</h2>
@@ -1150,17 +1198,43 @@ function esc(s) { const d = document.createElement('div'); d.textContent = s; re
 let cfg = {};
 
 /* ── Toast ─────────────────────────────────────────── */
-function toast(msg, err) {
+/* action = optional {label:'…', fn: async fn} — adds a button and keeps the
+ * toast visible for 12 s instead of 3 s.  Pass warn=true for amber styling. */
+function toast(msg, err, action) {
   const t = $('toast');
-  t.textContent = msg;
+  t.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = msg;
+  t.appendChild(span);
+  if (action) {
+    const btn = document.createElement('button');
+    btn.className = 'toast-btn';
+    btn.textContent = action.label;
+    btn.onclick = () => { clearTimeout(toast._t); t.className = 'toast'; setTimeout(() => t.style.display='none', 320); action.fn(); };
+    t.appendChild(btn);
+  }
   t.style.display = 'block';
-  /* rAF lets the browser apply display:block before starting the CSS transition */
-  requestAnimationFrame(() => { t.className = 'toast show' + (err ? ' err' : ''); });
+  requestAnimationFrame(() => {
+    t.className = 'toast show' + (err ? ' err' : action ? ' warn' : '');
+  });
   clearTimeout(toast._t);
   toast._t = setTimeout(() => {
-    t.className = 'toast';                                  /* fade out */
-    setTimeout(() => { t.style.display = 'none'; }, 320);  /* collapse after transition */
-  }, 3000);
+    t.className = 'toast';
+    setTimeout(() => { t.style.display = 'none'; }, 320);
+  }, action ? 12000 : 3000);
+}
+
+/* Show a restart-required notice with a Save & Reboot shortcut.
+ * Only fires when the checkbox is being checked (enabling), not unchecked. */
+function markRestartNeeded(checked) {
+  if (!checked) return;
+  toast('Restart required for this change to take effect.', false, {
+    label: 'Save & Reboot',
+    fn: async () => {
+      await saveSettings();
+      secureFetch('/api/reboot', { method: 'POST' }).then(() => toast('Rebooting…'));
+    },
+  });
 }
 
 /* ── Weather panel enable guard (at least one must remain on) ── */
@@ -1398,6 +1472,12 @@ async function loadSettings() {
   $('f-mast-user').value     = cfg.mastodon_user      || '';
   $('f-mast-instance').value = cfg.mastodon_instance  || '';
   $('f-mdns-en').checked     = cfg.mdns_enabled    !== false;
+  $('f-mqtt-en').checked    = cfg.mqtt_enabled    === true;
+  $('f-mqtt-broker').value  = cfg.mqtt_broker     || '';
+  $('f-mqtt-port').value    = cfg.mqtt_port       || 1883;
+  $('f-mqtt-user').value    = cfg.mqtt_user       || '';
+  $('f-mqtt-pass').value    = cfg.mqtt_password   || '';
+  $('f-mqtt-disc').checked  = cfg.mqtt_ha_discovery !== false;
   const tzStr = cfg.timezone || 'UTC0';
   $('f-tz').value = tzStr;
   $('f-tz-sel').value = tzStr; /* pre-selects matching option; stays blank for custom strings */
@@ -1583,6 +1663,16 @@ function onTtMethodChange() {
 function toggleSocialCard() {
   const body  = $('social-body');
   const arrow = $('social-arrow');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
+}
+
+/* ── MQTT card collapsible ── */
+function toggleMqttCard() {
+  const body  = $('mqtt-body');
+  const arrow = $('mqtt-arrow');
   if (!body) return;
   const open = body.style.display === 'none';
   body.style.display = open ? '' : 'none';
@@ -1809,6 +1899,12 @@ async function saveSettings() {
     mastodon_user: $('f-mast-user').value.trim(),
     mastodon_instance: $('f-mast-instance').value.trim(),
     mdns_enabled: $('f-mdns-en').checked,
+    mqtt_enabled:      $('f-mqtt-en').checked,
+    mqtt_broker:       $('f-mqtt-broker').value.trim(),
+    mqtt_port:         +$('f-mqtt-port').value || 1883,
+    mqtt_user:         $('f-mqtt-user').value.trim(),
+    mqtt_password:     $('f-mqtt-pass').value,
+    mqtt_ha_discovery: $('f-mqtt-disc').checked,
     mic_silence_gate: parseFloat($('f-gate-num').value) || 0,
     leading_zero: $('f-leading-zero').checked,
     lcd_gamma: Array.from(document.querySelectorAll('.f-tube-gamma')).map(el => Math.round(parseFloat(el.value) * 100) / 100),

@@ -133,7 +133,8 @@ typedef struct {
     uint16_t         sub_poll_interval_min; /* social counter re-poll interval in minutes (default 30, min 5) */
     bool             instagram_enabled; /* enable Instagram follower fetches (default true) */
     bool             tiktok_enabled;    /* enable TikTok follower fetches (default true) */
-    char             instagram_user[48]; /* public Instagram username, no @ prefix */
+    char             instagram_user[48];   /* public Instagram username, no @ prefix */
+    char             instagram_method[16]; /* "internal" (direct API) or "relay" */
     char             tiktok_user[48];       /* public TikTok username, no @ prefix */
     char             tiktok_key[64];        /* TikTok Research API bearer token; empty = use relay */
     char             tiktok_relay_host[64]; /* LAN IP of social_relay.py server, e.g. "192.168.1.100" */
@@ -141,6 +142,14 @@ typedef struct {
     char             mastodon_user[48];     /* Mastodon username, no @ prefix */
     char             mastodon_instance[64]; /* Mastodon instance domain, e.g. "mastodon.social" */
     bool             mdns_enabled;       /* gate mDNS advertisement */
+
+    /* MQTT / Home Assistant */
+    bool             mqtt_enabled;       /* boot-time gate; restart required */
+    char             mqtt_broker[64];    /* hostname or IP of MQTT broker */
+    uint16_t         mqtt_port;          /* default 1883 */
+    char             mqtt_user[32];      /* broker username (empty = anonymous) */
+    char             mqtt_password[64];  /* broker password */
+    bool             mqtt_ha_discovery;  /* publish HA auto-discovery payloads */
 
     /* Countdown / Pomodoro */
     uint16_t         countdown_minutes;

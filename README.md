@@ -37,6 +37,7 @@
 - [Weather](#weather)
 - [Social Media Counters](#social-media-counters)
   - [Local Relay (`social_relay.py`)](#local-relay-social_relaypy)
+- [Home Assistant MQTT](#home-assistant-mqtt)
 - [Themes](#themes)
   - [Adding a Custom Theme](#adding-a-custom-theme)
   - [Image Converter Helper](#image-converter-helper)
@@ -91,6 +92,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | LittleFS file browser with upload/delete/mkdir/rename | ✅ Working |
 | Automatic firmware update check (compares against latest GitHub release) | ✅ Working |
 | Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
+| Home Assistant MQTT integration (sensor + mode + display + brightness) | ✅ Working |
 
 ## Hardware
 
@@ -805,6 +807,61 @@ Results are cached for 5 minutes. The ESP32 HTTP timeout for relay requests is 4
 4. Save
 
 The relay must be running whenever the device polls. It does not need to be running continuously — the Nextube caches the last received count and only re-fetches on the next polling interval.
+
+## Home Assistant MQTT
+
+The Nextube can connect to a Home Assistant MQTT broker and register itself automatically via **MQTT auto-discovery** — no manual HA entity configuration needed.
+
+### What gets exposed
+
+| Entity | HA domain | What it does |
+|---|---|---|
+| **Nextube Temperature** | `sensor` | SHT30 temperature in °C, updated every 60 s |
+| **Nextube Humidity** | `sensor` | SHT30 relative humidity %, updated every 60 s |
+| **Nextube Mode** | `select` | Read and set the active display mode (Clock, Weather, YouTube, …) |
+| **Nextube Display** | `switch` | Turn the backlight ON or OFF (same as the middle touch button) |
+| **Nextube Brightness** | `number` | LCD brightness 0–100 slider |
+
+### Setup
+
+1. Make sure your Home Assistant instance has an MQTT broker running (the built-in **Mosquitto** add-on works). Plain `mqtt://` (no TLS) is used.
+2. Open the Nextube web UI → **Services → Home Assistant MQTT**.
+3. Check **Enable** (restart required).
+4. Enter your broker's **Broker** hostname or IP address (e.g. `homeassistant.local` or `192.168.1.x`).
+5. Set **Port** (default `1883`).
+6. Fill in **Username** and **Password** if your broker requires authentication; leave blank for anonymous access.
+7. Leave **Publish HA auto-discovery payloads** checked (recommended).
+8. Click **Save**, then reboot the device (**System → Reboot**).
+
+After reboot HA will show a new **Nextube** device under **Settings → Devices & Services → MQTT** within a few seconds of the device connecting.
+
+### MQTT topics
+
+All topics use the device hostname (default `nextube-remaster`, configurable in **Network Settings**) as the unique ID.
+
+| Direction | Topic | Payload |
+|---|---|---|
+| Publish | `nextube/<hostname>/sensor/temperature/state` | `{"temperature": 21.4}` |
+| Publish | `nextube/<hostname>/sensor/humidity/state` | `{"humidity": 55.1}` |
+| Publish | `nextube/<hostname>/mode/state` | `Clock` (plain string) |
+| **Subscribe** | `nextube/<hostname>/mode/set` | `Weather` (mode name) |
+| Publish | `nextube/<hostname>/display/state` | `ON` or `OFF` |
+| **Subscribe** | `nextube/<hostname>/display/set` | `ON` or `OFF` |
+| Publish | `nextube/<hostname>/brightness/state` | `75` (integer 0–100) |
+| **Subscribe** | `nextube/<hostname>/brightness/set` | `75` (integer 0–100) |
+| Publish | `homeassistant/sensor/<hostname>_temp/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/sensor/<hostname>_hum/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/select/<hostname>_mode/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/switch/<hostname>_display/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/number/<hostname>_brightness/config` | HA discovery JSON (retained) |
+
+### Notes
+
+- **Boot-time gate** — MQTT is only started if both **Enable** is checked *and* a broker address is set. Disabling MQTT frees the task stack and stops all polling — useful if you don't use Home Assistant.
+- **Restart required** — changes to MQTT settings take effect after a reboot (same behaviour as weather and social counter toggles).
+- **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
+- **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
+- **Multiple devices** — each Nextube uses its hostname as the unique ID. Give each device a different hostname in **Network Settings** to avoid topic collisions.
 
 ## Themes
 

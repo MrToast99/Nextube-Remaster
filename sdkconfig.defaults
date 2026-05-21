@@ -17,42 +17,27 @@ CONFIG_ESP32_SPIRAM_SUPPORT=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_BOOT_INIT=y
 CONFIG_SPIRAM_USE_MALLOC=y
-# SPIRAM_MALLOC_ALWAYSINTERNAL threshold — malloc calls ≤ this value are
-# forced to internal SRAM; calls > this value fall through to PSRAM.
+# SPIRAM_MALLOC_ALWAYSINTERNAL threshold — standard malloc/calloc calls whose
+# size is ≤ this value are allocated from internal SRAM; calls whose size
+# exceeds this value are allocated from PSRAM.
 #
-# 4096 was tested and rejected: CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
-# produces OUT_BUFFER_LEN = exactly 4096 bytes in IDF 5.5.3.  That sits
-# exactly at the old threshold (≤ 4096 → SRAM), so mbedtls_ssl_setup()
-# still allocates the OUT buffer from internal SRAM.  Subscriber-build
-# additions (3 mutexes, larger config struct, task TCBs all via pvPortMalloc)
-# fragmented SRAM such that no contiguous 4096-byte block survives to t≈20 s;
-# ssl_setup() returns MBEDTLS_ERR_SSL_ALLOC_FAILED (-0x7F00) on every retry.
+# This threshold ONLY applies when mbedTLS uses MBEDTLS_DEFAULT_MEM_ALLOC
+# (i.e., plain calloc — set below).  Under MBEDTLS_INTERNAL_MEM_ALLOC (the
+# IDF 5.x Kconfig default), mbedTLS calls heap_caps_calloc with
+# MALLOC_CAP_INTERNAL, bypassing this threshold entirely and forcing ALL
+# allocations to SRAM regardless.
 #
-# 3072 was tested and rejected: ssl_setup() now succeeds (both IN=16 KB and
-# OUT=4 KB exceed the threshold → PSRAM), but api.met.no's cert chain roots
-# at an RSA-4096 CA.  Certificate verification calls mbedtls_mpi_exp_mod()
-# via the hardware RSA path, which calls mbedtls_mpi_grow(&X, 128_words) =
-# a 512-byte calloc.  512 < 3072 → still forced to internal SRAM → SRAM is
-# too fragmented at t≈23 s to satisfy a 512-byte contiguous request →
-# MBEDTLS_ERR_MPI_ALLOC_FAILED ORed into MBEDTLS_ERR_RSA_PUBLIC_FAILED = 0x4290.
-#
-# 511 is the working value:
-#   • 512-byte RSA-4096 limb arrays  > 511 → PSRAM.
-#     The ESP32 hardware RSA engine loads operands via CPU I/O writes to
-#     dedicated peripheral registers (not DMA), so PSRAM limb-array pointers
-#     are safe — the CPU fetches each 32-bit word through the SPI cache and
-#     writes it to the RSA peripheral; no DMA mapping required.
-#   • 4096-byte SSL OUT buffer       > 511 → PSRAM  (ssl_setup succeeds)
-#   • 16384-byte SSL IN buffer       > 511 → PSRAM  (was already PSRAM)
-#   • WPA2-PSK AES context (~280 B)  ≤ 511 → SRAM  ← critical for DMA safety
-#   • WPA2-PSK SHA context (~120 B)  ≤ 511 → SRAM
-#   • HMAC context (~400 B)          ≤ 511 → SRAM
-#   (Hardware AES/SHA on original ESP32 use DMA and require internal-SRAM
-#    buffers.  Keeping all crypto contexts ≤ 511 B keeps them in SRAM and
-#    avoids the "DNS fails with error 202" failure that
-#    MBEDTLS_MEM_ALLOC_MODE_EXTERNAL produced by routing ALL mbedTLS
-#    allocations — including AES context structs — to PSRAM.)
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=511
+# With MBEDTLS_DEFAULT_MEM_ALLOC=y and threshold=255:
+#   • 16 384 B TLS IN  buffer   > 255 → PSRAM (4 MB free, always succeeds)
+#   • 4 096 B  TLS OUT buffer   > 255 → PSRAM
+#   • 512 B    RSA-4096 MPI     > 255 → PSRAM
+#   • 256 B    RSA-2048 MPI     > 255 → PSRAM
+#   • ~280 B   mbedtls_aes_ctx  > 255 → PSRAM
+#              (hardware AES reads via CPU reg writes, not DMA — safe in PSRAM)
+#   • ≤255 B   WPA2 crypto,     ≤ 255 → SRAM (DMA-accessible, required)
+#              FreeRTOS structs,
+#              lwIP socket state
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=255
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_MEMTEST=y
 CONFIG_SPIRAM_TYPE_AUTO=y
@@ -64,6 +49,18 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+# Allow heap-allocated task stacks to be placed in SPIRAM so that tasks
+# created with xTaskCreate / xTaskCreatePinnedToCore can have their stacks
+# served from PSRAM when the SPIRAM-aware malloc decides so (i.e. for stack
+# allocations whose size exceeds SPIRAM_MALLOC_ALWAYSINTERNAL=255).  Without
+# this, pvPortMalloc in the IDF FreeRTOS port uses MALLOC_CAP_INTERNAL and
+# forces all task stacks to internal SRAM regardless of the SPIRAM threshold.
+# This keeps SRAM clean for DMA-constrained allocations (lwIP pbufs, WiFi
+# crypto buffers) and for the ≤255-byte mbedTLS allocations that stay in SRAM
+# by design under MBEDTLS_DEFAULT_MEM_ALLOC.  The MQTT integration adds two
+# tasks (ha_mqtt + esp_mqtt internal) with 4 KB stacks each; placing those
+# stacks in PSRAM saves ~8 KB of internal SRAM.
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
 
 # Wi-Fi
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
@@ -117,14 +114,11 @@ CONFIG_LWIP_LOCAL_HOSTNAME="nextube-remaster"
 # esp-tls rejects the connection with "No server verification option set".
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 # Partial bundle (~30 KB, ~40 curated CAs).
-# The full bundle (~70 KB, 150+ CAs) was tested and rejected.
-# With HARDWARE_MPI=y (enabled) cert verification uses the hardware RSA engine
-# which requires dedicated SRAM scratch registers.  The full bundle's larger
-# initialisation footprint leaves less SRAM headroom; at t≈20 s the scratch
-# allocation inside ssl_setup() fails even on the second attempt, still
-# producing the 0x4290 error (MBEDTLS_ERR_RSA_PUBLIC_FAILED |
-# MBEDTLS_ERR_MPI_ALLOC_FAILED).  The partial bundle's smaller footprint
-# leaves enough headroom for the hardware RSA scratch on the retry.
+# The full bundle (~70 KB, 150+ CAs) is unnecessary — all APIs used by this
+# project (Met.no, Open-Meteo, Nominatim, OpenWeatherMap, wttr.in, YouTube,
+# Instagram, TikTok, Mastodon) root at CAs in the partial bundle.  The
+# smaller binary reduces flash usage and speeds up bundle search during cert
+# verification.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_PARTIAL=y
 #
 # TLS I/O buffer sizing.
@@ -137,42 +131,80 @@ CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 #
 # TLS memory strategy.
 #
-# MBEDTLS_DYNAMIC_BUFFER was tested and rejected: its "Dynamic Impl" path calls
-# heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) explicitly, so
-# the 16 KB IN buffer is still internal SRAM.  Worse, it allocates that buffer
-# *after* cert validation, when bignum/RSA ops have fragmented the heap — the
-# alloc fails even though cert validation itself just succeeded.
+# ── Root cause of 0x4290 (MBEDTLS_ERR_RSA_PUBLIC_FAILED | MPI_ALLOC_FAILED) ──
 #
-# MBEDTLS_MEM_ALLOC_MODE_EXTERNAL and custom mbedtls_platform_set_calloc_free()
-# were also tested and rejected: both route ALL mbedTLS calls to PSRAM, which
-# breaks the WPA2/WPA3 supplicant's hardware-crypto paths (hardware AES/SHA on
-# original ESP32 requires DMA-accessible = internal SRAM buffers), causing DNS
-# to fail with error 202 after WiFi connects.
+# IDF 5.5.3 Kconfig defaults MBEDTLS_MEM_ALLOC_MODE to MBEDTLS_INTERNAL_MEM_ALLOC.
+# In that mode, esp_mbedtls_mem_calloc() calls:
+#   heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+# This is an EXPLICIT internal-SRAM request that completely bypasses the
+# SPIRAM_MALLOC_ALWAYSINTERNAL threshold.  ALL mbedTLS allocations — including
+# the 16 KB TLS IN buffer, the 4 KB OUT buffer, and every 512-byte RSA-4096 MPI
+# limb array — go to internal SRAM, not PSRAM.
 #
-# Working strategy — three parts:
-#  1. No DYNAMIC_BUFFER + ALWAYSINTERNAL=3072: ssl_setup() allocates the IN/OUT
-#     buffers at connection open time.  Both exceed the 3072-byte threshold
-#     (IN = 16 KB, OUT = 4 KB) so they are allocated from PSRAM — 8 MB of
-#     unfragmented heap — rather than the scarce internal SRAM.  ssl_setup()
-#     therefore succeeds regardless of how fragmented internal SRAM becomes.
-#  2. TLS semaphore (tls_sem_take/give in config_mgr): only one ssl_context
-#     lives at a time, preventing concurrent PSRAM pressure.
-#  3. DHCP DNS: left as-is; the router's DNS resolves external hostnames
-#     correctly without intervention.
+# Without MQTT: SRAM had just enough room for two sequential TLS sessions
+# (geocoding + weather) plus RSA temporaries.
 #
-# Hardware RSA accelerator — left at default (ENABLED).
-# CONFIG_MBEDTLS_HARDWARE_MPI=n was tested and rejected.  The software RSA
-# path allocates a sliding-window precomputation table W[2 << WINDOW_SIZE]
-# of temporary MPIs.  For the RSA-4096 key in ISRG Root X1 (the root CA for
-# the Open-Meteo / Let's Encrypt chain) each W[i] limb array is 512 bytes.
-# With SPIRAM_MALLOC_ALWAYSINTERNAL=4096, these 512-byte allocations cannot
-# fall back to PSRAM; at t≈20 s they exhaust the remaining internal SRAM,
-# causing mbedtls_mpi_exp_mod() to return MBEDTLS_ERR_MPI_ALLOC_FAILED.
-# This ORs with MBEDTLS_ERR_RSA_PUBLIC_FAILED to produce the observed 0x4290
-# error ("PK verify failed / Certificate matched but signature verification
-# failed").  The hardware RSA engine bypasses W[] entirely — it loads N and E
-# directly into dedicated hardware registers and performs the modular
-# exponentiation there, so no SRAM window arrays are needed.
+# With MQTT enabled: the MQTT TCP PCB, event queues, and task TCBs add ~1–2 KB
+# of small SRAM allocations.  Those scattered allocations fragment SRAM such
+# that after the geocoding TLS session allocates-then-frees its 20 KB of
+# mbedTLS buffers, the freed blocks cannot fully coalesce.  The Met.no TLS
+# session begins, ssl_setup() gets the 16 KB + 4 KB it needs from the re-used
+# block, but by the time certificate verification reaches mbedtls_mpi_exp_mod()
+# the remaining contiguous SRAM is too small for the RSA MPI temporaries →
+# MBEDTLS_ERR_MPI_ALLOC_FAILED → MBEDTLS_ERR_RSA_PUBLIC_FAILED = 0x4290.
+#
+# ── Fix ──────────────────────────────────────────────────────────────────────
+#
+# Select MBEDTLS_DEFAULT_MEM_ALLOC ("Default alloc mode").  In this mode
+# esp_mbedtls_mem_calloc() calls plain calloc(n, size), which goes through
+# IDF's SPIRAM-aware heap (CONFIG_SPIRAM_USE_MALLOC=y).  Allocations whose
+# size exceeds SPIRAM_MALLOC_ALWAYSINTERNAL=255 are served from PSRAM; smaller
+# allocations stay in SRAM.  Effect on each allocation class:
+#
+#   Allocation                  Size     Result with DEFAULT + threshold=255
+#   ──────────────────────────  ───────  ───────────────────────────────────
+#   TLS IN  buffer              16 384 B > 255 → PSRAM (4 MB free)   ✓
+#   TLS OUT buffer               4 096 B > 255 → PSRAM               ✓
+#   RSA-4096 MPI limb array        512 B > 255 → PSRAM               ✓
+#   RSA-2048 MPI limb array        256 B > 255 → PSRAM               ✓
+#   mbedtls_aes_context           ~280 B > 255 → PSRAM               ✓
+#     (hardware AES loads key regs via CPU writes, not DMA — PSRAM is safe)
+#   WPA2 PSK crypto buffers      ≤ 120 B ≤ 255 → SRAM (DMA-safe)    ✓
+#   FreeRTOS TCBs / mutexes      ≤ 200 B ≤ 255 → SRAM               ✓
+#
+# MBEDTLS_EXTERNAL_MEM_ALLOC was also considered but rejected: it forces ALL
+# mbedTLS allocations to PSRAM via heap_caps_calloc(..., MALLOC_CAP_SPIRAM),
+# including the WPA2/WPA3 supplicant's AES/SHA context buffers.  On original
+# ESP32 the hardware crypto engines access those buffers via DMA, which
+# requires MALLOC_CAP_DMA (= internal SRAM).  Routing them to PSRAM causes
+# the supplicant to fail → DNS error 202 after Wi-Fi connects.  DEFAULT mode
+# avoids this because the threshold keeps small (<= 255 B) supplicant buffers
+# in internal SRAM.
+#
+# MBEDTLS_DYNAMIC_BUFFER was tested and rejected: its "Dynamic Impl" path
+# uses heap_caps_malloc(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) explicitly for
+# the record buffers, keeping them in SRAM regardless of this setting.
+#
+CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
+#
+# Hardware RSA accelerator — DISABLED (software RSA).
+# With DEFAULT_MEM_ALLOC + ALWAYSINTERNAL=255, hardware RSA's staging buffers
+# (allocated via mbedtls_calloc → calloc → SPIRAM-aware) would also land in
+# PSRAM, which is safe for the ESP32 hardware RSA peripheral (it reads
+# operands via CPU register writes, not DMA).  However, software RSA is kept
+# for simplicity — re-enabling it is a future optimisation.
+#
+# Performance trade-off: software RSA-4096 on ESP32 at 240 MHz takes roughly
+# 200–400 ms per public-key operation (vs ~50 ms hardware).  Weather fetches
+# every 10 minutes and social counters every 30 minutes make this latency
+# imperceptible in practice.
+CONFIG_MBEDTLS_HARDWARE_MPI=n
+
+# MQTT
+# Reduce the esp-mqtt internal task stack from the default 6144 bytes to 4096.
+# With SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y both the ha_mqtt and esp_mqtt
+# stacks reside in PSRAM; this saves ~4 KB of PSRAM vs the 6144-byte default.
+CONFIG_MQTT_TASK_STACK_SIZE=4096
 
 # LWIP
 CONFIG_LWIP_MAX_SOCKETS=32

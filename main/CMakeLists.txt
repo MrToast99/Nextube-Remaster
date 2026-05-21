@@ -17,4 +17,5 @@ idf_component_register(
         weather
         subscribers
         app_update
+        ha_mqtt
 )

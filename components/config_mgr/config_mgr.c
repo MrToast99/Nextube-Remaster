@@ -129,6 +129,7 @@ static void set_defaults(void)
     s_cfg.instagram_enabled        = false;
     s_cfg.tiktok_enabled    = false;
     s_cfg.instagram_user[0] = '\0';
+    strncpy(s_cfg.instagram_method, "internal", sizeof(s_cfg.instagram_method) - 1);
     s_cfg.tiktok_user[0]          = '\0';
     s_cfg.tiktok_key[0]           = '\0';
     s_cfg.tiktok_relay_host[0]    = '\0';
@@ -136,6 +137,14 @@ static void set_defaults(void)
     s_cfg.mastodon_user[0]        = '\0';
     s_cfg.mastodon_instance[0]    = '\0';
     s_cfg.mdns_enabled            = true;
+
+    /* MQTT / Home Assistant */
+    s_cfg.mqtt_enabled      = false;
+    s_cfg.mqtt_broker[0]    = '\0';
+    s_cfg.mqtt_port         = 1883;
+    s_cfg.mqtt_user[0]      = '\0';
+    s_cfg.mqtt_password[0]  = '\0';
+    s_cfg.mqtt_ha_discovery = true;
 
     s_cfg.countdown_minutes = 1;
     s_cfg.pomodoro_work     = 25;
@@ -297,7 +306,10 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.instagram_enabled = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tiktok_enabled");
         if (cJSON_IsBool(v)) s_cfg.tiktok_enabled = cJSON_IsTrue(v);
-        json_read_str(root, "instagram_user", s_cfg.instagram_user, sizeof(s_cfg.instagram_user));
+        json_read_str(root, "instagram_user",   s_cfg.instagram_user,   sizeof(s_cfg.instagram_user));
+        json_read_str(root, "instagram_method", s_cfg.instagram_method, sizeof(s_cfg.instagram_method));
+        if (s_cfg.instagram_method[0] == '\0')
+            strncpy(s_cfg.instagram_method, "internal", sizeof(s_cfg.instagram_method) - 1);
         json_read_str(root, "tiktok_user",         s_cfg.tiktok_user,         sizeof(s_cfg.tiktok_user));
         json_read_str(root, "tiktok_key",          s_cfg.tiktok_key,          sizeof(s_cfg.tiktok_key));
         json_read_str(root, "tiktok_relay_host",   s_cfg.tiktok_relay_host,   sizeof(s_cfg.tiktok_relay_host));
@@ -309,6 +321,17 @@ static void parse_json(const char *json, size_t len)
     {
         cJSON *de = cJSON_GetObjectItem(root, "mdns_enabled");
         if (cJSON_IsBool(de)) s_cfg.mdns_enabled = cJSON_IsTrue(de);
+    }
+    {
+        cJSON *v = cJSON_GetObjectItem(root, "mqtt_enabled");
+        if (cJSON_IsBool(v)) s_cfg.mqtt_enabled = cJSON_IsTrue(v);
+        json_read_str(root, "mqtt_broker",   s_cfg.mqtt_broker,   sizeof(s_cfg.mqtt_broker));
+        json_read_u16(root, "mqtt_port",     &s_cfg.mqtt_port);
+        if (s_cfg.mqtt_port == 0) s_cfg.mqtt_port = 1883;
+        json_read_str(root, "mqtt_user",     s_cfg.mqtt_user,     sizeof(s_cfg.mqtt_user));
+        json_read_str(root, "mqtt_password", s_cfg.mqtt_password, sizeof(s_cfg.mqtt_password));
+        v = cJSON_GetObjectItem(root, "mqtt_ha_discovery");
+        if (cJSON_IsBool(v)) s_cfg.mqtt_ha_discovery = cJSON_IsTrue(v);
     }
     json_read_u8(root, "mic_adc_channel", &s_cfg.mic_adc_channel);
     if (s_cfg.mic_adc_channel > 7) s_cfg.mic_adc_channel = 0; /* clamp to valid ADC1 range */
@@ -842,6 +865,7 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "instagram_enabled",       s_cfg.instagram_enabled);
     cJSON_AddBoolToObject  (root, "tiktok_enabled",    s_cfg.tiktok_enabled);
     cJSON_AddStringToObject(root, "instagram_user",    s_cfg.instagram_user);
+    cJSON_AddStringToObject(root, "instagram_method",  s_cfg.instagram_method);
     cJSON_AddStringToObject(root, "tiktok_user",         s_cfg.tiktok_user);
     cJSON_AddStringToObject(root, "tiktok_key",          s_cfg.tiktok_key);
     cJSON_AddStringToObject(root, "tiktok_relay_host",   s_cfg.tiktok_relay_host);
@@ -849,6 +873,12 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "mastodon_user",       s_cfg.mastodon_user);
     cJSON_AddStringToObject(root, "mastodon_instance",   s_cfg.mastodon_instance);
     cJSON_AddBoolToObject  (root, "mdns_enabled",        s_cfg.mdns_enabled);
+    cJSON_AddBoolToObject  (root, "mqtt_enabled",      s_cfg.mqtt_enabled);
+    cJSON_AddStringToObject(root, "mqtt_broker",       s_cfg.mqtt_broker);
+    cJSON_AddNumberToObject(root, "mqtt_port",         s_cfg.mqtt_port);
+    cJSON_AddStringToObject(root, "mqtt_user",         s_cfg.mqtt_user);
+    cJSON_AddStringToObject(root, "mqtt_password",     s_cfg.mqtt_password);
+    cJSON_AddBoolToObject  (root, "mqtt_ha_discovery", s_cfg.mqtt_ha_discovery);
     cJSON_AddNumberToObject(root, "mic_adc_channel",   s_cfg.mic_adc_channel);
     cJSON_AddNumberToObject(root, "mic_silence_gate",  (double)s_cfg.mic_silence_gate);
     {

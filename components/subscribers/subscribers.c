@@ -230,86 +230,124 @@ static void fetch_bilibili(void)
 }
 
 /* ── Instagram ────────────────────────────────────────────────────────── */
+/* ── Instagram ────────────────────────────────────────────────────────────
+ * Method is selected by instagram_method config field:
+ *   "relay"    — GET http://<tiktok_relay_host>:8888/instagram?user=<u>
+ *                Plain HTTP, no TLS, no bot-check. Requires social_relay.py.
+ *   "internal" — GET https://i.instagram.com/api/v1/users/web_profile_info/
+ *                Direct Instagram API; may require valid headers to avoid 401. */
 static void fetch_instagram(void)
 {
-    char user[48];
+    char user[48], method[16], relay_host[64];
     config_lock();
-    strncpy(user, config_get()->instagram_user, sizeof(user) - 1);
-    user[sizeof(user) - 1] = '\0';
+    strncpy(user,       config_get()->instagram_user,    sizeof(user)       - 1);
+    strncpy(method,     config_get()->instagram_method,  sizeof(method)     - 1);
+    strncpy(relay_host, config_get()->tiktok_relay_host, sizeof(relay_host) - 1);
     config_unlock();
+    user[sizeof(user) - 1]             = '\0';
+    method[sizeof(method) - 1]         = '\0';
+    relay_host[sizeof(relay_host) - 1] = '\0';
+
     if (user[0] == '\0') {
         ESP_LOGI(TAG, "Instagram: no username configured — skipping");
         return;
     }
 
-    /* Allocate receive buffer from PSRAM to avoid consuming internal SRAM
-     * that mbedTLS (used by the weather component) needs for TLS handshakes.
-     * 16384 bytes: we do NOT parse the full JSON (responses run 50–100 KB).
-     * Instead we search for "edge_followed_by":{"count": in the partial
-     * buffer; that field consistently appears within the first ~20 KB of
-     * the user object, well before the large media-edge arrays.  PSRAM has
-     * 4 MB mapped so 16 KB is negligible. */
-    const int BUF_SIZE = 16384;
-    heap_rx_t ctx = {
-        .buf      = heap_caps_malloc(BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-        .buf_size = BUF_SIZE,
-        .buf_len  = 0,
-    };
-    if (!ctx.buf) {
-        /* PSRAM unavailable — fall back to a modest internal allocation. */
-        ctx.buf      = malloc(4096);
-        ctx.buf_size = 4096;
-    }
-    if (!ctx.buf) { ESP_LOGW(TAG, "Instagram: no memory for RX buffer"); return; }
-
-    char url[256];
-    snprintf(url, sizeof(url),
-        "https://i.instagram.com/api/v1/users/web_profile_info/?username=%s", user);
-
-    esp_http_client_config_t http_cfg = {
-        .url = url, .event_handler = http_event_heap, .user_data = &ctx,
-        .timeout_ms = 10000, .crt_bundle_attach = esp_crt_bundle_attach,
-    };
-    tls_sem_take();
-    esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-    /* Instagram requires these headers to return JSON for public profiles */
-    esp_http_client_set_header(client, "x-ig-app-id", "936619743392459");
-    esp_http_client_set_header(client, "User-Agent",
-        "Instagram 219.0.0.12.117 Android (28/9; 420dpi; 1080x2148; samsung; SM-G977B)");
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-    tls_sem_give();
-
-    if (err == ESP_OK && status == 200) {
-        ctx.buf[ctx.buf_len] = '\0';
-        /* Instagram's web_profile_info response is 50–100 KB — too large to
-         * buffer fully.  Search for the follower-count field directly; it
-         * appears as the literal token "edge_followed_by":{"count":NNN} in
-         * the minified JSON, always before the bulky media-edge arrays. */
-        const char *needle = "\"edge_followed_by\":{\"count\":";
-        const char *p = strstr(ctx.buf, needle);
-        if (p) {
-            p += strlen(needle);
-            uint32_t count = (uint32_t)strtoul(p, NULL, 10);
-            xSemaphoreTake(s_insta_mutex, portMAX_DELAY);
-            s_insta.subscriber_count = count;
-            s_insta.valid = true;
-            xSemaphoreGive(s_insta_mutex);
-            ESP_LOGI(TAG, "Instagram @%s -> %lu followers", user, (unsigned long)count);
-        } else {
-            /* Field not found — either it appeared past the buffer window
-             * (unlikely: field is early in the response) or the API changed. */
-            ESP_LOGW(TAG, "Instagram: 'edge_followed_by' not found in %d bytes "
-                          "(truncated=%s) — prefix: %.80s",
-                     ctx.buf_len,
-                     ctx.buf_len >= ctx.buf_size - 1 ? "yes" : "no",
-                     ctx.buf);
+    if (strcmp(method, "relay") == 0) {
+        /* ── Relay path ──────────────────────────────────────────────────── */
+        if (relay_host[0] == '\0') {
+            ESP_LOGW(TAG, "Instagram: method=relay but no relay host configured — skipping");
+            return;
         }
+        char relay_buf[128] = {0};
+        heap_rx_t ctx = { .buf = relay_buf, .buf_size = sizeof(relay_buf), .buf_len = 0 };
+
+        char url[192];
+        snprintf(url, sizeof(url), "http://%s:8888/instagram?user=%s", relay_host, user);
+
+        esp_http_client_config_t http_cfg = {
+            .url = url, .event_handler = http_event_heap,
+            .user_data = &ctx, .timeout_ms = 15000,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
+        esp_err_t err = esp_http_client_perform(client);
+        int status    = esp_http_client_get_status_code(client);
+        esp_http_client_cleanup(client);
+
+        if (err == ESP_OK && status == 200) {
+            relay_buf[ctx.buf_len] = '\0';
+            const char *p = strstr(relay_buf, "\"followers\":");
+            if (p) {
+                p += strlen("\"followers\":");
+                uint32_t count = (uint32_t)strtoul(p, NULL, 10);
+                xSemaphoreTake(s_insta_mutex, portMAX_DELAY);
+                s_insta.subscriber_count = count;
+                s_insta.valid = true;
+                xSemaphoreGive(s_insta_mutex);
+                ESP_LOGI(TAG, "Instagram @%s -> %lu followers (relay)", user, (unsigned long)count);
+            } else {
+                ESP_LOGW(TAG, "Instagram relay: unexpected response: %s", relay_buf);
+            }
+        } else {
+            ESP_LOGW(TAG, "Instagram relay failed: err=%d status=%d", err, status);
+        }
+
     } else {
-        ESP_LOGW(TAG, "Instagram fetch failed: err=%d status=%d", err, status);
+        /* ── Internal API path (default) ─────────────────────────────────── */
+        /* Allocate receive buffer from PSRAM — Instagram responses run 50–100 KB.
+         * We only need the first ~16 KB: "edge_followed_by":{"count":N} always
+         * appears before the bulky media-edge arrays. */
+        const int BUF_SIZE = 16384;
+        heap_rx_t ctx = {
+            .buf      = heap_caps_malloc(BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+            .buf_size = BUF_SIZE,
+            .buf_len  = 0,
+        };
+        if (!ctx.buf) { ctx.buf = malloc(4096); ctx.buf_size = 4096; }
+        if (!ctx.buf) { ESP_LOGW(TAG, "Instagram: no memory for RX buffer"); return; }
+
+        char url[256];
+        snprintf(url, sizeof(url),
+            "https://i.instagram.com/api/v1/users/web_profile_info/?username=%s", user);
+
+        esp_http_client_config_t http_cfg = {
+            .url = url, .event_handler = http_event_heap, .user_data = &ctx,
+            .timeout_ms = 10000, .crt_bundle_attach = esp_crt_bundle_attach,
+        };
+        tls_sem_take();
+        esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
+        esp_http_client_set_header(client, "x-ig-app-id", "936619743392459");
+        esp_http_client_set_header(client, "User-Agent",
+            "Instagram 219.0.0.12.117 Android (28/9; 420dpi; 1080x2148; samsung; SM-G977B)");
+        esp_err_t err = esp_http_client_perform(client);
+        int status = esp_http_client_get_status_code(client);
+        esp_http_client_cleanup(client);
+        tls_sem_give();
+
+        if (err == ESP_OK && status == 200) {
+            ctx.buf[ctx.buf_len] = '\0';
+            const char *needle = "\"edge_followed_by\":{\"count\":";
+            const char *p = strstr(ctx.buf, needle);
+            if (p) {
+                p += strlen(needle);
+                uint32_t count = (uint32_t)strtoul(p, NULL, 10);
+                xSemaphoreTake(s_insta_mutex, portMAX_DELAY);
+                s_insta.subscriber_count = count;
+                s_insta.valid = true;
+                xSemaphoreGive(s_insta_mutex);
+                ESP_LOGI(TAG, "Instagram @%s -> %lu followers", user, (unsigned long)count);
+            } else {
+                ESP_LOGW(TAG, "Instagram: 'edge_followed_by' not found in %d bytes "
+                              "(truncated=%s) — prefix: %.80s",
+                         ctx.buf_len,
+                         ctx.buf_len >= ctx.buf_size - 1 ? "yes" : "no",
+                         ctx.buf);
+            }
+        } else {
+            ESP_LOGW(TAG, "Instagram fetch failed: err=%d status=%d", err, status);
+        }
+        free(ctx.buf);
     }
-    free(ctx.buf);
 }
 
 /* ── TikTok ───────────────────────────────────────────────────────────── */

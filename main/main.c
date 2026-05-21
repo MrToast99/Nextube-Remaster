@@ -47,6 +47,7 @@
 #include "subscribers.h"
 #include "microphone.h"
 #include "fw_version.h"
+#include "ha_mqtt.h"
 
 static const char *TAG = "main";
 
@@ -298,10 +299,10 @@ void app_main(void)
     }
     s_warm_boot = 0;     /* clear so the next hard-reset also triggers a restart */
 
-    ESP_LOGI(TAG, "╔════════════════════════════════════════════════╗");
+    ESP_LOGI(TAG, "╔═════════════════════════════════════════════════════╗");
     ESP_LOGI(TAG, "║  Nextube-Remaster Open-Source Firmware v%-7s ║", FW_VERSION_STR);
-    ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster ║");
-    ESP_LOGI(TAG, "╚════════════════════════════════════════════════╝");
+    ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster  ║");
+    ESP_LOGI(TAG, "╚═════════════════════════════════════════════════════╝");
 
     /* Allow power rails and SPI peripherals to fully settle. */
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -320,6 +321,7 @@ void app_main(void)
      * task reads them fresh from config at start time (see audio_mic_deferred_start). */
     bool    boot_weather_enabled;
     bool    boot_social_enabled;
+    bool    boot_mqtt_enabled;
     uint8_t boot_invert_mask;
     uint8_t boot_init_profile[6];
     uint8_t boot_vcom[6];
@@ -331,6 +333,7 @@ void app_main(void)
     const nextube_config_t *cfg_boot = config_get();
     boot_weather_enabled   = cfg_boot->weather_enabled;
     boot_social_enabled    = cfg_boot->social_enabled;
+    boot_mqtt_enabled      = cfg_boot->mqtt_enabled && cfg_boot->mqtt_broker[0] != '\0';
     boot_invert_mask     = cfg_boot->lcd_invert_mask;
     memcpy(boot_init_profile,    cfg_boot->lcd_init_profile,    sizeof(boot_init_profile));
     memcpy(boot_vcom,            cfg_boot->lcd_vcom,            sizeof(boot_vcom));
@@ -394,6 +397,12 @@ void app_main(void)
         subscribers_start();
     } else {
         ESP_LOGI(TAG, "Social counters disabled in config — task not started");
+    }
+    /* Home Assistant MQTT — only started when enabled and a broker is configured. */
+    if (boot_mqtt_enabled) {
+        ha_mqtt_start();
+    } else {
+        ESP_LOGI(TAG, "MQTT disabled or no broker configured — task not started");
     }
     sht30_task_start();    /* no-op task if sensor absent */
 

@@ -428,6 +428,142 @@ def _pw_fetch_youtube(channel_id):
             return None
 
 
+def _pw_fetch_instagram(username):
+    """
+    Use Playwright/Chromium to retrieve an Instagram follower count.
+
+    Extraction strategy (first match wins):
+      1. JSON embedded in page source — "edge_followed_by":{"count":N}
+         or "follower_count":N (present in window.__additionalDataLoaded /
+         shared_data script blocks for public profiles).
+      2. meta[name="description"] — Instagram sets this to
+         "N Followers, M Following, K Posts – …" for public accounts.
+
+    Returns an integer count, or None on any failure.
+    """
+    if not _pw_ensure():
+        return None
+
+    print(f"  [relay] Playwright: fetching Instagram @{username}…")
+    with _pw_lock:
+        try:
+            ctx = _pw_browser.new_context(user_agent=_UA)
+            page = ctx.new_page()
+            _pw_stealth(page)
+            try:
+                page.goto(
+                    f"https://www.instagram.com/{username}/",
+                    wait_until="domcontentloaded",
+                    timeout=30_000,
+                )
+                src = page.content()
+
+                # JSON patterns embedded in the page source
+                for pat in (
+                    r'"edge_followed_by"\s*:\s*\{"count"\s*:\s*(\d+)',
+                    r'"follower_count"\s*:\s*(\d+)',
+                ):
+                    m = re.search(pat, src)
+                    if m:
+                        count = int(m.group(1))
+                        print(f"  [relay] Playwright: @{username} → {count:,} followers  ✓")
+                        return count
+
+                # Meta description fallback: "1.2M Followers, 500 Following, …"
+                try:
+                    meta = page.locator('meta[name="description"]').get_attribute(
+                        'content', timeout=2_000)
+                    if meta:
+                        m = re.match(r'([\d,.]+\s*[KkMmBb]?)\s*[Ff]ollower', meta)
+                        if m:
+                            count = _parse_abbrev_count(m.group(1))
+                            if count is not None:
+                                print(f"  [relay] Playwright: @{username} → {count:,} "
+                                      f"followers (meta)  ✓")
+                                return count
+                except Exception:
+                    pass
+
+                print(f"  [relay] Playwright: follower count not found for @{username}")
+                return None
+            finally:
+                page.close()
+                ctx.close()
+        except Exception as exc:
+            print(f"  [relay] Playwright Instagram @{username}: {exc}")
+            return None
+
+
+_insta_cache = {}   # {username: (follower_count, timestamp)}
+
+
+def fetch_instagram_followers(username):
+    """
+    Return the follower count for an Instagram username, or None on failure.
+    Results are cached for CACHE_TTL seconds.
+
+    Fetch order:
+        1. Playwright/Chromium — real browser; best bot-detection bypass.
+        2. curl / urllib       — tries the public profile page directly.
+    """
+    with _cache_lock:
+        entry = _insta_cache.get(username)
+        if entry and time.time() - entry[1] < CACHE_TTL:
+            return entry[0]
+
+    # ── 1. Playwright ────────────────────────────────────────────────────────
+    if _PLAYWRIGHT_AVAILABLE:
+        count = _pw_fetch_instagram(username)
+        if count is not None:
+            with _cache_lock:
+                _insta_cache[username] = (count, time.time())
+            return count
+        print(f"  [relay] Playwright failed for @{username}, trying curl/urllib…")
+
+    # ── 2. curl / urllib ─────────────────────────────────────────────────────
+    url = f"https://www.instagram.com/{username}/"
+    extra = {"x-ig-app-id": "936619743392459"}
+    try:
+        if _CURL:
+            body, status = _curl_get(url, extra_headers=extra)
+        else:
+            body = _http_get(url, extra_headers=extra)
+            status = 200
+
+        if status == 200 and body:
+            for pat in (
+                r'"edge_followed_by"\s*:\s*\{"count"\s*:\s*(\d+)',
+                r'"follower_count"\s*:\s*(\d+)',
+            ):
+                m = re.search(pat, body)
+                if m:
+                    count = int(m.group(1))
+                    print(f"  [relay] curl/urllib: @{username} → {count:,} followers  ✓")
+                    with _cache_lock:
+                        _insta_cache[username] = (count, time.time())
+                    return count
+
+            # Last-resort: meta description in raw HTML
+            m = re.search(
+                r'<meta[^>]+name=["\']description["\'][^>]+content=["\']'
+                r'([\d,.]+\s*[KkMmBb]?)\s*[Ff]ollower',
+                body)
+            if m:
+                count = _parse_abbrev_count(m.group(1))
+                if count is not None:
+                    print(f"  [relay] curl/urllib: @{username} → {count:,} "
+                          f"followers (meta)  ✓")
+                    with _cache_lock:
+                        _insta_cache[username] = (count, time.time())
+                    return count
+
+        print(f"  [relay] Instagram: count not found for @{username} (HTTP {status})")
+    except Exception as exc:
+        print(f"  [relay] Instagram curl/urllib @{username}: {exc}")
+
+    return None
+
+
 # ── TikTok cookies ────────────────────────────────────────────────────────────
 # TikTok's WAF checks for the *presence* and rough *format* of session cookies,
 # not cryptographic validity, for public profile page loads.  We generate
@@ -832,7 +968,19 @@ class RelayHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs     = parse_qs(parsed.query)
 
-        if parsed.path == "/tiktok":
+        if parsed.path == "/instagram":
+            user = (qs.get("user") or [None])[0]
+            if not user:
+                self._send(400, b'{"error":"missing ?user= parameter"}')
+                return
+            count = fetch_instagram_followers(user)
+            if count is None:
+                self._send(503, b'{"error":"Instagram fetch failed - see relay console"}')
+            else:
+                body = json.dumps({"followers": count}).encode()
+                self._send(200, body)
+
+        elif parsed.path == "/tiktok":
             user = (qs.get("user") or [None])[0]
             if not user:
                 self._send(400, b'{"error":"missing ?user= parameter"}')
@@ -892,12 +1040,12 @@ if __name__ == "__main__":
         ok = _pw_ensure()
         if ok:
             if _STEALTH_AVAILABLE:
-                print("  TikTok/YouTube fetch : Playwright/Chromium  ✓  (stealth ✓)")
+                print("  Social Media fetcher : Playwright/Chromium  ✓  (stealth ✓)")
             else:
-                print("  TikTok/YouTube fetch : Playwright/Chromium  ✓  (stealth DISABLED)")
+                print("  Social Media fetcher : Playwright/Chromium  ✓  (stealth DISABLED)")
                 print(f"                         Reason: {_stealth_import_err}")
         else:
-            print("  TikTok/YouTube fetch : Playwright installed but browser")
+            print("  Social Media fetcher : Playwright installed but browser")
             print("                         failed to start — run:")
             print("                           playwright install chromium")
             if _CURL:
@@ -915,9 +1063,10 @@ if __name__ == "__main__":
 
     print()
     print("  Routes:")
-    print(f"    /tiktok?user=<username>   ->  {{\"followers\": N}}")
-    print(f"    /youtube?channel=<id>     ->  {{\"subscribers\": N}}")
-    print(f"    /health                   ->  OK")
+    print(f"    /instagram?user=<username> ->  {{\"followers\": N}}")
+    print(f"    /tiktok?user=<username>    ->  {{\"followers\": N}}")
+    print(f"    /youtube?channel=<id>      ->  {{\"subscribers\": N}}")
+    print(f"    /health                    ->  OK")
     print()
     print("  Results are cached for 5 minutes.")
     print("  Press Ctrl-C to stop.")
