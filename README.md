@@ -541,6 +541,8 @@ The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi prov
 3. Navigate to **http://192.168.4.1**.
 4. Set your admin password (first boot only), then enter your home WiFi credentials under **Network**.
 
+> **No laptop nearby?** A smartphone works perfectly for initial setup. Connect your phone to **Nextube-Setup**, open a browser, and go to **http://192.168.4.1** to complete the WiFi configuration. Once the Nextube joins your home network, manage it from any device on the same network.
+
 **AP lifecycle:**
 - **No credentials saved** — AP stays up indefinitely for first-time setup.
 - **Credentials saved, STA connects** — AP closes **90 seconds** after the device gets an IP, giving the browser time to finish loading the UI.
