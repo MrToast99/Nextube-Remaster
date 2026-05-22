@@ -38,6 +38,7 @@
 - [Social Media Counters](#social-media-counters)
   - [Local Relay (`social_relay.py`)](#local-relay-social_relaypy)
 - [Home Assistant MQTT](#home-assistant-mqtt)
+- [WLED Sync](#wled-sync)
 - [Themes](#themes)
   - [Adding a Custom Theme](#adding-a-custom-theme)
   - [Image Converter Helper](#image-converter-helper)
@@ -93,6 +94,8 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Automatic firmware update check (compares against latest GitHub release) | ✅ Working |
 | Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
 | Home Assistant MQTT integration (sensor + mode + display + brightness) | ✅ Working |
+| WLED Sync — receive UDP Notifier broadcasts; accent LEDs follow WLED colour | ✅ Working |
+| Weather Panel 3 — animated sunrise/sunset (20 Hz rising/setting sun + mountains) | ✅ Working |
 
 ## Hardware
 
@@ -559,8 +562,8 @@ After setup, access the management interface via:
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
 - **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, auto theme rotation (cycle all or selected themes on a timer), Spectrum LED source (custom amplitude-modulated glow colour **or** follow configured accent mode), Spectrum LCD bar colour, Spectrum noise floor threshold, **Advanced Display** (see below)
-- **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
-- **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; **Social Media Counters** (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters)); countdown duration, Pomodoro work and break durations
+- **Network** — WiFi SSID/password (shown as plain text on first entry so you can verify before saving; masked once a password has been saved), hostname, timezone (UTC offset in hours), NTP server. Only reconnects when credentials actually change, preserving the live connection for all other saves.
+- **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable (including animated Panel 3 Sunrise & Sunset); **Social Media Counters** (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters)); **WLED Sync** (see [WLED Sync](#wled-sync)); **Home Assistant MQTT** (see [Home Assistant MQTT](#home-assistant-mqtt)); countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
 - **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (automatic on page load and every 24 h; compares against latest GitHub release with dismissable toast notification), **Lock Webui** (enable/disable password protection, change password, sign out), WiFi Setup AP PIN management (show/regenerate), factory reset (settings-only or full), about (shows firmware + web UI versions independently)
 
@@ -618,7 +621,7 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 
 | Mode | Description |
 |---|---|
-| **Clock** | 12H or 24H digital clock |
+| **Clock** | 12H or 24H digital clock. **24H Custom** rotates tube 6 through up to five info panels (configurable under Display → 24H Custom): Day+date, Indoor temp & humidity (SHT30), Outdoor temperature, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon. |
 | **Date** | Date display (DD/MM/YY). Can be enabled alongside Clock — both appear as separate stops in the touch cycle. |
 | **Countdown** | Configurable countdown timer. Middle touch pauses/resumes. |
 | **Pomodoro** | Work/break timer with configurable work and break durations. Middle touch pauses/resumes. Automatically flips between work and break phases. |
@@ -626,7 +629,7 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 | **Instagram** | Live follower count. Fetched directly from Instagram's unofficial public API — no account or relay required. |
 | **TikTok** | Live follower count. Requires the local relay (`social_relay.py`) — TikTok's bot detection blocks direct ESP32 fetches. |
 | **Mastodon** | Live follower count. Fetched directly from the configured Mastodon instance API — no relay required. |
-| **Weather** | Two panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon. Either panel can be disabled (but not both). Temperatures rounded to whole degrees; leading zeros suppressed; minus sign position shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
+| **Weather** | Up to three panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon; **Panel 3** — animated sunrise/sunset (rising/setting sun + mountain silhouettes at 20 Hz, solar times in HH:MM). Any combination of panels can be enabled; at least one must remain on. Temperatures rounded to whole degrees; leading zeros suppressed; minus sign shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
 | **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
 | **Scoreboard** | Stub — displays zeros |
@@ -665,7 +668,7 @@ Weather mode cycles through all enabled weather APIs until one succeeds. Support
 
 Weather fetching: On WiFi connect the first fetch happens immediately with automatic 5-second retries until data arrives. After the first successful fetch, weather is refreshed every 10 minutes.
 
-Weather mode auto-cycles between two panels on a configurable interval (default 5 s). Either panel can be disabled in **Services → Weather → Display Panels**, but not both simultaneously.
+Weather mode auto-cycles between up to three panels on a configurable interval (default 5 s). Each panel can be individually enabled or disabled under **Services → Weather → Display Panels**; at least one must remain on.
 
 **Panel 1 — temperature + icon:**
 ```
@@ -684,6 +687,17 @@ e.g. −23°C:  _   −   2   3   °C  ☁
 ```
 [blank] [blank] [tens/blank] [units] [%] [icon]
 ```
+
+**Panel 3 — Sunrise & Sunset (animated):**
+```
+tube 0 : animated sunrise — full-circle sun rises from behind mountain silhouettes, holds at top, loops
+tube 1 : local sunrise time "HH:MM" (or "--:--" until geocoding completes)
+tube 2 : blank
+tube 3 : blank
+tube 4 : animated sunset  — sun descends into mountains, holds at bottom, loops
+tube 5 : local sunset time "HH:MM"
+```
+Solar times are calculated on-device using the NOAA solar position algorithm from geocoded lat/lon — the same coordinates resolved by the weather fetch. No extra API call is made. Before the first successful weather fetch (or if no city is configured) the times show `--:--`. The animation runs at 20 Hz; switching from another weather panel to Panel 3 starts the animation within 50 ms.
 
 **Waiting (no data yet):**
 ```
@@ -725,9 +739,9 @@ By default all platforms use unofficial or keyless fetch methods. Official API k
 
 Both keys are entirely optional. Leave the field blank to use the default keyless method.
 
-**Master switch (`Enable`)** — when unchecked the polling task never starts. Changes require a device restart to take effect.
+**Master switch (`Enable`)** — when unchecked the polling task never starts. Changes require a device restart to take effect. All social counter platforms (including YouTube/Bilibili) are **disabled by default** — enable whichever you use and save; the task only starts if at least one platform is enabled.
 
-**Polling interval** — applies to all platforms. Preset buttons: 5 m, 10 m, 30 m, 1 h, 6 h, 12 h, 24 h. Minimum 5 minutes. Changes take effect after the current sleep expires — no restart needed.
+**Polling interval** — applies to all platforms. Preset buttons: 5 m, 10 m, 30 m, 1 h, 6 h, 12 h, 24 h. Default is **1 hour**. Minimum 5 minutes. Changes take effect after the current sleep expires — no restart needed.
 
 ### Local Relay (`social_relay.py`)
 
@@ -862,6 +876,32 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 - **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
 - **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
 - **Multiple devices** — each Nextube uses its hostname as the unique ID. Give each device a different hostname in **Network Settings** to avoid topic collisions.
+
+## WLED Sync
+
+The accent LEDs can mirror a WLED-controlled LED strip on your LAN in real time. When enabled, Nextube listens on the WLED UDP Notifier broadcast port and applies the primary colour + brightness to all 6 WS2812B accent LEDs whenever WLED changes state — no target IP or extra configuration on the WLED side.
+
+### Setup (Nextube side)
+
+1. Open **Services → WLED Sync**.
+2. Check **Enable** and optionally change the UDP port (default **21324**).
+3. Click **Save**, then reboot the device.
+
+### Setup (WLED side)
+
+In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct change ✓**. That's all — WLED broadcasts to `255.255.255.255` (LAN subnet), so no Nextube IP is needed.
+
+### Notes
+
+| Behaviour | Detail |
+|---|---|
+| **Colour fidelity** | Works precisely for Solid and single-colour effects. For animated effects (Rainbow, Breath, Twinkle) Nextube shows the dominant colour at the moment each broadcast fires. |
+| **WLED offline** | Nextube holds the last received colour indefinitely — no crash, no fallback to black. |
+| **First boot** | Before any packet is received `wled_sync_get()` returns false → the accent LEDs run their normal config-driven effect (Static/Breath/Rainbow/Off). No delay or dark flash. |
+| **Boot-time gate** | The UDP listener task is only created if **Enable** is checked at boot. Restart required after toggling. |
+| **No TLS / HTTP** | Pure UDP receive — no `tls_sem` contention. Stack 3 KB, Core 0, priority 3. |
+
+---
 
 ## Themes
 
