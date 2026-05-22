@@ -417,6 +417,30 @@ void app_main(void)
     }
     sht30_task_start();    /* no-op task if sensor absent */
 
+    /* Detect OTA rollback: if the inactive OTA slot is in ABORTED state it means
+     * the previous boot attempt failed (the new firmware crashed or watchdogged
+     * before reaching esp_ota_mark_app_valid_cancel_rollback) and the bootloader
+     * automatically reverted to this slot.  Log it prominently so it is visible
+     * in the serial monitor and the in-RAM device log; the web UI reads the same
+     * partition state via /api/status and shows a banner to the user. */
+    {
+        const esp_partition_t *running  = esp_ota_get_running_partition();
+        const esp_partition_t *inactive = esp_ota_get_next_update_partition(NULL);
+        if (inactive && inactive != running) {
+            esp_ota_img_states_t st;
+            if (esp_ota_get_state_partition(inactive, &st) == ESP_OK &&
+                    st == ESP_OTA_IMG_ABORTED) {
+                esp_app_desc_t desc;
+                if (esp_ota_get_partition_description(inactive, &desc) == ESP_OK)
+                    ESP_LOGW(TAG, "OTA ROLLBACK — firmware v%s failed to start; "
+                             "reverted to v%s", desc.version, FW_VERSION_STR);
+                else
+                    ESP_LOGW(TAG, "OTA ROLLBACK — failed firmware version unknown; "
+                             "reverted to v%s", FW_VERSION_STR);
+            }
+        }
+    }
+
     /* Mark this OTA image as valid so the bootloader does not roll back to
      * the previous firmware on the next reboot.  CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
      * leaves a freshly-flashed image in ESP_OTA_IMG_PENDING_VERIFY state; if the

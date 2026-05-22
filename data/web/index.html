@@ -71,6 +71,10 @@ select option{background:var(--accent);color:var(--text)}
   </div>
 </header>
 
+<div id="ota-rollback-banner" style="display:none;background:rgba(255,160,0,.12);border:1px solid rgba(255,160,0,.55);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
+  <span style="flex:1">⚠️ <strong>OTA rollback</strong> — firmware <strong id="rb-bad-ver"></strong> crashed or failed to start after update. The device automatically reverted to the previous firmware (<strong id="rb-cur-ver"></strong>). Re-try the update or check <strong>System → Device Log</strong> for the crash reason.</span>
+  <button onclick="dismissOtaRollback()" style="background:none;border:none;color:rgba(255,160,0,.9);font-size:1.1rem;cursor:pointer;padding:0;line-height:1" title="Dismiss">✕</button>
+</div>
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
   ⚠️ <strong>Web UI update required</strong> — this firmware expects LittleFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
   Upload <code>nextube-WebUI-v*.zip</code> via <strong>System → Web UI Update</strong> (recommended — config preserved, no reboot),
@@ -1337,6 +1341,12 @@ function onProfileChange(sel) {
   const vcomEl = document.querySelector('.f-tube-vcom[data-tube="' + tube + '"]');
   if (vcomEl) vcomEl.value = vcom;
   markUnsaved();
+}
+
+function dismissOtaRollback() {
+  const badVer = $('rb-bad-ver')?.textContent?.replace(/^v/, '') || 'unknown';
+  localStorage.setItem('rollback_dismissed_' + badVer, '1');
+  $('ota-rollback-banner').style.display = 'none';
 }
 
 function toggleAdvDisplay() {
@@ -2916,6 +2926,22 @@ async function refreshStatus() {
   }
   $('s-fwver').textContent = s.firmware || '--';
   if ($('s-spver')) $('s-spver').textContent = s.fs_version || '--';
+
+  /* OTA rollback banner — shown when the inactive OTA slot is ABORTED,
+   * meaning the last update crashed before marking itself valid and the
+   * bootloader reverted automatically.  Dismissed per bad-version so a
+   * future rollback (different version) will show the banner again.     */
+  if (s.ota_rollback) {
+    const badVer = s.ota_rollback_ver || 'unknown';
+    const key    = 'rollback_dismissed_' + badVer;
+    if (!localStorage.getItem(key)) {
+      $('rb-bad-ver').textContent = 'v' + badVer;
+      $('rb-cur-ver').textContent = 'v' + (s.firmware || '--');
+      $('ota-rollback-banner').style.display = 'flex';
+    }
+  } else {
+    $('ota-rollback-banner').style.display = 'none';
+  }
 
   /* Version mismatch banner — compare the LittleFS version the firmware was
    * built to expect (expected_fs) against what's actually on the device

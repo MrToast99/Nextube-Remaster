@@ -742,6 +742,27 @@ static esp_err_t api_status(httpd_req_t *r)
      * admin_set is the only auth-related field exposed unauthenticated; the
      * AP PIN itself is on a separate auth'd route (/api/wifi/ap_pin). */
     cJSON_AddBoolToObject(root, "admin_set", auth_is_password_set());
+    /* OTA rollback detection — check whether the inactive OTA slot is in
+     * ABORTED state.  This means the last OTA update crashed before the new
+     * firmware could call esp_ota_mark_app_valid_cancel_rollback(), and the
+     * bootloader automatically reverted to this (previously-valid) slot.
+     * Reading partition state is a fast metadata read; safe on every poll. */
+    {
+        const esp_partition_t *running  = esp_ota_get_running_partition();
+        const esp_partition_t *inactive = esp_ota_get_next_update_partition(NULL);
+        bool rollback = false;
+        if (inactive && inactive != running) {
+            esp_ota_img_states_t st;
+            if (esp_ota_get_state_partition(inactive, &st) == ESP_OK &&
+                    st == ESP_OTA_IMG_ABORTED) {
+                rollback = true;
+                esp_app_desc_t desc;
+                if (esp_ota_get_partition_description(inactive, &desc) == ESP_OK)
+                    cJSON_AddStringToObject(root, "ota_rollback_ver", desc.version);
+            }
+        }
+        cJSON_AddBoolToObject(root, "ota_rollback", rollback);
+    }
     char *json = cJSON_PrintUnformatted(root);
     esp_err_t ret = send_json(r, json);
     free(json); cJSON_Delete(root);
