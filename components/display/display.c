@@ -2662,46 +2662,173 @@ static void render_album(const nextube_config_t *cfg,
  *                  rain  snow  squalls  thunderstorm
  *                  sand  tornado  volcanicAsh
  */
-/* ── wx_sun_draw_icon ────────────────────────────────────────────────────────
- * Draw a large sun-semicircle icon centred in a full 80×160 tube using U8g2
- * primitives.  rising=true for sunrise (^-caret), false for sunset (v-caret).
- * bg: decoded RGB565 background (LCD_WIDTH × LCD_HEIGHT); NULL = solid black. */
-static void wx_sun_draw_icon(int tube, bool rising, uint16_t fg,
-                              const uint8_t *bg)
+/* ── wx_sun_anim_frame ───────────────────────────────────────────────────────
+ * Animated sunrise/sunset for Weather Panel 2.
+ *   tube 0 (rising=true)  — sun rises from below horizon, pauses at top, loops
+ *   tube 4 (rising=false) — sun holds briefly at top then descends, loops
+ *
+ * The U8g2 frame buffer is 128×64 rows; the tube LCD is 80×160.  Three passes
+ * cover the full tube height; each pass translates tube-absolute coordinates
+ * into buffer coordinates by subtracting the pass start row (y0).  U8g2 clips
+ * any disc/ray pixel whose buffer coord falls outside the window.
+ *
+ * Rendering layers per pass (matching the user's Arduino/U8g2 sketch):
+ *   1. Full sun disc (U8G2_DRAW_ALL) — clipped when outside this pass window
+ *   2. Seven rays at π … 2π (left → up → right)
+ *   3. Black mask erasing everything below the horizon line
+ *   4. Horizon line
+ *   5. Two mountain triangles (pass 1 only — tube rows 64–127 contain them)
+ *
+ * fg: theme foreground colour (sun disc, rays, horizon, mountains).
+ * bg: theme blank.jpg decoded RGB565 image (or NULL → solid black).  Passed
+ *     through to ht_blit_at(); where U8g2 bit=0 the background image pixel is
+ *     shown, giving the sky area the theme's texture.                         */
+static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
+                               const uint8_t *bg)
 {
-    u8g2_ClearBuffer(&s_u8g2);
+    /* ── Per-tube animation state (sunrise idx=0, sunset idx=1) ── */
+    static float s_y  [2] = {150.0f,  40.0f};  /* sun centre Y, tube coords    */
+    static int   s_ph [2] = {0,       1    };   /* 0 = moving, 1 = holding      */
+    static int   s_cnt[2] = {0,       0    };
 
-    const int cx = 40, cy = 28, r = 16;   /* large semicircle */
+    int idx = rising ? 0 : 1;
 
-    /* Filled upper semicircle */
-    u8g2_DrawDisc(&s_u8g2, (u8g2_uint_t)cx, (u8g2_uint_t)cy, (u8g2_uint_t)r,
-                  U8G2_DRAW_UPPER_RIGHT | U8G2_DRAW_UPPER_LEFT);
-    /* Horizon line */
-    u8g2_DrawHLine(&s_u8g2, (u8g2_uint_t)(cx - r - 4), (u8g2_uint_t)cy,
-                   (u8g2_uint_t)((r + 4) * 2 + 1));
-    /* Three rays above the arc */
-    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)cx,       (u8g2_uint_t)(cy-r-2),
-                            (u8g2_uint_t)cx,       (u8g2_uint_t)(cy-r-6));   /* straight up */
-    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-r-1), (u8g2_uint_t)(cy-3),
-                            (u8g2_uint_t)(cx-r-5), (u8g2_uint_t)(cy-7));     /* upper-left  */
-    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+r+1), (u8g2_uint_t)(cy-3),
-                            (u8g2_uint_t)(cx+r+5), (u8g2_uint_t)(cy-7));     /* upper-right */
-    /* Direction caret just below horizon */
-    if (rising) {
-        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-6), (u8g2_uint_t)(cy+7),
-                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+3));
-        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+6), (u8g2_uint_t)(cy+7),
-                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+3));
-    } else {
-        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-6), (u8g2_uint_t)(cy+3),
-                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+7));
-        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+6), (u8g2_uint_t)(cy+3),
-                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+7));
+    /* ── Advance animation state one frame ── */
+    if (s_ph[idx] == 0) {                        /* moving phase */
+        s_y[idx] += rising ? -1.5f : 1.5f;
+        float limit = rising ? 40.0f : 150.0f;
+        if ((rising && s_y[idx] <= limit) || (!rising && s_y[idx] >= limit)) {
+            s_y[idx]   = limit;
+            s_ph[idx]  = 1;
+            s_cnt[idx] = 0;
+        }
+    } else {                                      /* hold phase */
+        if (++s_cnt[idx] >= (rising ? 60 : 20)) {
+            s_ph[idx] = 0;
+            s_y[idx]  = rising ? 150.0f : 40.0f;
+        }
     }
 
-    /* Icon spans rows 0 (ray tip) through ~35 (caret bottom) = 36 rows.
-     * Centre vertically: y_tube = (160 - 36) / 2 = 62. */
-    ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), 36, 62, fg, bg);
+    const int HY = 110;      /* tube-absolute Y of horizon line */
+    const int SR = 10;       /* sun disc radius                 */
+    float     sy = s_y[idx]; /* sun centre Y (tube coords)      */
+
+    /* ── 3-pass render covering the full 160-px tube ── */
+    static const int STARTS[3] = {0,  64, 128};
+    static const int ROWS  [3] = {64, 64,  32};
+
+    for (int p = 0; p < 3; p++) {
+        int y0   = STARTS[p];
+        int nrow = ROWS[p];
+
+        int bSun = (int)sy - y0;   /* sun centre in buffer rows (may be negative) */
+        int bHor = HY      - y0;   /* horizon    in buffer rows                   */
+
+        u8g2_ClearBuffer(&s_u8g2);
+        u8g2_SetDrawColor(&s_u8g2, 1);
+
+        /* ── 1. Sun disc ──────────────────────────────────────────────────────
+         * IMPORTANT: bSun may be negative when the sun centre is above this
+         * pass's buffer window.  Casting a small negative int to u8g2_uint_t
+         * (uint16_t with U8G2_16BIT) yields a value near 65535; adding the
+         * disc radius then wraps back into [0, SR], so DrawDisc renders
+         * phantom rows — the "downward lines" artifact.
+         *
+         * Safe rule:
+         *   bSun >= 0        → DrawDisc works correctly (large positive coords
+         *                      produced by disc top rows are ≥ 64 → clipped).
+         *   -SR < bSun < 0   → Only the bottom cap [0 .. bSun+SR-1] is visible.
+         *                      Draw each row with DrawHLine using signed math.
+         *   bSun <= -SR      → Disc entirely above this pass; skip.            */
+        if (bSun >= 0) {
+            u8g2_DrawDisc(&s_u8g2, 40, (u8g2_uint_t)bSun, (u8g2_uint_t)SR,
+                          U8G2_DRAW_ALL);
+        } else if (bSun > -SR) {
+            /* Sun centre is |bSun| rows above the buffer top.
+             * Visible rows: 0 … (bSun + SR - 1).  Use signed dy to avoid cast. */
+            int visible = bSun + SR;   /* > 0 because bSun > -SR */
+            for (int row = 0; row < visible; row++) {
+                int dy = row - bSun;   /* always positive: row >= 0, bSun < 0 */
+                int hw = (int)sqrtf((float)(SR * SR - dy * dy));
+                u8g2_DrawHLine(&s_u8g2,
+                               (u8g2_uint_t)(40 - hw),
+                               (u8g2_uint_t)row,
+                               (u8g2_uint_t)(2 * hw + 1));
+            }
+        }
+        /* bSun <= -SR: disc entirely above this pass — nothing to draw */
+
+        /* ── 2. Seven rays: angles π … 2π (left → up → right) ────────────
+         * All rays have sin(ang) ≤ 0 (upward in screen coords), so both
+         * endpoints are at or above bSun.  When bSun < 0 every endpoint is
+         * also negative → all out of range.  Only draw when bSun >= 0.
+         *
+         * CRITICAL: even when bSun >= 0, upward ray endpoints can be negative
+         * when bSun < (SR+11) ≈ 21.  A negative int cast to u8g2_uint_t
+         * (uint16_t) becomes ~65000+.  U8g2's Bresenham DrawLine then treats
+         * this as a very large positive y, and if the other endpoint is in-range
+         * (e.g. y=2), draws a line from y=2 all the way down to the buffer
+         * edge — exactly the "downward lines from the sun" artifact.
+         * Fix: skip any ray whose endpoints are outside [0, nrow).            */
+        if (bSun >= 0) {
+            for (int i = 0; i < 7; i++) {
+                float ang = (float)M_PI + (float)i * ((float)M_PI / 6.0f);
+                float ca  = cosf(ang), sa = sinf(ang);
+                int rx0 = 40   + (int)(ca * (float)(SR + 3));
+                int ry0 = bSun + (int)(sa * (float)(SR + 3));
+                int rx1 = 40   + (int)(ca * (float)(SR + 11));
+                int ry1 = bSun + (int)(sa * (float)(SR + 11));
+                /* Skip rays with any endpoint outside valid buffer rows.
+                 * Negative y → cast to large uint16_t → DrawLine artifact. */
+                if (ry0 < 0 || ry1 < 0 || ry0 >= nrow || ry1 >= nrow) continue;
+                u8g2_DrawLine(&s_u8g2,
+                              (u8g2_uint_t)rx0, (u8g2_uint_t)ry0,
+                              (u8g2_uint_t)rx1, (u8g2_uint_t)ry1);
+            }
+        }
+
+        /* ── 3. Mask — erase everything below the horizon ─────────────────
+         * Draw-colour 0 sets bits to 0.  Where bg != NULL, ht_blit_at maps
+         * zero-bits to the theme background, so the "sky" region above the
+         * horizon shows the theme texture while below-horizon stays black
+         * only because the mask is applied AFTER the disc/rays (overwriting
+         * any disc pixels that extended past the horizon).                  */
+        u8g2_SetDrawColor(&s_u8g2, 0);
+        if (bHor < 0) {
+            /* Entire pass is below the horizon — blank the whole buffer */
+            u8g2_DrawBox(&s_u8g2, 0, 0, 80, (u8g2_uint_t)nrow);
+        } else if (bHor < nrow) {
+            /* Partial pass — erase rows horizon+1 … nrow-1 */
+            int mask_h = nrow - bHor - 1;
+            if (mask_h > 0)
+                u8g2_DrawBox(&s_u8g2, 0, (u8g2_uint_t)(bHor + 1),
+                             80, (u8g2_uint_t)mask_h);
+        }
+        /* (bHor >= nrow: entire pass is above horizon — no mask needed) */
+        u8g2_SetDrawColor(&s_u8g2, 1);
+
+        /* ── 4. Horizon line ── */
+        if (bHor >= 0 && bHor < nrow)
+            u8g2_DrawHLine(&s_u8g2, 0, (u8g2_uint_t)bHor, 80);
+
+        /* ── 5. Mountain silhouettes — only in pass 1 (tube rows 64–127) ──
+         * Mountain left:  vertices (5,110)(20,90)(35,110) → buf (5,46)(20,26)(35,46)
+         * Mountain right: vertices (40,110)(60,95)(80,110) → buf (40,46)(60,31)(80,46)
+         * Bases coincide with the horizon line (buffer row 46 in pass 1).     */
+        if (p == 1) {
+            u8g2_DrawTriangle(&s_u8g2,
+                               5,  (int16_t)(110 - y0),
+                              20,  (int16_t)( 90 - y0),
+                              35,  (int16_t)(110 - y0));
+            u8g2_DrawTriangle(&s_u8g2,
+                              40,  (int16_t)(110 - y0),
+                              60,  (int16_t)( 95 - y0),
+                              80,  (int16_t)(110 - y0));
+        }
+
+        /* Blit: fg-colour where U8g2 bit=1, bg image where bit=0 (bg=NULL → black) */
+        ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), nrow, y0, fg, bg);
+    }
 }
 
 /* ── wx_sun_draw_time ────────────────────────────────────────────────────────
@@ -2726,19 +2853,28 @@ static void wx_sun_draw_time(int tube, const char *timestr, uint16_t fg,
 
 /* ── render_weather_sun ──────────────────────────────────────────────────────
  * Weather panel 2 — Sunrise & Sunset:
- *   tube 0 : sunrise icon (large sun ^ rising)
+ *   tube 0 : animated sunrise (sun rises from mountains, loops)
  *   tube 1 : sunrise time "HH:MM"
  *   tube 2 : blank
  *   tube 3 : blank
- *   tube 4 : sunset  icon (large sun v setting)
+ *   tube 4 : animated sunset  (sun descends into mountains, loops)
  *   tube 5 : sunset  time "HH:MM"
- * Background: theme's AMPM/blank.jpg composited behind U8g2 content.
+ *
+ * anim_only=false (full redraw): renders all 6 tubes.  Called on first draw,
+ *   mode/theme/time changes, or panel switch.
+ * anim_only=true  (animation tick): only advances and blits tubes 0 and 4.
+ *   Called every 50 ms tick while the sun panel is active, keeping the static
+ *   tubes (1, 2, 3, 5) stable without unnecessary SPI writes.
+ *
  * Solar times from NOAA algorithm; "--:--" fallback while geocoding pending.  */
-static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t)
+static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
+                                bool anim_only)
 {
     uint16_t fg = ht_sample_theme_color(cfg->theme);
 
-    /* Load theme background once — used for all four U8g2 tubes */
+    /* Load the theme background once — needed by both static and animation tubes.
+     * img_cache_get is a fast cache lookup (no disk I/O on cache hits), so it is
+     * cheap to call on every animation tick.                                      */
     char bg_path[256];
     snprintf(bg_path, sizeof(bg_path), "/images/themes/%s/AMPM/blank.jpg",
              cfg->theme);
@@ -2746,40 +2882,41 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t)
     const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
     if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
 
-    char rise_str[8] = "--:--";
-    char set_str[8]  = "--:--";
+    if (!anim_only) {
+        /* ── Static tubes: time strings + blank tubes ──
+         * Animation tubes (0 and 4) are fully rendered by wx_sun_anim_frame()
+         * on every tick; their background fill is handled there.               */
+        char rise_str[8] = "--:--";
+        char set_str[8]  = "--:--";
 
-    float lat = 0.0f, lon = 0.0f;
-    if (weather_get_location(&lat, &lon)) {
-        int rise_min = 0, set_min = 0;
-        solar_calc(lat, lon, t, &rise_min, &set_min);
-        if (rise_min >= 0)
-            snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
-                     (rise_min / 60) % 24, rise_min % 60);
-        if (set_min >= 0)
-            snprintf(set_str, sizeof(set_str), "%02d:%02d",
-                     (set_min / 60) % 24, set_min % 60);
+        float lat = 0.0f, lon = 0.0f;
+        if (weather_get_location(&lat, &lon)) {
+            int rise_min = 0, set_min = 0;
+            solar_calc(lat, lon, t, &rise_min, &set_min);
+            if (rise_min >= 0)
+                snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
+                         (rise_min / 60) % 24, rise_min % 60);
+            if (set_min >= 0)
+                snprintf(set_str, sizeof(set_str), "%02d:%02d",
+                         (set_min / 60) % 24, set_min % 60);
+        }
+
+        if (bg) {
+            display_show_image(1, bg_path);
+            display_show_image(5, bg_path);
+        } else {
+            display_fill(1, 0x0000);
+            display_fill(5, 0x0000);
+        }
+        wx_sun_draw_time(1, rise_str, fg, bg);
+        display_show_ampm(2, "blank", cfg->theme);
+        display_show_ampm(3, "blank", cfg->theme);
+        wx_sun_draw_time(5, set_str,  fg, bg);
     }
 
-    /* Paint full background on each tube first, then composite U8g2 content */
-    if (bg) {
-        display_show_image(0, bg_path);
-        display_show_image(1, bg_path);
-        display_show_image(4, bg_path);
-        display_show_image(5, bg_path);
-    } else {
-        display_fill(0, 0x0000);
-        display_fill(1, 0x0000);
-        display_fill(4, 0x0000);
-        display_fill(5, 0x0000);
-    }
-
-    wx_sun_draw_icon(0, /*rising=*/true,  fg, bg);
-    wx_sun_draw_time(1, rise_str,          fg, bg);
-    display_show_ampm(2, "blank", cfg->theme);
-    display_show_ampm(3, "blank", cfg->theme);
-    wx_sun_draw_icon(4, /*rising=*/false, fg, bg);
-    wx_sun_draw_time(5, set_str,           fg, bg);
+    /* ── Animation tubes — rendered on every frame regardless of anim_only ── */
+    wx_sun_anim_frame(0, /*rising=*/true,  fg, bg);
+    wx_sun_anim_frame(4, /*rising=*/false, fg, bg);
 }
 
 /* render_weather – panel 0 = temperature + icon, panel 1 = humidity + icon,
@@ -2800,7 +2937,7 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t)
  *  Panel 2 — sunrise + sunset:
  *    [rise_icon] [rise_time] [blank] [blank] [set_icon] [set_time]
  */
-static void render_weather(const nextube_config_t *cfg, int panel)
+static void render_weather(const nextube_config_t *cfg, int panel, bool anim_only)
 {
     const weather_data_t *w = weather_get();
     char path[128];
@@ -2814,14 +2951,13 @@ static void render_weather(const nextube_config_t *cfg, int panel)
 
     /* Panel 2 — sunrise/sunset — handled by a dedicated renderer */
     if (panel == WEATHER_PANEL_SUN) {
-        /* render_weather_sun needs local time — use a stack tm struct here.
-         * The caller (display_task) already holds a fresh struct tm in `t`, but
-         * render_weather doesn't receive it; re-derive from time() for simplicity
-         * (only called on panel switch or solar-time change, ≤once/minute). */
+        /* render_weather_sun needs local time — derive from time() here.
+         * anim_only=true: only advance and blit the animation tubes (0 and 4).
+         * anim_only=false: full redraw of all 6 tubes.                        */
         time_t now = time(NULL);
         struct tm lt;
         localtime_r(&now, &lt);
-        render_weather_sun(cfg, &lt);
+        render_weather_sun(cfg, &lt, anim_only);
         return;
     }
 
@@ -3288,6 +3424,9 @@ static void display_task(void *arg)
         uint8_t cur_burnin_snap     = (uint8_t)(s_burnin_mask | s_snow_mask);
         bool    burnin_force_render = (last_burnin_snap != 0) && (cur_burnin_snap == 0);
         last_burnin_snap = cur_burnin_snap;
+        /* Set true inside APP_MODE_WEATHER when the sun animation panel is
+         * active; used below to drive FAST tick and per-frame anim updates. */
+        bool    sun_anim            = false;
 
         switch (mode) {
 
@@ -3462,7 +3601,7 @@ static void display_task(void *arg)
             break;
         }
 
-        case APP_MODE_CUSTOM_CLOCK: {
+        case APP_MODE_DATE: {
             /* Custom Clock shows date (DD/MM/YY); only needs re-render when the
              * day changes, or on first draw / mode or theme switch. */
             struct tm t; ntp_get_local(&t);
@@ -3640,6 +3779,10 @@ static void display_task(void *arg)
                 }
             }
 
+            /* True when the animated sunrise/sunset panel is visible — drives
+             * FAST tick (20 Hz) and per-frame animation blit of tubes 0 and 4. */
+            sun_anim = (weather_panel == WEATHER_PANEL_SUN && cfg->weather_panel2_en);
+
             /* Trigger re-render when: first draw, mode/theme change, new data
              * values arrived, validity flips, panel switched, or solar-time
              * minute changed (only relevant on panel 2). */
@@ -3658,15 +3801,21 @@ static void display_task(void *arg)
                     wx_changed = (wx_tm.tm_min != last_wx_min);
             }
             bool valid_changed = (now_valid != last_wx_valid);
-            if (first || mode_changed || theme_changed || wx_changed || valid_changed ||
-                    panel_flipped || burnin_force_render) {
-                render_weather(cfg, weather_panel);
-                if (now_valid) {
-                    last_temp_c = w->temp_c;
-                    last_hum    = w->humidity;
-                    last_wx_min = wx_tm.tm_min;
+            bool full_redraw   = (first || mode_changed || theme_changed || wx_changed ||
+                                  valid_changed || panel_flipped || burnin_force_render);
+            if (full_redraw || sun_anim) {
+                render_weather(cfg, weather_panel, /*anim_only=*/!full_redraw);
+                /* Only update change-detection state on a full redraw so that
+                 * a pure animation tick doesn't mask a real data change on the
+                 * next full-redraw cycle.                                       */
+                if (full_redraw) {
+                    if (now_valid) {
+                        last_temp_c = w->temp_c;
+                        last_hum    = w->humidity;
+                        last_wx_min = wx_tm.tm_min;
+                    }
+                    last_wx_valid = now_valid;
                 }
-                last_wx_valid = now_valid;
             }
             break;
         }
@@ -3704,9 +3853,21 @@ static void display_task(void *arg)
 
         first = false;
 
-        /* Spectrum mode runs at 20 Hz to match the LED task refresh rate and
-         * give snappy bar response.  All other modes use 5 Hz. */
-        TickType_t tick_ms = (mode == APP_MODE_SPECTRUM)
+        /* Spectrum and the Weather sun animation run at 20 Hz.
+         * Spectrum matches the LED task refresh rate for snappy bar response.
+         * The sun animation (Weather Panel 2) needs 20 Hz so the rising/setting
+         * motion is smooth (1.5 px/frame × 20 Hz = 30 px/s).
+         * All other modes use 5 Hz.
+         *
+         * FAST is used whenever weather mode is active AND panel 2 is enabled,
+         * not only while the sun panel is currently displayed.  This eliminates
+         * the "lag on panel switch" where the task was sleeping for a full SLOW
+         * tick (200 ms) when the user switches from panel 0/1 to panel 2 — the
+         * animation would not start until the next SLOW wake-up.  Keeping FAST
+         * throughout weather mode means the panel switch is picked up within
+         * 50 ms, giving an instant animation start.                            */
+        bool weather_needs_fast = (mode == APP_MODE_WEATHER && cfg->weather_panel2_en);
+        TickType_t tick_ms = (mode == APP_MODE_SPECTRUM || sun_anim || weather_needs_fast)
                              ? pdMS_TO_TICKS(DISPLAY_TICK_MS_FAST)
                              : pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW);
 

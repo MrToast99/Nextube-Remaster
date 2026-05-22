@@ -623,7 +623,12 @@ static void subscribers_task(void *arg)
         config_unlock();
         if (interval_min < 5) interval_min = 5;   /* floor: avoid hammering APIs */
         ESP_LOGI(TAG, "Social counter poll cycle done — sleeping %u min", (unsigned)interval_min);
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)interval_min * 60000));
+        /* Sleep in 1-minute slices to avoid pdMS_TO_TICKS uint32_t overflow.
+         * A single vTaskDelay(interval_min * 60000) overflows when
+         * interval_min × 60000 × tick_rate_hz exceeds 2^32 (e.g. 720 min
+         * at 1 kHz tick rate wraps to ~250 s instead of 43200 s).            */
+        for (uint16_t _m = 0; _m < interval_min; _m++)
+            vTaskDelay(pdMS_TO_TICKS(60000));   /* 60 000 ms = 1 min, always safe */
     }
 }
 

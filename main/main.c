@@ -48,6 +48,7 @@
 #include "microphone.h"
 #include "fw_version.h"
 #include "ha_mqtt.h"
+#include "wled_sync.h"
 
 static const char *TAG = "main";
 
@@ -322,6 +323,7 @@ void app_main(void)
     bool    boot_weather_enabled;
     bool    boot_social_enabled;
     bool    boot_mqtt_enabled;
+    bool    boot_wled_sync_enabled;
     uint8_t boot_invert_mask;
     uint8_t boot_init_profile[6];
     uint8_t boot_vcom[6];
@@ -331,9 +333,10 @@ void app_main(void)
     uint8_t boot_tube_brightness[6];
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
-    boot_weather_enabled   = cfg_boot->weather_enabled;
-    boot_social_enabled    = cfg_boot->social_enabled;
-    boot_mqtt_enabled      = cfg_boot->mqtt_enabled && cfg_boot->mqtt_broker[0] != '\0';
+    boot_weather_enabled    = cfg_boot->weather_enabled;
+    boot_social_enabled     = cfg_boot->social_enabled;
+    boot_mqtt_enabled       = cfg_boot->mqtt_enabled && cfg_boot->mqtt_broker[0] != '\0';
+    boot_wled_sync_enabled  = cfg_boot->wled_sync_enabled;
     boot_invert_mask     = cfg_boot->lcd_invert_mask;
     memcpy(boot_init_profile,    cfg_boot->lcd_init_profile,    sizeof(boot_init_profile));
     memcpy(boot_vcom,            cfg_boot->lcd_vcom,            sizeof(boot_vcom));
@@ -403,6 +406,14 @@ void app_main(void)
         ha_mqtt_start();
     } else {
         ESP_LOGI(TAG, "MQTT disabled or no broker configured — task not started");
+    }
+    /* WLED Sync — UDP listener that mirrors WLED-controlled strips to accent LEDs.
+     * Started when wled_sync_enabled is true AND backlight_mode is BL_MODE_WLED
+     * (or the user may start it standalone so LEDs are ready when mode switches). */
+    if (boot_wled_sync_enabled) {
+        wled_sync_start();
+    } else {
+        ESP_LOGI(TAG, "WLED sync disabled — task not started");
     }
     sht30_task_start();    /* no-op task if sensor absent */
 

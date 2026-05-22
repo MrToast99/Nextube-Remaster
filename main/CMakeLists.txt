@@ -18,4 +18,5 @@ idf_component_register(
         subscribers
         app_update
         ha_mqtt
+        wled_sync
 )

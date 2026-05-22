@@ -124,8 +124,8 @@ static void set_defaults(void)
      * existing behaviour is preserved on upgrade. */
     s_cfg.weather_enabled = true;
     s_cfg.social_enabled           = false; /* opt-in: user must enable explicitly */
-    s_cfg.youtube_enabled          = true;
-    s_cfg.sub_poll_interval_min    = 30;
+    s_cfg.youtube_enabled          = false; /* opt-in: user must enable explicitly */
+    s_cfg.sub_poll_interval_min    = 60;   /* 1 hour default */
     s_cfg.instagram_enabled        = false;
     s_cfg.tiktok_enabled    = false;
     s_cfg.instagram_user[0] = '\0';
@@ -145,6 +145,10 @@ static void set_defaults(void)
     s_cfg.mqtt_user[0]      = '\0';
     s_cfg.mqtt_password[0]  = '\0';
     s_cfg.mqtt_ha_discovery = true;
+
+    /* WLED Sync */
+    s_cfg.wled_sync_enabled = false;
+    s_cfg.wled_sync_port    = 21324;
 
     s_cfg.countdown_minutes = 1;
     s_cfg.pomodoro_work     = 25;
@@ -237,8 +241,8 @@ static void parse_json(const char *json, size_t len)
         else if (strcmp(app_name, "Scoreboard")  == 0) s_cfg.current_mode = APP_MODE_SCOREBOARD;
         else if (strcmp(app_name, "Pomodoro")    == 0) s_cfg.current_mode = APP_MODE_POMODORO;
         else if (strcmp(app_name, "YouTube")     == 0) s_cfg.current_mode = APP_MODE_YOUTUBE;
-        else if (strcmp(app_name, "Date")        == 0) s_cfg.current_mode = APP_MODE_CUSTOM_CLOCK;
-        else if (strcmp(app_name, "CustomClock") == 0) s_cfg.current_mode = APP_MODE_CUSTOM_CLOCK; /* legacy alias */
+        else if (strcmp(app_name, "Date")        == 0) s_cfg.current_mode = APP_MODE_DATE;
+        else if (strcmp(app_name, "CustomClock") == 0) s_cfg.current_mode = APP_MODE_DATE; /* legacy alias */
         else if (strcmp(app_name, "Album")       == 0) s_cfg.current_mode = APP_MODE_ALBUM;
         else if (strcmp(app_name, "Weather")     == 0) s_cfg.current_mode = APP_MODE_WEATHER;
         else if (strcmp(app_name, "Spectrum")    == 0) s_cfg.current_mode = APP_MODE_SPECTRUM;
@@ -332,6 +336,12 @@ static void parse_json(const char *json, size_t len)
         json_read_str(root, "mqtt_password", s_cfg.mqtt_password, sizeof(s_cfg.mqtt_password));
         v = cJSON_GetObjectItem(root, "mqtt_ha_discovery");
         if (cJSON_IsBool(v)) s_cfg.mqtt_ha_discovery = cJSON_IsTrue(v);
+    }
+    {
+        cJSON *v = cJSON_GetObjectItem(root, "wled_sync_enabled");
+        if (cJSON_IsBool(v)) s_cfg.wled_sync_enabled = cJSON_IsTrue(v);
+        json_read_u16(root, "wled_sync_port", &s_cfg.wled_sync_port);
+        if (s_cfg.wled_sync_port == 0) s_cfg.wled_sync_port = 21324;
     }
     json_read_u8(root, "mic_adc_channel", &s_cfg.mic_adc_channel);
     if (s_cfg.mic_adc_channel > 7) s_cfg.mic_adc_channel = 0; /* clamp to valid ADC1 range */
@@ -460,6 +470,7 @@ static void parse_json(const char *json, size_t len)
     else if (strcmp(bl_mode, "Breath")  == 0) s_cfg.backlight_mode = BL_MODE_BREATH;
     else if (strcmp(bl_mode, "Rainbow") == 0) s_cfg.backlight_mode = BL_MODE_RAINBOW;
     else if (strcmp(bl_mode, "Off")     == 0) s_cfg.backlight_mode = BL_MODE_OFF;
+    else if (strcmp(bl_mode, "WLED")    == 0) s_cfg.backlight_mode = BL_MODE_WLED;
 
     char bl_onoff[8] = {0};
     json_read_str(root, "backlight_onoff", bl_onoff, sizeof(bl_onoff));
@@ -481,7 +492,7 @@ static void parse_json(const char *json, size_t len)
      * re-enable Clock so the device can always show the time. */
     {
         bool has_clock = (s_cfg.enabled_modes & (1 << APP_MODE_CLOCK))        != 0;
-        bool has_date  = (s_cfg.enabled_modes & (1 << APP_MODE_CUSTOM_CLOCK)) != 0;
+        bool has_date  = (s_cfg.enabled_modes & (1 << APP_MODE_DATE)) != 0;
         if (!has_clock && !has_date)
             s_cfg.enabled_modes |= (1 << APP_MODE_CLOCK);
     }
@@ -724,7 +735,7 @@ static void parse_json(const char *json, size_t len)
      * entirely from whether Spectrum mode is present in enabled_modes.
      * This enforces consistency after loading any config.json, including
      * old backups or hand-edited files where the two fields may disagree.
-     * APP_MODE_SPECTRUM == 8 → bit 8 of the bitmask. */
+     * APP_MODE_SPECTRUM == 7 → bit 7 of the bitmask. */
     s_cfg.mic_enabled = (s_cfg.enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
 
     cJSON_Delete(root);
@@ -911,11 +922,13 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "tube6_panel_sunrise",    s_cfg.tube6_panel_sunrise);
     cJSON_AddNumberToObject(root, "tube6_panel_ms",         s_cfg.tube6_panel_ms);
 
-    const char *bl_modes[] = {"Static","Breath","Rainbow","Off"};
+    const char *bl_modes[] = {"Static","Breath","Rainbow","Off","WLED"};
     unsigned bl_idx = (unsigned)s_cfg.backlight_mode;
     if (bl_idx >= sizeof(bl_modes) / sizeof(bl_modes[0])) bl_idx = 0;
     cJSON_AddStringToObject(root, "backlight_mode",  bl_modes[bl_idx]);
     cJSON_AddStringToObject(root, "backlight_onoff", s_cfg.backlight_on ? "ON" : "OFF");
+    cJSON_AddBoolToObject  (root, "wled_sync_enabled", s_cfg.wled_sync_enabled);
+    cJSON_AddNumberToObject(root, "wled_sync_port",    s_cfg.wled_sync_port);
     cJSON_AddNumberToObject(root, "enabled_modes",      s_cfg.enabled_modes);
     cJSON_AddBoolToObject  (root, "rotation_enabled",   s_cfg.rotation_enabled);
     cJSON_AddNumberToObject(root, "rotation_interval_s", s_cfg.rotation_interval_s);
@@ -1065,7 +1078,7 @@ const char *app_mode_name(app_mode_t mode)
         [APP_MODE_SCOREBOARD]   = "Scoreboard",
         [APP_MODE_POMODORO]     = "Pomodoro",
         [APP_MODE_YOUTUBE]      = "YouTube",
-        [APP_MODE_CUSTOM_CLOCK] = "Date",
+        [APP_MODE_DATE] = "Date",
         [APP_MODE_ALBUM]        = "Album",
         [APP_MODE_WEATHER]      = "Weather",
         [APP_MODE_SPECTRUM]     = "Spectrum",

@@ -25,15 +25,15 @@ typedef enum {
     APP_MODE_COUNTDOWN,
     APP_MODE_SCOREBOARD,
     APP_MODE_POMODORO,
-    APP_MODE_YOUTUBE,
-    APP_MODE_CUSTOM_CLOCK,
-    APP_MODE_ALBUM,
-    APP_MODE_WEATHER,
-    APP_MODE_SPECTRUM,  /* = 8 — microphone audio visualiser */
-    APP_MODE_INSTAGRAM, /* = 9  — Instagram follower counter */
-    APP_MODE_TIKTOK,    /* = 10 — TikTok follower counter    */
-    APP_MODE_MASTODON,  /* = 11 — Mastodon follower counter  */
-    APP_MODE_MAX,       /* = 12 */
+    APP_MODE_DATE,       /* = 4 */
+    APP_MODE_ALBUM,      /* = 5 */
+    APP_MODE_WEATHER,    /* = 6 */
+    APP_MODE_SPECTRUM,   /* = 7 — microphone audio visualiser */
+    APP_MODE_YOUTUBE,    /* = 8 — social counter; after Spectrum in touch rotation */
+    APP_MODE_INSTAGRAM,  /* = 9  — Instagram follower counter */
+    APP_MODE_TIKTOK,     /* = 10 — TikTok follower counter    */
+    APP_MODE_MASTODON,   /* = 11 — Mastodon follower counter  */
+    APP_MODE_MAX,        /* = 12 */
 } app_mode_t;
 
 /* ── Backlight effect modes ────────────────────────────────────────── */
@@ -42,6 +42,7 @@ typedef enum {
     BL_MODE_BREATH,
     BL_MODE_RAINBOW,
     BL_MODE_OFF,
+    BL_MODE_WLED = 4,  /* Follow WLED strips via UDP Notifier broadcast */
 } backlight_mode_t;
 
 /* ── Configuration structure ───────────────────────────────────────── */
@@ -150,6 +151,13 @@ typedef struct {
     char             mqtt_user[32];      /* broker username (empty = anonymous) */
     char             mqtt_password[64];  /* broker password */
     bool             mqtt_ha_discovery;  /* publish HA auto-discovery payloads */
+
+    /* WLED Sync (receive) — listen for WLED UDP Notifier v2 broadcasts
+     * and apply the primary colour + brightness to the local accent LEDs.
+     * Boot-time gate: restart required to start or stop the listener task.
+     * Select backlight_mode = BL_MODE_WLED to activate synchronisation.      */
+    bool             wled_sync_enabled;  /* start UDP listener task at boot     */
+    uint16_t         wled_sync_port;     /* WLED Notifier port, default 21324   */
 
     /* Countdown / Pomodoro */
     uint16_t         countdown_minutes;

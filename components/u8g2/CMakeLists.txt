@@ -55,4 +55,14 @@ if(NOT CMAKE_SCRIPT_MODE_FILE)
         -Wno-implicit-fallthrough
         -Wno-missing-field-initializers
     )
+
+    # Use 16-bit coordinates throughout U8g2 (u8g2_uint_t = uint16_t).
+    # Without this, u8g2_uint_t defaults to uint8_t in 8-bit mode.  When a
+    # buffer-relative coordinate is negative (e.g. bSun = sy − y0 < 0), the
+    # cast to uint8_t wraps to ~252; arithmetic on that value (252 + radius)
+    # wraps again to a small positive number that passes the clip check and
+    # renders phantom pixels — visible as artifact lines in wx_sun_anim_frame.
+    # With U8G2_16BIT, negative values become ~65532 and are safely outside
+    # the 0–63 clip range, so they are discarded without rendering.
+    target_compile_definitions(__idf_u8g2 PUBLIC U8G2_16BIT)
 endif()

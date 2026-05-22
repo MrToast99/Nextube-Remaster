@@ -15,6 +15,7 @@
 #include "board_pins.h"
 #include "config_mgr.h"
 #include "microphone.h"
+#include "wled_sync.h"
 #include "esp_log.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
@@ -176,6 +177,33 @@ void leds_effect_rainbow(void)
 static void led_task(void *arg)
 {
     while (1) {
+        /* ── WLED Sync override ─────────────────────────────────────────────
+         * When backlight_mode == BL_MODE_WLED and a UDP Notifier packet has
+         * been received, skip local effects and mirror the WLED primary colour.
+         * wled_sync_get() returns false until at least one packet arrives, so
+         * the fallthrough below keeps local effects active on first boot.      */
+        {
+            backlight_mode_t bl;
+            config_lock();
+            bl = config_get()->backlight_mode;
+            config_unlock();
+
+            if (bl == BL_MODE_WLED) {
+                wled_sync_state_t ws;
+                if (wled_sync_get(&ws)) {
+                    if (!ws.on) {
+                        leds_off();
+                    } else {
+                        leds_set_all(ws.r, ws.g, ws.b);
+                        leds_update();
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    continue;
+                }
+                /* No packet yet — fall through to local effects (shows 'Off') */
+            }
+        }
+
         /* Skip all RMT transmissions while audio is playing.
          * WS2812 hold their last colour — no visual glitch, no rail noise. */
         if (s_audio_active) {
@@ -314,6 +342,12 @@ static void led_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(50));
             break;
         }
+        case BL_MODE_WLED:
+            /* Sync task not started or no packet yet — hold LEDs off while
+             * waiting for the first WLED broadcast after boot.              */
+            leds_off();
+            vTaskDelay(pdMS_TO_TICKS(200));
+            break;
         case BL_MODE_OFF:
         default:
             leds_off();
