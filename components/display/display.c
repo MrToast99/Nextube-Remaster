@@ -2686,32 +2686,36 @@ static void render_album(const nextube_config_t *cfg,
 static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
                                const uint8_t *bg)
 {
-    /* ── Per-tube animation state (sunrise idx=0, sunset idx=1) ── */
-    static float s_y  [2] = {150.0f,  40.0f};  /* sun centre Y, tube coords    */
-    static int   s_ph [2] = {0,       1    };   /* 0 = moving, 1 = holding      */
-    static int   s_cnt[2] = {0,       0    };
+    /* ── Shared animation state — both tubes driven by a single position ────
+     *
+     * s_pos is the distance (px) the suns have travelled from their start:
+     *   Sunrise (tube 0): sy = 150 − s_pos   (bottom → top as s_pos grows)
+     *   Sunset  (tube 4): sy =  40 + s_pos   (top → bottom as s_pos grows)
+     *
+     * At any frame: rise_y + set_y = 190 — the two suns are always at
+     * complementary heights.  They cross the horizon (HY=110) simultaneously
+     * at s_pos ≈ 40, so one sun emerges from the mountains exactly as the
+     * other disappears behind them.
+     *
+     * State is advanced only on the rising=true call (tube 0) so that both
+     * tubes read the same s_pos within the same render frame.               */
+    static float s_pos = 0.0f;   /* 0..110: travel distance from start   */
+    static int   s_ph  = 0;      /* 0 = moving, 1 = holding at end pos   */
+    static int   s_cnt = 0;
 
-    int idx = rising ? 0 : 1;
-
-    /* ── Advance animation state one frame ── */
-    if (s_ph[idx] == 0) {                        /* moving phase */
-        s_y[idx] += rising ? -1.5f : 1.5f;
-        float limit = rising ? 40.0f : 150.0f;
-        if ((rising && s_y[idx] <= limit) || (!rising && s_y[idx] >= limit)) {
-            s_y[idx]   = limit;
-            s_ph[idx]  = 1;
-            s_cnt[idx] = 0;
-        }
-    } else {                                      /* hold phase */
-        if (++s_cnt[idx] >= (rising ? 60 : 20)) {
-            s_ph[idx] = 0;
-            s_y[idx]  = rising ? 150.0f : 40.0f;
+    if (rising) {                /* advance exactly once per render frame */
+        if (s_ph == 0) {
+            s_pos += 1.5f;
+            if (s_pos >= 110.0f) { s_pos = 110.0f; s_ph = 1; s_cnt = 0; }
+        } else {
+            if (++s_cnt >= 60) { s_ph = 0; s_pos = 0.0f; }
         }
     }
 
     const int HY = 110;      /* tube-absolute Y of horizon line */
     const int SR = 10;       /* sun disc radius                 */
-    float     sy = s_y[idx]; /* sun centre Y (tube coords)      */
+    /* Derive this tube's sun position from the shared travel distance */
+    float sy = rising ? (150.0f - s_pos) : (40.0f + s_pos);
 
     /* ── 3-pass render covering the full 160-px tube ── */
     static const int STARTS[3] = {0,  64, 128};
