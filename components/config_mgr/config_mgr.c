@@ -431,13 +431,20 @@ static void parse_json(const char *json, size_t len)
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
     json_read_u16(root, "weather_panel_ms",       &s_cfg.weather_panel_ms);
     if (s_cfg.weather_panel_ms < 1000) s_cfg.weather_panel_ms = 5000; /* resets to default 5 s if below 1 s */
-    /* Panel enable flags — guard: at least one of p0/p1 must be on */
-    cJSON *p0 = cJSON_GetObjectItem(root, "weather_panel0_en");
-    cJSON *p1 = cJSON_GetObjectItem(root, "weather_panel1_en");
-    cJSON *p2 = cJSON_GetObjectItem(root, "weather_panel2_en");
-    s_cfg.weather_panel0_en = p0 ? cJSON_IsTrue(p0) : true;
-    s_cfg.weather_panel1_en = p1 ? cJSON_IsTrue(p1) : true;
-    s_cfg.weather_panel2_en = p2 ? cJSON_IsTrue(p2) : false;
+    /* Panel enable flags — guard: at least one of p0/p1 must be on.
+     * Use the conditional-update pattern (same as tube6_panel_* flags) so that
+     * absent keys preserve the value set by set_defaults() rather than
+     * unconditionally overwriting it.  This prevents a partial-payload
+     * config_set_json call (or an old config.json that pre-dates weather_panel2_en)
+     * from resetting panel2 to false on every parse. */
+    {
+        cJSON *p0 = cJSON_GetObjectItem(root, "weather_panel0_en");
+        cJSON *p1 = cJSON_GetObjectItem(root, "weather_panel1_en");
+        cJSON *p2 = cJSON_GetObjectItem(root, "weather_panel2_en");
+        if (cJSON_IsBool(p0)) s_cfg.weather_panel0_en = cJSON_IsTrue(p0);
+        if (cJSON_IsBool(p1)) s_cfg.weather_panel1_en = cJSON_IsTrue(p1);
+        if (cJSON_IsBool(p2)) s_cfg.weather_panel2_en = cJSON_IsTrue(p2);
+    }
     if (!s_cfg.weather_panel0_en && !s_cfg.weather_panel1_en)
         s_cfg.weather_panel0_en = true;
 
