@@ -324,6 +324,7 @@ void app_main(void)
     bool    boot_social_enabled;
     bool    boot_mqtt_enabled;
     bool    boot_wled_sync_enabled;
+    float   boot_sht30_temp_offset;
     uint8_t boot_invert_mask;
     uint8_t boot_init_profile[6];
     uint8_t boot_vcom[6];
@@ -337,6 +338,7 @@ void app_main(void)
     boot_social_enabled     = cfg_boot->social_enabled;
     boot_mqtt_enabled       = cfg_boot->mqtt_enabled && cfg_boot->mqtt_broker[0] != '\0';
     boot_wled_sync_enabled  = cfg_boot->wled_sync_enabled;
+    boot_sht30_temp_offset  = cfg_boot->sht30_temp_offset;
     boot_invert_mask     = cfg_boot->lcd_invert_mask;
     memcpy(boot_init_profile,    cfg_boot->lcd_init_profile,    sizeof(boot_init_profile));
     memcpy(boot_vcom,            cfg_boot->lcd_vcom,            sizeof(boot_vcom));
@@ -376,7 +378,8 @@ void app_main(void)
     leds_task_start();
     touch_input_init();
     touch_input_register_callback(on_touch);
-    sht30_init();          /* probe optional sensor; safe no-op if absent */
+    sht30_init();               /* probe optional sensor; safe no-op if absent */
+    sht30_set_offset(boot_sht30_temp_offset); /* apply saved calibration offset */
 
     /* Networking – start AP+STA, then web server */
     wifi_manager_start();

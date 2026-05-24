@@ -30,8 +30,16 @@ void sht30_task_start(void);
 
 /* Return the last reading from the background task (non-blocking).
  * The returned pointer is valid for the lifetime of the firmware.
- * `valid` is false until the first successful read completes. */
+ * `valid` is false until the first successful read completes.
+ * The configured temperature offset (see sht30_set_offset) is applied
+ * before returning — callers always receive the corrected value. */
 const sht30_reading_t *sht30_get(void);
+
+/* Set a fixed offset (°C) added to every temperature reading returned by
+ * sht30_get().  Use a negative value to correct for ESP32 self-heating.
+ * Safe to call at any time; takes effect on the next sht30_get() call.
+ * Default 0.  Clamped to ±20 °C. */
+void sht30_set_offset(float offset_c);
 
 #ifdef __cplusplus
 }

@@ -123,6 +123,11 @@ typedef struct {
     bool             mic_calibration_saved;            /* true = mic_noise_floor[] is valid
                                            and should be applied on the next boot. */
 
+    /* SHT30 sensor calibration */
+    float            sht30_temp_offset;  /* °C added to every raw reading (negative corrects
+                                           for ESP32 self-heating).  Default 0.  Applied at
+                                           runtime via sht30_set_offset(); no restart required. */
+
     /* Background-feature toggles (boot-time gates — restart required to apply).
      * All default true so a config.json from older firmware retains current
      * behaviour after upgrade.  Disabling frees the per-task stack and stops
@@ -175,9 +180,17 @@ typedef struct {
 
     /* Mode Rotation – auto-cycle through enabled modes on a timer.
      * When rotation_enabled is false the mode never changes automatically;
-     * only UI API calls and physical button presses can change it. */
+     * only UI API calls and physical button presses can change it.
+     * rotation_modes == 0  → cycle all modes set in enabled_modes (default).
+     * rotation_modes != 0  → cycle only the intersection of rotation_modes
+     *                        and enabled_modes; falls back to enabled_modes if
+     *                        the intersection is empty. */
     bool             rotation_enabled;     /* false = manual-only mode switching */
     uint16_t         rotation_interval_s;  /* seconds per mode; 0 treated as 60 */
+    uint16_t         rotation_modes;       /* bitmask of modes to rotate; 0 = all enabled */
+    uint8_t          rotation_weights[12]; /* per-mode dwell multiplier (1–99, default 1).
+                                            * effective dwell = rotation_interval_s × weight.
+                                            * index == app_mode_t value.  0 treated as 1. */
 
     /* Theme Rotation – auto-cycle through themes on a timer.
      * theme_rotation_count == 0 → rotate all installed themes.

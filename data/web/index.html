@@ -8,7 +8,8 @@
 *{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#1a1a2e;--card:#16213e;--accent:#0f3460;--hi:#e94560;--text:#eee;--dim:#999;--ok:#4ecca3}
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-header{background:var(--accent);padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+header{background:var(--accent);padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}
+#sticky-shell{position:sticky;top:0;z-index:100;background:var(--bg);box-shadow:0 2px 8px rgba(0,0,0,.3)}
 header h1{font-size:1.2rem;font-weight:600;letter-spacing:.5px}
 header h1 span{color:var(--hi)}
 .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
@@ -62,6 +63,7 @@ select option{background:var(--accent);color:var(--text)}
 </style>
 </head>
 <body>
+<div id="sticky-shell">
 <header>
   <h1>🕐 <span>Nextube-Remaster</span> Manager</h1>
   <div id="conn-status"><span class="status-dot err"></span>Connecting…</div>
@@ -70,7 +72,6 @@ select option{background:var(--accent);color:var(--text)}
     <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveSettings()">Save Now</button>
   </div>
 </header>
-
 <div id="ota-rollback-banner" style="display:none;background:rgba(255,160,0,.12);border:1px solid rgba(255,160,0,.55);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
   <span style="flex:1">⚠️ <strong>OTA rollback</strong> — firmware <strong id="rb-bad-ver"></strong> crashed or failed to start after update. The device automatically reverted to the previous firmware (<strong id="rb-cur-ver"></strong>). Re-try the update or check <strong>System → Device Log</strong> for the crash reason.</span>
   <button onclick="dismissOtaRollback()" style="background:none;border:none;color:rgba(255,160,0,.9);font-size:1.1rem;cursor:pointer;padding:0;line-height:1" title="Dismiss">✕</button>
@@ -93,6 +94,7 @@ select option{background:var(--accent);color:var(--text)}
   <button data-tab="audio">Audio</button>
   <button data-tab="system">System</button>
 </nav>
+</div>
 
 <main>
 <!-- ─── Dashboard ──────────────────────────────────────────────── -->
@@ -163,8 +165,8 @@ select option{background:var(--accent);color:var(--text)}
       <div style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.7rem">
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weekdate" style="width:14px;height:14px"> Day &amp; Date <span style="color:var(--dim);font-size:.78rem">(day name / MM-DD)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-ht" style="width:14px;height:14px"> Indoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(SHT30 sensor)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem"></span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem"></span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem">(Currrent outside conditions)</span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem">(Currrent outside temperature)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-sunrise" style="width:14px;height:14px"> Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(calculated from weather location)</span></label>
       </div>
       <div style="display:flex;align-items:center;gap:.6rem;font-size:.85rem">
@@ -424,15 +426,16 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>Mode Rotation</h2>
     <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
-      When enabled, the device automatically cycles through all enabled modes on a timer.
+      When enabled, the device automatically cycles through modes on a timer.
+      Choose which modes to include, or leave all checked to rotate every enabled mode.
       When disabled, the mode only changes via the Quick Actions buttons or the physical touch buttons.
     </p>
-    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
         <input type="checkbox" id="rot-enabled" onchange="onRotToggle()">
         Enable Auto Rotation
       </label>
-      <div id="rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
+      <div id="rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;opacity:0.4">
         <label for="rot-interval" style="white-space:nowrap">Interval per mode:</label>
         <select id="rot-interval" class="select">
           <option value="15">15 seconds</option>
@@ -445,6 +448,33 @@ select option{background:var(--accent);color:var(--text)}
           <option value="3600">1 hour</option>
         </select>
       </div>
+    </div>
+    <div id="rot-modes-wrap" style="opacity:0.4">
+      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.4rem">
+        <span style="font-size:.85rem;color:var(--dim)">Modes to include &amp; weight:</span>
+        <button onclick="rotModeSelectAll(true)"  style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">All</button>
+        <button onclick="rotModeSelectAll(false)" style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">None</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.35rem .8rem">
+        <!-- each row: [checkbox] [name flex] [weight input] [× label] -->
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="0"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Clock</span><input type="number" class="rot-weight-in" data-bit="0"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="1"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Countdown</span><input type="number" class="rot-weight-in" data-bit="1"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="2"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Scoreboard</span><input type="number" class="rot-weight-in" data-bit="2"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="3"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Pomodoro</span><input type="number" class="rot-weight-in" data-bit="3"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="4"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Date</span><input type="number" class="rot-weight-in" data-bit="4"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="5"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Album</span><input type="number" class="rot-weight-in" data-bit="5"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="6"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Weather</span><input type="number" class="rot-weight-in" data-bit="6"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="7"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Spectrum</span><input type="number" class="rot-weight-in" data-bit="7"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="8"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">YouTube</span><input type="number" class="rot-weight-in" data-bit="8"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="9"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Instagram</span><input type="number" class="rot-weight-in" data-bit="9"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="10" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">TikTok</span><input type="number" class="rot-weight-in" data-bit="10" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="11" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Mastodon</span><input type="number" class="rot-weight-in" data-bit="11" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+      </div>
+      <p style="color:var(--dim);font-size:.76rem;margin-top:.5rem">
+        The <strong style="color:var(--text)">×</strong> value is a dwell multiplier applied to the base interval above.
+        A weight of <strong style="color:var(--text)">10</strong> keeps that mode on-screen 10× longer than a weight-1 mode.
+        Example: Clock&nbsp;×20, others&nbsp;×1 with a 1&nbsp;min interval → Clock shows for 20&nbsp;min between each 1&nbsp;min peek at other modes.
+      </p>
     </div>
   </div>
   <!-- Scheduled Anti Burn-in / LCD Refresh -->
@@ -594,7 +624,7 @@ select option{background:var(--accent);color:var(--text)}
     <div class="row">
       <div class="field"><label>City</label><input id="f-city" type="text" placeholder="City name"></div>
       <div class="field"><label>Units</label>
-        <select id="f-tempfmt"><option value="Celsius">Celsius</option><option value="Fahrenheit">Fahrenheit</option></select>
+        <select id="f-tempfmt" onchange="onTempFmtChange()"><option value="Celsius">Celsius</option><option value="Fahrenheit">Fahrenheit</option></select>
       </div>
     </div>
     <div class="row">
@@ -620,6 +650,23 @@ select option{background:var(--accent);color:var(--text)}
       <small style="color:var(--dim);margin-top:.3rem;display:block">At least one panel must remain enabled.</small>
     </div>
   </div>
+  <div class="card" id="sht30-card">
+    <h2>Indoor Sensor (SHT30)</h2>
+    <div class="row">
+      <div class="field">
+        <label>Temperature Offset <span id="sht30-offset-unit-lbl" style="color:var(--dim);font-size:.8rem">(°C, added to raw reading)</span></label>
+        <input id="f-sht30-offset" type="number" step="0.1" min="-20" max="20" value="0" data-unit="C" style="width:90px" oninput="markDirty()">
+      </div>
+    </div>
+    <p style="color:var(--dim);font-size:.78rem;margin:.5rem 0 0">
+      The SHT30 sits inside the same enclosure as the ESP32 and typically reads
+      <span id="sht30-help-range">2–5 °C</span> high due to self-heating.
+      Enter a negative value to subtract (<span id="sht30-help-ex">e.g. <code>-3.5</code></span>).
+      The unit follows <em>Network → Temperature Unit</em> and is converted to °C internally.
+      Takes effect immediately on save — no restart required.
+    </p>
+  </div>
+
   <div class="card" id="social-card">
     <!-- Header row — click anywhere to expand/collapse -->
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleSocialCard()">
@@ -1509,6 +1556,13 @@ async function loadSettings() {
    * upgrading from older firmware (no key in config.json yet) keep their
    * current behaviour until the user chooses to disable. */
   $('f-weather-en').checked = cfg.weather_enabled !== false;
+  {
+    const _isFahr  = (cfg.temperature_format || 'Celsius') === 'Fahrenheit';
+    const _rawC    = cfg.sht30_temp_offset != null ? cfg.sht30_temp_offset : 0;
+    updateSht30OffsetUnit(_isFahr);
+    /* Stored offset is always °C; convert to display unit (delta: × 9/5, no +32) */
+    $('f-sht30-offset').value = _isFahr ? (_rawC * 9 / 5).toFixed(1) : _rawC;
+  }
   $('f-sub-interval').value  = cfg.sub_poll_interval_min || 30;
   $('f-youtube-en').checked  = cfg.youtube_enabled    !== false;
   $('f-insta-en').checked    = cfg.instagram_enabled  === true;
@@ -1618,6 +1672,19 @@ async function loadSettings() {
   }
   rotSel.value = bestOpt.value;
   $('rot-interval-wrap').style.opacity = rotEnabled ? '1' : '0.4';
+  const rotModes   = cfg.rotation_modes || 0;
+  const rotWeights = Array.isArray(cfg.rotation_weights) ? cfg.rotation_weights : [];
+  document.querySelectorAll('.rot-mode-cb').forEach(cb => {
+    const bit = parseInt(cb.dataset.bit);
+    /* rotModes == 0 means "all modes" → every box checked */
+    cb.checked = (rotModes === 0) || !!(rotModes & (1 << bit));
+  });
+  document.querySelectorAll('.rot-weight-in').forEach(inp => {
+    const bit = parseInt(inp.dataset.bit);
+    const w = (rotWeights[bit] >= 1) ? rotWeights[bit] : 1;
+    inp.value = w;
+  });
+  $('rot-modes-wrap').style.opacity = rotEnabled ? '1' : '0.4';
 
   /* Theme rotation */
   const themeRotEn = cfg.theme_rotation_enabled === true;
@@ -1828,9 +1895,69 @@ function applyColorToAll() {
   });
 }
 
-/* ── Rotation toggle – dim interval selector when disabled ── */
+/* ── SHT30 offset unit (follows temperature_format) ──────────────── */
+function updateSht30OffsetUnit(isFahrenheit) {
+  const inp = $('f-sht30-offset');
+  if (!inp) return;
+  inp.dataset.unit = isFahrenheit ? 'F' : 'C';
+  if (isFahrenheit) {
+    inp.min = '-36'; inp.max = '36'; inp.step = '0.5';
+    $('sht30-offset-unit-lbl').textContent = '(°F, added to raw reading)';
+    $('sht30-help-range').textContent = '3–9 °F';
+    $('sht30-help-ex').innerHTML = 'e.g. <code>-6.0</code>';
+  } else {
+    inp.min = '-20'; inp.max = '20'; inp.step = '0.1';
+    $('sht30-offset-unit-lbl').textContent = '(°C, added to raw reading)';
+    $('sht30-help-range').textContent = '2–5 °C';
+    $('sht30-help-ex').innerHTML = 'e.g. <code>-3.5</code>';
+  }
+}
+/* Called when the temperature format select changes.
+ * Converts the currently displayed offset to the new unit on the fly. */
+function onTempFmtChange() {
+  const isFahr = $('f-tempfmt').value === 'Fahrenheit';
+  const inp    = $('f-sht30-offset');
+  if (inp) {
+    const wasF = inp.dataset.unit === 'F';
+    const cur  = parseFloat(inp.value) || 0;
+    if  (isFahr && !wasF) inp.value = (cur * 9 / 5).toFixed(1);  /* °C delta → °F delta */
+    else if (!isFahr && wasF) inp.value = (cur * 5 / 9).toFixed(1);  /* °F delta → °C delta */
+  }
+  updateSht30OffsetUnit(isFahr);
+  markDirty();
+}
+
+/* ── Mode Rotation toggle ─────────────────────────────────────────── */
 function onRotToggle() {
-  $('rot-interval-wrap').style.opacity = $('rot-enabled').checked ? '1' : '0.4';
+  const on = $('rot-enabled').checked;
+  $('rot-interval-wrap').style.opacity = on ? '1' : '0.4';
+  $('rot-modes-wrap').style.opacity    = on ? '1' : '0.4';
+  markDirty();
+}
+function rotModeSelectAll(checked) {
+  document.querySelectorAll('.rot-mode-cb').forEach(cb => cb.checked = checked);
+  markDirty();
+}
+/* Build bitmask from rot-mode-cb checkboxes.
+ * Returns 0 when all or none are checked — 0 means "all enabled modes". */
+function rotModeMask() {
+  let m = 0, checked = 0, total = 0;
+  document.querySelectorAll('.rot-mode-cb').forEach(cb => {
+    total++;
+    if (cb.checked) { checked++; m |= (1 << parseInt(cb.dataset.bit)); }
+  });
+  return (checked === 0 || checked === total) ? 0 : m;
+}
+/* Build weights array [0..11] from rot-weight-in inputs.
+ * Clamps each value to 1–99; missing inputs default to 1. */
+function rotWeightsArray() {
+  const arr = new Array(12).fill(1);
+  document.querySelectorAll('.rot-weight-in').forEach(inp => {
+    const bit = parseInt(inp.dataset.bit);
+    const v   = Math.max(1, Math.min(99, parseInt(inp.value) || 1));
+    if (bit >= 0 && bit < 12) arr[bit] = v;
+  });
+  return arr;
 }
 
 /* ── Theme rotation ─────────────────────────────────────────────────── */
@@ -1944,6 +2071,8 @@ async function saveSettings() {
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,
     rotation_interval_s: +$('rot-interval').value,
+    rotation_modes: rotModeMask(),
+    rotation_weights: rotWeightsArray(),
     theme_rotation_enabled:    $('theme-rot-enabled').checked,
     theme_rotation_interval_s: +$('theme-rot-interval').value,
     theme_rotation_themes: (() => {
@@ -1964,6 +2093,11 @@ async function saveSettings() {
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: !!$('m-spectrum').checked,
     weather_enabled: $('f-weather-en').checked,
+    sht30_temp_offset: (() => {
+      const v = parseFloat($('f-sht30-offset').value) || 0;
+      /* data-unit tracks current display unit; convert delta back to °C for storage */
+      return $('f-sht30-offset').dataset.unit === 'F' ? v * 5 / 9 : v;
+    })(),
     social_enabled: $('f-social-en') ? $('f-social-en').checked : false,
     youtube_enabled: $('f-youtube-en').checked,
     sub_poll_interval_min: Math.max(5, parseInt($('f-sub-interval').value) || 30),

@@ -1861,7 +1861,7 @@ static void ht_draw_suntime(const char *timestr, bool rising,
  *   WEEKDATE — Rows   0– 79 : day name — "Sun" … "Sat"
  *                            U8g2 logisoso28, centred in 64-row band (rows 8–71)
  *                            composited over AMPM/blank.jpg background.
- *              Rows  80–159 : date "MMDD" (no separator)
+ *              Rows  80–159 : date "DDMM" or "MMDD" (no separator; follows date_format)
  *                            U8g2 logisoso28, centred in 64-row band (rows 88–151)
  *                            composited over AMPM/blank.jpg background.
  *              Colour auto-sampled from Numbers/0.jpg centre pixel.
@@ -1962,10 +1962,17 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                           ? day_names[t->tm_wday] : "Mon";
         ht_draw_str_at(day, 26, 64, u8g2_font_logisoso28_tf, fg, bg);
 
-        /* Date "MMDD" — bottom half, centred in 64-row U8g2 band (rows 98–161) */
+        /* Date — bottom half, respects Network › Date format setting.
+         * "MM/DD/YY": month first → MMDD   (US format)
+         * "DD/MM/YY": day first   → DDMM   (international default) */
         {
             char buf[16];
-            snprintf(buf, sizeof(buf), "%02d%02d", t->tm_mon + 1, t->tm_mday);
+            bool us_fmt = (strcmp(cfg->date_format, "MM/DD/YY") == 0);
+            int  mo = t->tm_mon + 1;
+            if (us_fmt)
+                snprintf(buf, sizeof(buf), "%02d%02d", mo, t->tm_mday);
+            else
+                snprintf(buf, sizeof(buf), "%02d%02d", t->tm_mday, mo);
             ht_draw_str_at(buf, HALF + 26, 64, u8g2_font_logisoso28_tf, fg, bg);
         }
 
@@ -3199,14 +3206,21 @@ static void display_task(void *arg)
         /* ── Mode rotation ───────────────────────────────────────────
          * Only fires when rotation_enabled is true.  Any mode change
          * (UI, button, or previous rotation step) resets the timer so
-         * every mode gets the full interval before auto-advancing.    */
+         * the new mode gets its full weighted dwell before advancing.
+         *
+         * Effective dwell = rotation_interval_s × rotation_weights[mode].
+         * A weight of 1 (default) gives the base interval; a weight of 10
+         * keeps the current mode on-screen 10× longer than a weight-1 mode. */
         if (mode_changed) {
             rotation_tick = xTaskGetTickCount();
         } else if (cfg->rotation_enabled && !first) {
             uint16_t interval = cfg->rotation_interval_s ? cfg->rotation_interval_s : 60;
+            uint8_t  weight   = cfg->rotation_weights[cfg->current_mode];
+            if (weight < 1) weight = 1;
+            uint64_t dwell_ms = (uint64_t)interval * weight * 1000u;
             uint32_t elapsed_ms = (uint32_t)pdTICKS_TO_MS(
                                       xTaskGetTickCount() - rotation_tick);
-            if (elapsed_ms >= (uint32_t)interval * 1000u) {
+            if ((uint64_t)elapsed_ms >= dwell_ms) {
                 config_advance_mode();   /* updates cfg->current_mode + saves */
                 rotation_tick = xTaskGetTickCount();
             }

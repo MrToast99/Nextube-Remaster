@@ -284,6 +284,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     bool    new_audio_enabled;
     char    new_ssid[64], new_pass[64], new_hostname[32];
     bool    new_weather_en, new_youtube_en, new_mdns_en, new_mic_en;
+    float   new_sht30_offset;
     uint8_t new_invert_mask;
     uint8_t new_init_profile[6];
     uint8_t new_vcom[6];
@@ -297,11 +298,12 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     strlcpy(new_ssid,     new_cfg->ssid,      sizeof(new_ssid));
     strlcpy(new_pass,     new_cfg->password,  sizeof(new_pass));
     strlcpy(new_hostname, new_cfg->hostname,  sizeof(new_hostname));
-    new_weather_en   = new_cfg->weather_enabled;
-    new_youtube_en   = new_cfg->youtube_enabled;
-    new_mdns_en      = new_cfg->mdns_enabled;
-    new_mic_en       = new_cfg->mic_enabled;
-    new_invert_mask  = new_cfg->lcd_invert_mask;
+    new_weather_en    = new_cfg->weather_enabled;
+    new_youtube_en    = new_cfg->youtube_enabled;
+    new_mdns_en       = new_cfg->mdns_enabled;
+    new_mic_en        = new_cfg->mic_enabled;
+    new_sht30_offset  = new_cfg->sht30_temp_offset;
+    new_invert_mask   = new_cfg->lcd_invert_mask;
     memcpy(new_init_profile,    new_cfg->lcd_init_profile,    sizeof(new_init_profile));
     memcpy(new_vcom,            new_cfg->lcd_vcom,            sizeof(new_vcom));
     memcpy(new_gamma,           new_cfg->lcd_gamma,           sizeof(new_gamma));
@@ -314,6 +316,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     ntp_apply_timezone();
     ntp_apply_servers();
     audio_set_enabled(new_audio_enabled);
+    sht30_set_offset(new_sht30_offset);   /* live-update sensor calibration — no restart needed */
     if (new_invert_mask != old_invert_mask)
         display_apply_invert_mask(new_invert_mask);
     if (memcmp(new_init_profile, old_init_profile, sizeof(new_init_profile)) != 0)

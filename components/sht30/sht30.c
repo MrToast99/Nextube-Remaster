@@ -31,6 +31,7 @@ static i2c_master_dev_handle_t s_dev       = NULL;
 static bool                    s_present   = false;
 static sht30_reading_t         s_last      = { .valid = false };
 static SemaphoreHandle_t       s_mutex     = NULL;
+static float                   s_offset_c  = 0.0f;  /* temperature correction offset */
 
 bool sht30_init(void)
 {
@@ -133,6 +134,16 @@ static void sht30_task(void *arg)
     }
 }
 
+void sht30_set_offset(float offset_c)
+{
+    /* Clamp to ±20 °C to catch obvious misconfiguration */
+    if (offset_c >  20.0f) offset_c =  20.0f;
+    if (offset_c < -20.0f) offset_c = -20.0f;
+    /* s_offset_c is a single float — atomic on Xtensa; no mutex needed */
+    s_offset_c = offset_c;
+    ESP_LOGI(TAG, "Temperature offset set to %+.1f °C", (double)offset_c);
+}
+
 void sht30_task_start(void)
 {
     xTaskCreate(sht30_task, "sht30", 4096, NULL, 4, NULL);
@@ -148,5 +159,9 @@ const sht30_reading_t *sht30_get(void)
     } else {
         copy = s_last;
     }
+    /* Apply calibration offset — corrects for ESP32 self-heating or sensor
+     * placement.  Humidity is not affected; only temperature is offset. */
+    if (copy.valid)
+        copy.temp_c += s_offset_c;
     return &copy;
 }

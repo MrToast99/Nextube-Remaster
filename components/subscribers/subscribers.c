@@ -34,7 +34,13 @@ static int  s_http_buf_len = 0;
 /* ── HTTP event handler (shared buffer) ──────────────────────────────── */
 static esp_err_t http_event(esp_http_client_event_t *evt)
 {
-    if (evt->event_id == HTTP_EVENT_ON_DATA && !esp_http_client_is_chunked_response(evt->client)) {
+    /* Do NOT gate on !is_chunked_response: the HTTP client strips chunk
+     * framing before invoking this callback, so both chunked and non-chunked
+     * payloads arrive identically in evt->data.  The guard was silently
+     * discarding all YouTube Data API v3 response data because Google's API
+     * uses Transfer-Encoding: chunked, leaving the buffer empty and causing
+     * cJSON_Parse to fail → subscriber count stuck at zero. (Issue #49) */
+    if (evt->event_id == HTTP_EVENT_ON_DATA) {
         int copy = evt->data_len;
         if (s_http_buf_len + copy >= (int)sizeof(s_http_buf))
             copy = sizeof(s_http_buf) - s_http_buf_len - 1;

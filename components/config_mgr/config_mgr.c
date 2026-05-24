@@ -119,6 +119,7 @@ static void set_defaults(void)
     s_cfg.mic_silence_gate = 250.0f; /* ~16 counts RMS — above ADC noise, below real audio */
     memset(s_cfg.mic_noise_floor, 0, sizeof(s_cfg.mic_noise_floor));
     s_cfg.mic_calibration_saved = false;
+    s_cfg.sht30_temp_offset = 0.0f;    /* no correction by default */
 
     /* Background-feature toggles (boot-time gates).  Default true so
      * existing behaviour is preserved on upgrade. */
@@ -170,6 +171,8 @@ static void set_defaults(void)
     /* Rotation off by default; user must explicitly enable it */
     s_cfg.rotation_enabled    = false;
     s_cfg.rotation_interval_s = 60;
+    s_cfg.rotation_modes      = 0;    /* 0 = cycle all enabled modes */
+    for (int i = 0; i < APP_MODE_MAX; i++) s_cfg.rotation_weights[i] = 1;
 
     /* Theme rotation off by default; 0 count = all installed themes */
     s_cfg.theme_rotation_enabled    = false;
@@ -362,6 +365,10 @@ static void parse_json(const char *json, size_t len)
         cJSON *mc = cJSON_GetObjectItem(root, "mic_calibration_saved");
         if (cJSON_IsBool(mc)) s_cfg.mic_calibration_saved = cJSON_IsTrue(mc);
     }
+    json_read_float(root, "sht30_temp_offset", &s_cfg.sht30_temp_offset);
+    /* clamp to ±20 °C — large values indicate a misconfiguration */
+    if (s_cfg.sht30_temp_offset >  20.0f) s_cfg.sht30_temp_offset =  20.0f;
+    if (s_cfg.sht30_temp_offset < -20.0f) s_cfg.sht30_temp_offset = -20.0f;
     {
         cJSON *lz = cJSON_GetObjectItem(root, "leading_zero");
         if (cJSON_IsBool(lz)) s_cfg.leading_zero = cJSON_IsTrue(lz);
@@ -512,6 +519,22 @@ static void parse_json(const char *json, size_t len)
     }
     json_read_u16(root, "rotation_interval_s", &s_cfg.rotation_interval_s);
     if (s_cfg.rotation_interval_s == 0) s_cfg.rotation_interval_s = 60;
+    json_read_u16(root, "rotation_modes", &s_cfg.rotation_modes);
+    {
+        cJSON *wa = cJSON_GetObjectItem(root, "rotation_weights");
+        if (cJSON_IsArray(wa)) {
+            int n = cJSON_GetArraySize(wa);
+            for (int i = 0; i < n && i < APP_MODE_MAX; i++) {
+                cJSON *item = cJSON_GetArrayItem(wa, i);
+                if (cJSON_IsNumber(item)) {
+                    uint8_t w = (uint8_t)item->valueint;
+                    if (w < 1)  w = 1;
+                    if (w > 99) w = 99;
+                    s_cfg.rotation_weights[i] = w;
+                }
+            }
+        }
+    }
 
     /* Theme rotation */
     {
@@ -905,6 +928,7 @@ char *config_to_json(void)
             cJSON_AddItemToArray(mf, cJSON_CreateNumber((double)s_cfg.mic_noise_floor[i]));
     }
     cJSON_AddBoolToObject  (root, "mic_calibration_saved", s_cfg.mic_calibration_saved);
+    cJSON_AddNumberToObject(root, "sht30_temp_offset", (double)s_cfg.sht30_temp_offset);
     cJSON_AddBoolToObject  (root, "leading_zero",     s_cfg.leading_zero);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
@@ -937,8 +961,14 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "wled_sync_enabled", s_cfg.wled_sync_enabled);
     cJSON_AddNumberToObject(root, "wled_sync_port",    s_cfg.wled_sync_port);
     cJSON_AddNumberToObject(root, "enabled_modes",      s_cfg.enabled_modes);
-    cJSON_AddBoolToObject  (root, "rotation_enabled",   s_cfg.rotation_enabled);
+    cJSON_AddBoolToObject  (root, "rotation_enabled",    s_cfg.rotation_enabled);
     cJSON_AddNumberToObject(root, "rotation_interval_s", s_cfg.rotation_interval_s);
+    cJSON_AddNumberToObject(root, "rotation_modes",      s_cfg.rotation_modes);
+    {
+        cJSON *wa = cJSON_AddArrayToObject(root, "rotation_weights");
+        for (int i = 0; i < APP_MODE_MAX; i++)
+            cJSON_AddItemToArray(wa, cJSON_CreateNumber(s_cfg.rotation_weights[i]));
+    }
     cJSON_AddBoolToObject  (root, "theme_rotation_enabled",    s_cfg.theme_rotation_enabled);
     cJSON_AddNumberToObject(root, "theme_rotation_interval_s", s_cfg.theme_rotation_interval_s);
     {
@@ -1031,13 +1061,23 @@ void config_advance_mode(void)
 {
     xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
 
-    /* Step forward through APP_MODE_MAX slots, skipping disabled ones.
-     * Worst case: all modes except the current one are disabled, so we
-     * try APP_MODE_MAX times before giving up (stays on current mode). */
+    /* Build the effective rotation pool:
+     *   rotation_modes == 0  → all enabled modes
+     *   rotation_modes != 0  → user-selected subset intersected with enabled_modes
+     * Fall back to enabled_modes if the intersection is empty (misconfiguration
+     * or all selected modes were subsequently disabled). */
+    uint16_t mask = s_cfg.rotation_modes
+                    ? (s_cfg.rotation_modes & s_cfg.enabled_modes)
+                    : s_cfg.enabled_modes;
+    if (!mask) mask = s_cfg.enabled_modes;
+
+    /* Step forward through APP_MODE_MAX slots, skipping modes not in the pool.
+     * Worst case: only the current mode is in the pool — we try APP_MODE_MAX
+     * times before giving up (stays on current mode). */
     int m = (int)s_cfg.current_mode;
     for (int tries = 0; tries < APP_MODE_MAX; tries++) {
         m = (m + 1) % APP_MODE_MAX;
-        if (s_cfg.enabled_modes & (1 << m)) break;
+        if (mask & (1 << m)) break;
     }
 
     if ((app_mode_t)m != s_cfg.current_mode) {

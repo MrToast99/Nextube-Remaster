@@ -1,6 +1,6 @@
 {
-  "firmware_version": "1.12.1",
-  "fs_version": "1.12.1",
+  "firmware_version": "1.12.2",
+  "fs_version": "1.12.2",
   "name": "Nextube-Remaster",
   "description": "Open-source replacement firmware for the Nextube clock"
 }
