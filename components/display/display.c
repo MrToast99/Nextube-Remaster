@@ -3286,8 +3286,12 @@ static void display_task(void *arg)
         if (!first) {
             struct tm burn_tm; ntp_get_local(&burn_tm);
 
-            /* Hourly pixel-shift update */
-            if (burn_tm.tm_hour != last_hour) {
+            /* Hourly pixel-shift update.
+             * Guard on ntp_has_valid_time(): without this, epoch time (hour=0)
+             * would set s_burnin_shift_x = 0%5-2 = -2 on the very first tick
+             * before NTP or RTC provides the real hour, causing every tube to
+             * appear shifted -2 px on most boot-ups until the real hour arrives. */
+            if (ntp_has_valid_time() && burn_tm.tm_hour != last_hour) {
                 last_hour        = burn_tm.tm_hour;
                 s_burnin_shift_x = (int8_t)(last_hour % 5 - 2);
                 ESP_LOGI(TAG, "burn-in shift: hour=%d  x=%+d px",
