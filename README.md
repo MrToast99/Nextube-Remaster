@@ -659,12 +659,50 @@ Enable **Theme Rotation** in Display settings to automatically cycle through the
 
 Weather mode cycles through all enabled weather APIs until one succeeds. Supported sources:
 
-| Source | API Key | Notes |
-|---|---|---|
-| **wttr.in** | None | City can be `Name,CC` format |
-| **Open-Meteo** | None | Geocoding via Open-Meteo; strips country code automatically |
-| **OpenWeatherMap** | Free-tier key | Register at [openweathermap.org](https://home.openweathermap.org/users/sign_up) — free tier includes 1 000 calls/day |
-| **Met.no** | None | **Default.** Elevation-aware (fetched from geocoding API for accurate results) |
+| Source | API Key | Geocoding | Notes |
+|---|---|---|---|
+| **wttr.in** | None | wttr.in built-in | Accepts many formats — see below |
+| **Open-Meteo** | None | Open-Meteo geocoding API | Splits `City,CC` into name + country filter |
+| **OpenWeatherMap** | Free-tier key | OWM built-in | Accepts city, state, zip — see below. Register at [openweathermap.org](https://home.openweathermap.org/users/sign_up) — free tier includes 1 000 calls/day |
+| **Met.no** | None | Open-Meteo geocoding API | **Default.** Uses same geocoder as Open-Meteo; elevation auto-fetched for accurate forecasts |
+
+### City format
+
+All providers share a single **City** field (**Services → Weather → City**). The same string is used by whichever provider is active, so pick a format that works for your selected source.
+
+**Plain city name — works with all providers:**
+```
+London
+Tokyo
+Paris
+```
+When two cities share a name (e.g. *Springfield*, *Florence*) the provider returns the first match, which may be the wrong country. Use `City,CC` to disambiguate.
+
+**`City,CC` — recommended for ambiguous city names, supported by all providers:**
+```
+Florence,IT       ← Florence, Italy  (not Florence, South Carolina)
+Springfield,US
+London,GB
+Sydney,AU
+```
+`CC` is the two-letter [ISO 3166-1 alpha-2](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2) country code.  
+Open-Meteo and Met.no: the country code is sent as `&countrycode=CC` to the geocoding API, which fetches up to five candidates and picks the first whose `country_code` field matches.  
+wttr.in and OpenWeatherMap pass the whole string to their own resolvers.
+
+**Multi-word city names:**
+
+| Provider | Recommended format |
+|---|---|
+| wttr.in | Use `+` for spaces: `New+York,US`, `Los+Angeles,US` |
+| Open-Meteo, Met.no | Spaces work as-is: `New York,US` |
+| OpenWeatherMap | Spaces work as-is: `New York,US` |
+
+**OpenWeatherMap extras** (OWM only, not recognised by other providers):
+```
+Austin,Texas,US          ← City, state, country (useful for US cities)
+94040,US                 ← US zip code
+EC1A,GB                  ← UK postcode prefix
+```
 
 Weather fetching: On WiFi connect the first fetch happens immediately with automatic 5-second retries until data arrives. After the first successful fetch, weather is refreshed every 10 minutes.
 
