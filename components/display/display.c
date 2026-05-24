@@ -1851,6 +1851,32 @@ static void ht_draw_suntime(const char *timestr, bool rising,
     ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), 56, y_tube, fg, bg);
 }
 
+/* ── cx6_stamp_update_indicator ──────────────────────────────────────────────
+ * Panels rendered via ht_blit_at (weekdate, H/T, sunrise/sunset) bypass
+ * display_show_digit(), so they never trigger the 4-row red stripe that
+ * display_show_digit() applies automatically.  Worse, the H/T humidity blit
+ * and the weekdate date blit both extend to row 159, overwriting whatever
+ * display_show_image() had drawn there.
+ * Call this once after ALL blits for tube 5 are complete to re-stamp the
+ * indicator when s_update_indicator is active.  No-op when inactive.          */
+static void cx6_stamp_update_indicator(void)
+{
+    if (!s_update_indicator) return;
+    const int tube = LCD_COUNT - 1;
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
+                            + (int)s_col_offsets[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube]);
+    open_lcd_window(ox, (uint8_t)(oy + LCD_HEIGHT - 4), (uint8_t)LCD_WIDTH, 4);
+    uint8_t redline[LCD_WIDTH * 2];
+    for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
+    for (int row = 0; row < 4; row++) {
+        spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
+        spi_device_polling_transmit(spi_dev, &tr);
+    }
+    deselect_all();
+}
+
 /* ── render_cx_tube6 ─────────────────────────────────────────────────────────
  * Render the current 24H-Custom info panel onto tube 5 (the rightmost tube).
  * Each panel occupies the full 80×160 display by compositing two 80×80 halves:
@@ -2127,7 +2153,11 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
 
     s_cx_last_kind = (int8_t)kind;   /* record which panel was just drawn */
 
-cx_tube6_done:;
+cx_tube6_done:
+    /* Re-stamp the update indicator after every tube-6 panel render.
+     * ht_blit_at paths overwrite the bottom rows; display_fill misses it
+     * entirely.  cx6_stamp_update_indicator() is a no-op when inactive. */
+    cx6_stamp_update_indicator();
 }
 
 static void render_clock(const nextube_config_t *cfg, const struct tm *t)

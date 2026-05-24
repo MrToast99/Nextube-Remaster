@@ -91,7 +91,7 @@ select option{background:var(--accent);color:var(--text)}
   <button data-tab="display">Display</button>
   <button data-tab="network">Network</button>
   <button data-tab="services">Services</button>
-  <button data-tab="audio">Audio</button>
+  <button data-tab="hardware">Hardware</button>
   <button data-tab="system">System</button>
 </nav>
 </div>
@@ -103,12 +103,12 @@ select option{background:var(--accent);color:var(--text)}
     <div class="row" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
       <div class="stat"><div class="val" id="s-time">--:--</div><div class="lbl">Local Time</div></div>
       <div class="stat"><div class="val" id="s-mode">--</div><div class="lbl">Mode</div></div>
-      <div class="stat"><div class="val" id="s-temp">--°</div><div class="lbl">Weather</div></div>
+      <div class="stat" data-mode-bit="6"><div class="val" id="s-temp">--°</div><div class="lbl">Weather</div></div>
       <div class="stat" id="s-sensor-wrap" style="display:none"><div class="val" id="s-sensor">--°</div><div class="lbl">Local Sensor</div></div>
-      <div class="stat"><div class="val" id="s-subs">--</div><div class="lbl">Subscribers</div></div>
-      <div class="stat"><div class="val" id="s-insta">--</div><div class="lbl">Instagram</div></div>
-      <div class="stat"><div class="val" id="s-tiktok">--</div><div class="lbl">TikTok</div></div>
-      <div class="stat"><div class="val" id="s-mastodon">--</div><div class="lbl">Mastodon</div></div>
+      <div class="stat" data-mode-bit="8"><div class="val" id="s-subs">--</div><div class="lbl">Subscribers</div></div>
+      <div class="stat" data-mode-bit="9"><div class="val" id="s-insta">--</div><div class="lbl">Instagram</div></div>
+      <div class="stat" data-mode-bit="10"><div class="val" id="s-tiktok">--</div><div class="lbl">TikTok</div></div>
+      <div class="stat" data-mode-bit="11"><div class="val" id="s-mastodon">--</div><div class="lbl">Mastodon</div></div>
       <div class="stat"><div class="val" id="s-heap">--</div><div class="lbl">Free Heap</div></div>
       <div class="stat"><div class="val" id="s-wifi">--</div><div class="lbl">WiFi</div></div>
     </div>
@@ -116,18 +116,18 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>Quick Actions</h2>
     <div class="btn-group">
-      <button class="btn btn-primary" onclick="setMode('Clock')">Clock</button>
-      <button class="btn btn-outline" onclick="setMode('Countdown')">Countdown</button>
-      <button class="btn btn-outline" onclick="setMode('Scoreboard')">Scoreboard</button>
-      <button class="btn btn-outline" onclick="setMode('Pomodoro')">Pomodoro</button>
-      <button class="btn btn-outline" onclick="setMode('Date')">Date</button>
-      <button class="btn btn-outline" onclick="setMode('Album')">Album</button>
-      <button class="btn btn-outline" onclick="setMode('Weather')">Weather</button>
-      <button class="btn btn-outline" onclick="setMode('Spectrum')">Spectrum</button>
-      <button class="btn btn-outline" onclick="setMode('YouTube')">YouTube</button>
-      <button class="btn btn-outline" onclick="setMode('Instagram')">Instagram</button>
-      <button class="btn btn-outline" onclick="setMode('TikTok')">TikTok</button>
-      <button class="btn btn-outline" onclick="setMode('Mastodon')">Mastodon</button>
+      <button class="btn btn-primary" data-mode-bit="0"  onclick="setMode('Clock')">Clock</button>
+      <button class="btn btn-outline" data-mode-bit="1"  onclick="setMode('Countdown')">Countdown</button>
+      <button class="btn btn-outline" data-mode-bit="2"  onclick="setMode('Scoreboard')">Scoreboard</button>
+      <button class="btn btn-outline" data-mode-bit="3"  onclick="setMode('Pomodoro')">Pomodoro</button>
+      <button class="btn btn-outline" data-mode-bit="4"  onclick="setMode('Date')">Date</button>
+      <button class="btn btn-outline" data-mode-bit="5"  onclick="setMode('Album')">Album</button>
+      <button class="btn btn-outline" data-mode-bit="6"  onclick="setMode('Weather')">Weather</button>
+      <button class="btn btn-outline" data-mode-bit="7"  onclick="setMode('Spectrum')">Spectrum</button>
+      <button class="btn btn-outline" data-mode-bit="8"  onclick="setMode('YouTube')">YouTube</button>
+      <button class="btn btn-outline" data-mode-bit="9"  onclick="setMode('Instagram')">Instagram</button>
+      <button class="btn btn-outline" data-mode-bit="10" onclick="setMode('TikTok')">TikTok</button>
+      <button class="btn btn-outline" data-mode-bit="11" onclick="setMode('Mastodon')">Mastodon</button>
     </div>
   </div>
 </div>
@@ -600,8 +600,12 @@ select option{background:var(--accent);color:var(--text)}
 <!-- ─── Services ───────────────────────────────────────────────── -->
 <div class="tab-content" id="tab-services">
 
-  <div class="card">
-    <h2>Weather</h2>
+  <div class="card" id="weather-card">
+    <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleWeatherCard()">
+      <span id="weather-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
+      <h2 style="margin:0;border:none;padding:0;flex:1">Weather</h2>
+    </div>
+    <div id="weather-body" style="display:none;margin-top:.9rem">
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded(this.checked)">
@@ -649,24 +653,8 @@ select option{background:var(--accent);color:var(--text)}
       </div>
       <small style="color:var(--dim);margin-top:.3rem;display:block">At least one panel must remain enabled.</small>
     </div>
-  </div>
-  <div class="card" id="sht30-card">
-    <h2>Indoor Sensor (SHT30)</h2>
-    <div class="row">
-      <div class="field">
-        <label>Temperature Offset <span id="sht30-offset-unit-lbl" style="color:var(--dim);font-size:.8rem">(°C, added to raw reading)</span></label>
-        <input id="f-sht30-offset" type="number" step="0.1" min="-20" max="20" value="0" data-unit="C" style="width:90px" oninput="markDirty()">
-      </div>
     </div>
-    <p style="color:var(--dim);font-size:.78rem;margin:.5rem 0 0">
-      The SHT30 sits inside the same enclosure as the ESP32 and typically reads
-      <span id="sht30-help-range">2–5 °C</span> high due to self-heating.
-      Enter a negative value to subtract (<span id="sht30-help-ex">e.g. <code>-3.5</code></span>).
-      The unit follows <em>Network → Temperature Unit</em> and is converted to °C internally.
-      Takes effect immediately on save — no restart required.
-    </p>
   </div>
-
   <div class="card" id="social-card">
     <!-- Header row — click anywhere to expand/collapse -->
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleSocialCard()">
@@ -888,8 +876,12 @@ select option{background:var(--accent);color:var(--text)}
     </div>
   </div><!-- #wled-card -->
 
-  <div class="card">
-    <h2>Timer Settings</h2>
+  <div class="card" id="timer-card">
+    <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleTimerCard()">
+      <span id="timer-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
+      <h2 style="margin:0;border:none;padding:0;flex:1">Timer Settings</h2>
+    </div>
+    <div id="timer-body" style="display:none;margin-top:.9rem">
     <div class="row">
       <div class="field"><label>Countdown Duration (minutes)</label>
         <input id="f-countdown" type="number" min="1" max="999" value="1">
@@ -903,12 +895,29 @@ select option{background:var(--accent);color:var(--text)}
         <input id="f-pomo-break" type="number" min="1" max="999" value="5">
       </div>
     </div>
+    </div>
   </div>
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Services</button></div>
 </div>
 
-<!-- ─── Audio ──────────────────────────────────────────────────── -->
-<div class="tab-content" id="tab-audio">
+<!-- ─── Hardware ───────────────────────────────────────────────── -->
+<div class="tab-content" id="tab-hardware">
+  <div class="card" id="sht30-card">
+    <h2>Indoor Sensor (SHT30)</h2>
+    <div class="row">
+      <div class="field">
+        <label>Temperature Offset <span id="sht30-offset-unit-lbl" style="color:var(--dim);font-size:.8rem">(°C, added to raw reading)</span></label>
+        <input id="f-sht30-offset" type="number" step="0.1" min="-20" max="20" value="0" data-unit="C" style="width:90px" oninput="markDirty()">
+      </div>
+    </div>
+    <p style="color:var(--dim);font-size:.78rem;margin:.5rem 0 0">
+      The SHT30 sits inside the same enclosure as the ESP32 and typically reads
+      <span id="sht30-help-range">2–5 °C</span> high due to self-heating.
+      Enter a negative value to subtract (<span id="sht30-help-ex">e.g. <code>-3.5</code></span>).
+      The unit follows <em>Network → Temperature Unit</em> and is converted to °C internally.
+      Takes effect immediately on save — no restart required.
+    </p>
+  </div>
   <div class="card">
     <h2>Audio Settings</h2>
     <div class="field" style="padding-bottom:4px">
@@ -953,7 +962,7 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
   </div>
-  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Audio</button></div>
+  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Hardware</button></div>
 </div>
 
 <!-- ─── System ─────────────────────────────────────────────────── -->
@@ -1387,7 +1396,7 @@ function onProfileChange(sel) {
   const vcom   = sel.value === '1' ? 40 : 14;
   const vcomEl = document.querySelector('.f-tube-vcom[data-tube="' + tube + '"]');
   if (vcomEl) vcomEl.value = vcom;
-  markUnsaved();
+  markDirty();
 }
 
 function dismissOtaRollback() {
@@ -1529,15 +1538,15 @@ async function loadSettings() {
       el.value = v;
       el.nextElementSibling.textContent = v;
     }); }
-  $('f-lcdbr').value = cfg.lcd_brightness || 60; $('v-lcdbr').textContent = cfg.lcd_brightness || 60;
+  { const _lcdbr = cfg.lcd_brightness != null ? cfg.lcd_brightness : 60; $('f-lcdbr').value = _lcdbr; $('v-lcdbr').textContent = _lcdbr; }
   $('f-ab-en').checked = cfg.auto_brightness || false;
   $('ab-cfg').style.display = cfg.auto_brightness ? 'block' : 'none';
-  $('f-nightbr').value = cfg.night_brightness || 30; $('v-nightbr').textContent = cfg.night_brightness || 30;
+  { const _nightbr = cfg.night_brightness != null ? cfg.night_brightness : 30; $('f-nightbr').value = _nightbr; $('v-nightbr').textContent = _nightbr; }
   $('f-nightsh').value = cfg.night_start_hour !== undefined ? cfg.night_start_hour : 22;
   $('f-nighteh').value = cfg.night_end_hour !== undefined ? cfg.night_end_hour : 7;
-  $('f-ledbr').value = cfg.led_brightness || 60; $('v-ledbr').textContent = cfg.led_brightness || 60;
+  { const _ledbr = cfg.led_brightness != null ? cfg.led_brightness : 60; $('f-ledbr').value = _ledbr; $('v-ledbr').textContent = _ledbr; }
   $('f-blmode').value = cfg.backlight_mode || 'Breath';
-  const spd = cfg.led_effect_speed || 5; $('f-blspeed').value = spd; $('v-blspeed').textContent = spd;
+  const spd = cfg.led_effect_speed != null ? cfg.led_effect_speed : 5; $('f-blspeed').value = spd; $('v-blspeed').textContent = spd;
   onBlModeChange();
   $('f-ssid').value = cfg.ssid || '';
   /* Show password as plain text on first entry (no saved password) so the user
@@ -1608,7 +1617,7 @@ async function loadSettings() {
   $('f-buid').value = cfg.bili_uid || '';
   onVsiteChange();    /* sync YouTube/Bilibili field visibility */
   onYtMethodChange(); /* sync API key row visibility */
-  $('f-vol').value = cfg.volume || 20; $('v-vol').textContent = cfg.volume || 20;
+  { const _vol = cfg.volume != null ? cfg.volume : 20; $('f-vol').value = _vol; $('v-vol').textContent = _vol; }
   $('f-music').value = cfg.music_file || '';
   $('f-bell').value = cfg.bell_file || '';
   $('f-tone').value  = cfg.tone_file  || '';
@@ -1648,6 +1657,12 @@ async function loadSettings() {
    ['f-tiktok-en','m-tiktok'],['f-mast-en','m-mastodon']].forEach(([f,m])=>{
     if ($(f) && $(m) && $(f).checked && !$(m).checked) $(m).checked = true;
   });
+  /* Re-derive em after auto-enable so dashboard visibility includes auto-added modes */
+  { let _em = em;
+    [['m-youtube',8],['m-instagram',9],['m-tiktok',10],['m-mastodon',11]].forEach(([id,bit])=>{
+      if ($(id) && $(id).checked) _em |= (1 << bit);
+    });
+    updateDashboardVisibility(_em); }
   /* Social master toggle */
   const socialEnEl = $('f-social-en');
   if (socialEnEl) socialEnEl.checked = cfg.social_enabled === true;
@@ -1789,6 +1804,26 @@ function onTtMethodChange() {
   $('tt-method-key-hint').style.display   = relay ? 'none' : '';
 }
 
+/* ── Timer card collapsible ── */
+function toggleTimerCard() {
+  const body  = $('timer-body');
+  const arrow = $('timer-arrow');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
+}
+
+/* ── Weather card collapsible ── */
+function toggleWeatherCard() {
+  const body  = $('weather-body');
+  const arrow = $('weather-arrow');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
+}
+
 /* ── Social card collapsible ── */
 function toggleSocialCard() {
   const body  = $('social-body');
@@ -1895,6 +1930,18 @@ function applyColorToAll() {
   });
 }
 
+/* ── Dashboard visibility — hide tiles/buttons for disabled modes ── */
+function updateDashboardVisibility(em) {
+  /* Stat tiles that carry data-mode-bit */
+  document.querySelectorAll('.stat[data-mode-bit]').forEach(el => {
+    el.style.display = (em & (1 << parseInt(el.dataset.modeBit))) ? '' : 'none';
+  });
+  /* Quick Actions buttons */
+  document.querySelectorAll('#tab-dashboard .btn[data-mode-bit]').forEach(btn => {
+    btn.style.display = (em & (1 << parseInt(btn.dataset.modeBit))) ? '' : 'none';
+  });
+}
+
 /* ── SHT30 offset unit (follows temperature_format) ──────────────── */
 function updateSht30OffsetUnit(isFahrenheit) {
   const inp = $('f-sht30-offset');
@@ -1930,8 +1977,10 @@ function onTempFmtChange() {
 /* ── Mode Rotation toggle ─────────────────────────────────────────── */
 function onRotToggle() {
   const on = $('rot-enabled').checked;
-  $('rot-interval-wrap').style.opacity = on ? '1' : '0.4';
-  $('rot-modes-wrap').style.opacity    = on ? '1' : '0.4';
+  $('rot-interval-wrap').style.opacity       = on ? '1'  : '0.4';
+  $('rot-interval-wrap').style.pointerEvents = on ? ''   : 'none';
+  $('rot-modes-wrap').style.opacity          = on ? '1'  : '0.4';
+  $('rot-modes-wrap').style.pointerEvents    = on ? ''   : 'none';
   markDirty();
 }
 function rotModeSelectAll(checked) {
@@ -1963,8 +2012,10 @@ function rotWeightsArray() {
 /* ── Theme rotation ─────────────────────────────────────────────────── */
 function onThemeRotToggle() {
   const on = $('theme-rot-enabled').checked;
-  $('theme-rot-interval-wrap').style.opacity = on ? '1' : '0.4';
-  $('theme-rot-themes-wrap').style.opacity   = on ? '1' : '0.4';
+  $('theme-rot-interval-wrap').style.opacity       = on ? '1' : '0.4';
+  $('theme-rot-interval-wrap').style.pointerEvents = on ? ''  : 'none';
+  $('theme-rot-themes-wrap').style.opacity         = on ? '1' : '0.4';
+  $('theme-rot-themes-wrap').style.pointerEvents   = on ? ''  : 'none';
   markDirty();
 }
 
@@ -2159,6 +2210,7 @@ async function saveSettings() {
   toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
   if (res?.status === 'ok') {
     clearDirty();
+    updateDashboardVisibility(enabledModes);
     /* If a password was just typed in plain-text mode, mask it now that it has
      * been saved — the user has already verified it, so masking from here on
      * is the expected behaviour.                                               */
@@ -2543,7 +2595,7 @@ async function browseDir(dir) {
           <span style="display:flex;align-items:center;gap:.5rem">
             <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
             <button onclick="renameFolder(decodeURIComponent('${encPath}'))"
-               style="font-size:.75rem;color:var(--accent);background:none;border:1px solid var(--accent);border-radius:4px;padding:.15rem .4rem;cursor:pointer" title="Rename folder">✎</button>
+               style="font-size:.75rem;color:var(--dim);background:none;border:1px solid var(--dim);border-radius:4px;padding:.15rem .4rem;cursor:pointer" title="Rename folder">✎</button>
             <button onclick="deleteFile(decodeURIComponent('${encPath}'))"
                style="font-size:.75rem;color:var(--hi);background:none;border:1px solid var(--hi);border-radius:4px;padding:.15rem .4rem;cursor:pointer" title="Delete folder">✕</button>
           </span>
