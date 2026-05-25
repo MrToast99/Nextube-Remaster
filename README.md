@@ -338,6 +338,8 @@ Readings appear on the **Dashboard** under *Local Sensor* (temperature and humid
 
 ### Replacement LCD Panels
 
+> ⚠️ **LCD replacement support requires firmware v1.8 or later.** Earlier versions lack the per-tube calibration settings (VCOM, gamma, column/row offsets, panel profile) needed to configure ST7735S replacement panels correctly.
+
 The six original displays are **80×160 px ST7735 "Green Tab" IPS panels**. If one or more tubes fail they can be replaced with compatible ST7735S modules — the most common drop-in replacement confirmed to work with this firmware is:
 
  <img width="335" height="100" alt="image" src="https://github.com/user-attachments/assets/8837cff8-df31-41ae-81ee-644e3794f72e" />
