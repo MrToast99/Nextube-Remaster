@@ -610,7 +610,7 @@ select option{background:var(--accent);color:var(--text)}
     <div id="weather-body" style="display:none;margin-top:.9rem">
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded()">
+        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-weather-en','m-weather');markDirty();markRestartNeeded()">
         <label for="f-weather-en" style="cursor:pointer">Enable weather</label>
       </div>
       <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
@@ -1674,8 +1674,9 @@ async function loadSettings() {
   $('m-instagram').checked  = !!(em & (1 << 9));
   $('m-tiktok').checked     = !!(em & (1 << 10));
   $('m-mastodon').checked   = !!(em & (1 << 11));
-  /* If a counter fetch is enabled but its mode bit wasn't saved, add the mode */
-  [['f-youtube-en','m-youtube'],['f-insta-en','m-instagram'],
+  /* If a service fetch is enabled but its mode bit wasn't saved, add the mode */
+  [['f-weather-en','m-weather'],
+   ['f-youtube-en','m-youtube'],['f-insta-en','m-instagram'],
    ['f-tiktok-en','m-tiktok'],['f-mast-en','m-mastodon']].forEach(([f,m])=>{
     if ($(f) && $(m) && $(f).checked && !$(m).checked) $(m).checked = true;
   });
