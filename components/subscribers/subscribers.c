@@ -25,6 +25,9 @@ static SemaphoreHandle_t s_tiktok_mutex = NULL;
 static sub_count_t       s_mastodon       = {0};
 static SemaphoreHandle_t s_mastodon_mutex = NULL;
 
+/* Binary semaphore used to wake the subscribers task early for a forced poll. */
+static SemaphoreHandle_t s_refresh_sem = NULL;
+
 /* Shared receive buffer — used only by YouTube and Bilibili fetches.
  * Instagram and TikTok use a task-local heap buffer to avoid growing
  * this BSS region (internal SRAM is shared with the weather TLS stack). */
@@ -629,12 +632,15 @@ static void subscribers_task(void *arg)
         config_unlock();
         if (interval_min < 5) interval_min = 5;   /* floor: avoid hammering APIs */
         ESP_LOGI(TAG, "Social counter poll cycle done — sleeping %u min", (unsigned)interval_min);
-        /* Sleep in 1-minute slices to avoid pdMS_TO_TICKS uint32_t overflow.
-         * A single vTaskDelay(interval_min * 60000) overflows when
-         * interval_min × 60000 × tick_rate_hz exceeds 2^32 (e.g. 720 min
-         * at 1 kHz tick rate wraps to ~250 s instead of 43200 s).            */
-        for (uint16_t _m = 0; _m < interval_min; _m++)
-            vTaskDelay(pdMS_TO_TICKS(60000));   /* 60 000 ms = 1 min, always safe */
+        /* Sleep in 1-minute slices.  A semaphore give from subscribers_refresh_now()
+         * breaks out of the loop early so a forced poll starts immediately. */
+        for (uint16_t _m = 0; _m < interval_min; _m++) {
+            if (s_refresh_sem &&
+                xSemaphoreTake(s_refresh_sem, pdMS_TO_TICKS(60000)) == pdTRUE) {
+                ESP_LOGI(TAG, "Force-refresh requested — restarting poll cycle");
+                break;   /* exit the sleep loop and start the next poll immediately */
+            }
+        }
     }
 }
 
@@ -645,7 +651,14 @@ void subscribers_start(void)
     s_insta_mutex    = xSemaphoreCreateMutex();
     s_tiktok_mutex   = xSemaphoreCreateMutex();
     s_mastodon_mutex = xSemaphoreCreateMutex();
+    s_refresh_sem    = xSemaphoreCreateBinary();
     xTaskCreate(subscribers_task, "subscribers", 8192, NULL, 3, NULL);
+}
+
+/** Wake the subscribers task immediately to start a fresh poll cycle. */
+void subscribers_refresh_now(void)
+{
+    if (s_refresh_sem) xSemaphoreGive(s_refresh_sem);
 }
 
 const sub_count_t *subscribers_get(void)

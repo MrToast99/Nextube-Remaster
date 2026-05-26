@@ -13,7 +13,7 @@
  *
  * Available themes: NixieOY, FlipClock, DarkSlate, DotMatrixRG, DotMatrixY,
  *   Formula1, GlitchGR, LightFuture, NotionRain, RedDigits, RetroPaper,
- *   WireMesh, Custom, Custom01, Custom02, Custom03
+ *   WireMesh
  */
 #pragma once
 #include <stdint.h>

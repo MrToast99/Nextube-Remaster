@@ -2280,6 +2280,14 @@ static void render_number6(uint32_t value, const char *theme,
  *
  * 2+ digit K/M integers have no room for a decimal alongside the suffix,
  * so they fall through to render_number6 (3 significant digits, no dot). */
+/* Show platform icon + 5 blank tubes when the account is not configured. */
+static void render_followers_blank(const nextube_config_t *cfg, const char *icon)
+{
+    display_show_ampm(0, icon, cfg->theme);
+    for (int t = 1; t <= 5; t++)
+        display_show_ampm(t, "blank", cfg->theme);
+}
+
 static void render_followers(const nextube_config_t *cfg,
                              uint32_t count, const char *icon)
 {
@@ -2378,11 +2386,6 @@ static void render_pomodoro_display(const nextube_config_t *cfg,
     display_show_ampm  (5, in_break ? "pomodorolb" : "pomodorosb", cfg->theme);
 }
 
-static void render_scoreboard(const nextube_config_t *cfg)
-{
-    /* Show 6 zeros until score data is driven via a future API. */
-    for (int i = 0; i < 6; i++) display_show_number(i, 0, cfg->theme);
-}
 
 /* ── Spectrum bar visualiser ─────────────────────────────────────────── *
  *                                                                         *
@@ -2561,7 +2564,7 @@ void display_album_invalidate(void)
     s_album_index  = 0;
 }
 
-static void album_load_list(void)
+static void album_load_list(bool shuffle)
 {
     if (s_album_loaded) return;
     s_album_count = 0;
@@ -2577,6 +2580,16 @@ static void album_load_list(void)
             }
         }
         closedir(dp);
+    }
+    /* Fisher-Yates shuffle when requested */
+    if (shuffle && s_album_count > 1) {
+        for (int i = (int)s_album_count - 1; i > 0; i--) {
+            int j = (int)(esp_random() % (uint32_t)(i + 1));
+            char tmp[MAX_ALBUM_PATH];
+            memcpy(tmp,                  s_album_files[j], MAX_ALBUM_PATH);
+            memcpy(s_album_files[j],     s_album_files[i], MAX_ALBUM_PATH);
+            memcpy(s_album_files[i],     tmp,              MAX_ALBUM_PATH);
+        }
     }
     s_album_loaded = true;
 }
@@ -2657,7 +2670,7 @@ static void advance_theme(const char *current_theme,
 static void render_album(const nextube_config_t *cfg,
                          TickType_t *last_switch, bool force)
 {
-    album_load_list();
+    album_load_list(cfg->album_shuffle);
     if (s_album_count == 0) {
         for (int i = 0; i < LCD_COUNT; i++) {
             /* Skip masked tubes — burn-in/snow will cover them anyway. */
@@ -3445,7 +3458,7 @@ static void display_task(void *arg)
          * calls see mask=0 and write JPEGs immediately.  Without this the
          * render skips JPEG writes (mask still set), the expiry fires after,
          * and the last solid colour sits on screen until the next render tick
-         * — up to 2 s for clock modes; indefinitely for scoreboard / YouTube
+         * — up to 2 s for clock modes; indefinitely for YouTube
          * (which only re-render on data changes, not on every tick).
          *
          * burnin_force_render: true on any tick where the combined mask just
@@ -3722,10 +3735,12 @@ static void display_task(void *arg)
 
         case APP_MODE_YOUTUBE: {
             const sub_count_t *sub = subscribers_get();
-            uint32_t count = sub->valid ? (uint32_t)sub->subscriber_count : 0;
+            bool uncfg = (cfg->youtube_id[0] == '\0');
+            uint32_t count = (!uncfg && sub->valid) ? (uint32_t)sub->subscriber_count : 0;
             if (first || mode_changed || theme_changed || count != last_subs ||
                     burnin_force_render) {
-                render_followers(cfg, count, "youtube");
+                if (uncfg) render_followers_blank(cfg, "youtube");
+                else        render_followers(cfg, count, "youtube");
                 last_subs = count;
             }
             break;
@@ -3734,10 +3749,12 @@ static void display_task(void *arg)
         case APP_MODE_INSTAGRAM: {
             static uint32_t last_insta = UINT32_MAX;
             const sub_count_t *s = instagram_get();
-            uint32_t count = s->valid ? (uint32_t)s->subscriber_count : 0;
+            bool uncfg = (cfg->instagram_user[0] == '\0');
+            uint32_t count = (!uncfg && s->valid) ? (uint32_t)s->subscriber_count : 0;
             if (first || mode_changed || theme_changed || count != last_insta ||
                     burnin_force_render) {
-                render_followers(cfg, count, "instagram");
+                if (uncfg) render_followers_blank(cfg, "instagram");
+                else        render_followers(cfg, count, "instagram");
                 last_insta = count;
             }
             break;
@@ -3746,10 +3763,12 @@ static void display_task(void *arg)
         case APP_MODE_TIKTOK: {
             static uint32_t last_tiktok = UINT32_MAX;
             const sub_count_t *s = tiktok_get();
-            uint32_t count = s->valid ? (uint32_t)s->subscriber_count : 0;
+            bool uncfg = (cfg->tiktok_user[0] == '\0');
+            uint32_t count = (!uncfg && s->valid) ? (uint32_t)s->subscriber_count : 0;
             if (first || mode_changed || theme_changed || count != last_tiktok ||
                     burnin_force_render) {
-                render_followers(cfg, count, "tiktok");
+                if (uncfg) render_followers_blank(cfg, "tiktok");
+                else        render_followers(cfg, count, "tiktok");
                 last_tiktok = count;
             }
             break;
@@ -3758,19 +3777,18 @@ static void display_task(void *arg)
         case APP_MODE_MASTODON: {
             static uint32_t last_mastodon = UINT32_MAX;
             const sub_count_t *s = mastodon_get();
-            uint32_t count = s->valid ? (uint32_t)s->subscriber_count : 0;
+            bool uncfg = (cfg->mastodon_user[0] == '\0' ||
+                          cfg->mastodon_instance[0] == '\0');
+            uint32_t count = (!uncfg && s->valid) ? (uint32_t)s->subscriber_count : 0;
             if (first || mode_changed || theme_changed || count != last_mastodon ||
                     burnin_force_render) {
-                render_followers(cfg, count, "mastodon");
+                if (uncfg) render_followers_blank(cfg, "mastodon");
+                else        render_followers(cfg, count, "mastodon");
                 last_mastodon = count;
             }
             break;
         }
 
-        case APP_MODE_SCOREBOARD:
-            if (first || mode_changed || theme_changed || burnin_force_render)
-                render_scoreboard(cfg);
-            break;
 
         case APP_MODE_SPECTRUM:
             /* Audio changes every frame — always re-render at the display task rate. */

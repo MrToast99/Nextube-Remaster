@@ -10,18 +10,24 @@
  *   nextube/<host>/mode/state                "Clock"
  *   nextube/<host>/display/state             "ON" or "OFF"
  *   nextube/<host>/brightness/state          "75"
+ *   nextube/<host>/theme/state               "NixieOY"
+ *   nextube/<host>/rotation/state            "ON" or "OFF"
  *
  * Subscribed:
  *   nextube/<host>/mode/set                  "Weather"
  *   nextube/<host>/display/set               "ON" or "OFF"
  *   nextube/<host>/brightness/set            "75"
+ *   nextube/<host>/theme/set                 "DarkSlate"
+ *   nextube/<host>/rotation/set              "ON" or "OFF"
  *
  * HA auto-discovery:
  *   homeassistant/sensor/<host>_temp/config
  *   homeassistant/sensor/<host>_hum/config
  *   homeassistant/sensor/<host>_fw/config
  *   homeassistant/select/<host>_mode/config
+ *   homeassistant/select/<host>_theme/config
  *   homeassistant/switch/<host>_display/config
+ *   homeassistant/switch/<host>_rotation/config
  *   homeassistant/number/<host>_brightness/config
  *
  * Firmware version:
@@ -137,7 +143,7 @@ static void publish_discovery(void)
              "\"state_topic\":\"%s\","
              "\"command_topic\":\"%s\","
              "\"options\":["
-               "\"Clock\",\"Countdown\",\"Scoreboard\",\"Pomodoro\","
+               "\"Clock\",\"Countdown\",\"Pomodoro\","
                "\"YouTube\",\"Date\",\"Album\",\"Weather\","
                "\"Spectrum\",\"Instagram\",\"TikTok\",\"Mastodon\""
              "],"
@@ -184,6 +190,50 @@ static void publish_discovery(void)
              s_hostname, br_state, br_cmd, dev);
     publish(topic, payload, 1);
 
+    /* ── Theme select ── */
+    char theme_state[TOPIC_MAXLEN], theme_cmd[TOPIC_MAXLEN];
+    make_topic(theme_state, sizeof(theme_state), "theme/state");
+    make_topic(theme_cmd,   sizeof(theme_cmd),   "theme/set");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/select/%s_theme/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Theme\","
+             "\"unique_id\":\"%s_theme\","
+             "\"state_topic\":\"%s\","
+             "\"command_topic\":\"%s\","
+             "\"options\":["
+               "\"NixieOY\",\"FlipClock\",\"DarkSlate\","
+               "\"DotMatrixRG\",\"DotMatrixY\",\"Formula1\","
+               "\"GlitchGR\",\"LightFuture\",\"NotionRain\","
+               "\"RedDigits\",\"RetroPaper\",\"WireMesh\""
+             "],"
+             "\"icon\":\"mdi:palette\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, theme_state, theme_cmd, dev);
+    publish(topic, payload, 1);
+
+    /* ── Mode rotation switch ── */
+    char rot_state[TOPIC_MAXLEN], rot_cmd[TOPIC_MAXLEN];
+    make_topic(rot_state, sizeof(rot_state), "rotation/state");
+    make_topic(rot_cmd,   sizeof(rot_cmd),   "rotation/set");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/switch/%s_rotation/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Mode Rotation\","
+             "\"unique_id\":\"%s_rotation\","
+             "\"state_topic\":\"%s\","
+             "\"command_topic\":\"%s\","
+             "\"payload_on\":\"ON\","
+             "\"payload_off\":\"OFF\","
+             "\"icon\":\"mdi:autorenew\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, rot_state, rot_cmd, dev);
+    publish(topic, payload, 1);
+
     /* ── Firmware version sensor (diagnostic) ── */
     char fw_state[TOPIC_MAXLEN];
     make_topic(fw_state, sizeof(fw_state), "firmware/state");
@@ -226,6 +276,20 @@ static void publish_brightness(uint8_t val)
     make_topic(topic, sizeof(topic), "brightness/state");
     snprintf(buf, sizeof(buf), "%u", val);
     publish(topic, buf, 0);
+}
+
+static void publish_theme(const char *theme)
+{
+    char topic[TOPIC_MAXLEN];
+    make_topic(topic, sizeof(topic), "theme/state");
+    publish(topic, theme, 0);
+}
+
+static void publish_rotation(bool enabled)
+{
+    char topic[TOPIC_MAXLEN];
+    make_topic(topic, sizeof(topic), "rotation/state");
+    publish(topic, enabled ? "ON" : "OFF", 0);
 }
 
 static void publish_sensors(void)
@@ -283,7 +347,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                          "\"state_topic\":\"%s\","
                          "\"command_topic\":\"%s\","
                          "\"options\":["
-                           "\"Clock\",\"Countdown\",\"Scoreboard\",\"Pomodoro\","
+                           "\"Clock\",\"Countdown\",\"Pomodoro\","
                            "\"YouTube\",\"Date\",\"Album\",\"Weather\","
                            "\"Spectrum\",\"Instagram\",\"TikTok\",\"Mastodon\""
                          "],"
@@ -328,6 +392,50 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                          s_hostname, br_state, br_cmd, dev);
                 publish(topic, payload, 1);
 
+                /* Theme select */
+                char theme_state_ns[TOPIC_MAXLEN], theme_cmd_ns[TOPIC_MAXLEN];
+                make_topic(theme_state_ns, sizeof(theme_state_ns), "theme/state");
+                make_topic(theme_cmd_ns,   sizeof(theme_cmd_ns),   "theme/set");
+                snprintf(topic, sizeof(topic),
+                         "homeassistant/select/%s_theme/config", s_hostname);
+                snprintf(payload, sizeof(payload),
+                         "{"
+                         "\"name\":\"Nextube Theme\","
+                         "\"unique_id\":\"%s_theme\","
+                         "\"state_topic\":\"%s\","
+                         "\"command_topic\":\"%s\","
+                         "\"options\":["
+                           "\"NixieOY\",\"FlipClock\",\"DarkSlate\","
+                           "\"DotMatrixRG\",\"DotMatrixY\",\"Formula1\","
+                           "\"GlitchGR\",\"LightFuture\",\"NotionRain\","
+                           "\"RedDigits\",\"RetroPaper\",\"WireMesh\""
+                         "],"
+                         "\"icon\":\"mdi:palette\","
+                         "\"device\":{%s}"
+                         "}",
+                         s_hostname, theme_state_ns, theme_cmd_ns, dev);
+                publish(topic, payload, 1);
+
+                /* Rotation switch */
+                char rot_state_ns[TOPIC_MAXLEN], rot_cmd_ns[TOPIC_MAXLEN];
+                make_topic(rot_state_ns, sizeof(rot_state_ns), "rotation/state");
+                make_topic(rot_cmd_ns,   sizeof(rot_cmd_ns),   "rotation/set");
+                snprintf(topic, sizeof(topic),
+                         "homeassistant/switch/%s_rotation/config", s_hostname);
+                snprintf(payload, sizeof(payload),
+                         "{"
+                         "\"name\":\"Nextube Mode Rotation\","
+                         "\"unique_id\":\"%s_rotation\","
+                         "\"state_topic\":\"%s\","
+                         "\"command_topic\":\"%s\","
+                         "\"payload_on\":\"ON\","
+                         "\"payload_off\":\"OFF\","
+                         "\"icon\":\"mdi:autorenew\","
+                         "\"device\":{%s}"
+                         "}",
+                         s_hostname, rot_state_ns, rot_cmd_ns, dev);
+                publish(topic, payload, 1);
+
                 /* Firmware version sensor (same whether SHT30 present or not) */
                 char fw_state[TOPIC_MAXLEN];
                 make_topic(fw_state, sizeof(fw_state), "firmware/state");
@@ -358,20 +466,30 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             esp_mqtt_client_subscribe(s_client, topic, 1);
             make_topic(topic, sizeof(topic), "brightness/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            make_topic(topic, sizeof(topic), "theme/set");
+            esp_mqtt_client_subscribe(s_client, topic, 1);
+            make_topic(topic, sizeof(topic), "rotation/set");
+            esp_mqtt_client_subscribe(s_client, topic, 1);
         }
 
         /* Publish current state immediately after (re-)connect */
         {
             config_lock();
             const nextube_config_t *cfg = config_get();
-            app_mode_t  cur_mode = cfg->current_mode;
-            bool        cur_on   = cfg->backlight_on;
-            uint8_t     cur_br   = cfg->lcd_brightness;
+            app_mode_t  cur_mode     = cfg->current_mode;
+            bool        cur_on       = cfg->backlight_on;
+            uint8_t     cur_br       = cfg->lcd_brightness;
+            bool        cur_rot      = cfg->rotation_enabled;
+            char        cur_theme[32];
+            strncpy(cur_theme, cfg->theme, sizeof(cur_theme) - 1);
+            cur_theme[sizeof(cur_theme) - 1] = '\0';
             config_unlock();
 
             publish_mode(cur_mode);
             publish_display(cur_on);
             publish_brightness(cur_br);
+            publish_theme(cur_theme);
+            publish_rotation(cur_rot);
             if (sht30_is_present()) publish_sensors();
 
             /* Firmware version — retained so HA has it after broker restart */
@@ -446,6 +564,30 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             break;
         }
 
+        /* ── theme/set ── */
+        char theme_cmd_topic[TOPIC_MAXLEN];
+        make_topic(theme_cmd_topic, sizeof(theme_cmd_topic), "theme/set");
+        if (strcmp(t, theme_cmd_topic) == 0) {
+            config_set_theme(p);
+            publish_theme(p);
+            ESP_LOGI(TAG, "Theme set to %s via MQTT", p);
+            break;
+        }
+
+        /* ── rotation/set ── */
+        char rot_cmd_topic[TOPIC_MAXLEN];
+        make_topic(rot_cmd_topic, sizeof(rot_cmd_topic), "rotation/set");
+        if (strcmp(t, rot_cmd_topic) == 0) {
+            bool enable = (strcmp(p, "ON") == 0);
+            char json[48];
+            snprintf(json, sizeof(json), "{\"rotation_enabled\":%s}",
+                     enable ? "true" : "false");
+            config_set_json(json, strlen(json));
+            publish_rotation(enable);
+            ESP_LOGI(TAG, "Mode rotation %s via MQTT", enable ? "ON" : "OFF");
+            break;
+        }
+
         break;
     }
 
@@ -491,6 +633,11 @@ static void ha_mqtt_task(void *arg)
         .broker.address.uri = uri,
         .session.keepalive  = 30,
         .network.reconnect_timeout_ms = 5000,
+        /* Default stack (6144) is too small once discovery payloads are generated.
+         * publish_discovery() alone allocates ~1.7 KB of locals (payload[768] +
+         * dev[192] + 8 topic strings) on top of ~1-2 KB of MQTT library frames.
+         * 10240 gives comfortable headroom for future additions. */
+        .task.stack_size = 10240,
     };
 
     /* Set credentials only if username is provided */
@@ -514,6 +661,8 @@ static void ha_mqtt_task(void *arg)
     app_mode_t last_mode       = (app_mode_t)-1;
     bool       last_on         = true;
     uint8_t    last_brightness = 255;   /* sentinel — forces publish on first tick */
+    bool       last_rotation   = false;
+    char       last_theme[32]  = {0};   /* empty = sentinel, forces publish on first tick */
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(60000));
@@ -523,9 +672,13 @@ static void ha_mqtt_task(void *arg)
         /* Read current state */
         config_lock();
         const nextube_config_t *cfg = config_get();
-        app_mode_t  cur_mode = cfg->current_mode;
-        bool        cur_on   = cfg->backlight_on;
-        uint8_t     cur_br   = cfg->lcd_brightness;
+        app_mode_t  cur_mode   = cfg->current_mode;
+        bool        cur_on     = cfg->backlight_on;
+        uint8_t     cur_br     = cfg->lcd_brightness;
+        bool        cur_rot    = cfg->rotation_enabled;
+        char        cur_theme[32];
+        strncpy(cur_theme, cfg->theme, sizeof(cur_theme) - 1);
+        cur_theme[sizeof(cur_theme) - 1] = '\0';
         config_unlock();
 
         /* Sensor readings */
@@ -549,6 +702,18 @@ static void ha_mqtt_task(void *arg)
         if (cur_br != last_brightness) {
             publish_brightness(cur_br);
             last_brightness = cur_br;
+        }
+
+        /* Theme — publish when changed */
+        if (strcmp(cur_theme, last_theme) != 0) {
+            publish_theme(cur_theme);
+            strncpy(last_theme, cur_theme, sizeof(last_theme) - 1);
+        }
+
+        /* Rotation — publish when changed */
+        if (cur_rot != last_rotation) {
+            publish_rotation(cur_rot);
+            last_rotation = cur_rot;
         }
     }
 }

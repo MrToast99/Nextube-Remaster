@@ -9,6 +9,9 @@ typedef struct {
     bool     valid;
 } sub_count_t;
 void subscribers_start(void);
+/** Immediately wake the subscribers task to start a fresh poll cycle,
+ *  bypassing the remaining sleep interval. No-op if task is mid-fetch. */
+void subscribers_refresh_now(void);
 const sub_count_t *subscribers_get(void);
 const sub_count_t *instagram_get(void);
 const sub_count_t *tiktok_get(void);

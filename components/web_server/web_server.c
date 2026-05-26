@@ -1737,6 +1737,17 @@ static esp_err_t api_mic_reset_calibration(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/social/refresh
+ * Immediately wakes the subscribers task to run a fresh poll cycle,
+ * bypassing the remaining sleep interval.  Returns {"status":"ok"} instantly;
+ * the actual fetch happens asynchronously in the subscribers task. */
+static esp_err_t api_social_refresh(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    subscribers_refresh_now();
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* POST /api/debug/burnin
  * Body: {"mask": <0–63>}
  *   mask is a 6-bit field, one bit per tube (bit 0 = tube 1 … bit 5 = tube 6).
@@ -2091,6 +2102,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/mic/calibrate",          api_mic_calibrate),
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
+    R(HTTP_POST, "/api/social/refresh",         api_social_refresh),
     R(HTTP_POST, "/api/debug/burnin",           api_debug_burnin),
     R(HTTP_POST, "/api/debug/snow",             api_debug_snow),
     /* Auth routes.  set_password is allowed unauth on first boot only;

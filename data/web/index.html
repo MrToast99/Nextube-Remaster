@@ -118,7 +118,7 @@ select option{background:var(--accent);color:var(--text)}
     <div class="btn-group">
       <button class="btn btn-primary" data-mode-bit="0"  onclick="setMode('Clock')">Clock</button>
       <button class="btn btn-outline" data-mode-bit="1"  onclick="setMode('Countdown')">Countdown</button>
-      <button class="btn btn-outline" data-mode-bit="2"  onclick="setMode('Scoreboard')">Scoreboard</button>
+
       <button class="btn btn-outline" data-mode-bit="3"  onclick="setMode('Pomodoro')">Pomodoro</button>
       <button class="btn btn-outline" data-mode-bit="4"  onclick="setMode('Date')">Date</button>
       <button class="btn btn-outline" data-mode-bit="5"  onclick="setMode('Album')">Album</button>
@@ -130,6 +130,8 @@ select option{background:var(--accent);color:var(--text)}
       <button class="btn btn-outline" data-mode-bit="11" onclick="setMode('Mastodon')">Mastodon</button>
     </div>
   </div>
+
+
 </div>
 
 <!-- ─── Display ────────────────────────────────────────────────── -->
@@ -410,12 +412,12 @@ select option{background:var(--accent);color:var(--text)}
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-clock" checked onchange="markDirty()"> Clock <span style="font-size:.73rem;color:var(--dim)">(time)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-countdown" onchange="markDirty()"> Countdown</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-scoreboard" onchange="markDirty()"> Scoreboard</label>
+
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-pomodoro" onchange="markDirty()"> Pomodoro</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-date" onchange="markDirty()"> Date <span style="font-size:.73rem;color:var(--dim)">(full date)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album" onchange="markDirty()"> Album</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather" onchange="markDirty()"> Weather</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum" onchange="markDirty()"> Spectrum <span style="color:var(--dim);font-size:.78rem">(mic required)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum" onchange="markDirty();markRestartNeeded()"> Spectrum <span style="color:var(--dim);font-size:.78rem">(mic — restart required)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-youtube" onchange="markDirty()"> YouTube</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-instagram" onchange="markDirty()"> Instagram</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-tiktok" onchange="markDirty()"> TikTok</label>
@@ -459,7 +461,7 @@ select option{background:var(--accent);color:var(--text)}
         <!-- each row: [checkbox] [name flex] [weight input] [× label] -->
         <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="0"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Clock</span><input type="number" class="rot-weight-in" data-bit="0"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
         <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="1"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Countdown</span><input type="number" class="rot-weight-in" data-bit="1"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="2"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Scoreboard</span><input type="number" class="rot-weight-in" data-bit="2"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+
         <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="3"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Pomodoro</span><input type="number" class="rot-weight-in" data-bit="3"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
         <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="4"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Date</span><input type="number" class="rot-weight-in" data-bit="4"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
         <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="5"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Album</span><input type="number" class="rot-weight-in" data-bit="5"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
@@ -548,7 +550,7 @@ select option{background:var(--accent);color:var(--text)}
     <div class="field"><label>Hostname</label><input id="f-hostname" type="text" placeholder="nextube-remaster"></div>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-mdns-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded(this.checked)">
+        <input type="checkbox" id="f-mdns-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded()">
         <label for="f-mdns-en" style="cursor:pointer">Advertise via mDNS (.local)</label>
       </div>
       <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
@@ -608,7 +610,7 @@ select option{background:var(--accent);color:var(--text)}
     <div id="weather-body" style="display:none;margin-top:.9rem">
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded(this.checked)">
+        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded()">
         <label for="f-weather-en" style="cursor:pointer">Enable weather</label>
       </div>
       <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
@@ -664,7 +666,7 @@ select option{background:var(--accent);color:var(--text)}
 
     <div id="social-body" style="display:none;margin-top:.9rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
-        <input type="checkbox" id="f-social-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded(this.checked)">
+        <input type="checkbox" id="f-social-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded();updateDashboardVisibility(readEnabledModes())">
         Enable &nbsp;<small style="color:var(--dim)">(restart required — master switch for all social counters)</small>
       </label>
 
@@ -683,6 +685,7 @@ select option{background:var(--accent);color:var(--text)}
           <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=1440;markDirty()">24 h</button>
         </div>
         <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Applies to all platforms. Minimum 5 minutes. Changes take effect after the current sleep expires or reboot.</p>
+        <button type="button" class="btn btn-outline" style="margin-top:.5rem;font-size:.82rem" onclick="socialRefreshNow()">⟳ Fetch Now</button>
       </div>
       <div class="field">
         <label>Relay host <span style="color:var(--dim);font-size:.8rem">(LAN IP of PC running social_relay.py)</span></label>
@@ -702,7 +705,7 @@ select option{background:var(--accent);color:var(--text)}
       <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">YouTube / Bilibili</div>
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="f-youtube-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-youtube-en','m-youtube');markDirty();validateSubs()">
+          <input type="checkbox" id="f-youtube-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-youtube-en','m-youtube');markDirty();markRestartNeeded();validateSubs()">
           <label for="f-youtube-en" style="cursor:pointer">Enable YouTube / Bilibili</label>
         </div>
         <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
@@ -741,7 +744,7 @@ select option{background:var(--accent);color:var(--text)}
       <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">Instagram</div>
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="f-insta-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-insta-en','m-instagram');markDirty();validateSubs()">
+          <input type="checkbox" id="f-insta-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-insta-en','m-instagram');markDirty();markRestartNeeded();validateSubs()">
           <label for="f-insta-en" style="cursor:pointer">Enable Instagram follower counter</label>
         </div>
         <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Fetches public follower count. <strong>Restart required.</strong></p>
@@ -766,7 +769,7 @@ select option{background:var(--accent);color:var(--text)}
       <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">TikTok</div>
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="f-tiktok-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-tiktok-en','m-tiktok');markDirty();validateSubs()">
+          <input type="checkbox" id="f-tiktok-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-tiktok-en','m-tiktok');markDirty();markRestartNeeded();validateSubs()">
           <label for="f-tiktok-en" style="cursor:pointer">Enable TikTok follower counter</label>
         </div>
         <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Fetches public follower count. <strong>Restart required.</strong></p>
@@ -795,7 +798,7 @@ select option{background:var(--accent);color:var(--text)}
       <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">Mastodon</div>
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="f-mast-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-mast-en','m-mastodon');markDirty();validateSubs()">
+          <input type="checkbox" id="f-mast-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-mast-en','m-mastodon');markDirty();markRestartNeeded();validateSubs()">
           <label for="f-mast-en" style="cursor:pointer">Enable Mastodon follower counter</label>
         </div>
         <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Uses the official public API — no authentication or relay needed. <strong>Restart required.</strong></p>
@@ -819,7 +822,7 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <div id="mqtt-body" style="display:none;padding-top:.8rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
-        <input type="checkbox" id="f-mqtt-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded(this.checked)">
+        <input type="checkbox" id="f-mqtt-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded()">
         Enable &nbsp;<small style="color:var(--dim)">(restart required)</small>
       </label>
       <div class="row">
@@ -858,7 +861,7 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <div id="wled-body" style="display:none;padding-top:.8rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
-        <input type="checkbox" id="f-wled-sync-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded(this.checked)">
+        <input type="checkbox" id="f-wled-sync-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded()">
         Enable listener task &nbsp;<small style="color:var(--dim)">(restart required)</small>
       </label>
       <div class="field">
@@ -897,6 +900,25 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     </div>
   </div>
+
+  <div class="card" id="album-card">
+    <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleAlbumCard()">
+      <span id="album-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
+      <h2 style="margin:0;border:none;padding:0;flex:1">Album Settings</h2>
+    </div>
+    <div id="album-body" style="display:none;margin-top:.9rem">
+      <div class="row">
+        <div class="field"><label>Slide Duration (ms)</label>
+          <input id="f-album-switch" type="number" min="500" max="60000" step="500" value="2000" oninput="markDirty()">
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
+        <input type="checkbox" id="f-album-shuffle" onchange="markDirty()">
+        Shuffle — randomise playback order on each album load
+      </label>
+    </div>
+  </div>
+
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Services</button></div>
 </div>
 
@@ -1317,9 +1339,8 @@ function toast(msg, err, action) {
 }
 
 /* Show a restart-required notice with a Save & Reboot shortcut.
- * Only fires when the checkbox is being checked (enabling), not unchecked. */
-function markRestartNeeded(checked) {
-  if (!checked) return;
+ * Fires on both enable and disable — both directions require a reboot. */
+function markRestartNeeded() {
   toast('Restart required for this change to take effect.', false, {
     label: 'Save & Reboot',
     fn: async () => {
@@ -1630,9 +1651,11 @@ async function loadSettings() {
     $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
   if (cfg.mic_silence_gate != null && $('dbg-gate-num'))
     dbgSetGate(cfg.mic_silence_gate);
-  $('f-countdown').value  = cfg.default_countdown_time || 1;
-  $('f-pomo-work').value  = cfg.pomodoro_work  || 25;
-  $('f-pomo-break').value = cfg.pomodoro_break || 5;
+  $('f-countdown').value    = cfg.default_countdown_time || 1;
+  $('f-pomo-work').value    = cfg.pomodoro_work  || 25;
+  $('f-pomo-break').value   = cfg.pomodoro_break || 5;
+  $('f-album-switch').value = cfg.album_switch_time || 2000;
+  $('f-album-shuffle').checked = !!cfg.album_shuffle;
   $('f-wx-panel').value   = Math.round((cfg.weather_panel_ms || 5000) / 1000);
   $('f-wx-p0').checked    = cfg.weather_panel0_en !== false;
   $('f-wx-p1').checked    = cfg.weather_panel1_en !== false;
@@ -1642,7 +1665,6 @@ async function loadSettings() {
   const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
   $('m-clock').checked       = !!(em & (1 << 0));
   $('m-countdown').checked   = !!(em & (1 << 1));
-  $('m-scoreboard').checked  = !!(em & (1 << 2));
   $('m-pomodoro').checked    = !!(em & (1 << 3));
   $('m-date').checked        = !!(em & (1 << 4));
   $('m-album').checked       = !!(em & (1 << 5));
@@ -1699,6 +1721,7 @@ async function loadSettings() {
     const w = (rotWeights[bit] >= 1) ? rotWeights[bit] : 1;
     inp.value = w;
   });
+  updateRotWeightStates();
   $('rot-modes-wrap').style.opacity = rotEnabled ? '1' : '0.4';
 
   /* Theme rotation */
@@ -1808,6 +1831,16 @@ function onTtMethodChange() {
 function toggleTimerCard() {
   const body  = $('timer-body');
   const arrow = $('timer-arrow');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
+}
+
+/* ── Album card collapsible ── */
+function toggleAlbumCard() {
+  const body  = $('album-body');
+  const arrow = $('album-arrow');
   if (!body) return;
   const open = body.style.display === 'none';
   body.style.display = open ? '' : 'none';
@@ -1930,8 +1963,27 @@ function applyColorToAll() {
   });
 }
 
+/* ── Read current enabled-modes bitmask from checkboxes ─────────── */
+function readEnabledModes() {
+  return ($('m-clock').checked      ? (1 << 0)  : 0) |
+         ($('m-countdown').checked  ? (1 << 1)  : 0) |
+         ($('m-pomodoro').checked   ? (1 << 3)  : 0) |
+         ($('m-date').checked       ? (1 << 4)  : 0) |
+         ($('m-album').checked      ? (1 << 5)  : 0) |
+         ($('m-weather').checked    ? (1 << 6)  : 0) |
+         ($('m-spectrum').checked   ? (1 << 7)  : 0) |
+         ($('m-youtube').checked    ? (1 << 8)  : 0) |
+         ($('m-instagram').checked  ? (1 << 9)  : 0) |
+         ($('m-tiktok').checked     ? (1 << 10) : 0) |
+         ($('m-mastodon').checked   ? (1 << 11) : 0);
+}
+
 /* ── Dashboard visibility — hide tiles/buttons for disabled modes ── */
 function updateDashboardVisibility(em) {
+  /* If the social master switch is off, treat all social mode bits as clear */
+  const socialEl = $('f-social-en');
+  if (socialEl && !socialEl.checked)
+    em &= ~((1 << 8) | (1 << 9) | (1 << 10) | (1 << 11));
   /* Stat tiles that carry data-mode-bit */
   document.querySelectorAll('.stat[data-mode-bit]').forEach(el => {
     el.style.display = (em & (1 << parseInt(el.dataset.modeBit))) ? '' : 'none';
@@ -1985,6 +2037,7 @@ function onRotToggle() {
 }
 function rotModeSelectAll(checked) {
   document.querySelectorAll('.rot-mode-cb').forEach(cb => cb.checked = checked);
+  updateRotWeightStates();
   markDirty();
 }
 /* Build bitmask from rot-mode-cb checkboxes.
@@ -1996,6 +2049,20 @@ function rotModeMask() {
     if (cb.checked) { checked++; m |= (1 << parseInt(cb.dataset.bit)); }
   });
   return (checked === 0 || checked === total) ? 0 : m;
+}
+/* Dim/enable each weight input to match its mode checkbox state. */
+function updateRotWeightStates() {
+  document.querySelectorAll('.rot-mode-cb').forEach(cb => {
+    const bit = cb.dataset.bit;
+    const inp = document.querySelector(`.rot-weight-in[data-bit="${bit}"]`);
+    if (!inp) return;
+    const en = cb.checked;
+    inp.style.opacity      = en ? '1'   : '0.4';
+    inp.style.pointerEvents = en ? ''   : 'none';
+    /* Also dim the × label that follows the input */
+    const xLabel = inp.nextElementSibling;
+    if (xLabel) { xLabel.style.opacity = en ? '' : '0.4'; }
+  });
 }
 /* Build weights array [0..11] from rot-weight-in inputs.
  * Clamps each value to 1–99; missing inputs default to 1. */
@@ -2092,19 +2159,7 @@ async function saveSettings() {
     const h = el.value.replace('#','');
     return [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)];
   });
-  const enabledModes =
-    ($('m-clock').checked       ? (1 << 0) : 0) |
-    ($('m-countdown').checked   ? (1 << 1) : 0) |
-    ($('m-scoreboard').checked  ? (1 << 2) : 0) |
-    ($('m-pomodoro').checked    ? (1 << 3) : 0) |
-    ($('m-date').checked        ? (1 << 4)  : 0) |
-    ($('m-album').checked       ? (1 << 5)  : 0) |
-    ($('m-weather').checked     ? (1 << 6)  : 0) |
-    ($('m-spectrum').checked    ? (1 << 7)  : 0) |
-    ($('m-youtube').checked     ? (1 << 8)  : 0) |
-    ($('m-instagram').checked  ? (1 << 9)  : 0) |
-    ($('m-tiktok').checked     ? (1 << 10) : 0) |
-    ($('m-mastodon').checked   ? (1 << 11) : 0);
+  const enabledModes = readEnabledModes();
   const body = {
     apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value, clock_tube5: $('f-tube5').value }],
     lcd_brightness: +$('f-lcdbr').value,
@@ -2182,6 +2237,8 @@ async function saveSettings() {
     default_countdown_time: +$('f-countdown').value,
     pomodoro_work:  +$('f-pomo-work').value,
     pomodoro_break: +$('f-pomo-break').value,
+    album_switch_time: +$('f-album-switch').value,
+    album_shuffle: $('f-album-shuffle').checked,
     weather_panel_ms:  Math.max(1000, +$('f-wx-panel').value * 1000),
     weather_panel0_en: $('f-wx-p0').checked,
     weather_panel1_en: $('f-wx-p1').checked,
@@ -2234,6 +2291,14 @@ async function setMode(mode) {
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(res?.status === 'ok' ? 'Mode: ' + mode : 'Failed', res?.status !== 'ok');
   refreshStatus();
+}
+
+/* ── Social counter force-refresh ─────────────────── */
+async function socialRefreshNow() {
+  const res = await api('social/refresh', { method: 'POST' });
+  toast(res?.status === 'ok'
+        ? 'Refreshing counters… check back in a few seconds'
+        : 'Refresh request failed', res?.status !== 'ok');
 }
 
 /* ── WiFi scan ─────────────────────────────────────── */
@@ -2556,7 +2621,6 @@ async function browseDir(dir) {
   if (!files) return;
 
   s_filePath = dir;
-
   /* Breadcrumb */
   const parts = dir.replace(/\/+$/, '').split('/').filter(Boolean);
   let crumbHtml = '<span style="cursor:pointer;color:var(--hi)" onclick="browseDir(\'/\')">/ root</span>';
@@ -2653,6 +2717,7 @@ async function renameFolder(path) {
 
 /* Keep backward-compat alias used by auto-load on tab switch */
 function loadFiles() { browseDir(s_filePath); }
+
 
 /* ── Delete a LittleFS file ────────────────────────── */
 async function deleteFile(path) {
@@ -3849,6 +3914,10 @@ async function bootAuth() {
   }
 }
 window.addEventListener('load', bootAuth);
+/* Delegated listener: dim weight inputs when a rot-mode-cb is toggled individually */
+document.addEventListener('change', e => {
+  if (e.target.classList.contains('rot-mode-cb')) updateRotWeightStates();
+});
 </script>
 
 <script>

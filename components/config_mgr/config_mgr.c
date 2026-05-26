@@ -155,6 +155,7 @@ static void set_defaults(void)
     s_cfg.pomodoro_work     = 25;
     s_cfg.pomodoro_break    = 5;
     s_cfg.album_switch_ms   = 2000;
+    s_cfg.album_shuffle     = false;
     s_cfg.weather_panel_ms  = 5000;  /* 5 s between temp and humidity panels */
     s_cfg.weather_panel0_en = true;   /* temperature panel on by default */
     s_cfg.weather_panel1_en = true;   /* humidity panel on by default */
@@ -241,7 +242,7 @@ static void parse_json(const char *json, size_t len)
         json_read_str(app0, "app", app_name, sizeof(app_name));
         if      (strcmp(app_name, "Clock")      == 0) s_cfg.current_mode = APP_MODE_CLOCK;
         else if (strcmp(app_name, "Countdown")   == 0) s_cfg.current_mode = APP_MODE_COUNTDOWN;
-        else if (strcmp(app_name, "Scoreboard")  == 0) s_cfg.current_mode = APP_MODE_SCOREBOARD;
+        else if (strcmp(app_name, "Scoreboard")  == 0) s_cfg.current_mode = APP_MODE_CLOCK; /* removed mode → fall back to Clock */
         else if (strcmp(app_name, "Pomodoro")    == 0) s_cfg.current_mode = APP_MODE_POMODORO;
         else if (strcmp(app_name, "YouTube")     == 0) s_cfg.current_mode = APP_MODE_YOUTUBE;
         else if (strcmp(app_name, "Date")        == 0) s_cfg.current_mode = APP_MODE_DATE;
@@ -436,6 +437,8 @@ static void parse_json(const char *json, size_t len)
     json_read_u16(root, "pomodoro_work",          &s_cfg.pomodoro_work);
     json_read_u16(root, "pomodoro_break",         &s_cfg.pomodoro_break);
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
+    { cJSON *v = cJSON_GetObjectItem(root, "album_shuffle");
+      if (cJSON_IsBool(v)) s_cfg.album_shuffle = cJSON_IsTrue(v); }
     json_read_u16(root, "weather_panel_ms",       &s_cfg.weather_panel_ms);
     if (s_cfg.weather_panel_ms < 1000) s_cfg.weather_panel_ms = 5000; /* resets to default 5 s if below 1 s */
     /* Panel enable flags — guard: at least one of p0/p1 must be on.
@@ -942,6 +945,7 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "pomodoro_work",          s_cfg.pomodoro_work);
     cJSON_AddNumberToObject(root, "pomodoro_break",         s_cfg.pomodoro_break);
     cJSON_AddNumberToObject(root, "album_switch_time",      s_cfg.album_switch_ms);
+    cJSON_AddBoolToObject  (root, "album_shuffle",          s_cfg.album_shuffle);
     cJSON_AddNumberToObject(root, "weather_panel_ms",       s_cfg.weather_panel_ms);
     cJSON_AddBoolToObject  (root, "weather_panel0_en",      s_cfg.weather_panel0_en);
     cJSON_AddBoolToObject  (root, "weather_panel1_en",      s_cfg.weather_panel1_en);
@@ -1122,7 +1126,7 @@ const char *app_mode_name(app_mode_t mode)
     static const char *const names[APP_MODE_MAX] = {
         [APP_MODE_CLOCK]        = "Clock",
         [APP_MODE_COUNTDOWN]    = "Countdown",
-        [APP_MODE_SCOREBOARD]   = "Scoreboard",
+        /* index 2 unused — was Scoreboard */
         [APP_MODE_POMODORO]     = "Pomodoro",
         [APP_MODE_YOUTUBE]      = "YouTube",
         [APP_MODE_DATE] = "Date",

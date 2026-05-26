@@ -92,7 +92,6 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Auto theme rotation with configurable interval and per-theme selection | ✅ Working |
 | LittleFS file browser with upload/delete/mkdir/rename | ✅ Working |
 | Automatic firmware update check (compares against latest GitHub release) | ✅ Working |
-| Scoreboard mode | 🔧 Stub (displays zeros; no score input API yet) |
 | Home Assistant MQTT integration (sensor + mode + display + brightness) | ✅ Working |
 | WLED Sync — receive UDP Notifier broadcasts; accent LEDs follow WLED colour | ✅ Working |
 | Weather Panel 3 — animated sunrise/sunset (20 Hz rising/setting sun + mountains) | ✅ Working |
@@ -634,7 +633,6 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 | **Weather** | Up to three panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon; **Panel 3** — animated sunrise/sunset (rising/setting sun + mountain silhouettes at 20 Hz, solar times in HH:MM). Any combination of panels can be enabled; at least one must remain on. Temperatures rounded to whole degrees; leading zeros suppressed; minus sign shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
 | **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
-| **Scoreboard** | Stub — displays zeros |
 
 ### Mode Rotation
 
@@ -1152,8 +1150,7 @@ This is a community reverse-engineering effort. Key areas needing help:
 
 1. ~~**Theme images** — Extract or recreate the Nixie/Digital/Flip digit artwork for the displays~~
 2. ~~**SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)~~
-3. **Scoreboard mode** — Complete the score input API and display logic
-4. **Date face** — Configuration UI for custom digit-mapped date face (mode switching already works)
+3. **Date face** — Configuration UI for custom digit-mapped date face (mode switching already works)
 
 ## License
 

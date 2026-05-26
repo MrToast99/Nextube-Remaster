@@ -21,19 +21,20 @@ extern "C" {
 
 /* ── App mode identifiers ──────────────────────────────────────────── */
 typedef enum {
-    APP_MODE_CLOCK = 0,
-    APP_MODE_COUNTDOWN,
-    APP_MODE_SCOREBOARD,
-    APP_MODE_POMODORO,
-    APP_MODE_DATE,       /* = 4 */
-    APP_MODE_ALBUM,      /* = 5 */
-    APP_MODE_WEATHER,    /* = 6 */
-    APP_MODE_SPECTRUM,   /* = 7 — microphone audio visualiser */
-    APP_MODE_YOUTUBE,    /* = 8 — social counter; after Spectrum in touch rotation */
-    APP_MODE_INSTAGRAM,  /* = 9  — Instagram follower counter */
-    APP_MODE_TIKTOK,     /* = 10 — TikTok follower counter    */
-    APP_MODE_MASTODON,   /* = 11 — Mastodon follower counter  */
-    APP_MODE_MAX,        /* = 12 */
+    APP_MODE_CLOCK      = 0,
+    APP_MODE_COUNTDOWN  = 1,
+    /* bit 2 is unused — was APP_MODE_SCOREBOARD; kept as a gap so that saved
+     * enabled_modes bitmasks from older firmware are not silently misread. */
+    APP_MODE_POMODORO   = 3,
+    APP_MODE_DATE       = 4,
+    APP_MODE_ALBUM      = 5,
+    APP_MODE_WEATHER    = 6,
+    APP_MODE_SPECTRUM   = 7,  /* microphone audio visualiser */
+    APP_MODE_YOUTUBE    = 8,  /* social counter */
+    APP_MODE_INSTAGRAM  = 9,
+    APP_MODE_TIKTOK     = 10,
+    APP_MODE_MASTODON   = 11,
+    APP_MODE_MAX        = 12,
 } app_mode_t;
 
 /* ── Backlight effect modes ────────────────────────────────────────── */
@@ -171,6 +172,7 @@ typedef struct {
 
     /* Album */
     uint16_t         album_switch_ms;
+    bool             album_shuffle;    /* true = randomise playback order on load */
 
     /* Weather panel rotation interval (ms between temp/humidity panel switch) */
     uint16_t         weather_panel_ms;
@@ -217,10 +219,10 @@ typedef struct {
     /* 24H Custom clock — tube 6 rotating info panels.
      * Each bool gates one panel; at least one must be enabled (enforced on load).
      * Rotation advances to the next enabled panel every tube6_panel_ms ms.      */
-    bool             tube6_panel_weather;    /* Weather icon (placeholder — shows blank for now) */
+    bool             tube6_panel_weather;    /* Weather icon — shows current condition as full-tube JPEG */
     bool             tube6_panel_weekdate;   /* Day name (top half) + MMDD date (bottom half) */
     bool             tube6_panel_ht;         /* SHT30 temp (top half) + humidity (bottom half) */
-    bool             tube6_panel_temp;       /* Outdoor temperature (placeholder — shows blank for now) */
+    bool             tube6_panel_temp;       /* Outdoor temperature and humidity (OpenWeatherMap) */
     bool             tube6_panel_sunrise;    /* Sunrise & sunset times (U8g2 icon + local time) */
     uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
 } nextube_config_t;
