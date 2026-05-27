@@ -1499,7 +1499,7 @@ static esp_err_t api_file_download(httpd_req_t *r)
     size_t rd;
     while ((rd = fread(buf, 1, 8192, f)) > 0) {
         httpd_resp_send_chunk(r, buf, rd);
-        taskYIELD();   /* let IDLE0 run between chunks — same WDT-starvation fix as serve_static */
+        vTaskDelay(pdMS_TO_TICKS(1));  /* block 1 tick — taskYIELD() never lets IDLE (pri-0) run */
     }
     httpd_resp_send_chunk(r, NULL, 0);
     free(buf); fclose(f);
@@ -2071,14 +2071,17 @@ static esp_err_t serve_static(httpd_req_t *r)
      *
      * Two-pronged fix:
      *   1. 8 KB buffer — reduces loop iterations ~8× vs 1 KB.
-     *   2. taskYIELD() after each chunk — guarantees IDLE0 gets at least one
-     *      scheduler slot between chunks so it can feed the task WDT. */
+     *   2. vTaskDelay(1) after each chunk — blocks httpd for 1 tick so the
+     *      scheduler can run IDLE0.  taskYIELD() is insufficient: it re-queues
+     *      the caller at the back of its own priority level; IDLE (pri-0) only
+     *      runs when NO task of priority ≥ 1 is ready, which never happens
+     *      while httpd (pri-5) is continuously re-entering its ready queue. */
     char *buf = malloc(8192);
     if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
     size_t rd;
     while ((rd = fread(buf, 1, 8192, f)) > 0) {
         httpd_resp_send_chunk(r, buf, rd);
-        taskYIELD();   /* let IDLE0 (and other tasks) run between chunks */
+        vTaskDelay(pdMS_TO_TICKS(1));  /* block 1 tick so IDLE0 can feed the task WDT */
     }
     httpd_resp_send_chunk(r, NULL, 0);
     free(buf); fclose(f);

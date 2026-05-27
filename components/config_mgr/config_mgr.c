@@ -771,6 +771,17 @@ static void parse_json(const char *json, size_t len)
      * APP_MODE_SPECTRUM == 7 → bit 7 of the bitmask. */
     s_cfg.mic_enabled = (s_cfg.enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
 
+    /* If the weather SERVICE is enabled, the weather MODE must also be present
+     * in enabled_modes, otherwise the task fetches data that is never displayed.
+     * Old backup configs may have weather_enabled=true but bit 6 absent because
+     * the user had removed weather from the display rotation while keeping the
+     * service running, or because the config pre-dates the service/mode sync.
+     * The web UI now enforces this invariant at save time via syncCounterMode();
+     * apply the same rule here so backup restores work without a manual
+     * toggle-off / toggle-on cycle. */
+    if (s_cfg.weather_enabled)
+        s_cfg.enabled_modes |= (1u << APP_MODE_WEATHER);
+
     cJSON_Delete(root);
 }
 

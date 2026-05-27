@@ -1692,15 +1692,19 @@ async function loadSettings() {
    ['f-tiktok-en','m-tiktok'],['f-mast-en','m-mastodon']].forEach(([f,m])=>{
     if ($(f) && $(m) && $(f).checked && !$(m).checked) $(m).checked = true;
   });
+  /* Social master toggle — must be set BEFORE updateDashboardVisibility so the
+   * function sees the correct master-switch state when deciding whether to mask
+   * social mode bits 8–11.  Setting it after (as it was) caused all social
+   * tiles and Quick Actions buttons to stay hidden on page load even when the
+   * master switch and all sub-socials were enabled. */
+  const socialEnEl = $('f-social-en');
+  if (socialEnEl) socialEnEl.checked = cfg.social_enabled === true;
   /* Re-derive em after auto-enable so dashboard visibility includes auto-added modes */
   { let _em = em;
     [['m-youtube',8],['m-instagram',9],['m-tiktok',10],['m-mastodon',11]].forEach(([id,bit])=>{
       if ($(id) && $(id).checked) _em |= (1 << bit);
     });
     updateDashboardVisibility(_em); }
-  /* Social master toggle */
-  const socialEnEl = $('f-social-en');
-  if (socialEnEl) socialEnEl.checked = cfg.social_enabled === true;
 
   /* Spectrum colours and LED source */
   const sc = cfg.spectrum_RGB || [50, 80, 100];
