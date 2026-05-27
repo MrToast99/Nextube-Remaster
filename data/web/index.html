@@ -47,6 +47,8 @@ select option{background:var(--accent);color:var(--text)}
 .tab-content{display:none}.tab-content.active{display:block}
 #unsaved-banner{display:none;width:100%;background:rgba(160,100,50,.22);border-top:1px solid rgba(180,120,60,.65);color:#d4a57a;padding:.5rem 1rem;margin-top:.5rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
 #unsaved-banner.show{display:flex}
+#reboot-banner{display:none;width:100%;background:rgba(180,50,50,.22);border-top:1px solid rgba(210,70,70,.55);color:#e89a9a;padding:.5rem 1rem;margin-top:.3rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
+#reboot-banner.show{display:flex}
 .wifi-item{display:flex;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05)}
 .wifi-item .ssid{font-weight:500}.wifi-item .rssi{color:var(--dim);font-size:.8rem}
 .progress{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin-top:.5rem}
@@ -70,6 +72,13 @@ select option{background:var(--accent);color:var(--text)}
   <div id="unsaved-banner">
     <span>⚠ You have unsaved changes.</span>
     <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveSettings()">Save Now</button>
+  </div>
+  <div id="reboot-banner">
+    <span>⚡ Restart required — some changes won't take effect until the device reboots.</span>
+    <div style="display:flex;gap:.5rem;align-items:center">
+      <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveAndReboot()">Save &amp; Reboot</button>
+      <button onclick="clearRebootBanner()" style="background:none;border:none;color:currentColor;cursor:pointer;font-size:1.1rem;padding:0;line-height:1;opacity:.7" title="Dismiss">✕</button>
+    </div>
   </div>
 </header>
 <div id="ota-rollback-banner" style="display:none;background:rgba(255,160,0,.12);border:1px solid rgba(255,160,0,.55);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
@@ -1338,16 +1347,19 @@ function toast(msg, err, action) {
   }, action ? 12000 : 3000);
 }
 
-/* Show a restart-required notice with a Save & Reboot shortcut.
- * Fires on both enable and disable — both directions require a reboot. */
+/* Show the persistent reboot-required banner in the header.
+ * Fires on both enable and disable — both directions require a reboot.
+ * The banner persists across tab switches until the user saves+reboots or dismisses it. */
 function markRestartNeeded() {
-  toast('Restart required for this change to take effect.', false, {
-    label: 'Save & Reboot',
-    fn: async () => {
-      await saveSettings();
-      secureFetch('/api/reboot', { method: 'POST' }).then(() => toast('Rebooting…'));
-    },
-  });
+  document.getElementById('reboot-banner').classList.add('show');
+}
+function clearRebootBanner() {
+  document.getElementById('reboot-banner').classList.remove('show');
+}
+async function saveAndReboot() {
+  await saveSettings();
+  clearRebootBanner();
+  secureFetch('/api/reboot', { method: 'POST' }).then(() => toast('Rebooting…'));
 }
 
 /* ── Weather panel enable guard (at least one must remain on) ── */
@@ -2261,6 +2273,7 @@ async function saveSettings() {
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (res?.reboot) {
     clearDirty();
+    clearRebootBanner();
     toast('Settings saved — rebooting…');
     setTimeout(() => location.reload(), 8000);
     return;

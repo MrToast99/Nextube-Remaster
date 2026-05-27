@@ -1497,8 +1497,10 @@ static esp_err_t api_file_download(httpd_req_t *r)
     char *buf = malloc(8192);
     if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
     size_t rd;
-    while ((rd = fread(buf, 1, 8192, f)) > 0)
+    while ((rd = fread(buf, 1, 8192, f)) > 0) {
         httpd_resp_send_chunk(r, buf, rd);
+        taskYIELD();   /* let IDLE0 run between chunks — same WDT-starvation fix as serve_static */
+    }
     httpd_resp_send_chunk(r, NULL, 0);
     free(buf); fclose(f);
     return ESP_OK;
@@ -2059,9 +2061,25 @@ static esp_err_t serve_static(httpd_req_t *r)
 
     httpd_resp_set_type(r, content_type(fp));
     httpd_resp_set_hdr(r, "Cache-Control", "max-age=3600");
-    char *buf = malloc(1024);
+
+    /* Use a larger read buffer to cut the number of flash-read iterations —
+     * fread() on LittleFS is a synchronous SPI operation that never yields to
+     * FreeRTOS, and httpd_resp_send_chunk() returns without blocking as long as
+     * the lwIP TCP send buffer has room.  With a 1 KB buffer and a 300+ KB file
+     * like index.html the tight fread→send loop holds CPU 0 for ~30 s, starving
+     * IDLE0 and triggering the task WDT.
+     *
+     * Two-pronged fix:
+     *   1. 8 KB buffer — reduces loop iterations ~8× vs 1 KB.
+     *   2. taskYIELD() after each chunk — guarantees IDLE0 gets at least one
+     *      scheduler slot between chunks so it can feed the task WDT. */
+    char *buf = malloc(8192);
+    if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
     size_t rd;
-    while ((rd = fread(buf, 1, 1024, f)) > 0) httpd_resp_send_chunk(r, buf, rd);
+    while ((rd = fread(buf, 1, 8192, f)) > 0) {
+        httpd_resp_send_chunk(r, buf, rd);
+        taskYIELD();   /* let IDLE0 (and other tasks) run between chunks */
+    }
     httpd_resp_send_chunk(r, NULL, 0);
     free(buf); fclose(f);
     return ESP_OK;

@@ -95,6 +95,13 @@ CONFIG_MDNS_MAX_SERVICES=10
 # cycle until the probe settles.  Turning it off here ensures the AP interface
 # is never presented to LAN-side mDNS resolvers.
 CONFIG_MDNS_PREDEF_NETIF_AP=n
+# NOTE: CONFIG_MDNS_PREDEF_NETIF_STA is intentionally left at the default (y).
+# Setting it to n prevents mdns_init() from registering the STA IP event
+# handler; as a result mdns_register_netif() registers the netif but the mDNS
+# task never receives the "IP obtained" notification needed to fire the probe —
+# the device becomes invisible on .local.  We keep STA=y so reconnect probing
+# works automatically, and use start_mdns() call ordering to minimise
+# redundant probe cycles (mdns_hostname_set before mdns_register_netif).
 
 # LWIP netif default hostname.
 # This controls the name the device uses in DHCP client requests (option 12)

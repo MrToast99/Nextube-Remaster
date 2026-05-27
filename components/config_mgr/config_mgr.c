@@ -1074,6 +1074,13 @@ void config_advance_mode(void)
                     ? (s_cfg.rotation_modes & s_cfg.enabled_modes)
                     : s_cfg.enabled_modes;
     if (!mask) mask = s_cfg.enabled_modes;
+    /* Strip social modes when the master social switch is off so auto-rotation
+     * never advances to YouTube / Instagram / TikTok / Mastodon. */
+    if (!s_cfg.social_enabled)
+        mask &= ~((1u << APP_MODE_YOUTUBE)   | (1u << APP_MODE_INSTAGRAM) |
+                  (1u << APP_MODE_TIKTOK)    | (1u << APP_MODE_MASTODON));
+    /* If stripping left the pool empty (all enabled modes are social and social
+     * is off) the loop below will exhaust all tries and stay on current mode. */
 
     /* Step forward through APP_MODE_MAX slots, skipping modes not in the pool.
      * Worst case: only the current mode is in the pool — we try APP_MODE_MAX

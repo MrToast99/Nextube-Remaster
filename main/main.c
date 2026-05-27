@@ -114,6 +114,11 @@ static void on_touch(touch_pad_id_t pad)
     button_sound  = cfg->button_sound;
     strncpy(click_file, cfg->click_file, sizeof(click_file) - 1);
     click_file[sizeof(click_file) - 1] = '\0';
+    /* Strip social mode bits when the social master switch is off so that
+     * touch cycling never lands on YouTube / Instagram / TikTok / Mastodon. */
+    if (!cfg->social_enabled)
+        enabled_modes &= ~((1u << APP_MODE_YOUTUBE)   | (1u << APP_MODE_INSTAGRAM) |
+                           (1u << APP_MODE_TIKTOK)    | (1u << APP_MODE_MASTODON));
     config_unlock();
 
     switch (pad) {

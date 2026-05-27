@@ -319,10 +319,25 @@ static void start_mdns(void)
 
     mdns_init();
 
-    /* Register ONLY the STA netif.  The AP netif is excluded at build time
-     * via CONFIG_MDNS_PREDEF_NETIF_AP=n in sdkconfig.defaults, which prevents
-     * the mDNS component from auto-registering the AP interface when
-     * WIFI_EVENT_AP_START fires.
+    /* Set hostname and instance name BEFORE registering the netif manually.
+     * mdns_hostname_set() always schedules a full re-probe even when the name
+     * hasn't changed.  Calling it after mdns_register_netif() would add a
+     * second probe cycle on top of the one triggered by registration.  With
+     * CONFIG_MDNS_PREDEF_NETIF_STA=y (the default, intentionally kept —
+     * setting it to n breaks reconnect probing), mdns_init() also
+     * auto-registers the STA netif immediately when it detects the interface
+     * already has an IP, firing a first probe cycle before we even reach this
+     * point.  That means two probe cycles are unavoidable without deeper
+     * changes.  Keeping this order at least ensures mdns_register_netif()
+     * below returns ESP_ERR_INVALID_STATE (already registered) harmlessly,
+     * and the hostname/instance are set in the correct sequence. */
+    mdns_hostname_set(s_hostname);
+    mdns_instance_name_set("Nextube Remaster");
+
+    /* Register ONLY the STA netif (idempotent — mdns_init may have already
+     * auto-registered it; ESP_ERR_INVALID_STATE is expected and harmless).
+     * The AP netif is excluded at build time via CONFIG_MDNS_PREDEF_NETIF_AP=n
+     * in sdkconfig.defaults.
      *
      * NOTE: do NOT call mdns_unregister_netif(s_ap_netif) here.  This
      * function runs inside the IP_EVENT_STA_GOT_IP handler, which is
@@ -342,8 +357,6 @@ static void start_mdns(void)
         }
     }
 
-    mdns_hostname_set(s_hostname);
-    mdns_instance_name_set("Nextube Remaster");
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
     ESP_LOGI(TAG, "mDNS: http://%s.local  (STA netif registered)", s_hostname);
 }
