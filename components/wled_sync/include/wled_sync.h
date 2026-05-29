@@ -12,11 +12,20 @@
  * When it returns false (no packet yet, or sync disabled) the LED task runs its
  * normal config-driven effects unchanged.
  *
- * WLED Notifier v2 packet layout (relevant bytes):
- *   byte  0  : 9          — protocol marker; other values are discarded
- *   bytes 1-3: R, G, B    — primary colour of the current WLED effect
- *   byte  4  : effect ID  — ignored; Nextube always shows the primary colour
- *   byte 11  : brightness — 0 = off, 1-255 = scaling factor
+ * WLED Notifier (sync) packet layout (relevant bytes):
+ *   byte  0  : 0          — notifier marker; the UDP realtime protocols
+ *                           (WARLS=1, DRGB=2, DRGBW=3, DNRGB=4, DDP=5) share
+ *                           the port but use 1-5 here and are discarded
+ *   byte  2  : brightness — master brightness, 0 = off, 1-255 = scaling factor
+ *   bytes 3-5: R, G, B    — primary colour (col[0]) of the current WLED segment
+ *   byte  8  : effect ID  — 0 = Solid; non-zero = animation or palette effect
+ *   byte 11  : version    — compatibility-version byte (used as a sanity field)
+ *
+ * Important: palette-based animation effects (Rainbow, Fire, Ocean, Color Cycle,
+ * etc.) do not use col[0] for rendering.  WLED leaves col[0] at whatever it was
+ * last set to, which is often (0,0,0) if the user never chose an explicit colour
+ * for that effect.  The LED task uses the fx field to detect this case and falls
+ * back to the local rainbow animation instead of writing black to the strip.
  *
  * The LED task receives pre-scaled RGB values (R × bri / 255) so it can apply
  * them directly without needing the raw brightness separately.
@@ -31,7 +40,8 @@ extern "C" {
 
 /** Sync state received from the most-recent WLED UDP Notifier packet. */
 typedef struct {
-    uint8_t r, g, b;   /* primary colour, pre-scaled by WLED brightness */
+    uint8_t r, g, b;   /* primary colour (col[0]), pre-scaled by WLED brightness */
+    uint8_t fx;         /* effect index: 0 = Solid, non-zero = animation/palette */
     bool    on;         /* false when WLED brightness == 0 (strip is off) */
 } wled_sync_state_t;
 

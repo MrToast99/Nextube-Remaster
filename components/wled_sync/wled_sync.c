@@ -86,25 +86,31 @@ static void wled_sync_task(void *arg)
     while (1) {
         int len = recvfrom(sock, buf, sizeof(buf), 0,
                            (struct sockaddr *)&src, &src_len);
-        if (len < 12) continue;       /* too short to be a valid v2 packet */
-        if (buf[0] != 9) continue;    /* not a WLED Notifier v2 packet     */
+        if (len < 12) continue;       /* too short to carry the version byte  */
+        /* WLED Notifier (sync) packets carry 0 in byte 0.  The UDP *realtime*
+         * protocols (WARLS=1, DRGB=2, DRGBW=3, DNRGB=4, DDP=5) can land on the
+         * same port but use 1–5 here — discard those.                         */
+        if (buf[0] != 0) continue;
 
-        /* byte[11] = brightness 0–255; bytes[1-3] = primary R, G, B */
-        uint8_t bri = buf[11];
-        uint8_t r   = (uint8_t)((buf[1] * (uint16_t)bri) / 255u);
-        uint8_t g   = (uint8_t)((buf[2] * (uint16_t)bri) / 255u);
-        uint8_t b   = (uint8_t)((buf[3] * (uint16_t)bri) / 255u);
+        /* WLED Notifier layout: byte 2 = master brightness, bytes 3-5 = primary
+         * R,G,B, byte 11 = compatibility version.  Pre-scale RGB by brightness
+         * so the accent LEDs mirror exactly what the WLED strip is displaying. */
+        uint8_t bri = buf[2];
+        uint8_t r   = (uint8_t)((buf[3] * (uint16_t)bri) / 255u);
+        uint8_t g   = (uint8_t)((buf[4] * (uint16_t)bri) / 255u);
+        uint8_t b   = (uint8_t)((buf[5] * (uint16_t)bri) / 255u);
 
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_state.r    = r;
         s_state.g    = g;
         s_state.b    = b;
+        s_state.fx   = buf[8];   /* effect index: 0=Solid, non-zero=animation */
         s_state.on   = (bri > 0);
         s_have_state = true;
         xSemaphoreGive(s_mutex);
 
-        ESP_LOGD(TAG, "Sync → #%02X%02X%02X  bri=%u  fx=%u",
-                 r, g, b, bri, buf[4]);
+        ESP_LOGD(TAG, "Sync → #%02X%02X%02X  bri=%u  fx=%u  ver=%u",
+                 r, g, b, bri, buf[8], buf[11]);
     }
 }
 

@@ -32,6 +32,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 
+#include "driver/gpio.h"
 #include "board_pins.h"
 #include "config_mgr.h"
 #include "display.h"
@@ -235,9 +236,13 @@ static void audio_mic_deferred_start(void *arg)
     bool    mic_en   = cfg->mic_enabled;   /* preliminary — re-read after wait */
     config_unlock();
 
-    audio_init();
+    /* audio_init() handles the enabled state directly:
+     *   enabled=true  → DAC brought up, APLL locked, DMA ring running.
+     *   enabled=false → GPIO25 driven LOW (amp-input clamp), DAC not started.
+     * audio_set_enabled() is only called later from the web server when the
+     * user toggles the setting at runtime — no need to call it here. */
+    audio_init(audio_en);
     audio_set_volume(vol);
-    audio_set_enabled(audio_en);
 
     /* ── Mic — wait for the AP PIN phase to end ──────────────────────── */
     bool mic_started = false;
@@ -309,6 +314,22 @@ void app_main(void)
     ESP_LOGI(TAG, "║  Nextube-Remaster Open-Source Firmware v%-7s ║", FW_VERSION_STR);
     ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster  ║");
     ESP_LOGI(TAG, "╚═════════════════════════════════════════════════════╝");
+
+    /* ── Clamp the DAC output pin immediately ────────────────────────────
+     * GPIO25 (DAC_CHAN_0 → LTK8002D amplifier) is Hi-Z at ESP32 power-on.
+     * The LTK8002D SD pin is tied high so the amp is always powered.  A
+     * floating Hi-Z input acts as an antenna for WS2812 (≈400 Hz) and SPI
+     * switching transients on the shared 3.3 V rail → audible hiss until
+     * the audio subsystem initialises (up to 8 s into boot).
+     * Drive OUTPUT LOW here unconditionally: the AC coupling cap on the amp
+     * input charges to 0 V and the amp sees ~0 V AC differential — near
+     * silence.  GPIO source impedance (~12 Ω drive-strength-3) is lower than
+     * the DAC resistor ladder, providing effective noise rejection.
+     * If audio is enabled, dac_restart() in the deferred task reconfigures
+     * GPIO25 for DAC use automatically — this GPIO mode is overridden.  */
+    gpio_reset_pin(PIN_AUDIO_DAC);
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_AUDIO_DAC, 0);
 
     /* Allow power rails and SPI peripherals to fully settle. */
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -383,6 +404,9 @@ void app_main(void)
     leds_task_start();
     touch_input_init();
     touch_input_register_callback(on_touch);
+    /* Hold LEFT+RIGHT touch pads together for 30 s to summon the WiFi setup AP
+     * on demand (replaces the old automatic 90 s fallback timer). */
+    touch_input_register_combo_callback(wifi_manager_force_ap);
     sht30_init();               /* probe optional sensor; safe no-op if absent */
     sht30_set_offset(boot_sht30_temp_offset); /* apply saved calibration offset */
 

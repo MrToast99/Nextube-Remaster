@@ -67,16 +67,33 @@ select option{background:var(--accent);color:var(--text)}
 <body>
 <div id="sticky-shell">
 <header>
-  <h1>🕐 <span>Nextube-Remaster</span> Manager</h1>
-  <div id="conn-status"><span class="status-dot err"></span>Connecting…</div>
+  <h1>🕐 <span>Nextube-Remaster</span> <span data-i18n="header.manager">Manager</span></h1>
+  <div style="display:flex;align-items:center;gap:.7rem">
+    <select id="ui-lang" class="select" aria-label="Language" title="Language"
+            onchange="setUiLang(this.value)"
+            style="width:auto;padding:.25rem .5rem;font-size:.8rem">
+      <option value="en">English</option>
+      <option value="da">Dansk</option>
+      <option value="de">Deutsch</option>
+      <option value="es">Español</option>
+      <option value="fr">Français</option>
+      <option value="it">Italiano</option>
+      <option value="nl">Nederlands</option>
+      <option value="no">Norsk</option>
+      <option value="pt">Português</option>
+      <option value="fi">Suomi</option>
+      <option value="sv">Svenska</option>
+    </select>
+    <div id="conn-status"><span class="status-dot err"></span><span data-i18n="conn.connecting">Connecting…</span></div>
+  </div>
   <div id="unsaved-banner">
-    <span>⚠ You have unsaved changes.</span>
-    <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveSettings()">Save Now</button>
+    <span>⚠ <span data-i18n="banner.unsaved">You have unsaved changes.</span></span>
+    <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveSettings()" data-i18n="btn.save_now">Save Now</button>
   </div>
   <div id="reboot-banner">
-    <span>⚡ Restart required — some changes won't take effect until the device reboots.</span>
+    <span>⚡ <span data-i18n="banner.reboot">Restart required — some changes won't take effect until the device reboots.</span></span>
     <div style="display:flex;gap:.5rem;align-items:center">
-      <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveAndReboot()">Save &amp; Reboot</button>
+      <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveAndReboot()" data-i18n="btn.save_reboot">Save &amp; Reboot</button>
       <button onclick="clearRebootBanner()" style="background:none;border:none;color:currentColor;cursor:pointer;font-size:1.1rem;padding:0;line-height:1;opacity:.7" title="Dismiss">✕</button>
     </div>
   </div>
@@ -96,12 +113,12 @@ select option{background:var(--accent);color:var(--text)}
   <button onclick="$('theme-error-banner').style.display='none'" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.1rem;line-height:1;padding:0 .2rem" title="Dismiss">✕</button>
 </div>
 <nav id="tabs">
-  <button class="active" data-tab="dashboard">Dashboard</button>
-  <button data-tab="display">Display</button>
-  <button data-tab="network">Network</button>
-  <button data-tab="services">Services</button>
-  <button data-tab="hardware">Hardware</button>
-  <button data-tab="system">System</button>
+  <button class="active" data-tab="dashboard" data-i18n="tab.dashboard">Dashboard</button>
+  <button data-tab="display" data-i18n="tab.display">Display</button>
+  <button data-tab="network" data-i18n="tab.network">Network</button>
+  <button data-tab="services" data-i18n="tab.services">Services</button>
+  <button data-tab="hardware" data-i18n="tab.hardware">Hardware</button>
+  <button data-tab="system" data-i18n="tab.system">System</button>
 </nav>
 </div>
 
@@ -110,29 +127,29 @@ select option{background:var(--accent);color:var(--text)}
 <div class="tab-content active" id="tab-dashboard">
   <div class="card">
     <div class="row" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
-      <div class="stat"><div class="val" id="s-time">--:--</div><div class="lbl">Local Time</div></div>
-      <div class="stat"><div class="val" id="s-mode">--</div><div class="lbl">Mode</div></div>
-      <div class="stat" data-mode-bit="6"><div class="val" id="s-temp">--°</div><div class="lbl">Weather</div></div>
-      <div class="stat" id="s-sensor-wrap" style="display:none"><div class="val" id="s-sensor">--°</div><div class="lbl">Local Sensor</div></div>
-      <div class="stat" data-mode-bit="8"><div class="val" id="s-subs">--</div><div class="lbl">Subscribers</div></div>
+      <div class="stat"><div class="val" id="s-time">--:--</div><div class="lbl" data-i18n="dash.local_time">Local Time</div></div>
+      <div class="stat"><div class="val" id="s-mode">--</div><div class="lbl" data-i18n="dash.mode">Mode</div></div>
+      <div class="stat" data-mode-bit="6"><div class="val" id="s-temp">--°</div><div class="lbl" data-i18n="dash.weather">Weather</div></div>
+      <div class="stat" id="s-sensor-wrap" style="display:none"><div class="val" id="s-sensor">--°</div><div class="lbl" data-i18n="dash.local_sensor">Local Sensor</div></div>
+      <div class="stat" data-mode-bit="8"><div class="val" id="s-subs">--</div><div class="lbl" data-i18n="dash.subscribers">Subscribers</div></div>
       <div class="stat" data-mode-bit="9"><div class="val" id="s-insta">--</div><div class="lbl">Instagram</div></div>
       <div class="stat" data-mode-bit="10"><div class="val" id="s-tiktok">--</div><div class="lbl">TikTok</div></div>
       <div class="stat" data-mode-bit="11"><div class="val" id="s-mastodon">--</div><div class="lbl">Mastodon</div></div>
-      <div class="stat"><div class="val" id="s-heap">--</div><div class="lbl">Free Heap</div></div>
+      <div class="stat"><div class="val" id="s-heap">--</div><div class="lbl" data-i18n="dash.free_heap">Free Heap</div></div>
       <div class="stat"><div class="val" id="s-wifi">--</div><div class="lbl">WiFi</div></div>
     </div>
   </div>
   <div class="card">
-    <h2>Quick Actions</h2>
+    <h2 data-i18n="dash.quick_actions">Quick Actions</h2>
     <div class="btn-group">
-      <button class="btn btn-primary" data-mode-bit="0"  onclick="setMode('Clock')">Clock</button>
-      <button class="btn btn-outline" data-mode-bit="1"  onclick="setMode('Countdown')">Countdown</button>
+      <button class="btn btn-primary" data-mode-bit="0"  onclick="setMode('Clock')" data-i18n="mode.clock">Clock</button>
+      <button class="btn btn-outline" data-mode-bit="1"  onclick="setMode('Countdown')" data-i18n="mode.countdown">Countdown</button>
 
-      <button class="btn btn-outline" data-mode-bit="3"  onclick="setMode('Pomodoro')">Pomodoro</button>
-      <button class="btn btn-outline" data-mode-bit="4"  onclick="setMode('Date')">Date</button>
-      <button class="btn btn-outline" data-mode-bit="5"  onclick="setMode('Album')">Album</button>
-      <button class="btn btn-outline" data-mode-bit="6"  onclick="setMode('Weather')">Weather</button>
-      <button class="btn btn-outline" data-mode-bit="7"  onclick="setMode('Spectrum')">Spectrum</button>
+      <button class="btn btn-outline" data-mode-bit="3"  onclick="setMode('Pomodoro')" data-i18n="mode.pomodoro">Pomodoro</button>
+      <button class="btn btn-outline" data-mode-bit="4"  onclick="setMode('Date')" data-i18n="mode.date">Date</button>
+      <button class="btn btn-outline" data-mode-bit="5"  onclick="setMode('Album')" data-i18n="mode.album">Album</button>
+      <button class="btn btn-outline" data-mode-bit="6"  onclick="setMode('Weather')" data-i18n="mode.weather">Weather</button>
+      <button class="btn btn-outline" data-mode-bit="7"  onclick="setMode('Spectrum')" data-i18n="mode.spectrum">Spectrum</button>
       <button class="btn btn-outline" data-mode-bit="8"  onclick="setMode('YouTube')">YouTube</button>
       <button class="btn btn-outline" data-mode-bit="9"  onclick="setMode('Instagram')">Instagram</button>
       <button class="btn btn-outline" data-mode-bit="10" onclick="setMode('TikTok')">TikTok</button>
@@ -146,30 +163,30 @@ select option{background:var(--accent);color:var(--text)}
 <!-- ─── Display ────────────────────────────────────────────────── -->
 <div class="tab-content" id="tab-display">
   <div class="card">
-    <h2>Display Settings</h2>
-    <div class="field"><label>Theme</label>
+    <h2 data-i18n="disp.settings">Display Settings</h2>
+    <div class="field"><label data-i18n="disp.theme">Theme</label>
       <div style="display:flex;gap:8px;align-items:center">
         <select id="f-theme" style="flex:1"></select>
         <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadThemes(true)">↺ Refresh</button>
       </div>
     </div>
-    <div class="field"><label>Time Format</label>
-      <select id="f-timetype" onchange="onTimeTypeChange()"><option value="24H">24 Hour</option><option value="24H_NS">24 Hour (No Sec)</option><option value="24H_CX">24 Hour (Custom)</option><option value="12H">12 Hour</option></select>
+    <div class="field"><label data-i18n="disp.time_format">Time Format</label>
+      <select id="f-timetype" onchange="onTimeTypeChange()"><option value="24H" data-i18n="opt.24h">24 Hour</option><option value="24H_NS" data-i18n="opt.24h_ns">24 Hour (No Sec)</option><option value="24H_CX" data-i18n="opt.24h_cx">24 Hour (Custom)</option><option value="12H" data-i18n="opt.12h">12 Hour</option></select>
     </div>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-leading-zero" style="width:16px;height:16px;cursor:pointer">
-        <label for="f-leading-zero" style="margin:0;cursor:pointer;font-weight:normal">Show leading zero <span style="color:var(--dim);font-size:.82rem">(e.g. 09:30 instead of 9:30)</span></label>
+        <label for="f-leading-zero" style="margin:0;cursor:pointer;font-weight:normal"><span data-i18n="disp.leading_zero">Show leading zero</span> <span style="color:var(--dim);font-size:.82rem" data-i18n="disp.leading_zero_hint">(e.g. 09:30 instead of 9:30)</span></label>
       </div>
     </div>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-notify-update" style="width:16px;height:16px;cursor:pointer" onchange="onNotifyUpdateChange()" checked>
-        <label for="f-notify-update" style="margin:0;cursor:pointer;font-weight:normal">Enable clock face update notification <span style="color:var(--dim);font-size:.82rem">(shows a 2-row red indicator at the bottom of tube 6 when a firmware update is available)</span></label>
+        <label for="f-notify-update" style="margin:0;cursor:pointer;font-weight:normal"><span data-i18n="disp.notify_update">Enable clock face update notification</span> <span style="color:var(--dim);font-size:.82rem" data-i18n="disp.notify_update_hint">(shows a 2-row red indicator at the bottom of tube 6 when a firmware update is available)</span></label>
       </div>
     </div>
-    <div class="field" id="tube5-section" style="display:none"><label>Tube 6 Display</label>
-      <select id="f-tube5"><option value="blank">Blank</option><option value="weather">Weather Icon</option></select>
+    <div class="field" id="tube5-section" style="display:none"><label data-i18n="disp.tube6_display">Tube 6 Display</label>
+      <select id="f-tube5"><option value="blank" data-i18n="opt.blank">Blank</option><option value="weather" data-i18n="opt.weather_icon">Weather Icon</option></select>
     </div>
     <div id="tube6cx-section" style="display:none;border:1px solid var(--accent);padding:.8rem;border-radius:8px;margin-bottom:1rem">
       <div style="font-size:.85rem;font-weight:600;margin-bottom:.6rem">Tube 6 Info Panels <span style="color:var(--dim);font-weight:normal;font-size:.8rem">(24H Custom — rotate when enabled)</span></div>
@@ -188,37 +205,37 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
 
-    <div class="field meter"><label>LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">60</span>%</div>
+    <div class="field meter"><label data-i18n="disp.lcd_brightness">LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">60</span>%</div>
 
     <div style="border:1px solid var(--accent);padding:.8rem;border-radius:8px;margin-bottom:1rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;margin-bottom:0">
-        <input type="checkbox" id="f-ab-en"> Night Brightness
+        <input type="checkbox" id="f-ab-en"> <span data-i18n="disp.night_brightness">Night Brightness</span>
       </label>
       <div id="ab-cfg" style="display:none;margin-top:.8rem;border-top:1px solid var(--accent);padding-top:.8rem">
-        <div class="field meter"><label>Night LCD Brightness</label><input type="range" id="f-nightbr" min="0" max="100"><span id="v-nightbr">30</span>%</div>
+        <div class="field meter"><label data-i18n="disp.night_lcd_brightness">Night LCD Brightness</label><input type="range" id="f-nightbr" min="0" max="100"><span id="v-nightbr">30</span>%</div>
         <div style="display:flex;gap:1.5rem">
-          <div class="field"><label>Night starts at</label><input type="number" id="f-nightsh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
-          <div class="field"><label>Night ends at</label><input type="number" id="f-nighteh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
+          <div class="field"><label data-i18n="disp.night_start">Night starts at</label><input type="number" id="f-nightsh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
+          <div class="field"><label data-i18n="disp.night_end">Night ends at</label><input type="number" id="f-nighteh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
         </div>
-        <small style="color:var(--dim);display:block;margin-top:.4rem">NTP time must be synced for this to work.</small>
+        <small style="color:var(--dim);display:block;margin-top:.4rem" data-i18n="disp.night_ntp_note">NTP time must be synced for this to work.</small>
       </div>
     </div>
 
-    <div class="field meter"><label>LED Brightness</label><input type="range" id="f-ledbr" min="0" max="100"><span id="v-ledbr">60</span>%</div>
+    <div class="field meter"><label data-i18n="disp.led_brightness">LED Brightness</label><input type="range" id="f-ledbr" min="0" max="100"><span id="v-ledbr">60</span>%</div>
 
     <!-- ── Advanced Display ────────────────────────────────────── -->
     <div style="border:1px solid var(--accent);border-radius:8px;margin-bottom:1rem">
       <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none;padding:.75rem 1rem" onclick="toggleAdvDisplay()">
         <span id="adv-display-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
-        <span style="font-size:.95rem;font-weight:600;letter-spacing:.02em;color:var(--hi)">Advanced Display</span>
+        <span style="font-size:.95rem;font-weight:600;letter-spacing:.02em;color:var(--hi)" data-i18n="disp.advanced">Advanced Display</span>
       </div>
       <div id="adv-display-body" style="display:none;padding:.75rem 1rem;border-top:1px solid var(--accent)">
-        <p style="color:var(--dim);font-size:.82rem;margin:0 0 1.2rem">Panel correction settings for replacement screens. The LCD Brightness and Night Brightness sliders above apply uniformly to all tubes as a group; the individual trim below scales each tube within that baseline.</p>
+        <p style="color:var(--dim);font-size:.82rem;margin:0 0 1.2rem" data-i18n="adv.intro">Panel correction settings for replacement screens. The LCD Brightness and Night Brightness sliders above apply uniformly to all tubes as a group; the individual trim below scales each tube within that baseline.</p>
 
         <!-- Gamma -->
         <div class="field" style="padding-bottom:.2rem">
-          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Gamma Correction</div>
-          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem">Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and colour depth on panels with a flat native response. Try <b>1.8–2.2</b> for washed replacement panels. Takes effect after Save.</div>
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.gamma">Gamma Correction</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem" data-i18n-html="adv.gamma_desc">Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and colour depth on panels with a flat native response. Try <b>1.8–2.2</b> for washed replacement panels. Takes effect after Save.</div>
           <div style="padding:0 2.5rem">
             <div style="display:flex;flex-direction:column;gap:.3rem">
               <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 1</span><span style="font-size:.78rem;color:var(--dim)">0.5</span><input type="range" class="f-tube-gamma" data-tube="0" min="0.5" max="3.0" step="0.05" value="1.0" style="flex:1" oninput="this.nextElementSibling.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)"><span style="font-size:.78rem;color:var(--dim)">3.0</span><span style="min-width:2.8rem;text-align:right;font-variant-numeric:tabular-nums">1.00</span></div>
@@ -233,22 +250,22 @@ select option{background:var(--accent);color:var(--text)}
 
         <!-- Panel profile -->
         <div class="field" style="padding-bottom:.2rem">
-          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Panel Profile</div>
-          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem"><b>Profile</b> selects the hardware gamma curve. <b>VCOM</b> (0–63) sets the AC driving voltage — higher values increase contrast and colour depth. For ST7735S replacement panels (e.g. LH096NT-IF09W) start with Profile <b>Vivid</b> + VCOM <b>40</b>, then tune: raise toward 60 if still washed, lower toward 25 if over-saturated. Changes take effect after Save.</div>
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.profile">Panel Profile</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem" data-i18n-html="adv.profile_desc"><b>Profile</b> selects the hardware gamma curve. <b>VCOM</b> (0–63) sets the AC driving voltage — higher values increase contrast and colour depth. For ST7735S replacement panels (e.g. LH096NT-IF09W) start with Profile <b>Vivid</b> + VCOM <b>40</b>, then tune: raise toward 60 if still washed, lower toward 25 if over-saturated. Changes take effect after Save.</div>
           <div style="padding:0 2.5rem">
             <table style="border-collapse:collapse;font-size:.82rem;width:100%">
               <thead><tr style="color:var(--dim)">
-                <th style="text-align:left;padding:2px 6px;font-weight:500">Tube</th>
-                <th style="padding:2px 8px;font-weight:500">Profile (gamma)</th>
-                <th style="padding:2px 8px;font-weight:500">VCOM (0–63)</th>
+                <th style="text-align:left;padding:2px 6px;font-weight:500" data-i18n="adv.tube">Tube</th>
+                <th style="padding:2px 8px;font-weight:500" data-i18n="adv.profile_col">Profile (gamma)</th>
+                <th style="padding:2px 8px;font-weight:500" data-i18n="adv.vcom_col">VCOM (0–63)</th>
               </tr></thead>
               <tbody>
-                <tr><td style="padding:4px 6px">Tube 1</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="0" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="0" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
-                <tr><td style="padding:4px 6px">Tube 2</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="1" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="1" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
-                <tr><td style="padding:4px 6px">Tube 3</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="2" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="2" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
-                <tr><td style="padding:4px 6px">Tube 4</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="3" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="3" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
-                <tr><td style="padding:4px 6px">Tube 5</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="4" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="4" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
-                <tr><td style="padding:4px 6px">Tube 6</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="5" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0">Standard</option><option value="1">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="5" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 1</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="0" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0" data-i18n="adv.standard">Standard</option><option value="1" data-i18n="adv.vivid">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="0" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 2</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="1" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0" data-i18n="adv.standard">Standard</option><option value="1" data-i18n="adv.vivid">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="1" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 3</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="2" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0" data-i18n="adv.standard">Standard</option><option value="1" data-i18n="adv.vivid">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="2" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 4</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="3" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0" data-i18n="adv.standard">Standard</option><option value="1" data-i18n="adv.vivid">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="3" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 5</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="4" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0" data-i18n="adv.standard">Standard</option><option value="1" data-i18n="adv.vivid">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="4" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
+                <tr><td style="padding:4px 6px">Tube 6</td><td style="padding:4px 6px;vertical-align:middle"><select class="f-panel-profile" data-tube="5" onchange="onProfileChange(this)" style="background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px;font-size:.82rem"><option value="0" data-i18n="adv.standard">Standard</option><option value="1" data-i18n="adv.vivid">Vivid</option></select></td><td style="padding:4px 6px;text-align:center;vertical-align:middle"><input type="number" class="f-tube-vcom" data-tube="5" value="14" min="0" max="63" style="width:52px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center;font-size:.82rem"></td></tr>
               </tbody>
             </table>
           </div>
@@ -256,8 +273,8 @@ select option{background:var(--accent);color:var(--text)}
 
         <!-- Colour inversion -->
         <div class="field" style="padding-bottom:.2rem;margin-top:.9rem">
-          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Colour Inversion</div>
-          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem">Enable for any tube whose replacement screen shows a photo-negative image. Sends INVON immediately — no reboot needed.</div>
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.inversion">Colour Inversion</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.inversion_desc">Enable for any tube whose replacement screen shows a photo-negative image. Sends INVON immediately — no reboot needed.</div>
           <div style="padding:0 2.5rem">
             <div style="display:flex;gap:1.2rem;flex-wrap:wrap">
               <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="f-invert-tube" value="0"> Tube 1</label>
@@ -272,14 +289,14 @@ select option{background:var(--accent);color:var(--text)}
 
         <!-- Window offset -->
         <div class="field" style="padding-bottom:.2rem;margin-top:.9rem">
-          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Window Offset</div>
-          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem">Shift the pixel window to fix 1 px static at the right/bottom edge of replacement panels. ST7735S variants (e.g. LH096NT-IF09W) typically need Col +2 / Row +1.</div>
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.offset">Window Offset</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem" data-i18n="adv.offset_desc">Shift the pixel window to fix 1 px static at the right/bottom edge of replacement panels. ST7735S variants (e.g. LH096NT-IF09W) typically need Col +2 / Row +1.</div>
           <div style="padding:0 2.5rem">
             <table style="border-collapse:collapse;font-size:.82rem;width:100%">
               <thead><tr style="color:var(--dim)">
-                <th style="text-align:left;padding:2px 6px;font-weight:500">Tube</th>
-                <th style="padding:2px 8px;font-weight:500">Col</th>
-                <th style="padding:2px 8px;font-weight:500">Row</th>
+                <th style="text-align:left;padding:2px 6px;font-weight:500" data-i18n="adv.tube">Tube</th>
+                <th style="padding:2px 8px;font-weight:500" data-i18n="adv.col_header">Col</th>
+                <th style="padding:2px 8px;font-weight:500" data-i18n="adv.row_header">Row</th>
               </tr></thead>
               <tbody>
                 <tr><td style="padding:4px 6px">Tube 1</td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-col-off" data-tube="0" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-row-off" data-tube="0" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td></tr>
@@ -295,8 +312,8 @@ select option{background:var(--accent);color:var(--text)}
 
         <!-- Per-tube brightness trim -->
         <div class="field" style="padding-bottom:0;margin-top:.9rem">
-          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem">Individual Brightness Trim</div>
-          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem">Scale each tube's pixels relative to the group LCD Brightness above. Use when one replacement panel is noticeably brighter or dimmer than the others (100 = no change).</div>
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.brightness_trim">Individual Brightness Trim</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.brightness_trim_desc">Scale each tube's pixels relative to the group LCD Brightness above. Use when one replacement panel is noticeably brighter or dimmer than the others (100 = no change).</div>
           <div style="padding:0 2.5rem">
             <div style="display:flex;flex-direction:column;gap:.3rem">
               <div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube 1</span><input type="range" class="f-tube-br" data-tube="0" min="0" max="100" value="100" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">100</span>%</div>
@@ -313,61 +330,61 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <!-- Theme Rotation -->
   <div class="card">
-    <h2>Theme Rotation</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
+    <h2 data-i18n="disp.theme_rotation">Theme Rotation</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="disp.theme_rotation_desc">
       Automatically cycles through themes on a timer. Choose which themes to
       include, or leave all checked to rotate every installed theme.
     </p>
     <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
         <input type="checkbox" id="theme-rot-enabled" onchange="onThemeRotToggle()">
-        Enable Theme Rotation
+        <span data-i18n="disp.enable_theme_rotation">Enable Theme Rotation</span>
       </label>
       <div id="theme-rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;opacity:0.4">
-        <label for="theme-rot-interval" style="white-space:nowrap">Interval per theme:</label>
+        <label for="theme-rot-interval" style="white-space:nowrap" data-i18n="disp.interval_per_theme">Interval per theme:</label>
         <select id="theme-rot-interval" class="select">
-          <option value="60">1 minute</option>
-          <option value="300" selected>5 minutes</option>
-          <option value="600">10 minutes</option>
-          <option value="1800">30 minutes</option>
-          <option value="3600">1 hour</option>
-          <option value="7200">2 hours</option>
-          <option value="14400">4 hours</option>
+          <option value="60" data-i18n="opt.1min">1 minute</option>
+          <option value="300" selected data-i18n="opt.5min">5 minutes</option>
+          <option value="600" data-i18n="opt.10min">10 minutes</option>
+          <option value="1800" data-i18n="opt.30min">30 minutes</option>
+          <option value="3600" data-i18n="opt.1hour">1 hour</option>
+          <option value="7200" data-i18n="opt.2hours">2 hours</option>
+          <option value="14400" data-i18n="opt.4hours">4 hours</option>
         </select>
       </div>
     </div>
     <div id="theme-rot-themes-wrap" style="opacity:0.4">
       <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.4rem">
-        <span style="font-size:.85rem;color:var(--dim)">Themes to include:</span>
-        <button onclick="themeRotSelectAll(true)"  style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">All</button>
-        <button onclick="themeRotSelectAll(false)" style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">None</button>
+        <span style="font-size:.85rem;color:var(--dim)" data-i18n="disp.themes_to_include">Themes to include:</span>
+        <button onclick="themeRotSelectAll(true)"  style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer" data-i18n="btn.all">All</button>
+        <button onclick="themeRotSelectAll(false)" style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer" data-i18n="btn.none">None</button>
       </div>
       <div id="theme-rot-list" style="display:flex;flex-wrap:wrap;gap:.4rem .8rem"></div>
     </div>
   </div>
   <div class="card">
-    <h2>LED Accent Lighting</h2>
-    <div class="field"><label>Mode</label>
-      <select id="f-blmode" onchange="onBlModeChange()"><option>Static</option><option>Breath</option><option>Rainbow</option><option>Off</option><option value="WLED">WLED Controller</option></select>
+    <h2 data-i18n="disp.led_accent">LED Accent Lighting</h2>
+    <div class="field"><label data-i18n="disp.mode">Mode</label>
+      <select id="f-blmode" onchange="onBlModeChange()"><option value="Static" data-i18n="opt.static">Static</option><option value="Breath" data-i18n="opt.breath">Breath</option><option value="Rainbow" data-i18n="opt.rainbow">Rainbow</option><option value="Off" data-i18n="opt.off">Off</option><option value="WLED" data-i18n="opt.wled">WLED Controller</option></select>
     </div>
     <div class="field meter" id="led-speed-section">
-      <label>Effect speed</label>
+      <label data-i18n="disp.effect_speed">Effect speed</label>
       <input type="range" id="f-blspeed" min="1" max="10" value="5"
              oninput="$('v-blspeed').textContent=this.value;markDirty()">
       <span id="v-blspeed">5</span>
     </div>
     <div class="field" id="led-color-section">
-      <label>LED Colours (click to change)</label>
+      <label data-i18n="disp.led_colours">LED Colours (click to change)</label>
       <div id="color-swatches" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:.4rem"></div>
       <div style="display:flex;align-items:center;gap:.7rem;margin-top:.9rem;flex-wrap:wrap">
-        <label style="font-size:.8rem;color:var(--dim);white-space:nowrap">Set all tubes:</label>
+        <label style="font-size:.8rem;color:var(--dim);white-space:nowrap" data-i18n="disp.set_all_tubes">Set all tubes:</label>
         <input type="color" id="led-all-color" value="#ff6600"
                style="width:44px;height:36px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
         <button class="btn btn-outline" style="padding:.35rem .9rem;font-size:.8rem"
-                onclick="applyColorToAll()">Apply to All</button>
+                onclick="applyColorToAll()" data-i18n="disp.apply_to_all">Apply to All</button>
       </div>
     </div>
-    <div id="wled-mode-hint" style="display:none;margin-top:.6rem;padding:.6rem .8rem;border:1px solid var(--accent);border-radius:6px;font-size:.82rem;color:var(--dim)">
+    <div id="wled-mode-hint" style="display:none;margin-top:.6rem;padding:.6rem .8rem;border:1px solid var(--accent);border-radius:6px;font-size:.82rem;color:var(--dim)" data-i18n-html="disp.wled_hint">
       <strong style="color:var(--text)">WLED Controller mode:</strong>
       Accent LEDs will mirror the primary colour and brightness of any WLED device on your network.
       Enable the <em>WLED Sync</em> service (Services tab) so the listener task starts on next boot,
@@ -376,31 +393,31 @@ select option{background:var(--accent);color:var(--text)}
     </div>
   </div>
   <div class="card">
-    <h2>Spectrum Mode</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left &rarr; treble right).</p>
+    <h2 data-i18n="disp.spectrum_mode">Spectrum Mode</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="disp.spectrum_desc">Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left → treble right).</p>
     <div class="field" style="display:grid;grid-template-columns:max-content 44px 1fr;gap:.6rem 1rem;align-items:center">
-      <label>LED Source</label>
+      <label data-i18n="spec.led_src">LED Source</label>
       <select id="f-spec-led-src" onchange="specLedSrcChange()" style="grid-column:2/4;height:36px;background:var(--surface);color:var(--text);border:1px solid #444;border-radius:6px;padding:0 .5rem;font-size:.9rem">
-        <option value="0">Custom glow colour (amplitude-modulated)</option>
-        <option value="1">Follow accent mode (Static / Breath / Rainbow / Off)</option>
+        <option value="0" data-i18n="spec.led_src_custom">Custom glow colour (amplitude-modulated)</option>
+        <option value="1" data-i18n="spec.led_src_follow">Follow accent mode (Static / Breath / Rainbow / Off)</option>
       </select>
-      <label id="spec-color-label">LED Glow Colour</label>
+      <label id="spec-color-label" data-i18n="spec.led_color_label">LED Glow Colour</label>
       <input type="color" id="f-spec-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
-      <span id="spec-color-hint" style="color:var(--dim);font-size:.82rem">Amplitude-modulated LED ring colour in Spectrum mode</span>
-      <label>LCD Bar Colour</label>
+      <span id="spec-color-hint" style="color:var(--dim);font-size:.82rem" data-i18n="spec.led_color_hint">Amplitude-modulated LED ring colour in Spectrum mode</span>
+      <label data-i18n="spec.lcd_color_label">LCD Bar Colour</label>
       <input type="color" id="f-spec-lcd-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
-      <span style="color:var(--dim);font-size:.82rem">Bar colour for the LCD spectrum display</span>
+      <span style="color:var(--dim);font-size:.82rem" data-i18n="spec.lcd_color_hint">Bar colour for the LCD spectrum display</span>
     </div>
     <div class="field" style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-top:.4rem">
-      <button onclick="micCalibrate()" style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem">📸 Capture Baseline</button>
-      <button onclick="micResetCal()"  style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem">↺ Reset to Auto</button>
+      <button onclick="micCalibrate()" style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem" data-i18n="spec.capture_baseline_btn">📸 Capture Baseline</button>
+      <button onclick="micResetCal()"  style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem" data-i18n="spec.reset_auto_btn">↺ Reset to Auto</button>
       <span id="mic-cal-msg" style="color:var(--dim);font-size:.82rem"></span>
     </div>
-    <p style="color:var(--dim);font-size:.78rem;margin-top:.4rem">While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.</p>
-    <p style="color:#ffa000;font-size:.78rem;margin-top:.3rem">⚠️ <strong>Switch away from Spectrum mode before capturing.</strong> In Spectrum mode the mic is continuously processing live audio — this interferes with baseline capture and will cause a timeout error. Switch to Clock or any other mode first, then capture.</p>
+    <p style="color:var(--dim);font-size:.78rem;margin-top:.4rem" data-i18n-html="spec.capture_help">While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.</p>
+    <p style="color:#ffa000;font-size:.78rem;margin-top:.3rem" data-i18n-html="spec.capture_warn">⚠️ <strong>Switch away from Spectrum mode before capturing.</strong> In Spectrum mode the mic is continuously processing live audio — this interferes with baseline capture and will cause a timeout error. Switch to Clock or any other mode first, then capture.</p>
     <div class="field" style="margin-top:1.4rem">
-      <label>Noise Floor
-        <span style="font-weight:normal;color:var(--dim);font-size:.8rem">
+      <label><span data-i18n="spec.noise_floor">Noise Floor</span>
+        <span style="font-weight:normal;color:var(--dim);font-size:.8rem" data-i18n="spec.noise_floor_hint">
           — raise to ignore board noise and room hum; lower to catch quieter sounds
         </span>
       </label>
@@ -410,23 +427,23 @@ select option{background:var(--accent);color:var(--text)}
         <input type="number" id="f-gate-num" min="0" max="16777216" step="10" value="250"
                style="width:90px" oninput="specGateSync(true)">
       </div>
-      <p style="font-size:.75rem;color:var(--dim);margin:.3rem 0 0">
+      <p style="font-size:.75rem;color:var(--dim);margin:.3rem 0 0" data-i18n="spec.gate_help">
         0 = gate off (always display). Default 250. Slider caps at 1000; type directly for higher values.
       </p>
     </div>
   </div>
   <div class="card">
-    <h2>Enabled Modes</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Choose which modes are accessible via the touch buttons. Clock and Date can both be enabled at the same time.</p>
+    <h2 data-i18n="disp.enabled_modes">Enabled Modes</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="disp.enabled_modes_desc">Choose which modes are accessible via the touch buttons. Clock and Date can both be enabled at the same time.</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem">
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-clock" checked onchange="markDirty()"> Clock <span style="font-size:.73rem;color:var(--dim)">(time)</span></label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-countdown" onchange="markDirty()"> Countdown</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-clock" checked onchange="markDirty()"> <span data-i18n="mode.clock">Clock</span> <span style="font-size:.73rem;color:var(--dim)" data-i18n="disp.hint_time">(time)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-countdown" onchange="markDirty()"> <span data-i18n="mode.countdown">Countdown</span></label>
 
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-pomodoro" onchange="markDirty()"> Pomodoro</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-date" onchange="markDirty()"> Date <span style="font-size:.73rem;color:var(--dim)">(full date)</span></label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album" onchange="markDirty()"> Album</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather" onchange="markDirty()"> Weather</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum" onchange="markDirty();markRestartNeeded()"> Spectrum <span style="color:var(--dim);font-size:.78rem">(mic — restart required)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-pomodoro" onchange="markDirty()"> <span data-i18n="mode.pomodoro">Pomodoro</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-date" onchange="markDirty()"> <span data-i18n="mode.date">Date</span> <span style="font-size:.73rem;color:var(--dim)" data-i18n="disp.hint_full_date">(full date)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album" onchange="markDirty()"> <span data-i18n="mode.album">Album</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather" onchange="markDirty()"> <span data-i18n="mode.weather">Weather</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum" onchange="markDirty();markRestartNeeded()"> <span data-i18n="mode.spectrum">Spectrum</span> <span style="color:var(--dim);font-size:.78rem" data-i18n="disp.hint_mic_restart">(mic — restart required)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-youtube" onchange="markDirty()"> YouTube</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-instagram" onchange="markDirty()"> Instagram</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-tiktok" onchange="markDirty()"> TikTok</label>
@@ -435,8 +452,8 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <!-- Mode Rotation -->
   <div class="card">
-    <h2>Mode Rotation</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
+    <h2 data-i18n="disp.mode_rotation">Mode Rotation</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="disp.mode_rotation_desc">
       When enabled, the device automatically cycles through modes on a timer.
       Choose which modes to include, or leave all checked to rotate every enabled mode.
       When disabled, the mode only changes via the Quick Actions buttons or the physical touch buttons.
@@ -444,44 +461,44 @@ select option{background:var(--accent);color:var(--text)}
     <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
         <input type="checkbox" id="rot-enabled" onchange="onRotToggle()">
-        Enable Auto Rotation
+        <span data-i18n="disp.enable_auto_rotation">Enable Auto Rotation</span>
       </label>
       <div id="rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;opacity:0.4">
-        <label for="rot-interval" style="white-space:nowrap">Interval per mode:</label>
+        <label for="rot-interval" style="white-space:nowrap" data-i18n="disp.interval_per_mode">Interval per mode:</label>
         <select id="rot-interval" class="select">
-          <option value="15">15 seconds</option>
-          <option value="30">30 seconds</option>
-          <option value="60" selected>1 minute</option>
-          <option value="120">2 minutes</option>
-          <option value="300">5 minutes</option>
-          <option value="600">10 minutes</option>
-          <option value="1800">30 minutes</option>
-          <option value="3600">1 hour</option>
+          <option value="15" data-i18n="opt.15s">15 seconds</option>
+          <option value="30" data-i18n="opt.30s">30 seconds</option>
+          <option value="60" selected data-i18n="opt.1min">1 minute</option>
+          <option value="120" data-i18n="opt.2min">2 minutes</option>
+          <option value="300" data-i18n="opt.5min">5 minutes</option>
+          <option value="600" data-i18n="opt.10min">10 minutes</option>
+          <option value="1800" data-i18n="opt.30min">30 minutes</option>
+          <option value="3600" data-i18n="opt.1hour">1 hour</option>
         </select>
       </div>
     </div>
     <div id="rot-modes-wrap" style="opacity:0.4">
       <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.4rem">
-        <span style="font-size:.85rem;color:var(--dim)">Modes to include &amp; weight:</span>
-        <button onclick="rotModeSelectAll(true)"  style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">All</button>
-        <button onclick="rotModeSelectAll(false)" style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer">None</button>
+        <span style="font-size:.85rem;color:var(--dim)" data-i18n="disp.modes_to_include">Modes to include &amp; weight:</span>
+        <button onclick="rotModeSelectAll(true)"  style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer" data-i18n="btn.all">All</button>
+        <button onclick="rotModeSelectAll(false)" style="font-size:.78rem;padding:.2rem .6rem;border-radius:4px;cursor:pointer" data-i18n="btn.none">None</button>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.35rem .8rem">
         <!-- each row: [checkbox] [name flex] [weight input] [× label] -->
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="0"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Clock</span><input type="number" class="rot-weight-in" data-bit="0"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="1"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Countdown</span><input type="number" class="rot-weight-in" data-bit="1"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="0"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Clock</span><input type="number" class="rot-weight-in" data-bit="0"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="1"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Countdown</span><input type="number" class="rot-weight-in" data-bit="1"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
 
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="3"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Pomodoro</span><input type="number" class="rot-weight-in" data-bit="3"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="4"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Date</span><input type="number" class="rot-weight-in" data-bit="4"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="5"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Album</span><input type="number" class="rot-weight-in" data-bit="5"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="6"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Weather</span><input type="number" class="rot-weight-in" data-bit="6"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="7"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Spectrum</span><input type="number" class="rot-weight-in" data-bit="7"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="8"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">YouTube</span><input type="number" class="rot-weight-in" data-bit="8"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="9"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Instagram</span><input type="number" class="rot-weight-in" data-bit="9"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="10" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">TikTok</span><input type="number" class="rot-weight-in" data-bit="10" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem"><input type="checkbox" class="rot-mode-cb" data-bit="11" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Mastodon</span><input type="number" class="rot-weight-in" data-bit="11" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:.75rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="3"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Pomodoro</span><input type="number" class="rot-weight-in" data-bit="3"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="4"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Date</span><input type="number" class="rot-weight-in" data-bit="4"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="5"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Album</span><input type="number" class="rot-weight-in" data-bit="5"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="6"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Weather</span><input type="number" class="rot-weight-in" data-bit="6"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="7"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Spectrum</span><input type="number" class="rot-weight-in" data-bit="7"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="8"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">YouTube</span><input type="number" class="rot-weight-in" data-bit="8"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="9"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Instagram</span><input type="number" class="rot-weight-in" data-bit="9"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="10" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">TikTok</span><input type="number" class="rot-weight-in" data-bit="10" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="11" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Mastodon</span><input type="number" class="rot-weight-in" data-bit="11" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
       </div>
-      <p style="color:var(--dim);font-size:.76rem;margin-top:.5rem">
+      <p style="color:var(--dim);font-size:.76rem;margin-top:.5rem" data-i18n-html="disp.rot_weight_help">
         The <strong style="color:var(--text)">×</strong> value is a dwell multiplier applied to the base interval above.
         A weight of <strong style="color:var(--text)">10</strong> keeps that mode on-screen 10× longer than a weight-1 mode.
         Example: Clock&nbsp;×20, others&nbsp;×1 with a 1&nbsp;min interval → Clock shows for 20&nbsp;min between each 1&nbsp;min peek at other modes.
@@ -490,8 +507,8 @@ select option{background:var(--accent);color:var(--text)}
   </div>
   <!-- Scheduled Anti Burn-in / LCD Refresh -->
   <div class="card">
-    <h2>Scheduled Anti Burn-in / LCD Refresh</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">
+    <h2 data-i18n="disp.burnin">Scheduled Anti Burn-in / LCD Refresh</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="disp.burnin_desc">
       Automatically runs a burn-in recovery session at the configured schedule, then returns
       to normal display.  No user action is required — the device fires autonomously while
       powered on.
@@ -499,112 +516,129 @@ select option{background:var(--accent);color:var(--text)}
     <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.8rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
         <input type="checkbox" id="bi-sched-en" onchange="onBurninSchedToggle()">
-        Enable Scheduled Anti Burn-in / LCD Refresh
+        <span data-i18n="disp.bi_enable">Enable Scheduled Anti Burn-in / LCD Refresh</span>
       </label>
     </div>
     <div id="bi-sched-cfg" style="opacity:.4;pointer-events:none">
       <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.7rem">
         <div style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
-          <label for="bi-interval" style="white-space:nowrap">Schedule:</label>
+          <label for="bi-interval" style="white-space:nowrap" data-i18n="disp.bi_schedule">Schedule:</label>
           <select id="bi-interval" class="select">
-            <option value="weekly">Weekly — every Sunday</option>
-            <option value="monthly">Monthly — 1st of month</option>
+            <option value="weekly" data-i18n="disp.bi_weekly">Weekly — every Sunday</option>
+            <option value="monthly" data-i18n="disp.bi_monthly">Monthly — 1st of month</option>
           </select>
         </div>
         <div style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
-          <label for="bi-hour" style="white-space:nowrap">at</label>
+          <label for="bi-hour" style="white-space:nowrap" data-i18n="disp.bi_at">at</label>
           <select id="bi-hour" class="select"></select>
         </div>
         <div style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
-          <label for="bi-duration" style="white-space:nowrap">Duration:</label>
+          <label for="bi-duration" style="white-space:nowrap" data-i18n="disp.bi_duration">Duration:</label>
           <select id="bi-duration" class="select">
-            <option value="1800">30 minutes</option>
-            <option value="3600" selected>1 hour</option>
-            <option value="7200">2 hours</option>
-            <option value="10800">3 hours</option>
-            <option value="14400">4 hours</option>
+            <option value="1800" data-i18n="opt.30min">30 minutes</option>
+            <option value="3600" selected data-i18n="opt.1hour">1 hour</option>
+            <option value="7200" data-i18n="opt.2hours">2 hours</option>
+            <option value="10800" data-i18n="opt.3hours">3 hours</option>
+            <option value="14400" data-i18n="opt.4hours">4 hours</option>
           </select>
         </div>
         <div style="display:flex;align-items:center;gap:.5rem;font-size:.9rem">
-          <label for="bi-mode" style="white-space:nowrap">Mode:</label>
+          <label for="bi-mode" style="white-space:nowrap" data-i18n="disp.bi_mode_label">Mode:</label>
           <select id="bi-mode" class="select" onchange="markDirty()">
-            <option value="colour-cycle">Colour-cycle (R→G→B→W→K)</option>
-            <option value="snow">Snow (random pixel noise)</option>
+            <option value="colour-cycle" data-i18n="disp.bi_mode_cycle">Colour-cycle (R→G→B→W→K)</option>
+            <option value="snow" data-i18n="disp.bi_mode_snow">Snow (random pixel noise)</option>
           </select>
         </div>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <span style="font-size:.82rem;color:var(--dim)">Tubes:</span>
+        <span style="font-size:.82rem;color:var(--dim)" data-i18n="disp.bi_tubes">Tubes:</span>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="0" checked> 1</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="1" checked> 2</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="2" checked> 3</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="3" checked> 4</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="4" checked> 5</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="5" checked> 6</label>
-        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="biSchedSelectAll()">All</button>
-        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="biSchedSelectNone()">None</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="biSchedSelectAll()" data-i18n="btn.all">All</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="biSchedSelectNone()" data-i18n="btn.none">None</button>
       </div>
     </div>
   </div>
 
-  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Display Settings</button></div>
+  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()" data-i18n="disp.save">Save Display Settings</button></div>
 </div>
 
 <!-- ─── Network ────────────────────────────────────────────────── -->
 <div class="tab-content" id="tab-network">
   <div class="card">
-    <h2>WiFi Configuration</h2>
+    <h2 data-i18n="net.wifi_config">WiFi Configuration</h2>
     <div class="field"><label>SSID</label><input id="f-ssid" type="text"></div>
-    <div class="field"><label>Password</label><input id="f-pass" type="password"></div>
-    <div class="field"><label>Hostname</label><input id="f-hostname" type="text" placeholder="nextube-remaster"></div>
+    <div class="field"><label data-i18n="net.password">Password</label><input id="f-pass" type="password"></div>
+    <div class="field"><label data-i18n="net.hostname">Hostname</label><input id="f-hostname" type="text" placeholder="nextube-remaster" oninput="markDirty();markRestartNeeded()"><p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0" data-i18n="net.requires_reboot">Requires reboot to take effect.</p></div>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-mdns-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded()">
-        <label for="f-mdns-en" style="cursor:pointer">Advertise via mDNS (.local)</label>
+        <label for="f-mdns-en" style="cursor:pointer" data-i18n="net.mdns">Advertise via mDNS (.local)</label>
       </div>
-      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
+      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="net.mdns_hint">
         When off, device is reachable by IP only — no <code>nextube-remaster.local</code> resolution.
         <strong>Restart required.</strong>
       </p>
     </div>
     <div class="btn-group">
-      <button class="btn btn-primary" onclick="saveSettings()">Save & Connect</button>
-      <button class="btn btn-outline" onclick="scanWifi()">Scan Networks</button>
+      <button class="btn btn-primary" onclick="saveSettings()" data-i18n="net.save_connect">Save & Connect</button>
+      <button class="btn btn-outline" onclick="scanWifi()" data-i18n="net.scan">Scan Networks</button>
     </div>
     <div id="wifi-list" style="margin-top:.8rem"></div>
   </div>
   <div class="card">
-    <h2>Date</h2>
+    <h2 data-i18n="net.date">Date</h2>
     <div class="field">
-      <label for="f-datefmt">Date format</label>
+      <label for="f-datefmt" data-i18n="net.date_format">Date format</label>
       <select id="f-datefmt" class="select" onchange="markDirty()">
-        <option value="DD/MM/YY">DD/MM/YY &nbsp;(day / month / year)</option>
-        <option value="MM/DD/YY">MM/DD/YY &nbsp;(month / day / year)</option>
+        <option value="DD/MM/YY" data-i18n="net.datefmt_dmy">DD/MM/YY &nbsp;(day / month / year)</option>
+        <option value="MM/DD/YY" data-i18n="net.datefmt_mdy">MM/DD/YY &nbsp;(month / day / year)</option>
       </select>
+    </div>
+    <div class="field">
+      <label for="f-language" data-i18n="net.display_language">Display language</label>
+      <select id="f-language" class="select" onchange="markDirty()">
+        <option value="en">English</option>
+        <option value="da">Dansk (Danish)</option>
+        <option value="de">Deutsch (German)</option>
+        <option value="es">Español (Spanish)</option>
+        <option value="fr">Français (French)</option>
+        <option value="it">Italiano (Italian)</option>
+        <option value="nl">Nederlands (Dutch)</option>
+        <option value="no">Norsk (Norwegian)</option>
+        <option value="pt">Português (Portuguese)</option>
+        <option value="fi">Suomi (Finnish)</option>
+        <option value="sv">Svenska (Swedish)</option>
+      </select>
+      <small style="color:var(--dim)" data-i18n="net.display_language_hint">Language of the day-of-week text shown on tube 6 (Week/Date panel). The web interface language is set separately, top-right.</small>
     </div>
   </div>
   <div class="card">
-    <h2>Time Zone</h2>
-    <div class="field"><label>Region</label>
-      <input id="f-tz-filter" type="text" placeholder="Filter timezones…"
+    <h2 data-i18n="net.timezone">Time Zone</h2>
+    <div class="field"><label data-i18n="net.region">Region</label>
+      <input id="f-tz-filter" type="text" placeholder="Filter timezones…" data-i18n-ph="net.filter_tz"
              oninput="buildTzSelect(this.value)"
              style="margin-bottom:.4rem;width:100%;box-sizing:border-box">
       <select id="f-tz-sel" size="6" onchange="onTzSelChange()"
               style="width:100%;font-family:monospace;font-size:.82rem">
-        <option value="">Loading timezone list…</option>
+        <option value="" data-i18n="net.tz_loading">Loading timezone list…</option>
       </select>
     </div>
     <div class="field">
-      <label>POSIX TZ string <span style="color:var(--dim);font-size:.8rem">(auto-filled by region, or enter manually)</span></label>
+      <label><span data-i18n="net.posix_tz">POSIX TZ string</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="net.posix_tz_hint">(auto-filled by region, or enter manually)</span></label>
       <input id="f-tz" type="text" placeholder="e.g. EST5EDT,M3.2.0,M11.1.0" style="font-family:monospace">
-      <small style="color:var(--dim);display:block;margin-top:.3rem">Format: STD offset [DST [offset],start[/time],end[/time]] — supports automatic DST transitions</small>
+      <small style="color:var(--dim);display:block;margin-top:.3rem" data-i18n="net.posix_tz_format">Format: STD offset [DST [offset],start[/time],end[/time]] — supports automatic DST transitions</small>
     </div>
-    <h2 style="margin-top:1.2rem">NTP Servers</h2>
+    <h2 style="margin-top:1.2rem" data-i18n="net.ntp_servers">NTP Servers</h2>
     <div class="field"><label>Server 1</label><input id="f-ntp0" type="text" placeholder="0.pool.ntp.org"></div>
     <div class="field"><label>Server 2</label><input id="f-ntp1" type="text" placeholder="1.pool.ntp.org"></div>
-    <div class="field"><label>Server 3 <span style="color:var(--dim);font-size:.8rem">(optional)</span></label><input id="f-ntp2" type="text" placeholder="leave blank to skip"></div>
-    <div class="field"><label>Server 4 <span style="color:var(--dim);font-size:.8rem">(optional)</span></label><input id="f-ntp3" type="text" placeholder="leave blank to skip"></div>
-    <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save</button></div>
+    <div class="field"><label>Server 3 <span style="color:var(--dim);font-size:.8rem" data-i18n="net.optional">(optional)</span></label><input id="f-ntp2" type="text" placeholder="leave blank to skip" data-i18n-ph="net.leave_blank"></div>
+    <div class="field"><label>Server 4 <span style="color:var(--dim);font-size:.8rem" data-i18n="net.optional">(optional)</span></label><input id="f-ntp3" type="text" placeholder="leave blank to skip" data-i18n-ph="net.leave_blank"></div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()" data-i18n="net.save">Save</button></div>
   </div>
 </div>
 
@@ -614,55 +648,55 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card" id="weather-card">
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleWeatherCard()">
       <span id="weather-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
-      <h2 style="margin:0;border:none;padding:0;flex:1">Weather</h2>
+      <h2 style="margin:0;border:none;padding:0;flex:1" data-i18n="svc.weather">Weather</h2>
     </div>
     <div id="weather-body" style="display:none;margin-top:.9rem">
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-weather-en','m-weather');markDirty();markRestartNeeded()">
-        <label for="f-weather-en" style="cursor:pointer">Enable weather</label>
+        <label for="f-weather-en" style="cursor:pointer" data-i18n="svc.weather_enable">Enable weather</label>
       </div>
-      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
+      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.weather_enable_hint">
         Periodic weather data fetch. Disabling frees ~8 KB RAM and stops HTTPS calls.
         <strong>Restart required.</strong>
       </p>
     </div>
-    <div class="field"><label>Source</label>
+    <div class="field"><label data-i18n="svc.source">Source</label>
       <select id="f-wsrc" onchange="toggleWeatherKey()">
-        <option value="wttr">wttr.in – free, no key needed</option>
-        <option value="openmeteo">Open-Meteo – free, no key needed</option>
-        <option value="metno">Met.no – free, no key needed</option>
-        <option value="openweather">OpenWeatherMap – free API key required</option>
+        <option value="wttr" data-i18n="svc.wsrc_wttr">wttr.in – free, no key needed</option>
+        <option value="openmeteo" data-i18n="svc.wsrc_openmeteo">Open-Meteo – free, no key needed</option>
+        <option value="metno" data-i18n="svc.wsrc_metno">Met.no – free, no key needed</option>
+        <option value="openweather" data-i18n="svc.wsrc_openweather">OpenWeatherMap – free API key required</option>
       </select>
     </div>
-    <div class="field" id="f-wkey-row" style="display:none"><label>API Key</label><input id="f-wkey" type="text"></div>
+    <div class="field" id="f-wkey-row" style="display:none"><label data-i18n="svc.api_key">API Key</label><input id="f-wkey" type="text"></div>
     <div class="row">
-      <div class="field"><label>City</label><input id="f-city" type="text" placeholder="City name"></div>
-      <div class="field"><label>Units</label>
-        <select id="f-tempfmt" onchange="onTempFmtChange()"><option value="Celsius">Celsius</option><option value="Fahrenheit">Fahrenheit</option></select>
+      <div class="field"><label data-i18n="svc.city">City</label><input id="f-city" type="text" placeholder="City name" data-i18n-ph="svc.city_ph"></div>
+      <div class="field"><label data-i18n="svc.units">Units</label>
+        <select id="f-tempfmt" onchange="onTempFmtChange()"><option value="Celsius" data-i18n="opt.celsius">Celsius</option><option value="Fahrenheit" data-i18n="opt.fahrenheit">Fahrenheit</option></select>
       </div>
     </div>
     <div class="row">
-      <div class="field"><label>Panel Rotation (seconds)</label>
+      <div class="field"><label data-i18n="svc.panel_rotation">Panel Rotation (seconds)</label>
         <input id="f-wx-panel" type="number" min="1" max="300" value="20">
       </div>
     </div>
-    <div class="field"><label>Display Panels</label>
+    <div class="field"><label data-i18n="svc.display_panels">Display Panels</label>
       <div style="display:flex;flex-direction:column;gap:.35rem;margin-top:.35rem">
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
           <input type="checkbox" id="f-wx-p0" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p0')" checked>
-          Temperature <span style="color:var(--dim);font-size:.78rem">(panel 0)</span>
+          <span data-i18n="svc.wx_temperature">Temperature</span> <span style="color:var(--dim);font-size:.78rem">(panel 0)</span>
         </label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
           <input type="checkbox" id="f-wx-p1" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p1')" checked>
-          Humidity <span style="color:var(--dim);font-size:.78rem">(panel 1)</span>
+          <span data-i18n="svc.wx_humidity">Humidity</span> <span style="color:var(--dim);font-size:.78rem">(panel 1)</span>
         </label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
           <input type="checkbox" id="f-wx-p2" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p2')">
-          Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(panel 2)</span>
+          <span data-i18n="svc.wx_sunrise">Sunrise &amp; Sunset</span> <span style="color:var(--dim);font-size:.78rem">(panel 2)</span>
         </label>
       </div>
-      <small style="color:var(--dim);margin-top:.3rem;display:block">At least one panel must remain enabled.</small>
+      <small style="color:var(--dim);margin-top:.3rem;display:block" data-i18n="svc.wx_one_panel">At least one panel must remain enabled.</small>
     </div>
     </div>
   </div>
@@ -670,21 +704,21 @@ select option{background:var(--accent);color:var(--text)}
     <!-- Header row — click anywhere to expand/collapse -->
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleSocialCard()">
       <span id="social-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
-      <h2 style="margin:0;border:none;padding:0;flex:1">Social Media Counters</h2>
+      <h2 style="margin:0;border:none;padding:0;flex:1" data-i18n="svc.social">Social Media Counters</h2>
     </div>
 
     <div id="social-body" style="display:none;margin-top:.9rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
         <input type="checkbox" id="f-social-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded();updateDashboardVisibility(readEnabledModes())">
-        Enable &nbsp;<small style="color:var(--dim)">(restart required — master switch for all social counters)</small>
+        <span data-i18n="svc.enable">Enable</span> &nbsp;<small style="color:var(--dim)" data-i18n="svc.social_master_hint">(restart required — master switch for all social counters)</small>
       </label>
 
       <!-- ── Shared settings ───────────────────────────────── -->
       <div class="field">
-        <label>Polling Interval <span style="color:var(--dim);font-size:.8rem">(minutes between fetches)</span></label>
+        <label><span data-i18n="svc.polling_interval">Polling Interval</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.polling_interval_hint">(minutes between fetches)</span></label>
         <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
           <input id="f-sub-interval" type="number" min="5" max="1440" step="1" style="width:80px" oninput="markDirty()">
-          <span style="color:var(--dim);font-size:.82rem">Presets:</span>
+          <span style="color:var(--dim);font-size:.82rem" data-i18n="svc.presets">Presets:</span>
           <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=5;   markDirty()">5 m</button>
           <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=10;  markDirty()">10 m</button>
           <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=30;  markDirty()">30 m</button>
@@ -693,17 +727,17 @@ select option{background:var(--accent);color:var(--text)}
           <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=720; markDirty()">12 h</button>
           <button type="button" class="btn-sm" onclick="$('f-sub-interval').value=1440;markDirty()">24 h</button>
         </div>
-        <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Applies to all platforms. Minimum 5 minutes. Changes take effect after the current sleep expires or reboot.</p>
-        <button type="button" class="btn btn-outline" style="margin-top:.5rem;font-size:.82rem" onclick="socialRefreshNow()">⟳ Fetch Now</button>
+        <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0" data-i18n="svc.polling_help">Applies to all platforms. Minimum 5 minutes. Changes take effect after the current sleep expires or reboot.</p>
+        <button type="button" class="btn btn-outline" style="margin-top:.5rem;font-size:.82rem" onclick="socialRefreshNow()">⟳ <span data-i18n="svc.fetch_now">Fetch Now</span></button>
       </div>
       <div class="field">
-        <label>Relay host <span style="color:var(--dim);font-size:.8rem">(LAN IP of PC running social_relay.py)</span></label>
-        <input id="f-tiktok-relay" type="text" placeholder="e.g. 192.168.1.100" maxlength="63" oninput="markDirty();validateSubs()">
-        <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">
+        <label><span data-i18n="svc.relay_host">Relay host</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.relay_host_hint">(LAN IP of PC running social_relay.py)</span></label>
+        <input id="f-tiktok-relay" type="text" placeholder="e.g. 192.168.1.100" maxlength="63" oninput="markDirty();validateSubs()" data-i18n-ph="svc.relay_host_ph">
+        <p style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0" data-i18n-html="svc.relay_help">
           Run <code>python helpers/social_relay/social_relay.py</code> on any PC on your network and paste the IP here.
           Used by YouTube and TikTok when their fetch method is set to Relay.
         </p>
-        <p id="warn-relay-host" style="display:none;color:var(--hi);font-size:.8rem;margin:.4rem 0 0;padding:.4rem .6rem;background:rgba(255,160,0,.08);border:1px solid rgba(255,160,0,.3);border-radius:5px">
+        <p id="warn-relay-host" style="display:none;color:var(--hi);font-size:.8rem;margin:.4rem 0 0;padding:.4rem .6rem;background:rgba(255,160,0,.08);border:1px solid rgba(255,160,0,.3);border-radius:5px" data-i18n-html="svc.relay_warn">
           ⚠ Relay host is required — one or more platforms above use <strong>Relay</strong> as their fetch method but no host is set. Enter the IP shown when you run <code>social_relay.py</code>, or switch the fetch method to a non-relay option.
         </p>
       </div>
@@ -715,36 +749,36 @@ select option{background:var(--accent);color:var(--text)}
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
           <input type="checkbox" id="f-youtube-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-youtube-en','m-youtube');markDirty();markRestartNeeded();validateSubs()">
-          <label for="f-youtube-en" style="cursor:pointer">Enable YouTube / Bilibili</label>
+          <label for="f-youtube-en" style="cursor:pointer" data-i18n="svc.yt_enable">Enable YouTube / Bilibili</label>
         </div>
-        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.yt_enable_hint">
           Periodic subscriber-count fetch. Disabling frees ~8 KB RAM.
           <strong>Restart required.</strong>
         </p>
       </div>
-      <div class="field"><label>Platform</label>
+      <div class="field"><label data-i18n="svc.platform">Platform</label>
         <select id="f-vsite" onchange="onVsiteChange()"><option value="youtube">YouTube</option><option value="bilibili">Bilibili</option></select>
       </div>
       <div id="yt-fields">
-        <div class="field"><label>YouTube Channel ID</label><input id="f-ytid" type="text" oninput="validateSubs()"></div>
-        <p id="warn-yt-id" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px">⚠ Channel ID is required. Find yours at <a href="https://www.youtube.com/account_advanced" target="_blank">youtube.com/account_advanced</a>.</p>
+        <div class="field"><label data-i18n="svc.yt_channel_id">YouTube Channel ID</label><input id="f-ytid" type="text" oninput="validateSubs()"></div>
+        <p id="warn-yt-id" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px" data-i18n-html="svc.yt_id_warn">⚠ Channel ID is required. Find yours at <a href="https://www.youtube.com/account_advanced" target="_blank">youtube.com/account_advanced</a>.</p>
         <div class="field">
-          <label>Fetch method</label>
+          <label data-i18n="svc.fetch_method">Fetch method</label>
           <select id="yt-method" onchange="onYtMethodChange(); markDirty(); validateSubs()">
-            <option value="relay">Relay — no API key needed (recommended)</option>
-            <option value="apikey">YouTube Data API v3 key</option>
+            <option value="relay" data-i18n="svc.yt_method_relay">Relay — no API key needed (recommended)</option>
+            <option value="apikey" data-i18n="svc.yt_method_apikey">YouTube Data API v3 key</option>
           </select>
-          <p id="yt-method-relay-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Uses <code>social_relay.py</code> — set the relay host above.</p>
-          <p id="yt-method-key-hint"   style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none">Free API key from <a href="https://console.cloud.google.com" target="_blank">console.cloud.google.com</a> → Enable "YouTube Data API v3" → Credentials → API Key.</p>
+          <p id="yt-method-relay-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0" data-i18n-html="svc.relay_method_hint">Uses <code>social_relay.py</code> — set the relay host above.</p>
+          <p id="yt-method-key-hint"   style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none" data-i18n-html="svc.yt_key_hint">Free API key from <a href="https://console.cloud.google.com" target="_blank">console.cloud.google.com</a> → Enable "YouTube Data API v3" → Credentials → API Key.</p>
         </div>
         <div id="yt-key-row" style="display:none">
-          <div class="field"><label>API Key</label><input id="f-ytkey" type="text" oninput="validateSubs()"></div>
-          <p id="warn-yt-key" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px">⚠ Paste your YouTube Data API v3 key above.</p>
+          <div class="field"><label data-i18n="svc.api_key">API Key</label><input id="f-ytkey" type="text" oninput="validateSubs()"></div>
+          <p id="warn-yt-key" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px" data-i18n="svc.yt_key_warn">⚠ Paste your YouTube Data API v3 key above.</p>
         </div>
       </div>
       <div id="bili-fields">
-        <div class="field"><label>Bilibili UID</label><input id="f-buid" type="text" oninput="validateSubs()"></div>
-        <p id="warn-bili" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px">⚠ Bilibili UID is required for the follower counter to work.</p>
+        <div class="field"><label data-i18n="svc.bili_uid">Bilibili UID</label><input id="f-buid" type="text" oninput="validateSubs()"></div>
+        <p id="warn-bili" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px" data-i18n="svc.bili_warn">⚠ Bilibili UID is required for the follower counter to work.</p>
       </div>
 
       <hr style="border:none;border-top:1px solid rgba(255,255,255,.07);margin:.9rem 0">
@@ -754,23 +788,23 @@ select option{background:var(--accent);color:var(--text)}
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
           <input type="checkbox" id="f-insta-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-insta-en','m-instagram');markDirty();markRestartNeeded();validateSubs()">
-          <label for="f-insta-en" style="cursor:pointer">Enable Instagram follower counter</label>
+          <label for="f-insta-en" style="cursor:pointer" data-i18n="svc.ig_enable">Enable Instagram follower counter</label>
         </div>
-        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Fetches public follower count. <strong>Restart required.</strong></p>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.fetch_follower_hint">Fetches public follower count. <strong>Restart required.</strong></p>
       </div>
-      <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(no @ prefix)</span></label>
-        <input id="f-insta-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()">
+      <div class="field"><label><span data-i18n="svc.username">Username</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.no_at_prefix">(no @ prefix)</span></label>
+        <input id="f-insta-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()" data-i18n-ph="svc.username_ph">
       </div>
       <div class="field">
-        <label>Fetch method</label>
+        <label data-i18n="svc.fetch_method">Fetch method</label>
         <select id="ig-method" onchange="onIgMethodChange(); markDirty(); validateSubs()">
-          <option value="internal">Internal — direct Instagram API</option>
-          <option value="relay">Relay — via social_relay.py</option>
+          <option value="internal" data-i18n="svc.ig_method_internal">Internal — direct Instagram API</option>
+          <option value="relay" data-i18n="svc.ig_method_relay">Relay — via social_relay.py</option>
         </select>
-        <p id="ig-method-internal-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Calls Instagram's internal API directly. No relay needed, but may return 401 if rate-limited.</p>
-        <p id="ig-method-relay-hint"    style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none">Uses <code>social_relay.py</code> — set the relay host above.</p>
+        <p id="ig-method-internal-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0" data-i18n="svc.ig_internal_hint">Calls Instagram's internal API directly. No relay needed, but may return 401 if rate-limited.</p>
+        <p id="ig-method-relay-hint"    style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none" data-i18n-html="svc.relay_method_hint">Uses <code>social_relay.py</code> — set the relay host above.</p>
       </div>
-      <p id="warn-insta" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px">⚠ Username is required for the follower counter to work.</p>
+      <p id="warn-insta" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px" data-i18n="svc.username_warn">⚠ Username is required for the follower counter to work.</p>
 
       <hr style="border:none;border-top:1px solid rgba(255,255,255,.07);margin:.9rem 0">
 
@@ -779,27 +813,27 @@ select option{background:var(--accent);color:var(--text)}
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
           <input type="checkbox" id="f-tiktok-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-tiktok-en','m-tiktok');markDirty();markRestartNeeded();validateSubs()">
-          <label for="f-tiktok-en" style="cursor:pointer">Enable TikTok follower counter</label>
+          <label for="f-tiktok-en" style="cursor:pointer" data-i18n="svc.tt_enable">Enable TikTok follower counter</label>
         </div>
-        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Fetches public follower count. <strong>Restart required.</strong></p>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.fetch_follower_hint">Fetches public follower count. <strong>Restart required.</strong></p>
       </div>
-      <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(no @ prefix)</span></label>
-        <input id="f-tiktok-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()">
+      <div class="field"><label><span data-i18n="svc.username">Username</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.no_at_prefix">(no @ prefix)</span></label>
+        <input id="f-tiktok-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()" data-i18n-ph="svc.username_ph">
       </div>
       <div class="field">
-        <label>Fetch method</label>
+        <label data-i18n="svc.fetch_method">Fetch method</label>
         <select id="tt-method" onchange="onTtMethodChange(); markDirty(); validateSubs()">
-          <option value="relay">Relay — no API key needed (recommended)</option>
-          <option value="apikey">TikTok Research API token</option>
+          <option value="relay" data-i18n="svc.tt_method_relay">Relay — no API key needed (recommended)</option>
+          <option value="apikey" data-i18n="svc.tt_method_apikey">TikTok Research API token</option>
         </select>
-        <p id="tt-method-relay-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0">Uses <code>social_relay.py</code> — set the relay host above.</p>
-        <p id="tt-method-key-hint"   style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none">Apply for Research API access at <a href="https://developers.tiktok.com" target="_blank">developers.tiktok.com</a> → Research API → Client Token.</p>
+        <p id="tt-method-relay-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0" data-i18n-html="svc.relay_method_hint">Uses <code>social_relay.py</code> — set the relay host above.</p>
+        <p id="tt-method-key-hint"   style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none" data-i18n-html="svc.tt_key_hint">Apply for Research API access at <a href="https://developers.tiktok.com" target="_blank">developers.tiktok.com</a> → Research API → Client Token.</p>
       </div>
       <div id="tt-key-row" style="display:none">
-        <div class="field"><label>Research API Bearer Token</label><input id="f-tiktok-key" type="text" oninput="validateSubs()"></div>
-        <p id="warn-tiktok-key" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px">⚠ Paste your TikTok Research API bearer token above.</p>
+        <div class="field"><label data-i18n="svc.tt_token">Research API Bearer Token</label><input id="f-tiktok-key" type="text" oninput="validateSubs()"></div>
+        <p id="warn-tiktok-key" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .5rem;padding-left:2px" data-i18n="svc.tt_key_warn">⚠ Paste your TikTok Research API bearer token above.</p>
       </div>
-      <p id="warn-tiktok" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px">⚠ Username is required for the follower counter to work.</p>
+      <p id="warn-tiktok" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px" data-i18n="svc.username_warn">⚠ Username is required for the follower counter to work.</p>
 
       <hr style="border:none;border-top:1px solid rgba(255,255,255,.07);margin:.9rem 0">
 
@@ -808,17 +842,17 @@ select option{background:var(--accent);color:var(--text)}
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
           <input type="checkbox" id="f-mast-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-mast-en','m-mastodon');markDirty();markRestartNeeded();validateSubs()">
-          <label for="f-mast-en" style="cursor:pointer">Enable Mastodon follower counter</label>
+          <label for="f-mast-en" style="cursor:pointer" data-i18n="svc.mast_enable">Enable Mastodon follower counter</label>
         </div>
-        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px">Uses the official public API — no authentication or relay needed. <strong>Restart required.</strong></p>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.mast_enable_hint">Uses the official public API — no authentication or relay needed. <strong>Restart required.</strong></p>
       </div>
-      <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(no @ prefix)</span></label>
-        <input id="f-mast-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()">
+      <div class="field"><label><span data-i18n="svc.username">Username</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.no_at_prefix">(no @ prefix)</span></label>
+        <input id="f-mast-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()" data-i18n-ph="svc.username_ph">
       </div>
-      <div class="field"><label>Instance <span style="color:var(--dim);font-size:.8rem">(domain only)</span></label>
+      <div class="field"><label><span data-i18n="svc.instance">Instance</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.domain_only">(domain only)</span></label>
         <input id="f-mast-instance" type="text" placeholder="mastodon.social" maxlength="63" oninput="validateSubs()">
       </div>
-      <p id="warn-mastodon" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px">⚠ Both username and instance are required.</p>
+      <p id="warn-mastodon" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px" data-i18n="svc.mast_warn">⚠ Both username and instance are required.</p>
 
     </div><!-- #social-body -->
   </div><!-- #social-card -->
@@ -827,34 +861,34 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card" id="mqtt-card">
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleMqttCard()">
       <span id="mqtt-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
-      <h2 style="margin:0;border:none;padding:0;flex:1">Home Assistant MQTT</h2>
+      <h2 style="margin:0;border:none;padding:0;flex:1" data-i18n="svc.mqtt">Home Assistant MQTT</h2>
     </div>
     <div id="mqtt-body" style="display:none;padding-top:.8rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
         <input type="checkbox" id="f-mqtt-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded()">
-        Enable &nbsp;<small style="color:var(--dim)">(restart required)</small>
+        <span data-i18n="svc.enable">Enable</span> &nbsp;<small style="color:var(--dim)" data-i18n="svc.restart_required">(restart required)</small>
       </label>
       <div class="row">
-        <div class="field"><label>Broker</label>
-          <input id="f-mqtt-broker" type="text" placeholder="192.168.1.x or hostname" maxlength="63" oninput="markDirty()">
+        <div class="field"><label data-i18n="svc.broker">Broker</label>
+          <input id="f-mqtt-broker" type="text" placeholder="192.168.1.x or hostname" maxlength="63" oninput="markDirty()" data-i18n-ph="svc.broker_ph">
         </div>
-        <div class="field"><label>Port</label>
+        <div class="field"><label data-i18n="svc.port">Port</label>
           <input id="f-mqtt-port" type="number" min="1" max="65535" value="1883" oninput="markDirty()">
         </div>
       </div>
       <div class="row">
-        <div class="field"><label>Username <span style="color:var(--dim);font-size:.8rem">(leave blank for anonymous)</span></label>
+        <div class="field"><label><span data-i18n="svc.username">Username</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.username_anon">(leave blank for anonymous)</span></label>
           <input id="f-mqtt-user" type="text" maxlength="31" oninput="markDirty()">
         </div>
-        <div class="field"><label>Password</label>
+        <div class="field"><label data-i18n="net.password">Password</label>
           <input id="f-mqtt-pass" type="password" maxlength="63" oninput="markDirty()">
         </div>
       </div>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;cursor:pointer">
         <input type="checkbox" id="f-mqtt-disc" style="width:15px;height:15px" onchange="markDirty()" checked>
-        Publish Home Assistant auto-discovery payloads
+        <span data-i18n="svc.mqtt_discovery">Publish Home Assistant auto-discovery payloads</span>
       </label>
-      <p style="color:var(--dim);font-size:.78rem;margin:.6rem 0 0">
+      <p style="color:var(--dim);font-size:.78rem;margin:.6rem 0 0" data-i18n-html="svc.mqtt_help">
         Exposes temperature, humidity (SHT30), display mode, backlight on/off, and brightness as HA entities.
         Uses MQTT auto-discovery — no manual HA configuration required.
         Uses plain <code>mqtt://</code> (no TLS).
@@ -866,19 +900,19 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card" id="wled-card">
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleWledCard()">
       <span id="wled-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
-      <h2 style="margin:0;border:none;padding:0;flex:1">WLED Sync</h2>
+      <h2 style="margin:0;border:none;padding:0;flex:1" data-i18n="svc.wled">WLED Sync</h2>
     </div>
     <div id="wled-body" style="display:none;padding-top:.8rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
         <input type="checkbox" id="f-wled-sync-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded()">
-        Enable listener task &nbsp;<small style="color:var(--dim)">(restart required)</small>
+        <span data-i18n="svc.wled_enable">Enable listener task</span> &nbsp;<small style="color:var(--dim)" data-i18n="svc.restart_required">(restart required)</small>
       </label>
       <div class="field">
-        <label>UDP Port <span style="color:var(--dim);font-size:.8rem">(default 21324)</span></label>
+        <label><span data-i18n="svc.udp_port">UDP Port</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.udp_port_hint">(default 21324)</span></label>
         <input id="f-wled-sync-port" type="number" min="1" max="65535" value="21324"
                style="width:100px" oninput="markDirty()">
       </div>
-      <p style="color:var(--dim);font-size:.78rem;margin:.6rem 0 0">
+      <p style="color:var(--dim);font-size:.78rem;margin:.6rem 0 0" data-i18n-html="svc.wled_help">
         Listens for <strong>WLED UDP Notifier v2</strong> broadcasts on your LAN and mirrors the primary
         colour &amp; brightness to Nextube's accent LEDs. Requires <strong>WLED Controller</strong> to be
         selected as the LED Accent Lighting mode (Display tab).<br>
@@ -891,19 +925,19 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card" id="timer-card">
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleTimerCard()">
       <span id="timer-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
-      <h2 style="margin:0;border:none;padding:0;flex:1">Timer Settings</h2>
+      <h2 style="margin:0;border:none;padding:0;flex:1" data-i18n="svc.timer">Timer Settings</h2>
     </div>
     <div id="timer-body" style="display:none;margin-top:.9rem">
     <div class="row">
-      <div class="field"><label>Countdown Duration (minutes)</label>
+      <div class="field"><label data-i18n="svc.countdown_dur">Countdown Duration (minutes)</label>
         <input id="f-countdown" type="number" min="1" max="999" value="1">
       </div>
     </div>
     <div class="row">
-      <div class="field"><label>Pomodoro Work Duration (minutes)</label>
+      <div class="field"><label data-i18n="svc.pomo_work">Pomodoro Work Duration (minutes)</label>
         <input id="f-pomo-work" type="number" min="1" max="999" value="25">
       </div>
-      <div class="field"><label>Pomodoro Break Duration (minutes)</label>
+      <div class="field"><label data-i18n="svc.pomo_break">Pomodoro Break Duration (minutes)</label>
         <input id="f-pomo-break" type="number" min="1" max="999" value="5">
       </div>
     </div>
@@ -913,118 +947,118 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card" id="album-card">
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleAlbumCard()">
       <span id="album-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
-      <h2 style="margin:0;border:none;padding:0;flex:1">Album Settings</h2>
+      <h2 style="margin:0;border:none;padding:0;flex:1" data-i18n="svc.album">Album Settings</h2>
     </div>
     <div id="album-body" style="display:none;margin-top:.9rem">
       <div class="row">
-        <div class="field"><label>Slide Duration (ms)</label>
+        <div class="field"><label data-i18n="svc.slide_dur">Slide Duration (ms)</label>
           <input id="f-album-switch" type="number" min="500" max="60000" step="500" value="2000" oninput="markDirty()">
         </div>
       </div>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;cursor:pointer">
         <input type="checkbox" id="f-album-shuffle" onchange="markDirty()">
-        Shuffle — randomise playback order on each album load
+        <span data-i18n="svc.shuffle">Shuffle — randomise playback order on each album load</span>
       </label>
     </div>
   </div>
 
-  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Services</button></div>
+  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()" data-i18n="svc.save">Save Services</button></div>
 </div>
 
 <!-- ─── Hardware ───────────────────────────────────────────────── -->
 <div class="tab-content" id="tab-hardware">
   <div class="card" id="sht30-card">
-    <h2>Indoor Sensor (SHT30)</h2>
+    <h2 data-i18n="hw.sht30">Indoor Sensor (SHT30)</h2>
     <div class="row">
       <div class="field">
-        <label>Temperature Offset <span id="sht30-offset-unit-lbl" style="color:var(--dim);font-size:.8rem">(°C, added to raw reading)</span></label>
+        <label><span data-i18n="hw.temp_offset">Temperature Offset</span> <span id="sht30-offset-unit-lbl" style="color:var(--dim);font-size:.8rem">(°C, added to raw reading)</span></label>
         <input id="f-sht30-offset" type="number" step="0.1" min="-20" max="20" value="0" data-unit="C" style="width:90px" oninput="markDirty()">
       </div>
     </div>
-    <p style="color:var(--dim);font-size:.78rem;margin:.5rem 0 0">
+    <p id="sht30-help-para" style="color:var(--dim);font-size:.78rem;margin:.5rem 0 0">
       The SHT30 sits inside the same enclosure as the ESP32 and typically reads
-      <span id="sht30-help-range">2–5 °C</span> high due to self-heating.
-      Enter a negative value to subtract (<span id="sht30-help-ex">e.g. <code>-3.5</code></span>).
+      <strong>2–5 °C</strong> high due to self-heating.
+      Enter a negative value to subtract (e.g. <code>-3.5</code>).
       The unit follows <em>Network → Temperature Unit</em> and is converted to °C internally.
       Takes effect immediately on save — no restart required.
     </p>
   </div>
   <div class="card">
-    <h2>Audio Settings</h2>
+    <h2 data-i18n="hw.audio">Audio Settings</h2>
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-audio-en" style="width:16px;height:16px;cursor:pointer">
-        <label for="f-audio-en" style="margin:0;cursor:pointer;font-weight:normal">Enable audio output</label>
+        <label for="f-audio-en" style="margin:0;cursor:pointer;font-weight:normal" data-i18n="hw.enable_audio">Enable audio output</label>
       </div>
     </div>
-    <div class="field meter"><label>Volume</label><input type="range" id="f-vol" min="0" max="100"><span id="v-vol">20</span>%</div>
-    <div class="field"><label>Clock Music File</label>
+    <div class="field meter"><label data-i18n="hw.volume">Volume</label><input type="range" id="f-vol" min="0" max="100"><span id="v-vol">20</span>%</div>
+    <div class="field"><label data-i18n="hw.music_file">Clock Music File</label>
       <div style="display:flex;gap:8px;align-items:center">
         <input id="f-music" type="text" style="flex:1">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-music')">▶ Test</button>
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-music')">▶ <span data-i18n="hw.test">Test</span></button>
       </div>
     </div>
-    <div class="field"><label>Bell Sound</label>
+    <div class="field"><label data-i18n="hw.bell">Bell Sound</label>
       <div style="display:flex;gap:8px;align-items:center">
         <input id="f-bell" type="text" style="flex:1">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-bell')">▶ Test</button>
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-bell')">▶ <span data-i18n="hw.test">Test</span></button>
       </div>
     </div>
-    <div class="field"><label>Tone Sound (Pomodoro/Countdown)</label>
+    <div class="field"><label data-i18n="hw.tone">Tone Sound (Pomodoro/Countdown)</label>
       <div style="display:flex;gap:8px;align-items:center">
         <input id="f-tone" type="text" style="flex:1">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-tone')">▶ Test</button>
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-tone')">▶ <span data-i18n="hw.test">Test</span></button>
       </div>
     </div>
-    <div class="field"><label>Timer Sound</label>
+    <div class="field"><label data-i18n="hw.timer_sound">Timer Sound</label>
       <div style="display:flex;gap:8px;align-items:center">
         <input id="f-timer" type="text" style="flex:1">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-timer')">▶ Test</button>
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-timer')">▶ <span data-i18n="hw.test">Test</span></button>
       </div>
     </div>
-    <div class="field"><label>Button Click Sound</label>
+    <div class="field"><label data-i18n="hw.click_sound">Button Click Sound</label>
       <div style="display:flex;gap:8px;align-items:center">
         <input id="f-click" type="text" style="flex:1" placeholder="/spiffs/audio/click.wav">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-click')">▶ Test</button>
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-click')">▶ <span data-i18n="hw.test">Test</span></button>
       </div>
       <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-btn-sound" style="width:16px;height:16px;cursor:pointer">
-        <label for="f-btn-sound" style="margin:0;cursor:pointer;font-weight:normal">Enable click sound on button press</label>
+        <label for="f-btn-sound" style="margin:0;cursor:pointer;font-weight:normal" data-i18n="hw.enable_click">Enable click sound on button press</label>
       </div>
     </div>
   </div>
-  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Hardware</button></div>
+  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()" data-i18n="hw.save">Save Hardware</button></div>
 </div>
 
 <!-- ─── System ─────────────────────────────────────────────────── -->
 <div class="tab-content" id="tab-system">
   <div class="card">
-    <h2>Firmware Update (OTA)</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">Upload <strong>nextube-fw-ota.bin</strong> for over-the-air updates. Do <strong>not</strong> upload <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.</p>
+    <h2 data-i18n="sys.ota">Firmware Update (OTA)</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem" data-i18n-html="sys.ota_help">Upload <strong>nextube-fw-ota.bin</strong> for over-the-air updates. Do <strong>not</strong> upload <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.</p>
     <input type="file" id="ota-file" accept=".bin" style="margin-bottom:.5rem">
     <div class="progress ota" id="ota-progress" style="display:none"><div class="progress-bar" id="ota-bar"></div></div>
     <p id="ota-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doOTA()">Upload & Flash</button></div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
   </div>
   <div class="card">
-    <h2>Web UI Update</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Upload <strong>nextube-WebUI-v*.zip</strong> to apply only the changed web UI files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
+    <h2 data-i18n="sys.webui_update">Web UI Update</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.webui_help">Upload <strong>nextube-WebUI-v*.zip</strong> to apply only the changed web UI files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
     <input type="file" id="hotpatch-file" accept=".zip" style="margin-bottom:.5rem">
     <div class="progress ota" id="hotpatch-progress" style="display:none"><div class="progress-bar" id="hotpatch-bar"></div></div>
     <p id="hotpatch-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doHotPatch()">Upload & Apply</button></div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doHotPatch()" data-i18n="sys.upload_apply">Upload & Apply</button></div>
   </div>
   <div class="card">
-    <h2>Backup &amp; Restore</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">Download your current configuration to a file or restore it from a backup. Recommended before any LittleFS recovery flash.</p>
+    <h2 data-i18n="sys.backup">Backup &amp; Restore</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem" data-i18n="sys.backup_help">Download your current configuration to a file or restore it from a backup. Recommended before any LittleFS recovery flash.</p>
     <div class="btn-group">
-      <button class="btn btn-outline" onclick="exportSettings()">Download config.json</button>
-      <button class="btn btn-outline" onclick="$('f-import').click()">Restore from File</button>
+      <button class="btn btn-outline" onclick="exportSettings()" data-i18n="sys.download_config">Download config.json</button>
+      <button class="btn btn-outline" onclick="$('f-import').click()" data-i18n="sys.restore_file">Restore from File</button>
       <input type="file" id="f-import" accept=".json" style="display:none" onchange="importSettings(this)">
     </div>
   </div>
   <div class="card">
-    <h2>LittleFS Storage</h2>
+    <h2 data-i18n="sys.fs_storage">LittleFS Storage</h2>
     <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:.85rem;margin-bottom:.45rem">
       <span><span id="fs-used-lbl" style="font-weight:600">--</span> used of <span id="fs-total-lbl">--</span></span>
       <span style="color:var(--dim)"><span id="fs-free-lbl">--</span> free</span>
@@ -1035,90 +1069,90 @@ select option{background:var(--accent);color:var(--text)}
     <p id="fs-pct-lbl" style="font-size:.78rem;color:var(--dim);margin-top:.35rem;text-align:right"></p>
   </div>
   <div class="card">
-    <h2>LittleFS Files</h2>
+    <h2 data-i18n="sys.fs_files">LittleFS Files</h2>
     <div id="file-breadcrumb" style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem;min-height:1.2em"></div>
     <div id="file-list" style="font-size:.85rem;max-height:320px;overflow-y:auto;border:1px solid rgba(255,255,255,.07);border-radius:6px"></div>
     <input type="file" id="upload-input" multiple style="display:none" onchange="uploadFiles(this.files, false)">
     <input type="file" id="upload-dir-input" webkitdirectory multiple style="display:none" onchange="uploadFiles(this.files, true)">
     <div class="btn-group" style="margin-top:.7rem">
-      <button class="btn btn-outline" onclick="browseDir('/')">Browse</button>
-      <button class="btn btn-outline" onclick="browseDir(s_filePath)">Refresh</button>
-      <button class="btn btn-outline" onclick="mkdirFolder()">📂 New Folder</button>
-      <button class="btn btn-outline" onclick="$('upload-input').click()">⬆ Upload File(s)</button>
-      <button class="btn btn-outline" onclick="$('upload-dir-input').click()">📁 Upload Folder</button>
+      <button class="btn btn-outline" onclick="browseDir('/')" data-i18n="sys.browse">Browse</button>
+      <button class="btn btn-outline" onclick="browseDir(s_filePath)" data-i18n="sys.refresh">Refresh</button>
+      <button class="btn btn-outline" onclick="mkdirFolder()">📂 <span data-i18n="sys.new_folder">New Folder</span></button>
+      <button class="btn btn-outline" onclick="$('upload-input').click()">⬆ <span data-i18n="sys.upload_files">Upload File(s)</span></button>
+      <button class="btn btn-outline" onclick="$('upload-dir-input').click()">📁 <span data-i18n="sys.upload_folder">Upload Folder</span></button>
     </div>
   </div>
   <div class="card">
-    <h2>LittleFS Recovery</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.</p>
-    <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5">
+    <h2 data-i18n="sys.fs_recovery">LittleFS Recovery</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.fs_recovery_help">Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.</p>
+    <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5" data-i18n-html="sys.fs_recovery_warn">
       ⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above, and download your config using Backup &amp; Restore before proceeding.
     </div>
     <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
     <div class="progress ota" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
     <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doFSOTA()">Upload & Flash</button></div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doFSOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
   </div>
   <div class="card">
-    <h2>Device Logs</h2>
-    <p style="color:var(--dim);font-size:.82rem;margin-bottom:.8rem">Live device log output — buffered in RAM from boot, not written to flash. Last 200 lines. Use auto-refresh to watch in real time.</p>
+    <h2 data-i18n="sys.logs">Device Logs</h2>
+    <p style="color:var(--dim);font-size:.82rem;margin-bottom:.8rem" data-i18n="sys.logs_help">Live device log output — buffered in RAM from boot, not written to flash. Last 200 lines. Use auto-refresh to watch in real time.</p>
     <pre id="log-output" style="background:#0d0d0d;color:#bbb;font-family:'Courier New',Courier,monospace;font-size:.73rem;line-height:1.45;padding:.8rem;border-radius:6px;height:300px;overflow-y:auto;margin:0 0 .8rem;white-space:pre-wrap;word-break:break-all;border:1px solid #222"></pre>
     <div class="btn-group">
-      <button class="btn btn-outline" id="log-auto-btn" onclick="toggleLogAuto()">Auto-refresh</button>
-      <button class="btn btn-outline" onclick="refreshLogs()">Refresh</button>
-      <button class="btn btn-outline" onclick="clearLogs()">Clear</button>
+      <button class="btn btn-outline" id="log-auto-btn" onclick="toggleLogAuto()" data-i18n="sys.auto_refresh">Auto-refresh</button>
+      <button class="btn btn-outline" onclick="refreshLogs()" data-i18n="sys.refresh">Refresh</button>
+      <button class="btn btn-outline" onclick="clearLogs()" data-i18n="sys.clear">Clear</button>
     </div>
   </div>
   <!-- ── Setup AP ──────────────────────────────────────────────── -->
   <div class="card">
-    <h2>Setup AP</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">
+    <h2 data-i18n="sys.setup_ap">Setup AP</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.setup_ap_help">
       8-digit PIN for the <strong>Nextube-Setup</strong> WiFi network.
       Visible on the LCD tubes whenever the AP is broadcasting.
     </p>
     <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
       <code id="ap-pin-display" style="font-size:1.05rem;letter-spacing:.18em;background:rgba(255,255,255,.06);padding:.45rem .8rem;border-radius:6px;min-width:9.5em;text-align:center">••••••••</code>
-      <button class="btn btn-outline" onclick="loadApPin()">Show</button>
-      <button class="btn btn-outline" onclick="regenApPin()">Regenerate</button>
+      <button class="btn btn-outline" onclick="loadApPin()" data-i18n="sys.show">Show</button>
+      <button class="btn btn-outline" onclick="regenApPin()" data-i18n="sys.regenerate">Regenerate</button>
     </div>
   </div>
 
   <!-- ── Admin Authentication ──────────────────────────────────────── -->
   <div class="card" id="auth-mgmt-card">
-    <h2>Admin Authentication</h2>
+    <h2 data-i18n="sys.auth">Admin Authentication</h2>
     <!-- Content rendered dynamically by updateAuthCard() -->
-    <p style="color:var(--dim);font-size:.85rem">Loading…</p>
+    <p style="color:var(--dim);font-size:.85rem" data-i18n="sys.loading">Loading…</p>
   </div>
 
   <div class="card">
-    <h2>Danger Zone</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">
+    <h2 data-i18n="sys.danger">Danger Zone</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.danger_help">
       <strong>Partial Factory Reset</strong> clears your settings (WiFi credentials,
       theme, modes) but preserves the admin password and AP PIN.<br>
       <strong>Full factory reset</strong> additionally clears the admin
       password and AP PIN — device returns to fresh-from-box state.
     </p>
     <div class="btn-group">
-      <button class="btn btn-danger" onclick="if(confirm('Reset ALL settings to factory defaults?\n\nAdmin password and AP PIN are preserved.'))secureFetch('/api/reset',{method:'POST'}).then(()=>toast('Resetting...'))">Partial Factory Reset</button>
-      <button class="btn btn-danger" onclick="doFullFactoryReset()">Full Factory Reset</button>
-      <button class="btn btn-outline" onclick="if(confirm('Reboot the device?'))secureFetch('/api/reboot',{method:'POST'}).then(()=>toast('Rebooting...'))">Reboot Device</button>
+      <button class="btn btn-danger" onclick="doPartialReset()" data-i18n="sys.partial_reset">Partial Factory Reset</button>
+      <button class="btn btn-danger" onclick="doFullFactoryReset()" data-i18n="sys.full_reset">Full Factory Reset</button>
+      <button class="btn btn-outline" onclick="doReboot()" data-i18n="sys.reboot">Reboot Device</button>
     </div>
   </div>
   <div class="card">
-    <h2>About</h2>
+    <h2 data-i18n="sys.about">About</h2>
     <p style="font-size:.85rem;color:var(--dim)">
-      Firmware &nbsp;v<span id="s-fwver" onclick="dbgTap()" style="cursor:default" title=""></span><br>
-      Web UI &nbsp;&nbsp;&nbsp;v<span id="s-spver">--</span><br>
-      Hardware Rev <span id="s-hwver">1.31</span><br>
-      ESP32-WROVER-E · 16MB Flash · 8MB PSRAM<br>
-      <a href="https://github.com/MrToast99/Nextube-Remaster" target="_blank" style="color:var(--hi)">GitHub Repository</a>
+      <span data-i18n="sys.about_firmware">Firmware</span> &nbsp;v<span id="s-fwver" onclick="dbgTap()" style="cursor:default" title=""></span><br>
+      <span data-i18n="sys.about_webui">Web UI</span> &nbsp;&nbsp;&nbsp;v<span id="s-spver">--</span><br>
+      <span data-i18n="sys.about_hw_rev">Hardware Rev</span> <span id="s-hwver">1.31</span><br>
+      <span data-i18n="sys.about_hw_spec">ESP32-WROVER-E · 16MB Flash · 8MB PSRAM</span><br>
+      <a href="https://github.com/MrToast99/Nextube-Remaster" target="_blank" style="color:var(--hi)" data-i18n="sys.github">GitHub Repository</a>
     </p>
     <div id="update-available" style="display:none;background:rgba(80,200,80,.12);border:1px solid rgba(80,200,80,.4);border-radius:6px;padding:.6rem .9rem;margin:.6rem 0;font-size:.83rem">
-      New release available: <strong>v<span id="update-version"></span></strong> —
-      <a id="update-url" href="#" target="_blank" style="color:var(--hi)">Download from GitHub</a>
+      <span data-i18n="sys.update_available">New release available:</span> <strong>v<span id="update-version"></span></strong> —
+      <a id="update-url" href="#" target="_blank" style="color:var(--hi)" data-i18n="sys.update_download">Download from GitHub</a>
     </div>
     <div class="btn-group" style="margin-top:.5rem">
-      <button id="check-updates-btn" class="btn btn-outline" onclick="checkForUpdates()">Check for Updates</button>
+      <button id="check-updates-btn" class="btn btn-outline" onclick="checkForUpdates()" data-i18n="sys.check_updates">Check for Updates</button>
     </div>
   </div>
 
@@ -1320,6 +1354,346 @@ const $ = id => document.getElementById(id);
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 let cfg = {};
 
+/* ── Web UI internationalisation (i18n) ──────────────────────────────────
+ * Per-browser UI language, stored in localStorage — independent of the
+ * on-device "Display language" config (which only controls the tube-6 weekday
+ * text).  Tag markup declaratively:
+ *   data-i18n="key"       → element.textContent
+ *   data-i18n-html="key"  → element.innerHTML   (strings containing markup)
+ *   data-i18n-ph="key"    → element.placeholder
+ *   data-i18n-title="key" → element.title
+ * Dynamic JS strings call tr("key", ...subs) with {0},{1}… placeholders.
+ * English is always the fallback for any key missing in another language.
+ * Translation tables are populated per tab in the I18N object; English is the
+ * canonical source and every other language overrides the keys it provides. */
+const UI_LANGS = [
+  ["en","English"],["da","Dansk"],["de","Deutsch"],["es","Español"],
+  ["fr","Français"],["it","Italiano"],["nl","Nederlands"],["no","Norsk"],
+  ["pt","Português"],["fi","Suomi"],["sv","Svenska"]
+];
+const I18N = {
+  en: {
+    "header.manager":"Manager",
+    "conn.connecting":"Connecting…","conn.connected":"Connected","conn.offline":"Offline",
+    "banner.unsaved":"You have unsaved changes.","btn.save_now":"Save Now",
+    "banner.reboot":"Restart required — some changes won't take effect until the device reboots.",
+    "btn.save_reboot":"Save & Reboot",
+    "tab.dashboard":"Dashboard","tab.display":"Display","tab.network":"Network",
+    "tab.services":"Services","tab.hardware":"Hardware","tab.system":"System"
+  }
+};
+
+/* ── Translation batch: Dashboard tab ────────────────────────────────────
+ * Each tab's strings are merged in its own block so coverage can grow tab by
+ * tab.  Brand names (YouTube/Instagram/TikTok/Mastodon) are English-only and
+ * resolve through the fallback, so non-English tables omit them. */
+Object.assign(I18N.en, {
+  "dash.local_time":"Local Time","dash.mode":"Mode","dash.weather":"Weather",
+  "dash.local_sensor":"Local Sensor","dash.subscribers":"Subscribers",
+  "dash.free_heap":"Free Heap","dash.quick_actions":"Quick Actions",
+  "mode.clock":"Clock","mode.countdown":"Countdown","mode.pomodoro":"Pomodoro",
+  "mode.date":"Date","mode.album":"Album","mode.weather":"Weather","mode.spectrum":"Spectrum",
+  "mode.youtube":"YouTube","mode.instagram":"Instagram","mode.tiktok":"TikTok","mode.mastodon":"Mastodon"
+});
+
+/* ── Translation batch: Display tab ──────────────────────────────────────
+ * Shared opt.* and btn.* keys are reused by the Network/Services tabs too. */
+Object.assign(I18N.en, {
+  "disp.settings":"Display Settings","disp.theme":"Theme","disp.time_format":"Time Format",
+  "opt.24h":"24 Hour","opt.24h_ns":"24 Hour (No Sec)","opt.24h_cx":"24 Hour (Custom)","opt.12h":"12 Hour",
+  "disp.leading_zero":"Show leading zero","disp.leading_zero_hint":"(e.g. 09:30 instead of 9:30)",
+  "disp.notify_update":"Enable clock face update notification",
+  "disp.notify_update_hint":"(shows a 2-row red indicator at the bottom of tube 6 when a firmware update is available)",
+  "disp.tube6_display":"Tube 6 Display","opt.blank":"Blank","opt.weather_icon":"Weather Icon",
+  "disp.lcd_brightness":"LCD Brightness","disp.night_brightness":"Night Brightness",
+  "disp.night_lcd_brightness":"Night LCD Brightness","disp.night_start":"Night starts at","disp.night_end":"Night ends at",
+  "disp.night_ntp_note":"NTP time must be synced for this to work.","disp.led_brightness":"LED Brightness",
+  "disp.advanced":"Advanced Display",
+  "disp.theme_rotation":"Theme Rotation",
+  "disp.theme_rotation_desc":"Automatically cycles through themes on a timer. Choose which themes to include, or leave all checked to rotate every installed theme.",
+  "disp.enable_theme_rotation":"Enable Theme Rotation","disp.interval_per_theme":"Interval per theme:","disp.themes_to_include":"Themes to include:",
+  "opt.15s":"15 seconds","opt.30s":"30 seconds","opt.1min":"1 minute","opt.2min":"2 minutes","opt.5min":"5 minutes",
+  "opt.10min":"10 minutes","opt.30min":"30 minutes","opt.1hour":"1 hour","opt.2hours":"2 hours","opt.4hours":"4 hours",
+  "btn.all":"All","btn.none":"None",
+  "disp.led_accent":"LED Accent Lighting","disp.mode":"Mode",
+  "opt.static":"Static","opt.breath":"Breath","opt.rainbow":"Rainbow","opt.off":"Off","opt.wled":"WLED Controller",
+  "disp.effect_speed":"Effect speed","disp.led_colours":"LED Colours (click to change)","disp.set_all_tubes":"Set all tubes:","disp.apply_to_all":"Apply to All",
+  "disp.spectrum_mode":"Spectrum Mode",
+  "disp.spectrum_desc":"Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left → treble right).",
+  "disp.enabled_modes":"Enabled Modes",
+  "disp.enabled_modes_desc":"Choose which modes are accessible via the touch buttons. Clock and Date can both be enabled at the same time.",
+  "disp.hint_time":"(time)","disp.hint_full_date":"(full date)","disp.hint_mic_restart":"(mic — restart required)",
+  "disp.mode_rotation":"Mode Rotation",
+  "disp.mode_rotation_desc":"When enabled, the device automatically cycles through modes on a timer. Choose which modes to include, or leave all checked to rotate every enabled mode. When disabled, the mode only changes via the Quick Actions buttons or the physical touch buttons.",
+  "disp.enable_auto_rotation":"Enable Auto Rotation","disp.interval_per_mode":"Interval per mode:","disp.modes_to_include":"Modes to include & weight:",
+  "disp.burnin":"Scheduled Anti Burn-in / LCD Refresh",
+  "disp.burnin_desc":"Automatically runs a burn-in recovery session at the configured schedule, then returns to normal display. No user action is required — the device fires autonomously while powered on.",
+  "disp.save":"Save Display Settings"
+});
+/* ── Translation batch: Network tab (English baseline; other langs in /lang) ── */
+Object.assign(I18N.en, {
+  "net.wifi_config":"WiFi Configuration","net.password":"Password","net.hostname":"Hostname",
+  "net.requires_reboot":"Requires reboot to take effect.",
+  "net.mdns":"Advertise via mDNS (.local)",
+  "net.mdns_hint":"When off, device is reachable by IP only — no <code>nextube-remaster.local</code> resolution. <strong>Restart required.</strong>",
+  "net.save_connect":"Save & Connect","net.scan":"Scan Networks",
+  "net.date":"Date","net.date_format":"Date format",
+  "net.datefmt_dmy":"DD/MM/YY  (day / month / year)","net.datefmt_mdy":"MM/DD/YY  (month / day / year)",
+  "net.display_language":"Display language",
+  "net.display_language_hint":"Language of the day-of-week text shown on tube 6 (Week/Date panel). The web interface language is set separately, top-right.",
+  "net.timezone":"Time Zone","net.region":"Region","net.filter_tz":"Filter timezones…","net.tz_loading":"Loading timezone list…",
+  "net.posix_tz":"POSIX TZ string","net.posix_tz_hint":"(auto-filled by region, or enter manually)",
+  "net.posix_tz_format":"Format: STD offset [DST [offset],start[/time],end[/time]] — supports automatic DST transitions",
+  "net.ntp_servers":"NTP Servers","net.optional":"(optional)","net.leave_blank":"leave blank to skip","net.save":"Save"
+});
+/* ── Translation batch: Services tab (pass 1 — Weather/MQTT/WLED/Timer/Album) ── */
+Object.assign(I18N.en, {
+  "svc.weather":"Weather","svc.weather_enable":"Enable weather",
+  "svc.weather_enable_hint":"Periodic weather data fetch. Disabling frees ~8 KB RAM and stops HTTPS calls. <strong>Restart required.</strong>",
+  "svc.source":"Source",
+  "svc.wsrc_wttr":"wttr.in – free, no key needed","svc.wsrc_openmeteo":"Open-Meteo – free, no key needed",
+  "svc.wsrc_metno":"Met.no – free, no key needed","svc.wsrc_openweather":"OpenWeatherMap – free API key required",
+  "svc.api_key":"API Key","svc.city":"City","svc.city_ph":"City name","svc.units":"Units",
+  "opt.celsius":"Celsius","opt.fahrenheit":"Fahrenheit",
+  "svc.panel_rotation":"Panel Rotation (seconds)","svc.display_panels":"Display Panels",
+  "svc.wx_temperature":"Temperature","svc.wx_humidity":"Humidity","svc.wx_sunrise":"Sunrise & Sunset",
+  "svc.wx_one_panel":"At least one panel must remain enabled.",
+  "svc.mqtt":"Home Assistant MQTT","svc.enable":"Enable","svc.restart_required":"(restart required)",
+  "svc.broker":"Broker","svc.broker_ph":"192.168.1.x or hostname","svc.port":"Port",
+  "svc.username":"Username","svc.username_anon":"(leave blank for anonymous)",
+  "svc.mqtt_discovery":"Publish Home Assistant auto-discovery payloads",
+  "svc.mqtt_help":"Exposes temperature, humidity (SHT30), display mode, backlight on/off, and brightness as HA entities. Uses MQTT auto-discovery — no manual HA configuration required. Uses plain <code>mqtt://</code> (no TLS).",
+  "svc.wled":"WLED Sync","svc.wled_enable":"Enable listener task","svc.udp_port":"UDP Port","svc.udp_port_hint":"(default 21324)",
+  "svc.wled_help":"Listens for <strong>WLED UDP Notifier v2</strong> broadcasts on your LAN and mirrors the primary colour & brightness to Nextube's accent LEDs. Requires <strong>WLED Controller</strong> to be selected as the LED Accent Lighting mode (Display tab).<br>On each WLED device: <strong>Config → Sync Interfaces → UDP Sync → Send on direct change ✓</strong> — no target IP needed, WLED broadcasts to the whole subnet.",
+  "svc.timer":"Timer Settings","svc.countdown_dur":"Countdown Duration (minutes)",
+  "svc.pomo_work":"Pomodoro Work Duration (minutes)","svc.pomo_break":"Pomodoro Break Duration (minutes)",
+  "svc.album":"Album Settings","svc.slide_dur":"Slide Duration (ms)",
+  "svc.shuffle":"Shuffle — randomise playback order on each album load",
+  "svc.save":"Save Services"
+});
+/* ── Translation batch: Services tab (pass 2 — Social Media Counters) ── */
+Object.assign(I18N.en, {
+  "svc.social":"Social Media Counters","svc.social_master_hint":"(restart required — master switch for all social counters)",
+  "svc.polling_interval":"Polling Interval","svc.polling_interval_hint":"(minutes between fetches)","svc.presets":"Presets:",
+  "svc.polling_help":"Applies to all platforms. Minimum 5 minutes. Changes take effect after the current sleep expires or reboot.",
+  "svc.fetch_now":"Fetch Now",
+  "svc.relay_host":"Relay host","svc.relay_host_hint":"(LAN IP of PC running social_relay.py)","svc.relay_host_ph":"e.g. 192.168.1.100",
+  "svc.relay_help":"Run <code>python helpers/social_relay/social_relay.py</code> on any PC on your network and paste the IP here. Used by YouTube and TikTok when their fetch method is set to Relay.",
+  "svc.relay_warn":"⚠ Relay host is required — one or more platforms above use <strong>Relay</strong> as their fetch method but no host is set. Enter the IP shown when you run <code>social_relay.py</code>, or switch the fetch method to a non-relay option.",
+  "svc.yt_enable":"Enable YouTube / Bilibili",
+  "svc.yt_enable_hint":"Periodic subscriber-count fetch. Disabling frees ~8 KB RAM. <strong>Restart required.</strong>",
+  "svc.platform":"Platform","svc.yt_channel_id":"YouTube Channel ID",
+  "svc.yt_id_warn":"⚠ Channel ID is required. Find yours at <a href=\"https://www.youtube.com/account_advanced\" target=\"_blank\">youtube.com/account_advanced</a>.",
+  "svc.fetch_method":"Fetch method",
+  "svc.yt_method_relay":"Relay — no API key needed (recommended)","svc.yt_method_apikey":"YouTube Data API v3 key",
+  "svc.relay_method_hint":"Uses <code>social_relay.py</code> — set the relay host above.",
+  "svc.yt_key_hint":"Free API key from <a href=\"https://console.cloud.google.com\" target=\"_blank\">console.cloud.google.com</a> → Enable \"YouTube Data API v3\" → Credentials → API Key.",
+  "svc.yt_key_warn":"⚠ Paste your YouTube Data API v3 key above.",
+  "svc.bili_uid":"Bilibili UID","svc.bili_warn":"⚠ Bilibili UID is required for the follower counter to work.",
+  "svc.ig_enable":"Enable Instagram follower counter",
+  "svc.fetch_follower_hint":"Fetches public follower count. <strong>Restart required.</strong>",
+  "svc.no_at_prefix":"(no @ prefix)","svc.username_ph":"username",
+  "svc.ig_method_internal":"Internal — direct Instagram API","svc.ig_method_relay":"Relay — via social_relay.py",
+  "svc.ig_internal_hint":"Calls Instagram's internal API directly. No relay needed, but may return 401 if rate-limited.",
+  "svc.username_warn":"⚠ Username is required for the follower counter to work.",
+  "svc.tt_enable":"Enable TikTok follower counter",
+  "svc.tt_method_relay":"Relay — no API key needed (recommended)","svc.tt_method_apikey":"TikTok Research API token",
+  "svc.tt_key_hint":"Apply for Research API access at <a href=\"https://developers.tiktok.com\" target=\"_blank\">developers.tiktok.com</a> → Research API → Client Token.",
+  "svc.tt_token":"Research API Bearer Token","svc.tt_key_warn":"⚠ Paste your TikTok Research API bearer token above.",
+  "svc.mast_enable":"Enable Mastodon follower counter",
+  "svc.mast_enable_hint":"Uses the official public API — no authentication or relay needed. <strong>Restart required.</strong>",
+  "svc.instance":"Instance","svc.domain_only":"(domain only)","svc.mast_warn":"⚠ Both username and instance are required."
+});
+/* ── Translation batch: Hardware tab ── */
+Object.assign(I18N.en, {
+  "hw.sht30":"Indoor Sensor (SHT30)","hw.temp_offset":"Temperature Offset",
+  "hw.audio":"Audio Settings","hw.enable_audio":"Enable audio output","hw.volume":"Volume",
+  "hw.music_file":"Clock Music File","hw.bell":"Bell Sound","hw.tone":"Tone Sound (Pomodoro/Countdown)",
+  "hw.timer_sound":"Timer Sound","hw.click_sound":"Button Click Sound","hw.test":"Test",
+  "hw.enable_click":"Enable click sound on button press","hw.save":"Save Hardware"
+});
+/* ── Translation batch: System tab (main cards; hidden debug panel left EN) ── */
+Object.assign(I18N.en, {
+  "sys.ota":"Firmware Update (OTA)",
+  "sys.ota_help":"Upload <strong>nextube-fw-ota.bin</strong> for over-the-air updates. Do <strong>not</strong> upload <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.",
+  "sys.upload_flash":"Upload & Flash",
+  "sys.webui_update":"Web UI Update",
+  "sys.webui_help":"Upload <strong>nextube-WebUI-v*.zip</strong> to apply only the changed web UI files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.",
+  "sys.upload_apply":"Upload & Apply",
+  "sys.backup":"Backup & Restore",
+  "sys.backup_help":"Download your current configuration to a file or restore it from a backup. Recommended before any LittleFS recovery flash.",
+  "sys.download_config":"Download config.json","sys.restore_file":"Restore from File",
+  "sys.fs_storage":"LittleFS Storage","sys.fs_files":"LittleFS Files",
+  "sys.browse":"Browse","sys.refresh":"Refresh","sys.new_folder":"New Folder","sys.upload_files":"Upload File(s)","sys.upload_folder":"Upload Folder",
+  "sys.fs_recovery":"LittleFS Recovery",
+  "sys.fs_recovery_help":"Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.",
+  "sys.fs_recovery_warn":"⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above, and download your config using Backup & Restore before proceeding.",
+  "sys.logs":"Device Logs",
+  "sys.logs_help":"Live device log output — buffered in RAM from boot, not written to flash. Last 200 lines. Use auto-refresh to watch in real time.",
+  "sys.auto_refresh":"Auto-refresh","sys.clear":"Clear",
+  "sys.setup_ap":"Setup AP",
+  "sys.setup_ap_help":"8-digit PIN for the <strong>Nextube-Setup</strong> WiFi network. Visible on the LCD tubes whenever the AP is broadcasting.",
+  "sys.show":"Show","sys.regenerate":"Regenerate",
+  "sys.auth":"Admin Authentication","sys.loading":"Loading…",
+  "sys.danger":"Danger Zone",
+  "sys.danger_help":"<strong>Partial Factory Reset</strong> clears your settings (WiFi credentials, theme, modes) but preserves the admin password and AP PIN.<br><strong>Full factory reset</strong> additionally clears the admin password and AP PIN — device returns to fresh-from-box state.",
+  "sys.partial_reset":"Partial Factory Reset","sys.full_reset":"Full Factory Reset","sys.reboot":"Reboot Device",
+  "sys.about":"About","sys.github":"GitHub Repository","sys.check_updates":"Check for Updates"
+});
+/* ── Translation batch: Advanced Display sub-panel ── */
+Object.assign(I18N.en, {
+  "adv.intro":"Panel correction settings for replacement screens. The LCD Brightness and Night Brightness sliders above apply uniformly to all tubes as a group; the individual trim below scales each tube within that baseline.",
+  "adv.gamma":"Gamma Correction",
+  "adv.gamma_desc":"Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and colour depth on panels with a flat native response. Try <b>1.8–2.2</b> for washed replacement panels. Takes effect after Save.",
+  "adv.profile":"Panel Profile",
+  "adv.profile_desc":"<b>Profile</b> selects the hardware gamma curve. <b>VCOM</b> (0–63) sets the AC driving voltage — higher values increase contrast and colour depth. For ST7735S replacement panels (e.g. LH096NT-IF09W) start with Profile <b>Vivid</b> + VCOM <b>40</b>, then tune: raise toward 60 if still washed, lower toward 25 if over-saturated. Changes take effect after Save.",
+  "adv.tube":"Tube","adv.profile_col":"Profile (gamma)","adv.vcom_col":"VCOM (0–63)",
+  "adv.standard":"Standard","adv.vivid":"Vivid",
+  "adv.inversion":"Colour Inversion",
+  "adv.inversion_desc":"Enable for any tube whose replacement screen shows a photo-negative image. Sends INVON immediately — no reboot needed.",
+  "adv.offset":"Window Offset",
+  "adv.offset_desc":"Shift the pixel window to fix 1 px static at the right/bottom edge of replacement panels. ST7735S variants (e.g. LH096NT-IF09W) typically need Col +2 / Row +1.",
+  "adv.col_header":"Col","adv.row_header":"Row",
+  "adv.brightness_trim":"Individual Brightness Trim",
+  "adv.brightness_trim_desc":"Scale each tube's pixels relative to the group LCD Brightness above. Use when one replacement panel is noticeably brighter or dimmer than the others (100 = no change)."
+});
+/* ── Translation batch: Spectrum Mode card ── */
+Object.assign(I18N.en, {
+  "spec.led_src":"LED Source",
+  "spec.led_src_custom":"Custom glow colour (amplitude-modulated)",
+  "spec.led_src_follow":"Follow accent mode (Static / Breath / Rainbow / Off)",
+  "spec.led_color_label":"LED Glow Colour","spec.led_color_hint":"Amplitude-modulated LED ring colour in Spectrum mode",
+  "spec.lcd_color_label":"LCD Bar Colour","spec.lcd_color_hint":"Bar colour for the LCD spectrum display",
+  "spec.capture_baseline_btn":"📸 Capture Baseline","spec.reset_auto_btn":"↺ Reset to Auto",
+  "spec.capture_help":"While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.",
+  "spec.capture_warn":"⚠️ <strong>Switch away from Spectrum mode before capturing.</strong> In Spectrum mode the mic is continuously processing live audio — this interferes with baseline capture and will cause a timeout error. Switch to Clock or any other mode first, then capture.",
+  "spec.noise_floor":"Noise Floor",
+  "spec.noise_floor_hint":"— raise to ignore board noise and room hum; lower to catch quieter sounds",
+  "spec.gate_help":"0 = gate off (always display). Default 250. Slider caps at 1000; type directly for higher values."
+});
+/* ── Translation batch: WLED hint + Mode Rotation weight + Burn-in scheduled ── */
+Object.assign(I18N.en, {
+  "disp.wled_hint":"<strong style=\"color:var(--text)\">WLED Controller mode:</strong> Accent LEDs will mirror the primary colour and brightness of any WLED device on your network. Enable the <em>WLED Sync</em> service (Services tab) so the listener task starts on next boot, then configure your WLED device: <strong>Config → Sync Interfaces → UDP Sync → Send on direct change ✓</strong>. No target IP needed — WLED broadcasts to the whole subnet.",
+  "disp.rot_weight_help":"The <strong style=\"color:var(--text)\">×</strong> value is a dwell multiplier applied to the base interval above. A weight of <strong style=\"color:var(--text)\">10</strong> keeps that mode on-screen 10× longer than a weight-1 mode. Example: Clock&nbsp;×20, others&nbsp;×1 with a 1&nbsp;min interval → Clock shows for 20&nbsp;min between each 1&nbsp;min peek at other modes.",
+  "disp.bi_enable":"Enable Scheduled Anti Burn-in / LCD Refresh",
+  "disp.bi_schedule":"Schedule:","disp.bi_weekly":"Weekly — every Sunday","disp.bi_monthly":"Monthly — 1st of month",
+  "disp.bi_at":"at","disp.bi_duration":"Duration:",
+  "opt.3hours":"3 hours",
+  "disp.bi_mode_label":"Mode:","disp.bi_mode_cycle":"Colour-cycle (R→G→B→W→K)","disp.bi_mode_snow":"Snow (random pixel noise)",
+  "disp.bi_tubes":"Tubes:"
+});
+/* ── Translation batch: SHT30 dynamic help ── */
+Object.assign(I18N.en, {
+  "hw.sht30_unit_c":"(°C, added to raw reading)","hw.sht30_unit_f":"(°F, added to raw reading)",
+  "hw.sht30_help_c":"The SHT30 sits inside the same enclosure as the ESP32 and typically reads <strong>2–5 °C</strong> high due to self-heating. Enter a negative value to subtract (e.g. <code>-3.5</code>). The unit follows <em>Network → Temperature Unit</em> and is converted to °C internally. Takes effect immediately on save — no restart required.",
+  "hw.sht30_help_f":"The SHT30 sits inside the same enclosure as the ESP32 and typically reads <strong>3–9 °F</strong> high due to self-heating. Enter a negative value to subtract (e.g. <code>-6.0</code>). The unit follows <em>Network → Temperature Unit</em> and is converted to °F internally. Takes effect immediately on save — no restart required."
+});
+/* ── Translation batch: About section + update banner ── */
+Object.assign(I18N.en, {
+  "sys.about_firmware":"Firmware","sys.about_webui":"Web UI",
+  "sys.about_hw_rev":"Hardware Rev","sys.about_hw_spec":"ESP32-WROVER-E · 16MB Flash · 8MB PSRAM",
+  "sys.update_available":"New release available:","sys.update_download":"Download from GitHub"
+});
+/* ── Translation batch: Auth card (dynamic, rendered by updateAuthCard()) ── */
+Object.assign(I18N.en, {
+  "auth.disabled_desc":"Authentication is currently <strong>disabled</strong>. Anyone on the network can access and change all settings. Set a password to restrict access.",
+  "auth.enabled_desc":"Authentication is currently <strong>enabled</strong>. A password is required to change any settings.",
+  "auth.new_pw_ph":"New password (6-64 chars)","auth.confirm_pw_ph":"Confirm password",
+  "auth.enable_btn":"Enable Authentication","auth.change_pw_btn":"Change password",
+  "auth.sign_out_btn":"Sign out","auth.disable_btn":"Disable Authentication",
+  "auth.pw_length_err":"Password must be 6-64 characters","auth.pw_mismatch":"Passwords don't match",
+  "auth.working":"Working…","auth.network_err":"Network error",
+  "auth.enter_pw_prompt":"Enter your current password to disable authentication:",
+  "auth.pw_required":"Password required","auth.wrong_pw":"Wrong password"
+});
+/* ── Translation batch: dynamic JS strings (toasts, status, prompts) ── */
+Object.assign(I18N.en, {
+  "js.themes_refreshed":"Themes refreshed ({0} found)","js.themes_no_new":"No new themes found on device — showing defaults",
+  "js.themes_err":"Could not reach /api/themes — showing defaults",
+  "js.rebooting":"Rebooting…","js.resetting":"Resetting…",
+  "js.api_error_http":"API error: HTTP {0}","js.api_error":"API error: {0}",
+  "js.relay_host_required":"Set a relay host before saving — see the warning in Social Media Counters.",
+  "js.settings_saved_rebooting":"Settings saved — rebooting…","js.settings_saved":"Settings saved!","js.save_failed":"Save failed",
+  "js.mode_prefix":"Mode: ","js.failed":"Failed",
+  "js.refreshing_counters":"Refreshing counters… check back in a few seconds","js.refresh_failed":"Refresh request failed",
+  "js.scanning":"Scanning…","js.no_file_path":"No file path set",
+  "js.playing":"▶ Playing…","js.playback_failed":"Playback failed",
+  "js.ota_wrong_file":"Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin",
+  "js.ota_complete":"OTA complete! Rebooting…","js.ota_failed":"OTA failed: {0}",
+  "js.ota_conn_lost":"OTA complete — device rebooting…","js.ota_stalled":"OTA failed: upload stalled at {0}%",
+  "js.fs_updated":"LittleFS updated! Rebooting…","js.fs_failed":"LittleFS update failed: {0}",
+  "js.fs_conn_lost":"LittleFS updated — device rebooting…","js.fs_stalled":"LittleFS update failed: upload stalled at {0}%",
+  "js.webui_patched":"WebUI patch applied — {0} file(s) updated",
+  "js.webui_patch_failed":"WebUI patch failed: {0}","js.webui_patch_err":"WebUI patch failed","js.webui_patch_net_err":"WebUI patch failed: network error",
+  "js.folder_create_failed":"Failed to create folder",
+  "js.renamed_to":"Renamed to {0}","js.rename_failed":"Rename failed",
+  "js.deleted":"Deleted {0}","js.delete_failed":"Delete failed","js.delete_error":"Delete error: {0}",
+  "js.auth_enabled":"Authentication enabled","js.auth_disabled":"Authentication disabled",
+  "js.wrong_pw":"Wrong password","js.pw_required":"Password required",
+  "js.fetch_settings_failed":"Could not fetch settings",
+  "js.network_err":"Network error","js.sign_in_required":"Sign in required",
+  "js.mic_countdown":"Starting in {0}… stay quiet","js.mic_capturing":"Capturing… (keep room quiet)",
+  "js.mic_saved":"✓ Baseline saved — boots instantly from now on",
+  "js.mic_reset_ok":"↺ Auto-calibration restarted (~4 s ramp on next boot)",
+  "js.pw_saved_ph":"(saved — leave blank to keep)","js.enter_pw_ph":"Enter password",
+  "js.confirm_partial_reset":"Reset ALL settings to factory defaults?\n\nAdmin password and AP PIN are preserved.",
+  "js.confirm_reboot":"Reboot the device?"
+});
+let uiLang = "en";
+/* Only English is inlined (the baseline + guaranteed fallback); every other
+ * language is lazy-loaded once from /lang/<code>.json and cached here.  This
+ * keeps index.html small and means the browser only ever downloads the one
+ * language actually in use. */
+const LANG_LOADED = { en: true };
+/* Translation lookup — named tr() (not t()) on purpose: several functions in
+ * this file use `const t = …` as a local (e.g. toast()), which would shadow a
+ * global named t and silently break translation calls added inside them. */
+function tr(key, ...subs) {
+  let s = (I18N[uiLang] && I18N[uiLang][key] != null) ? I18N[uiLang][key]
+        : (I18N.en[key] != null ? I18N.en[key] : key);
+  for (let i = 0; i < subs.length; i++) s = s.split("{" + i + "}").join(subs[i]);
+  return s;
+}
+function applyI18n(root) {
+  root = root || document;
+  root.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = tr(el.getAttribute("data-i18n")); });
+  root.querySelectorAll("[data-i18n-html]").forEach(el => { el.innerHTML = tr(el.getAttribute("data-i18n-html")); });
+  root.querySelectorAll("[data-i18n-ph]").forEach(el => { el.placeholder = tr(el.getAttribute("data-i18n-ph")); });
+  root.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = tr(el.getAttribute("data-i18n-title")); });
+}
+/* Lazy-load a language pack from /lang/<code>.json (cached after first load).
+ * Returns false on ANY failure so callers can fall back to English — including
+ * the case where the static-file handler serves index.html for a missing file
+ * (HTTP 200 with an HTML body), which makes r.json() throw. */
+async function loadLang(lang) {
+  if (lang === "en" || LANG_LOADED[lang]) return true;
+  try {
+    const r = await fetch("/lang/" + lang + ".json");
+    if (!r.ok) return false;
+    const data = await r.json();
+    if (!data || typeof data !== "object") return false;
+    I18N[lang] = Object.assign(I18N[lang] || {}, data);
+    LANG_LOADED[lang] = true;
+    return true;
+  } catch (_) { return false; }
+}
+async function setUiLang(lang) {
+  if (!UI_LANGS.some(([c]) => c === lang)) lang = "en";
+  if (lang !== "en" && !(await loadLang(lang))) lang = "en";   /* fetch/parse failed → English */
+  uiLang = lang;
+  try { localStorage.setItem("nextube_ui_lang", lang); } catch(_) {}
+  document.documentElement.setAttribute("lang", lang);
+  const sel = $("ui-lang"); if (sel) sel.value = lang;
+  applyI18n();
+}
+function initUiLang() {
+  let lang = null;
+  try { lang = localStorage.getItem("nextube_ui_lang"); } catch(_) {}
+  if (!lang) { const n = (navigator.language || "en").slice(0,2).toLowerCase(); if (UI_LANGS.some(([c]) => c === n)) lang = n; }
+  setUiLang(lang || "en");   /* async — fire-and-forget on boot */
+}
+document.addEventListener("DOMContentLoaded", initUiLang);
+
 /* ── Toast ─────────────────────────────────────────── */
 /* action = optional {label:'…', fn: async fn} — adds a button and keeps the
  * toast visible for 12 s instead of 3 s.  Pass warn=true for amber styling. */
@@ -1359,7 +1733,7 @@ function clearRebootBanner() {
 async function saveAndReboot() {
   await saveSettings();
   clearRebootBanner();
-  secureFetch('/api/reboot', { method: 'POST' }).then(() => toast('Rebooting…'));
+  secureFetch('/api/reboot', { method: 'POST' }).then(() => toast(tr('js.rebooting')));
 }
 
 /* ── Weather panel enable guard (at least one must remain on) ── */
@@ -1476,11 +1850,11 @@ async function secureFetch(url, opts) {
 async function api(path, opts) {
   try {
     const r = await secureFetch('/api/' + path, opts);
-    if (!r.ok) { toast('API error: HTTP ' + r.status, true); return null; }
+    if (!r.ok) { toast(tr('js.api_error_http', r.status), true); return null; }
     return await r.json();
   } catch(e) {
     if (e.message === 'unauthorized') return null;   /* handled by login modal */
-    toast('API error: ' + e.message, true);
+    toast(tr('js.api_error', e.message), true);
     return null;
   }
 }
@@ -1515,12 +1889,12 @@ async function loadThemes(manual) {
       s_themes = themes;
       populateThemes(themes);
       buildThemeRotList();   /* refresh rotation checkboxes if card is visible */
-      if (manual) toast('Themes refreshed (' + themes.length + ' found)');
+      if (manual) toast(tr('js.themes_refreshed', themes.length));
     } else if (manual) {
-      toast('No new themes found on device — showing defaults');
+      toast(tr('js.themes_no_new'));
     }
   } catch(_) {
-    if (manual) toast('Could not reach /api/themes — showing defaults', true);
+    if (manual) toast(tr('js.themes_err'), true);
   }
 }
 
@@ -1588,10 +1962,10 @@ async function loadSettings() {
   $('f-pass').value = '';
   if (cfg.has_password) {
     $('f-pass').type        = 'password';
-    $('f-pass').placeholder = '(saved — leave blank to keep)';
+    $('f-pass').placeholder = tr('js.pw_saved_ph');
   } else {
     $('f-pass').type        = 'text';
-    $('f-pass').placeholder = 'Enter password';
+    $('f-pass').placeholder = tr('js.enter_pw_ph');
   }
   $('f-hostname').value = cfg.hostname || 'nextube-remaster';
   /* Background-feature toggles — default true if key absent so devices
@@ -1642,6 +2016,7 @@ async function loadSettings() {
   $('f-city').value = cfg.City || '';
   $('f-tempfmt').value = cfg.temperature_format || 'Celsius';
   $('f-datefmt').value = cfg.date_format || 'DD/MM/YY';
+  $('f-language').value = cfg.language || 'en';
   $('f-vsite').value = cfg.video_site || 'youtube';
   $('f-ytid').value  = cfg.youtube_id  || '';
   $('f-ytkey').value = cfg.youtube_key || '';
@@ -1725,7 +2100,6 @@ async function loadSettings() {
     if (+rotSel.options[i].value === rotInterval) { bestOpt = rotSel.options[i]; break; }
   }
   rotSel.value = bestOpt.value;
-  $('rot-interval-wrap').style.opacity = rotEnabled ? '1' : '0.4';
   const rotModes   = cfg.rotation_modes || 0;
   const rotWeights = Array.isArray(cfg.rotation_weights) ? cfg.rotation_weights : [];
   document.querySelectorAll('.rot-mode-cb').forEach(cb => {
@@ -1739,7 +2113,7 @@ async function loadSettings() {
     inp.value = w;
   });
   updateRotWeightStates();
-  $('rot-modes-wrap').style.opacity = rotEnabled ? '1' : '0.4';
+  onRotToggle();   /* sets opacity + pointer-events for both rotation wrappers */
 
   /* Theme rotation */
   const themeRotEn = cfg.theme_rotation_enabled === true;
@@ -1751,9 +2125,8 @@ async function loadSettings() {
     if (+trSel.options[i].value === themeRotInt) { trBest = trSel.options[i]; break; }
   }
   trSel.value = trBest.value;
-  $('theme-rot-interval-wrap').style.opacity = themeRotEn ? '1' : '0.4';
   buildThemeRotList(cfg.theme_rotation_themes || []);  /* [] = all themes checked */
-  $('theme-rot-themes-wrap').style.opacity   = themeRotEn ? '1' : '0.4';
+  onThemeRotToggle();   /* sets opacity + pointer-events for both theme-rotation wrappers */
 
   /* Scheduled burn-in */
   {
@@ -2016,16 +2389,16 @@ function updateSht30OffsetUnit(isFahrenheit) {
   const inp = $('f-sht30-offset');
   if (!inp) return;
   inp.dataset.unit = isFahrenheit ? 'F' : 'C';
+  const unitLbl  = $('sht30-offset-unit-lbl');
+  const helpPara = $('sht30-help-para');
   if (isFahrenheit) {
     inp.min = '-36'; inp.max = '36'; inp.step = '0.5';
-    $('sht30-offset-unit-lbl').textContent = '(°F, added to raw reading)';
-    $('sht30-help-range').textContent = '3–9 °F';
-    $('sht30-help-ex').innerHTML = 'e.g. <code>-6.0</code>';
+    if (unitLbl)  unitLbl.textContent = tr('hw.sht30_unit_f');
+    if (helpPara) helpPara.innerHTML  = tr('hw.sht30_help_f');
   } else {
     inp.min = '-20'; inp.max = '20'; inp.step = '0.1';
-    $('sht30-offset-unit-lbl').textContent = '(°C, added to raw reading)';
-    $('sht30-help-range').textContent = '2–5 °C';
-    $('sht30-help-ex').innerHTML = 'e.g. <code>-3.5</code>';
+    if (unitLbl)  unitLbl.textContent = tr('hw.sht30_unit_c');
+    if (helpPara) helpPara.innerHTML  = tr('hw.sht30_help_c');
   }
 }
 /* Called when the temperature format select changes.
@@ -2167,7 +2540,7 @@ function biSchedMask() {
 async function saveSettings() {
   /* Block save when a relay-dependent platform is enabled but no host is set */
   if ($('warn-relay-host') && $('warn-relay-host').style.display !== 'none') {
-    toast('Set a relay host before saving — see the warning in Social Media Counters.');
+    toast(tr('js.relay_host_required'));
     $('f-tiktok-relay').focus();
     return;
   }
@@ -2208,6 +2581,7 @@ async function saveSettings() {
     timezone: $('f-tz').value,
     ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
     date_format: $('f-datefmt').value,
+    language: $('f-language').value,
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_format: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value,
     /* Send empty key when relay method selected so firmware uses the relay path */
@@ -2278,11 +2652,11 @@ async function saveSettings() {
   if (res?.reboot) {
     clearDirty();
     clearRebootBanner();
-    toast('Settings saved — rebooting…');
+    toast(tr('js.settings_saved_rebooting'));
     setTimeout(() => location.reload(), 8000);
     return;
   }
-  toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
+  toast(tr(res?.status === 'ok' ? 'js.settings_saved' : 'js.save_failed'), res?.status !== 'ok');
   if (res?.status === 'ok') {
     clearDirty();
     updateDashboardVisibility(enabledModes);
@@ -2292,7 +2666,7 @@ async function saveSettings() {
     const pwField = $('f-pass');
     if (pwField.value || pwField.type === 'text') {
       pwField.type        = 'password';
-      pwField.placeholder = '(saved — leave blank to keep)';
+      pwField.placeholder = tr('js.pw_saved_ph');
       pwField.value       = '';
     }
     /* Sync the clock-face indicator to the saved setting */
@@ -2307,22 +2681,20 @@ async function setMode(mode) {
   cfg.apps = [{ name:'app1', app: mode, theme: $('f-theme')?.value || 'NixieOY', type: $('f-timetype')?.value || '24H' }];
   const body = { apps: cfg.apps };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-  toast(res?.status === 'ok' ? 'Mode: ' + mode : 'Failed', res?.status !== 'ok');
+  toast(res?.status === 'ok' ? tr('js.mode_prefix') + mode : tr('js.failed'), res?.status !== 'ok');
   refreshStatus();
 }
 
 /* ── Social counter force-refresh ─────────────────── */
 async function socialRefreshNow() {
   const res = await api('social/refresh', { method: 'POST' });
-  toast(res?.status === 'ok'
-        ? 'Refreshing counters… check back in a few seconds'
-        : 'Refresh request failed', res?.status !== 'ok');
+  toast(tr(res?.status === 'ok' ? 'js.refreshing_counters' : 'js.refresh_failed'), res?.status !== 'ok');
 }
 
 /* ── WiFi scan ─────────────────────────────────────── */
 async function scanWifi() {
   await api('wifi/scan', { method:'POST' });
-  toast('Scanning...');
+  toast(tr('js.scanning'));
   setTimeout(async () => {
     const nets = await api('wifi/scan');
     if (!nets) return;
@@ -2338,13 +2710,13 @@ async function scanWifi() {
 /* ── Audio test ────────────────────────────────────── */
 async function testAudio(fieldId) {
   const path = $(fieldId).value.trim();
-  if (!path) return toast('No file path set', true);
+  if (!path) return toast(tr('js.no_file_path'), true);
   const res = await api('audio/play', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ file: path })
   });
-  toast(res?.status === 'ok' ? '▶ Playing…' : 'Playback failed', res?.status !== 'ok');
+  toast(tr(res?.status === 'ok' ? 'js.playing' : 'js.playback_failed'), res?.status !== 'ok');
 }
 
 /* ── Mic noise baseline calibration ───────────────── */
@@ -2362,14 +2734,14 @@ async function micCalibrate() {
     /* 5-second countdown — gives the user time to release the mouse and
      * move away so the click transient isn't captured in the baseline. */
     for (let i = 5; i > 0; i--) {
-      msg.textContent = `Starting in ${i}… stay quiet`;
+      msg.textContent = tr('js.mic_countdown', i);
       await new Promise(res => setTimeout(res, 1000));
     }
 
-    msg.textContent = 'Capturing… (keep room quiet)';
+    msg.textContent = tr('js.mic_capturing');
     const r = await secureFetch('/api/mic/calibrate', { method: 'POST' });
     if (r.ok) {
-      msg.textContent = '✓ Baseline saved — boots instantly from now on';
+      msg.textContent = tr('js.mic_saved');
     } else {
       msg.textContent = '✗ ' + (await r.text());
     }
@@ -2384,7 +2756,7 @@ async function micCalibrate() {
 async function micResetCal() {
   const msg = $('mic-cal-msg');
   const r = await secureFetch('/api/mic/reset_calibration', { method: 'POST' });
-  msg.textContent = r.ok ? '↺ Auto-calibration restarted (~4 s ramp on next boot)' : '✗ Reset failed';
+  msg.textContent = r.ok ? tr('js.mic_reset_ok') : '✗ Reset failed';
 }
 
 /* ── OTA ───────────────────────────────────────────── */
@@ -2396,9 +2768,9 @@ let _otaInProgress = false;
 
 async function doOTA() {
   const file = $('ota-file').files[0];
-  if (!file) return toast('Select a .bin file first', true);
+  if (!file) return toast(tr('js.no_file_path'), true);
   if (file.name.toLowerCase().includes('full')) {
-    return toast('Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin', true);
+    return toast(tr('js.ota_wrong_file'), true);
   }
   /* Pre-flight auth check — must happen before the binary is sent.
    * If the session has expired the server returns 401 and closes the
@@ -2459,10 +2831,10 @@ async function doOTA() {
     if (_xhrHandle401(xhr)) { _otaInProgress = false; return; }
     if (xhr.status === 200) {
       otaDone('fast', 'Rebooting… page reloads in 15 s');
-      toast('OTA complete! Rebooting…');
+      toast(tr('js.ota_complete'));
     } else {
       otaDone(false, 'Failed: ' + (xhr.responseText || xhr.statusText));
-      toast('OTA failed: ' + (xhr.responseText || xhr.statusText), true);
+      toast(tr('js.ota_failed', xhr.responseText || xhr.statusText), true);
     }
   };
 
@@ -2472,10 +2844,10 @@ async function doOTA() {
   xhr.onerror = () => {
     if (uploadPct >= 99.9) {
       otaDone('slow', 'Rebooting… page reloads in 20 s');
-      toast('OTA complete — device rebooting…');
+      toast(tr('js.ota_conn_lost'));
     } else {
       otaDone(false, 'Upload stalled at ' + Math.round(uploadPct) + '% — check WiFi and retry');
-      toast('OTA failed: upload stalled at ' + Math.round(uploadPct) + '%', true);
+      toast(tr('js.ota_stalled', Math.round(uploadPct)), true);
     }
   };
 
@@ -2487,7 +2859,7 @@ async function doOTA() {
 /* ── LittleFS OTA ────────────────────────────────────── */
 async function doFSOTA() {
   const file = $('spiffs-file').files[0];
-  if (!file) return toast('Select a LittleFS .bin file first', true);
+  if (!file) return toast(tr('js.no_file_path'), true);
   if (!file.name.toLowerCase().includes('littlefs')) {
     if (!confirm('File name doesn\'t look like a LittleFS image — upload anyway?')) return;
   }
@@ -2550,10 +2922,10 @@ async function doFSOTA() {
     if (_xhrHandle401(xhr)) { _otaInProgress = false; stat.textContent = 'Sign in required'; return; }
     if (xhr.status === 200) {
       fsDone('fast', 'Rebooting… page reloads in 15 s');
-      toast('LittleFS updated! Rebooting…');
+      toast(tr('js.fs_updated'));
     } else {
       fsDone(false, 'Failed: ' + (xhr.responseText || xhr.statusText));
-      toast('LittleFS update failed: ' + (xhr.responseText || xhr.statusText), true);
+      toast(tr('js.fs_failed', xhr.responseText || xhr.statusText), true);
     }
   };
 
@@ -2562,10 +2934,10 @@ async function doFSOTA() {
   xhr.onerror = () => {
     if (uploadPct >= 99.9) {
       fsDone('slow', 'Rebooting… page reloads in 30 s (LittleFS flash takes time)');
-      toast('LittleFS updated — device rebooting…');
+      toast(tr('js.fs_conn_lost'));
     } else {
       fsDone(false, 'Upload stalled at ' + Math.round(uploadPct) + '% — check WiFi and retry');
-      toast('LittleFS update failed: upload stalled at ' + Math.round(uploadPct) + '%', true);
+      toast(tr('js.fs_stalled', Math.round(uploadPct)), true);
     }
   };
 
@@ -2580,7 +2952,7 @@ async function doFSOTA() {
  * config.json is protected server-side; no reboot needed. */
 function doHotPatch() {
   const file = $('hotpatch-file').files[0];
-  if (!file) return toast('Select a Web UI .zip file first', true);
+  if (!file) return toast(tr('js.no_file_path'), true);
   if (!file.name.toLowerCase().endsWith('.zip')) {
     if (!confirm('File doesn\'t look like a ZIP — upload anyway?')) return;
   }
@@ -2610,19 +2982,19 @@ function doHotPatch() {
         stat.textContent = `✓ ${d.written} file(s) patched: ${names}`;
         if (d.skipped) stat.textContent += `  (${d.skipped} skipped)`;
         if (d.failed)  stat.textContent += `  ⚠️ ${d.failed} failed`;
-        toast(`WebUI patch applied — ${d.written} file(s) updated`);
+        toast(tr('js.webui_patched', d.written));
       } else {
         stat.textContent = 'Failed: ' + (d.error || xhr.statusText);
-        toast('WebUI patch failed: ' + (d.error || xhr.statusText), true);
+        toast(tr('js.webui_patch_failed', d.error || xhr.statusText), true);
       }
     } catch(e) {
       stat.textContent = 'Failed: ' + xhr.statusText;
-      toast('WebUI patch failed', true);
+      toast(tr('js.webui_patch_err'), true);
     }
   };
   xhr.onerror = () => {
-    stat.textContent = 'Network error.';
-    toast('WebUI patch failed: network error', true);
+    stat.textContent = tr('js.network_err');
+    toast(tr('js.webui_patch_net_err'), true);
   };
   xhr.open('POST', '/api/update_fs_hotpatch');
   xhr.setRequestHeader('Content-Type', 'application/zip');
@@ -2710,7 +3082,7 @@ async function mkdirFolder() {
   if (r?.status === 'ok') {
     browseDir(path);
   } else {
-    toast('Failed to create folder', true);
+    toast(tr('js.folder_create_failed'), true);
   }
 }
 
@@ -2726,10 +3098,10 @@ async function renameFolder(path) {
   const r = await api('file/rename?from=' + encodeURIComponent(path) +
                                '&to='   + encodeURIComponent(toPath), { method: 'POST' });
   if (r?.status === 'ok') {
-    toast('Renamed to ' + cleaned);
+    toast(tr('js.renamed_to', cleaned));
     browseDir(s_filePath);
   } else {
-    toast('Rename failed', true);
+    toast(tr('js.rename_failed'), true);
   }
 }
 
@@ -2744,9 +3116,19 @@ async function deleteFile(path) {
   try {
     const r = await secureFetch('/api/file/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
     const d = await r.json();
-    if (d.status === 'ok') { toast('Deleted ' + name); browseDir(s_filePath); }
-    else toast('Delete failed', true);
-  } catch(e) { toast('Delete error: ' + e.message, true); }
+    if (d.status === 'ok') { toast(tr('js.deleted', name)); browseDir(s_filePath); }
+    else toast(tr('js.delete_failed'), true);
+  } catch(e) { toast(tr('js.delete_error', e.message), true); }
+}
+
+/* ── Danger Zone helpers (tr()-aware wrappers for inline-onclick removal) ── */
+function doPartialReset() {
+  if (confirm(tr('js.confirm_partial_reset')))
+    secureFetch('/api/reset', { method: 'POST' }).then(() => toast(tr('js.resetting')));
+}
+function doReboot() {
+  if (confirm(tr('js.confirm_reboot')))
+    secureFetch('/api/reboot', { method: 'POST' }).then(() => toast(tr('js.rebooting')));
 }
 
 /* ── Hidden debug panel ─────────────────────────────────────────────── */
@@ -3152,12 +3534,15 @@ async function refreshStatus() {
   if (_otaInProgress) return;
   const s = await api('status');
   if (!s) {
-    $('conn-status').innerHTML = '<span class="status-dot err"></span>Offline';
+    $('conn-status').innerHTML = '<span class="status-dot err"></span>' + esc(tr('conn.offline'));
     return;
   }
-  $('conn-status').innerHTML = '<span class="status-dot ok"></span>Connected';
+  $('conn-status').innerHTML = '<span class="status-dot ok"></span>' + esc(tr('conn.connected'));
   $('s-time').textContent = s.time ? s.time.split('T')[1] : '--:--';
-  $('s-mode').textContent = s.mode || '--';
+  /* Translate the mode name when a matching mode.* key exists; otherwise show
+   * the raw value the device reported (keeps unknown/future modes readable). */
+  { const mk = 'mode.' + (s.mode || '').toLowerCase();
+    $('s-mode').textContent = s.mode ? (I18N.en[mk] ? tr(mk) : s.mode) : '--'; }
   const _useFahrenheit = (cfg.temperature_format || 'Celsius') === 'Fahrenheit';
   if (s.weather) {
     const _wt = _useFahrenheit ? (s.weather.temp_c * 9 / 5 + 32) : s.weather.temp_c;
@@ -3798,32 +4183,25 @@ function updateAuthCard(adminSet) {
 
   if (!adminSet) {
     card.innerHTML = `
-      <h2>Admin Authentication</h2>
-      <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">
-        Authentication is currently <strong>disabled</strong>.
-        Anyone on the network can access and change all settings.
-        Set a password to restrict access.
-      </p>
+      <h2>${tr('sys.auth')}</h2>
+      <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">${tr('auth.disabled_desc')}</p>
       <div style="display:flex;flex-direction:column;gap:.5rem;max-width:340px">
-        <input id="auth-en-pw"  type="password" placeholder="New password (6-64 chars)" autocomplete="new-password">
-        <input id="auth-en-cf"  type="password" placeholder="Confirm password" autocomplete="new-password"
+        <input id="auth-en-pw"  type="password" placeholder="${tr('auth.new_pw_ph')}" autocomplete="new-password">
+        <input id="auth-en-cf"  type="password" placeholder="${tr('auth.confirm_pw_ph')}" autocomplete="new-password"
                onkeydown="if(event.key==='Enter')doEnableAuth()">
         <div id="auth-en-err" style="color:var(--err,#e94560);font-size:.83rem;min-height:1.2em"></div>
         <div class="btn-group" style="margin-top:.2rem">
-          <button id="auth-en-btn" class="btn btn-primary" onclick="doEnableAuth()">Enable Authentication</button>
+          <button id="auth-en-btn" class="btn btn-primary" onclick="doEnableAuth()">${tr('auth.enable_btn')}</button>
         </div>
       </div>`;
   } else {
     card.innerHTML = `
-      <h2>Admin Authentication</h2>
-      <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">
-        Authentication is currently <strong>enabled</strong>.
-        A password is required to change any settings.
-      </p>
+      <h2>${tr('sys.auth')}</h2>
+      <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">${tr('auth.enabled_desc')}</p>
       <div class="btn-group">
-        <button class="btn btn-outline" onclick="showChangePasswordPrompt()">Change password</button>
-        <button class="btn btn-outline" onclick="doLogout()">Sign out</button>
-        <button class="btn btn-danger"  onclick="doDisableAuth()">Disable Authentication</button>
+        <button class="btn btn-outline" onclick="showChangePasswordPrompt()">${tr('auth.change_pw_btn')}</button>
+        <button class="btn btn-outline" onclick="doLogout()">${tr('auth.sign_out_btn')}</button>
+        <button class="btn btn-danger"  onclick="doDisableAuth()">${tr('auth.disable_btn')}</button>
       </div>`;
   }
 }
@@ -3836,15 +4214,15 @@ async function doEnableAuth() {
   if (err) err.textContent = '';
 
   if (pw.length < 6 || pw.length > 64) {
-    if (err) err.textContent = 'Password must be 6-64 characters';
+    if (err) err.textContent = tr('auth.pw_length_err');
     return;
   }
   if (pw !== cf) {
-    if (err) err.textContent = "Passwords don't match";
+    if (err) err.textContent = tr('auth.pw_mismatch');
     return;
   }
 
-  const release = _btnBusy('auth-en-btn', 'Working…');
+  const release = _btnBusy('auth-en-btn', tr('auth.working'));
   try {
     const r = await fetch('/api/auth/set_password', {
       method: 'POST',
@@ -3868,9 +4246,9 @@ async function doEnableAuth() {
       if (authToken) localStorage.setItem('nextube_token', authToken);
     }
     updateAuthCard(true);
-    toast('Authentication enabled');
+    toast(tr('js.auth_enabled'));
   } catch (e) {
-    if (err) err.textContent = 'Network error';
+    if (err) err.textContent = tr('auth.network_err');
   } finally {
     release();
   }
@@ -3878,9 +4256,9 @@ async function doEnableAuth() {
 
 /* Disable auth: requires confirming the current password. */
 async function doDisableAuth() {
-  const pw = prompt('Enter your current password to disable authentication:');
+  const pw = prompt(tr('auth.enter_pw_prompt'));
   if (pw === null) return;   /* user cancelled */
-  if (!pw) { toast('Password required', true); return; }
+  if (!pw) { toast(tr('js.pw_required'), true); return; }
 
   try {
     const r = await secureFetch('/api/auth/disable', {
@@ -3890,15 +4268,15 @@ async function doDisableAuth() {
     });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
-      toast(j.error === 'bad_password' ? 'Wrong password' : ('Error: HTTP ' + r.status), true);
+      toast(j.error === 'bad_password' ? tr('js.wrong_pw') : tr('js.api_error_http', r.status), true);
       return;
     }
     authToken = '';
     localStorage.removeItem('nextube_token');
     updateAuthCard(false);
-    toast('Authentication disabled');
+    toast(tr('js.auth_disabled'));
   } catch (e) {
-    if (e.message !== 'unauthorized') toast('Network error', true);
+    if (e.message !== 'unauthorized') toast(tr('js.network_err'), true);
   }
 }
 

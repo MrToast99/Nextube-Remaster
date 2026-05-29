@@ -292,7 +292,18 @@ void ntp_apply_timezone(void)
 
 void ntp_apply_servers(void)
 {
-    char servers[4][64];
+    /* MUST be static — esp_sntp_setservername() (lwIP sntp_setservername) stores
+     * the POINTER to each server-name string; it does NOT copy the string.  A
+     * stack-local buffer here would be reclaimed the instant this function
+     * returns, leaving lwIP's SNTP server table pointing at freed stack memory.
+     * On the next poll the SNTP engine then resolves whatever garbage now
+     * occupies that stack — firing a burst of malformed DNS queries on every
+     * config save (visible as junk "<binary>.localdomain" lookups in the DNS
+     * server's log, sourced from the device itself).  A static buffer keeps the
+     * strings, and therefore lwIP's stored pointers, valid for the program's
+     * lifetime.  (The boot path in ntp_task is safe for a different reason: its
+     * stack-local copy lives as long as ntp_task, which never returns.) */
+    static char servers[4][64];
     config_lock();
     const nextube_config_t *cfg = config_get();
     for (int i = 0; i < 4; i++) {

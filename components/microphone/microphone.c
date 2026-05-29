@@ -128,7 +128,39 @@ static SemaphoreHandle_t s_cal_done      = NULL;   /* binary; given when done   
 static volatile int s_last_raw = -1;
 
 /* ── Timer handle ────────────────────────────────────────────────────── */
-static esp_timer_handle_t s_timer = NULL;
+static esp_timer_handle_t s_timer    = NULL;
+
+/* True while the 8 kHz sampling timer is actively running.
+ *
+ * The timer is the dominant CPU-0 load: its callback calls adc_oneshot_read()
+ * 8000×/s in the esp_timer service task, which is pinned to CPU 0 — the same
+ * core that runs the WiFi driver and the lwIP TCP/IP thread.  Leaving it
+ * running when the Spectrum visualiser is NOT on screen starves IDLE0 and the
+ * network stack → task-WDT timeouts and an unreachable web UI.
+ *
+ * So sampling is GATED to Spectrum mode (or an in-progress calibration):
+ * mic_task stops the timer whenever the gate is closed and starts it again
+ * when Spectrum mode is entered.  s_sampling tracks the live timer state so
+ * mic_set_sampling() is idempotent and start/stop are never double-issued. */
+static bool               s_sampling = false;
+
+/* Start or stop the periodic sampling timer.  Idempotent and NULL-safe.
+ * esp_timer_start_periodic / esp_timer_stop are thread-safe, so this may be
+ * called from mic_task or from mic_calibrate() (web-server task) alike. */
+static void mic_set_sampling(bool on)
+{
+    if (!s_timer)        return;   /* mic_init() not run yet (mic disabled) */
+    if (on == s_sampling) return;  /* already in the requested state        */
+    if (on) {
+        /* Start a fresh frame so the first buffer after the gate opens isn't a
+         * mix of stale (pre-stop) and new samples. */
+        s_isr_pos = 0;
+        esp_timer_start_periodic(s_timer, SAMPLE_US);
+    } else {
+        esp_timer_stop(s_timer);
+    }
+    s_sampling = on;
+}
 
 /* ── Timer callback: fired every SAMPLE_US by esp_timer (ESP_TIMER_TASK) ── */
 /* Runs in the esp_timer service task (priority 22, FreeRTOS task context).
@@ -170,8 +202,11 @@ static float goertzel(const float *buf, int N, float freq)
 static void reconfigure_channel(uint8_t cfg_ch)
 {
     if (cfg_ch > 7) cfg_ch = 7;
-    /* Stop timer so the ISR cannot call adc_oneshot_read_isr during reconfigure */
-    if (s_timer) esp_timer_stop(s_timer);
+    /* Stop the timer so the callback cannot read the ADC mid-reconfigure.
+     * Remember whether it was running so we only restart it if sampling was
+     * actually active — restarting unconditionally would defeat the gate. */
+    bool was_sampling = s_sampling;
+    mic_set_sampling(false);
 
     adc_oneshot_chan_cfg_t ccfg = {
         .atten    = ADC_ATTEN_DB_12,
@@ -184,7 +219,7 @@ static void reconfigure_channel(uint8_t cfg_ch)
         ESP_LOGI(TAG, "ADC channel → CH%u (GPIO%d)", cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
     }
 
-    if (s_timer) esp_timer_start_periodic(s_timer, SAMPLE_US);
+    if (was_sampling) mic_set_sampling(true);
 }
 
 /* ── Mic sampling / analysis task ────────────────────────────────────── */
@@ -200,12 +235,12 @@ static void mic_task(void *arg)
     ESP_LOGI(TAG, "mic_task running  (ISR timer @ %d Hz, no busy-wait)", SAMPLE_RATE);
 
     while (1) {
-        /* Block here until the ISR signals a completed frame (or timeout 500 ms).
-         * This yields the CPU — IDLE1 and other tasks run freely. */
-        if (xSemaphoreTake(s_frame_sem, pdMS_TO_TICKS(500)) != pdTRUE) {
-            /* Timeout — probably gated; just loop */
-            continue;
-        }
+        /* Block until the timer callback signals a completed frame, or wake
+         * every 500 ms on timeout.  The timeout path is essential while gated:
+         * the timer is STOPPED then (no frames arrive), so this is the only
+         * place that re-reads the mode and can re-start sampling when the user
+         * switches into Spectrum mode.  Blocking here yields the CPU fully. */
+        bool got_frame = (xSemaphoreTake(s_frame_sem, pdMS_TO_TICKS(500)) == pdTRUE);
 
         uint8_t want_ch;
         bool    mic_enabled;
@@ -222,22 +257,37 @@ static void mic_task(void *arg)
         silence_gate = cfg->mic_silence_gate;
         config_unlock();
 
+        /* ── Spectrum-mode gate ─────────────────────────────────────────────
+         * Sample only when the mic is enabled AND (Spectrum is on screen OR a
+         * calibration is in progress).  Otherwise STOP the 8 kHz timer so it
+         * stops hammering adc_oneshot_read() on CPU 0 — this is what keeps the
+         * WiFi/lwIP stack alive and the web UI reachable in every other mode.
+         * Calibration (s_cal_requested) bypasses the mode test so a quiet-room
+         * baseline can be captured without switching to Spectrum first. */
+        bool want_sampling =
+            mic_enabled &&
+            ((spectrum_en && cur_mode == APP_MODE_SPECTRUM) || s_cal_requested);
+
+        if (!want_sampling) {
+            mic_set_sampling(false);   /* stop the timer → frees CPU 0 */
+            taskENTER_CRITICAL(&s_mux);
+            memset(s_bands, 0, sizeof(s_bands));
+            taskEXIT_CRITICAL(&s_mux);
+            /* Drain stale semaphore signals that accumulated while sampling */
+            while (xSemaphoreTake(s_frame_sem, 0) == pdTRUE) { /* flush */ }
+            continue;
+        }
+
         /* ── Reconfigure ADC channel if debug panel changed it ── */
         if (want_ch != s_active_ch) {
             reconfigure_channel(want_ch);
         }
 
-        /* ── Gate: discard frame when mic disabled or not in Spectrum mode ──
-         * Exception: when s_cal_requested is set, bypass the mode gate so
-         * calibration works from any mode (the user does not have to switch
-         * to Spectrum first to capture a quiet-room baseline). */
-        if (!mic_enabled ||
-            ((!spectrum_en || cur_mode != APP_MODE_SPECTRUM) && !s_cal_requested)) {
-            taskENTER_CRITICAL(&s_mux);
-            memset(s_bands, 0, sizeof(s_bands));
-            taskEXIT_CRITICAL(&s_mux);
-            /* Drain stale semaphore signals that accumulated while gated */
-            while (xSemaphoreTake(s_frame_sem, 0) == pdTRUE) { /* flush */ }
+        /* Ensure the timer is running now that the gate is open.  If it was
+         * just started (we woke via timeout, no frame yet), loop back and wait
+         * for the first real frame before running Goertzel. */
+        mic_set_sampling(true);
+        if (!got_frame) {
             continue;
         }
 
@@ -367,7 +417,13 @@ void mic_init(void)
 
     /* Periodic timer — fires every SAMPLE_US in the esp_timer service task.
      * Task dispatch (default) lets us call adc_oneshot_read() safely.
-     * No ISR-safe ADC variant needed; no busy-wait; watchdog stays happy. */
+     *
+     * The timer is created here but deliberately NOT started: it is gated to
+     * Spectrum mode and started on demand by mic_task (see mic_set_sampling).
+     * Starting it unconditionally would run adc_oneshot_read() at 8 kHz on
+     * CPU 0 in every mode, starving the WiFi/lwIP stack on that core and
+     * tripping the task watchdog (IDLE0) — the web UI then becomes unreachable
+     * a few seconds after the mic comes up. */
     esp_timer_create_args_t targs = {
         .callback              = mic_sample_cb,
         .arg                   = NULL,
@@ -376,15 +432,24 @@ void mic_init(void)
         .skip_unhandled_events = true,
     };
     ESP_ERROR_CHECK(esp_timer_create(&targs, &s_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(s_timer, SAMPLE_US));
 
-    ESP_LOGI(TAG, "Sampling timer started: %u µs period  (%.0f Hz, TASK dispatch)", SAMPLE_US, (float)SAMPLE_RATE);
+    ESP_LOGI(TAG, "Sampling timer created: %u µs period (%.0f Hz) — gated to Spectrum mode",
+             SAMPLE_US, (float)SAMPLE_RATE);
 }
 
 int mic_read_raw(void)
 {
-    /* Returns the most recent ADC count captured by the ISR.
-     * Valid immediately after mic_init(); -1 before first sample. */
+    /* When the sampling timer is gated (not in Spectrum mode) the cached value
+     * would be stale, so take a fresh one-shot read.  This is safe because the
+     * timer is not concurrently driving the ADC while gated — and the debug
+     * panel that uses this is meant to run outside Spectrum mode anyway.  While
+     * actively sampling (Spectrum on screen) we return the cached value the
+     * timer keeps updating, avoiding extra ADC contention. */
+    if (!s_sampling && s_adc) {
+        int raw = -1;
+        if (adc_oneshot_read(s_adc, s_active_chan, &raw) == ESP_OK)
+            s_last_raw = raw;
+    }
     return s_last_raw;
 }
 
@@ -435,6 +500,13 @@ bool mic_calibrate(float out[MIC_BAND_COUNT], uint32_t timeout_ms)
     s_cal_frame_cnt = 0;
     s_cal_requested = true;
     taskEXIT_CRITICAL(&s_mux);
+
+    /* Start sampling immediately so calibration works from any mode without
+     * waiting up to 500 ms for mic_task's gate-timeout cycle to notice the
+     * request.  s_cal_requested keeps the gate open; mic_task re-closes it
+     * (stops the timer) on the next frame after calibration completes if the
+     * device is not in Spectrum mode. */
+    mic_set_sampling(true);
 
     /* Block until mic_task signals completion (or timeout) */
     if (xSemaphoreTake(s_cal_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {

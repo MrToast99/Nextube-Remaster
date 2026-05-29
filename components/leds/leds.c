@@ -184,16 +184,33 @@ static void led_task(void *arg)
          * the fallthrough below keeps local effects active on first boot.      */
         {
             backlight_mode_t bl;
+            uint8_t          bl_brightness;
             config_lock();
-            bl = config_get()->backlight_mode;
+            bl            = config_get()->backlight_mode;
+            bl_brightness = config_get()->led_brightness;
             config_unlock();
 
             if (bl == BL_MODE_WLED) {
                 wled_sync_state_t ws;
                 if (wled_sync_get(&ws)) {
+                    leds_set_brightness(bl_brightness);
                     if (!ws.on) {
                         leds_off();
+                    } else if (ws.fx != 0 && ws.r == 0 && ws.g == 0 && ws.b == 0) {
+                        /* Palette-based animation effects (Rainbow, Fire, Ocean,
+                         * Color Cycle, etc.) do not use col[0] for rendering.
+                         * WLED sends col[0]=(0,0,0) in the notifier packet when
+                         * the user hasn't set an explicit primary colour for that
+                         * effect, causing the accent LEDs to go dark.
+                         * Mirror with our local rainbow so the strip stays visually
+                         * active while WLED is animating. */
+                        leds_effect_rainbow();
                     } else {
+                        /* Apply the device master brightness explicitly: this path
+                         * continues before the leds_set_brightness() call in the
+                         * main loop body, so without this the global brightness
+                         * would keep whatever stale value it last had.
+                         * The WLED colour is already scaled by WLED's own brightness. */
                         leds_set_all(ws.r, ws.g, ws.b);
                         leds_update();
                     }

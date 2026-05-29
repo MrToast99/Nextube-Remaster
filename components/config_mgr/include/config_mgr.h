@@ -216,6 +216,13 @@ typedef struct {
     /* Date display format (Custom Clock / date panels) */
     char             date_format[12];    /* "DD/MM/YY" (default, European) or "MM/DD/YY" (US) */
 
+    /* Display localisation — ISO 639-1 language code controlling on-device text
+     * that is rendered as words (currently the tube-6 WEEKDATE day name).
+     * Supported: "en" (default), Western European (fr, de, es, it, pt, nl) and
+     * Nordic (sv, no, da, fi).  The web UI language is chosen separately and
+     * stored per-browser; this field is the device/tube setting only. */
+    char             language[6];
+
     /* 24H Custom clock — tube 6 rotating info panels.
      * Each bool gates one panel; at least one must be enabled (enforced on load).
      * Rotation advances to the next enabled panel every tube6_panel_ms ms.      */

@@ -84,24 +84,31 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # mDNS
 CONFIG_MDNS_MAX_SERVICES=10
-# Disable automatic mDNS registration for the AP netif.
-# By default IDF 5.x mDNS registers ALL netifs (STA, AP, ETH) automatically
-# via built-in event handlers when each interface comes up.  We do our own
-# explicit mdns_register_netif(s_sta_netif) in start_mdns(), so we only want
-# STA registered.  With AP auto-registration enabled, any WIFI_EVENT_AP_START
-# fired after mdns_init() (fallback AP, reconnect) causes mDNS to probe on the
-# AP interface and announce to the LAN — producing a 1-second "espressif" blip
-# on the Unifi controller (or any mDNS-aware client) on every announcement
-# cycle until the probe settles.  Turning it off here ensures the AP interface
-# is never presented to LAN-side mDNS resolvers.
+# Disable predefined (auto) mDNS registration for the AP netif.
+# By default IDF 5.x mDNS auto-registers every netif (STA, AP, ETH) when it
+# comes up.  We never want the setup AP ("Nextube-Setup") advertised on the
+# LAN, so its predefined registration is disabled here — the AP interface is
+# never presented to LAN-side mDNS resolvers.
 CONFIG_MDNS_PREDEF_NETIF_AP=n
-# NOTE: CONFIG_MDNS_PREDEF_NETIF_STA is intentionally left at the default (y).
-# Setting it to n prevents mdns_init() from registering the STA IP event
-# handler; as a result mdns_register_netif() registers the netif but the mDNS
-# task never receives the "IP obtained" notification needed to fire the probe —
-# the device becomes invisible on .local.  We keep STA=y so reconnect probing
-# works automatically, and use start_mdns() call ordering to minimise
-# redundant probe cycles (mdns_hostname_set before mdns_register_netif).
+# Disable predefined (auto) mDNS registration for the STA netif.
+# wifi_manager.c registers the STA netif explicitly via mdns_register_netif()
+# after mdns_init(), and drives the probe/announce cycle from the
+# IP_EVENT_STA_GOT_IP handler:
+#
+#   • New IP (boot, DHCP reassign, new network) → ENABLE_IP4: full
+#     probe + announce so the device is advertised on the LAN.
+#   • Same IP (reconnect on the same DHCP lease) → ANNOUNCE_IP4: re-announce
+#     without re-probing (the hostname claim hasn't changed).
+#
+# Keeping auto-registration off gives a single, explicit registration path
+# rather than also having the daemon install its own LWIP netif-ext callback
+# on IP-address changes.  In the 2025 refactored espressif/mdns component the
+# explicit mdns_register_netif() call is a pure registry operation: it stores
+# the netif pointer in a free slot and installs NO callbacks and NO esp-event
+# handlers.  (Without that explicit call, get_if_from_netif() can't find the
+# netif and mdns_netif_action() returns ESP_ERR_INVALID_STATE — mDNS would
+# never announce.)
+CONFIG_MDNS_PREDEF_NETIF_STA=n
 
 # LWIP netif default hostname.
 # This controls the name the device uses in DHCP client requests (option 12)

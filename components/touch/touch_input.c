@@ -34,6 +34,13 @@ static const char *TAG = "touch";
  *   longer than typical EMI glitches on the capacitive pads. */
 #define PRESS_DEBOUNCE  3
 
+/* ── Setup-AP hotkey: hold LEFT + RIGHT together for ~30 s ─────────────────
+ * 30 000 ms / 50 ms poll = 600 consecutive "both pressed" samples.  A small
+ * miss tolerance (COMBO_MISS_TOL × 50 ms) rides over brief capacitive flicker
+ * so the long hold doesn't reset on a single noisy sample. */
+#define COMBO_HOLD_SAMPLES  (30000 / 50)   /* 600 = 30 s */
+#define COMBO_MISS_TOL      4               /* up to 200 ms flicker tolerated */
+
 /* ── Touch pad channel numbers (match GPIO from board_pins.h) ───────── */
 /*   PIN_TOUCH_LEFT=4→pad0, PIN_TOUCH_MIDDLE=2→pad2, PIN_TOUCH_RIGHT=15→pad3 */
 static const int touch_channels[] = { 0, 2, 3 };  /* pad IDs, not GPIO numbers */
@@ -43,6 +50,7 @@ static touch_sensor_handle_t  s_sens = NULL;
 static touch_channel_handle_t s_chan[3] = { NULL, NULL, NULL };
 
 static touch_callback_t user_cb = NULL;
+static touch_combo_callback_t combo_cb = NULL;
 static TaskHandle_t touch_task_handle = NULL;
 
 /* ── Poll task ──────────────────────────────────────────────────────── */
@@ -86,6 +94,9 @@ static void touch_poll_task(void *arg)
     int  debounce_count[3] = { 0, 0, 0 };   /* consecutive pressed samples     */
     bool armed[3]          = { true, true, true }; /* false after stuck recovery
                                                      * until pad fully releases  */
+    bool raw_now[3]        = { false, false, false }; /* instantaneous press state */
+    int  combo_count = 0, combo_miss = 0;   /* LEFT+RIGHT hold tracker         */
+    bool combo_fired = false;
 
     while (1) {
         for (int i = 0; i < 3; i++) {
@@ -99,6 +110,7 @@ static void touch_poll_task(void *arg)
             /* Dynamic threshold: 20 % drop below software baseline */
             uint32_t threshold = s_baseline[i] * 80 / 100;
             bool raw = (smooth[0] < threshold);
+            raw_now[i] = raw;
 
             /* Slowly track baseline toward current smooth only when NOT pressed.
              * IIR: baseline = baseline - baseline/64 + smooth/64 */
@@ -151,6 +163,25 @@ static void touch_poll_task(void *arg)
             }
             was_pressed[i] = pressed;
         }
+
+        /* ── Setup-AP hotkey: LEFT + RIGHT held together ~30 s ──────────────
+         * Uses the instantaneous raw press state (raw_now[]), NOT the debounced
+         * single-press path, so it works independently of the per-channel
+         * stuck-press recovery that disarms long holds.  Fires the combo
+         * callback exactly once per sustained hold (combo_fired guard); resets
+         * when the pads release (with a small flicker tolerance). */
+        if (raw_now[TOUCH_LEFT] && raw_now[TOUCH_RIGHT]) {
+            combo_miss = 0;
+            if (combo_count < COMBO_HOLD_SAMPLES) combo_count++;
+            if (combo_count >= COMBO_HOLD_SAMPLES && !combo_fired) {
+                combo_fired = true;
+                ESP_LOGW(TAG, "Touch combo LEFT+RIGHT held 30 s — firing combo callback");
+                if (combo_cb) combo_cb();
+            }
+        } else if (combo_count > 0 && ++combo_miss > COMBO_MISS_TOL) {
+            combo_count = 0; combo_miss = 0; combo_fired = false;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -231,3 +262,4 @@ void touch_input_init(void)
 }
 
 void touch_input_register_callback(touch_callback_t cb) { user_cb = cb; }
+void touch_input_register_combo_callback(touch_combo_callback_t cb) { combo_cb = cb; }

@@ -101,6 +101,7 @@ static void set_defaults(void)
     strncpy(s_cfg.city, "", sizeof(s_cfg.city) - 1);
     strncpy(s_cfg.temp_format, "Celsius", sizeof(s_cfg.temp_format) - 1);
     strncpy(s_cfg.date_format, "DD/MM/YY", sizeof(s_cfg.date_format) - 1);
+    strncpy(s_cfg.language,    "en",       sizeof(s_cfg.language)    - 1);
 
     strncpy(s_cfg.video_site, "youtube", sizeof(s_cfg.video_site) - 1);
     strncpy(s_cfg.youtube_key, "", sizeof(s_cfg.youtube_key) - 1);
@@ -274,6 +275,7 @@ static void parse_json(const char *json, size_t len)
     json_read_str(root, "temperature_formate", s_cfg.temp_format, sizeof(s_cfg.temp_format));
     json_read_str(root, "temperature_format",  s_cfg.temp_format, sizeof(s_cfg.temp_format));
     json_read_str(root, "date_format",         s_cfg.date_format, sizeof(s_cfg.date_format));
+    json_read_str(root, "language",            s_cfg.language,    sizeof(s_cfg.language));
     json_read_str(root, "music_file",       s_cfg.music_file,      sizeof(s_cfg.music_file));
     json_read_str(root, "bell_file",        s_cfg.bell_file,       sizeof(s_cfg.bell_file));
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
@@ -898,6 +900,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "City",             s_cfg.city);
     cJSON_AddStringToObject(root, "temperature_format",  s_cfg.temp_format);
     cJSON_AddStringToObject(root, "date_format",         s_cfg.date_format);
+    cJSON_AddStringToObject(root, "language",            s_cfg.language);
     cJSON_AddStringToObject(root, "music_file",       s_cfg.music_file);
     cJSON_AddStringToObject(root, "bell_file",        s_cfg.bell_file);
     cJSON_AddStringToObject(root, "tone_file",        s_cfg.tone_file);

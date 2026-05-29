@@ -1697,6 +1697,45 @@ static void ht_draw_str_at(const char *str, int y_tube, int height,
     ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), blit_h, y_tube, fg, bg);
 }
 
+/* ── Localised weekday abbreviation (tube-6 WEEKDATE panel) ───────────────
+ * Returns a short (≤3-char) day-of-week label for the given ISO 639-1 language
+ * code and tm_wday (0=Sunday … 6=Saturday).  Every glyph is ASCII or Latin-1
+ * Supplement (é á í ì ç å ö ä ø æ), which u8g2_font_logisoso28_tf (_tf = full
+ * glyph set, 0x20–0xFF) renders correctly through the UTF-8-aware
+ * ht_draw_str_at().  Abbreviations are kept ≤3 chars so they fit the 80-px tube
+ * at logisoso28.  Unknown or empty language codes fall back to English. */
+static const char *weekday_abbrev(const char *lang, int wday)
+{
+    if (wday < 0 || wday > 6) wday = 1;   /* defensive: default to Monday */
+
+    /* Index order matches tm_wday: 0=Sun, 1=Mon, … 6=Sat. */
+    static const char *const en[7] = { "Sun","Mon","Tue","Wed","Thu","Fri","Sat" };
+    static const char *const de[7] = { "So","Mo","Di","Mi","Do","Fr","Sa" };
+    static const char *const fr[7] = { "Dim","Lun","Mar","Mer","Jeu","Ven","Sam" };
+    static const char *const es[7] = { "Dom","Lun","Mar","Mié","Jue","Vie","Sáb" };
+    static const char *const it[7] = { "Dom","Lun","Mar","Mer","Gio","Ven","Sab" };
+    static const char *const pt[7] = { "Dom","Seg","Ter","Qua","Qui","Sex","Sáb" };
+    static const char *const nl[7] = { "Zo","Ma","Di","Wo","Do","Vr","Za" };
+    static const char *const sv[7] = { "Sön","Mån","Tis","Ons","Tor","Fre","Lör" };
+    static const char *const no[7] = { "Søn","Man","Tir","Ons","Tor","Fre","Lør" };
+    static const char *const da[7] = { "Søn","Man","Tir","Ons","Tor","Fre","Lør" };
+    static const char *const fi[7] = { "Su","Ma","Ti","Ke","To","Pe","La" };
+
+    if (lang && lang[0]) {
+        if      (!strcmp(lang, "de")) return de[wday];
+        else if (!strcmp(lang, "fr")) return fr[wday];
+        else if (!strcmp(lang, "es")) return es[wday];
+        else if (!strcmp(lang, "it")) return it[wday];
+        else if (!strcmp(lang, "pt")) return pt[wday];
+        else if (!strcmp(lang, "nl")) return nl[wday];
+        else if (!strcmp(lang, "sv")) return sv[wday];
+        else if (!strcmp(lang, "no")) return no[wday];
+        else if (!strcmp(lang, "da")) return da[wday];
+        else if (!strcmp(lang, "fi")) return fi[wday];
+    }
+    return en[wday];
+}
+
 /* Render a UTF-8 string into the U8g2 buffer using the 28-px
  * logisoso font, centred horizontally (within LCD_WIDTH=80) and vertically
  * (within the 64-row buffer), then blit to tube 5 at the given half offset.  */
@@ -1981,11 +2020,9 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
 
         uint16_t fg = ht_sample_theme_color(cfg->theme);
 
-        /* Day name — top half, centred in 64-row U8g2 band (rows 8–71)     */
-        static const char *const day_names[] =
-            { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-        const char *day = (t->tm_wday >= 0 && t->tm_wday <= 6)
-                          ? day_names[t->tm_wday] : "Mon";
+        /* Day name — top half, centred in 64-row U8g2 band (rows 8–71).
+         * Localised per cfg->language (tube display language setting). */
+        const char *day = weekday_abbrev(cfg->language, t->tm_wday);
         ht_draw_str_at(day, 26, 64, u8g2_font_logisoso28_tf, fg, bg);
 
         /* Date — bottom half, respects Network › Date format setting.

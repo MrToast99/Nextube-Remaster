@@ -3,10 +3,23 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-void audio_init(void);
+/**
+ * Initialise the audio subsystem.
+ *
+ * @param enabled  Pass the value of cfg->audio_enabled read from config at
+ *                 boot.  When false the DAC is never started — GPIO25 is
+ *                 driven OUTPUT LOW instead, which clamps the amplifier's
+ *                 AC-coupled input at 0 V (same low-impedance effect as the
+ *                 DAC continuous driver outputting level 0) without touching
+ *                 the I²S0 peripheral, APLL, or any DMA heap.  The mutex is
+ *                 still created so audio_set_enabled(true) can start the DAC
+ *                 later from the web UI without a reboot.
+ *                 When true the full DAC / DMA ring is brought up immediately.
+ */
+void audio_init(bool enabled);
 void audio_play_file(const char *path);
 void audio_set_volume(int vol);
-void audio_set_enabled(bool enabled);   /* false = DAC off, GPIO25 driven 0 V (clamped, low static) */
+void audio_set_enabled(bool enabled);   /* false = DAC ring at 0 V (clamped); true = bring DAC up */
 void audio_stop(void);
 
 /**

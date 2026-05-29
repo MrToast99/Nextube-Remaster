@@ -21,18 +21,54 @@ static char s_ip_str[20] = "0.0.0.0";
 static esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif  = NULL;
 
+/* mDNS state — set once in wifi_manager_start() based on config.
+ *
+ * s_mdns_on:       true when mDNS was enabled at boot.  Avoids touching the
+ *                  mDNS API in the event handler if the feature is disabled.
+ *
+ * s_last_mdns_ip:  The IP address seen at the last IP_EVENT_STA_GOT_IP.
+ *                  Starts at {0} (all-zeros).  NEVER cleared on disconnect.
+ *
+ * On GOT_IP we pick one of two mDNS actions:
+ *   • New / changed IP  → ENABLE_IP4: full probe + announce so .local
+ *                         resolvers learn (or update) the address.
+ *   • Same IP (a reconnect on the same DHCP lease) → ANNOUNCE_IP4: re-announce
+ *                         without re-probing.  The hostname claim hasn't
+ *                         changed, so a fresh probe cycle would just be wasted
+ *                         mDNS multicast traffic.
+ *
+ * Why we track s_last_mdns_ip ourselves instead of using ev->ip_changed:
+ * esp_netif_action_disconnected() clears ip_info_old to 0.0.0.0 on every
+ * disconnect, so ev->ip_changed is always true after a reconnect — even when
+ * the lease IP is unchanged.  Keeping our own last-IP and never clearing it on
+ * disconnect lets us tell a genuine address change from a same-IP reconnect.
+ * Because s_last_mdns_ip starts at {0}, the very first GOT_IP is always a
+ * "changed" IP → ENABLE_IP4 runs first and initialises the interface.
+ * (ANNOUNCE_IP4 is a no-op until the interface has been enabled, so it can
+ * never fire before that first ENABLE_IP4.)
+ *
+ * mdns_register_netif() IS called once in wifi_manager_start(), immediately
+ * after mdns_init().  With CONFIG_MDNS_PREDEF_NETIF_STA=n the daemon does not
+ * auto-populate its s_esp_netifs[] table, so without this call
+ * get_if_from_netif() cannot find s_sta_netif and every mdns_netif_action()
+ * returns ESP_ERR_INVALID_STATE (mDNS never announces).  In the refactored
+ * (2025) espressif/mdns component the call ONLY stores the esp_netif_t pointer
+ * in that table — it installs no LWIP netif-ext callback and no esp-event
+ * handler. */
+static bool         s_mdns_on      = false;
+static esp_ip4_addr_t s_last_mdns_ip = {0};
+
 /* AP is disabled 60 seconds after STA gets an IP.  60 s gives the browser
  * enough time to finish loading the web UI on the AP-side IP before the
  * AP disappears (client then reconnects via the LAN IP / mDNS). */
 #define AP_DISABLE_DELAY_US      (60LL * 1000 * 1000)   /* 60 seconds  */
 
-/* AP fallback timeout.  When credentials ARE saved, the device starts in
- * STA-only mode (no AP broadcast).  If STA fails to associate AND obtain
- * an IP within this window, the AP comes up as a recovery path so the
- * user can re-configure.  The same timer is re-armed on any later
- * disconnect — a brief WiFi blip that recovers within the window stays
- * silent; an extended outage triggers the AP fallback automatically. */
-#define AP_FALLBACK_TIMEOUT_US   (90LL * 1000 * 1000)   /* 90 seconds  */
+/* The setup AP is NOT brought up automatically when STA fails.  Instead the
+ * user summons it on demand by holding the LEFT + RIGHT touch pads together
+ * for 30 s (touch_input combo → wifi_manager_force_ap()).  This avoids the AP
+ * popping up unexpectedly during transient WiFi outages, and is reliable even
+ * during a connect-retry storm (which previously kept resetting the old timer
+ * so it never elapsed). */
 
 /* ────— per-device WPA2 PIN for the setup AP ─────────────────────────
  * Generated on first boot (from esp_random) and stored in the NVS namespace
@@ -46,6 +82,7 @@ static esp_netif_t *s_ap_netif  = NULL;
  * an external sticker / label on the device. */
 #define AP_PIN_NVS_NS         "nextube_sec"
 #define AP_PIN_NVS_KEY        "ap_pin"
+
 #define AP_PIN_LEN            8     /* must be ≥ 8 — WPA2_PSK minimum length */
 
 static char s_ap_pin[AP_PIN_LEN + 1] = {0};
@@ -70,7 +107,6 @@ static volatile int s_ap_client_count = 0;
 static volatile bool s_ap_active = false;
 
 static esp_timer_handle_t s_ap_disable_timer   = NULL;
-static esp_timer_handle_t s_ap_fallback_timer  = NULL;
 
 /* Set by wifi_manager_reconnect_sta() before it calls esp_wifi_connect()
  * directly.  Tells WIFI_EVENT_STA_DISCONNECTED NOT to fire a second
@@ -78,9 +114,6 @@ static esp_timer_handle_t s_ap_fallback_timer  = NULL;
  * two concurrent association requests and leave the TCP/IP stack in an
  * indeterminate state. */
 static bool s_manual_reconnect = false;
-static bool s_mdns_started     = false; /* mDNS init guard — start only once, after first IP */
-
-static void start_mdns(void); /* forward declaration — defined after wifi_event_handler */
 
 /* ──────— AP PIN helpers ──────────────────────────────────────────── */
 
@@ -177,6 +210,7 @@ void wifi_manager_factory_reset_ap_pin(void)
     ESP_LOGW(TAG, "AP PIN factory-reset — fresh PIN will be generated on next boot");
 }
 
+
 static void ap_disable_cb(void *arg)
 {
     ESP_LOGI(TAG, "STA connected – disabling setup AP");
@@ -184,16 +218,16 @@ static void ap_disable_cb(void *arg)
     esp_wifi_set_mode(WIFI_MODE_STA);
 }
 
-/* AP fallback timer fired — STA hasn't obtained an IP within the window.
- * Bring the setup AP up so the user has a recovery path.  Stays up
- * indefinitely; closes only when STA eventually does get an IP (then
- * ap_disable_timer fires 60 s later). */
-static void ap_fallback_cb(void *arg)
+/* Bring the setup AP up on demand (manual trigger — the LEFT+RIGHT touch-pad
+ * hotkey, see touch_input combo handling).  Idempotent: a no-op if the AP is
+ * already broadcasting.  The AP stays up until STA obtains an IP, at which
+ * point IP_EVENT_STA_GOT_IP schedules the usual 60 s graceful shutdown so the
+ * browser session can migrate to the LAN IP.  Safe to call from a task
+ * context (esp_wifi_set_mode is thread-safe). */
+void wifi_manager_force_ap(void)
 {
-    if (xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT) return; /* made it in time */
-    if (s_ap_active) return; /* already up */
-    ESP_LOGW(TAG, "STA failed to obtain IP within %.0f s – enabling fallback AP",
-             AP_FALLBACK_TIMEOUT_US / 1e6);
+    if (s_ap_active) return;            /* already broadcasting */
+    ESP_LOGW(TAG, "Manual AP trigger — enabling setup AP (SSID: Nextube-Setup)");
     s_ap_active = true;
     esp_wifi_set_mode(WIFI_MODE_APSTA);
 }
@@ -202,8 +236,6 @@ static void init_ap_timers(void)
 {
     esp_timer_create_args_t a = { .callback = ap_disable_cb,  .name = "ap_disable"  };
     esp_timer_create(&a, &s_ap_disable_timer);
-    esp_timer_create_args_t b = { .callback = ap_fallback_cb, .name = "ap_fallback" };
-    esp_timer_create(&b, &s_ap_fallback_timer);
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t base,
@@ -218,15 +250,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
             /* Cancel any pending AP-disable — STA is no longer "up". */
             if (s_ap_disable_timer) esp_timer_stop(s_ap_disable_timer);
-            /* (Re-)arm the fallback timer.  A brief blip that recovers
-             * within the window stays silent (timer cancelled by IP_GOT
-             * before it fires).  An extended outage triggers the AP
-             * fallback automatically.  No-op if AP is already up. */
-            if (!s_ap_active && s_ap_fallback_timer) {
-                esp_timer_stop(s_ap_fallback_timer);
-                esp_timer_start_once(s_ap_fallback_timer,
-                                     AP_FALLBACK_TIMEOUT_US);
-            }
             if (s_manual_reconnect) {
                 /* wifi_manager_reconnect_sta() already called esp_wifi_connect()
                  * directly — skip the auto-reconnect here to avoid a second
@@ -259,11 +282,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "STA IP: %s", s_ip_str);
-        /* STA made it — cancel the AP-fallback timer if still running. */
-        if (s_ap_fallback_timer) esp_timer_stop(s_ap_fallback_timer);
         /* If the AP is currently up (either because we never had STA
-         * credentials and started in APSTA, or because the fallback
-         * fired earlier), schedule a graceful 60 s shutdown so the
+         * credentials and started in APSTA, or because the user summoned it
+         * via the LEFT+RIGHT touch hotkey), schedule a graceful 60 s shutdown so the
          * browser session on 192.168.4.1 has time to migrate to the
          * LAN-side IP / mDNS hostname.  When STA succeeded directly
          * (no AP up) there's nothing to close — skip. */
@@ -274,96 +295,54 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 esp_timer_start_once(s_ap_disable_timer, AP_DISABLE_DELAY_US);
             }
         }
-        /* Start mDNS once — only after the STA interface has a routable IP.
-         * Initialising mDNS earlier (at wifi_start) causes it to probe using
-         * the ESP-IDF default hostname "espressif" on the AP interface before
-         * mdns_hostname_set() takes effect, flooding the LAN with unicast DNS
-         * queries for "espressif.<domain>.a" on every boot and reconnect. */
-        if (!s_mdns_started) {
-            s_mdns_started = true;
-            /* Gate on user config — some users prefer their devices not to
-             * advertise on the LAN.  Boot-time only; toggling this requires
-             * a reboot to take effect (matches the other feature toggles). */
-            bool mdns_on;
-            config_lock();
-            mdns_on = config_get()->mdns_enabled;
-            config_unlock();
-            if (mdns_on) {
-                start_mdns();
+        /* mDNS probe or re-announce on GOT_IP.
+         *
+         * ip_actually_changed = true  → new IP (boot, DHCP reassign, new
+         *   network): call ENABLE_IP4 so the daemon probes for uniqueness and
+         *   then announces the address.  .local resolvers update their caches.
+         *
+         * ip_actually_changed = false → reconnect on the same DHCP lease:
+         *   call ANNOUNCE_IP4 to re-announce without re-probing.  The hostname
+         *   claim hasn't changed, so a fresh probe cycle would be wasted
+         *   multicast traffic.
+         *
+         * ANNOUNCE_IP4 is guarded by mdns_priv_if_ready() inside the daemon
+         * and is a silent no-op when the interface has not been enabled yet.
+         * Because s_last_mdns_ip starts at 0, the very first GOT_IP always
+         * has ip_actually_changed = true → ENABLE_IP4 runs first, so the
+         * interface is always enabled before ANNOUNCE_IP4 can fire.
+         *
+         * ev->ip_changed is NOT used: esp_netif_action_disconnected() clears
+         * ip_info_old to 0.0.0.0 on every disconnect, making ev->ip_changed
+         * always true — even for a same-IP reconnect.
+         *
+         * mdns_register_netif() is called once at startup (see wifi_manager_start)
+         * so that get_if_from_netif() can locate s_sta_netif and these
+         * mdns_netif_action() calls succeed. */
+        if (s_mdns_on && s_sta_netif) {
+            bool ip_actually_changed = (ev->ip_info.ip.addr != s_last_mdns_ip.addr);
+            s_last_mdns_ip = ev->ip_info.ip;   /* update before action so re-entrant GOT_IP is safe */
+            if (ip_actually_changed) {
+                ESP_LOGI(TAG, "mDNS: new IP " IPSTR " → probe (ENABLE_IP4)",
+                         IP2STR(&ev->ip_info.ip));
+                esp_err_t e = mdns_netif_action(s_sta_netif, MDNS_EVENT_ENABLE_IP4);
+                if (e != ESP_OK) ESP_LOGW(TAG, "mDNS ENABLE_IP4: %s", esp_err_to_name(e));
+                else ESP_LOGI(TAG, "mDNS: probing → http://%s.local", s_hostname);
             } else {
-                ESP_LOGI(TAG, "mDNS disabled in config — not advertising");
+                ESP_LOGI(TAG, "mDNS: same IP " IPSTR " → re-announce (ANNOUNCE_IP4)",
+                         IP2STR(&ev->ip_info.ip));
+                esp_err_t e = mdns_netif_action(s_sta_netif, MDNS_EVENT_ANNOUNCE_IP4);
+                if (e != ESP_OK) ESP_LOGW(TAG, "mDNS ANNOUNCE_IP4: %s", esp_err_to_name(e));
+                else ESP_LOGI(TAG, "mDNS: re-announced → http://%s.local", s_hostname);
             }
         }
     }
 }
 
-static void start_mdns(void)
-{
-    /* Refresh s_hostname from config in case it changed since boot
-     * (e.g. user saved new hostname via web UI and reconnected).
-     * s_hostname is module-level so netif->hostname stays valid after
-     * this function returns — LWIP stores the pointer, not a copy. */
-    config_lock();
-    const nextube_config_t *cfg = config_get();
-    if (cfg->hostname[0] != '\0') {
-        strncpy(s_hostname, cfg->hostname, sizeof(s_hostname) - 1);
-        s_hostname[sizeof(s_hostname) - 1] = '\0';
-    }
-    config_unlock();
-
-    /* Re-apply to the STA netif so any hostname change made via the web UI
-     * takes effect without a full reboot (reconnect path). */
-    if (s_sta_netif) {
-        esp_netif_set_hostname(s_sta_netif, s_hostname);
-    }
-
-    mdns_init();
-
-    /* Set hostname and instance name BEFORE registering the netif manually.
-     * mdns_hostname_set() always schedules a full re-probe even when the name
-     * hasn't changed.  Calling it after mdns_register_netif() would add a
-     * second probe cycle on top of the one triggered by registration.  With
-     * CONFIG_MDNS_PREDEF_NETIF_STA=y (the default, intentionally kept —
-     * setting it to n breaks reconnect probing), mdns_init() also
-     * auto-registers the STA netif immediately when it detects the interface
-     * already has an IP, firing a first probe cycle before we even reach this
-     * point.  That means two probe cycles are unavoidable without deeper
-     * changes.  Keeping this order at least ensures mdns_register_netif()
-     * below returns ESP_ERR_INVALID_STATE (already registered) harmlessly,
-     * and the hostname/instance are set in the correct sequence. */
-    mdns_hostname_set(s_hostname);
-    mdns_instance_name_set("Nextube Remaster");
-
-    /* Register ONLY the STA netif (idempotent — mdns_init may have already
-     * auto-registered it; ESP_ERR_INVALID_STATE is expected and harmless).
-     * The AP netif is excluded at build time via CONFIG_MDNS_PREDEF_NETIF_AP=n
-     * in sdkconfig.defaults.
-     *
-     * NOTE: do NOT call mdns_unregister_netif(s_ap_netif) here.  This
-     * function runs inside the IP_EVENT_STA_GOT_IP handler, which is
-     * dispatched by the default event loop task.  mdns_unregister_netif()
-     * posts an action to the mDNS task and blocks until it completes; the
-     * mDNS task then calls esp_event_post() back into the default event loop.
-     * The default event loop task is already blocked waiting for mDNS —
-     * deadlock.  The event queue fills up, httpd and the HTTP client both
-     * fail to post events, and the web UI stops responding.
-     *
-     * ESP_ERR_INVALID_STATE = already registered (idempotent on reconnect).
-     * Any other non-OK result is logged but not fatal. */
-    if (s_sta_netif) {
-        esp_err_t reg_err = mdns_register_netif(s_sta_netif);
-        if (reg_err != ESP_OK && reg_err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "mdns_register_netif STA: %s", esp_err_to_name(reg_err));
-        }
-    }
-
-    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-    ESP_LOGI(TAG, "mDNS: http://%s.local  (STA netif registered)", s_hostname);
-}
-
 void wifi_manager_start(void)
 {
     char ssid[64], password[64];
+    bool mdns_on;
     config_lock();
     const nextube_config_t *cfg = config_get();
     strncpy(ssid,     cfg->ssid,     sizeof(ssid)     - 1); ssid[sizeof(ssid)         - 1] = '\0';
@@ -376,6 +355,7 @@ void wifi_manager_start(void)
         strncpy(s_hostname, "nextube-remaster", sizeof(s_hostname) - 1);
     }
     s_hostname[sizeof(s_hostname) - 1] = '\0';
+    mdns_on = cfg->mdns_enabled;
     config_unlock();
 
     s_wifi_events = xEventGroupCreate();
@@ -385,14 +365,13 @@ void wifi_manager_start(void)
 
     /* Set the correct hostname on both netifs BEFORE esp_wifi_start().
      * The DHCP client sends the hostname in DISCOVER/REQUEST packets which
-     * go out before IP_EVENT_STA_GOT_IP fires (and before start_mdns() is
-     * called).  Without this, all early DHCP packets use the LWIP compile-
-     * time default "espressif" — Unifi (and other controllers) log that as
-     * the device hostname, creating a conflict with the mDNS announcement
-     * of "nextube-remaster" and causing the name to oscillate every DHCP
-     * retry cycle (~15 s) until the lease is fully established.
-     * Setting it here ensures the very first DHCP DISCOVER already carries
-     * the correct name. */
+     * go out before IP_EVENT_STA_GOT_IP fires.  Without this, all early
+     * DHCP packets use the LWIP compile-time default "espressif" — Unifi
+     * (and other controllers) log that as the device hostname, creating a
+     * conflict with the mDNS announcement of "nextube-remaster" and causing
+     * the name to oscillate every DHCP retry cycle (~15 s) until the lease
+     * is fully established.  Setting it here ensures the very first DHCP
+     * DISCOVER already carries the correct name. */
     esp_netif_set_hostname(s_sta_netif, s_hostname);
     esp_netif_set_hostname(s_ap_netif,  s_hostname);
     ESP_LOGI(TAG, "Netif hostname set to \"%s\" (STA + AP)", s_hostname);
@@ -404,6 +383,45 @@ void wifi_manager_start(void)
 
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
+
+    s_mdns_on = mdns_on;   /* save for IP-event handler */
+    if (mdns_on) {
+        /* Initialise the mDNS daemon and register hostname + service BEFORE
+         * WiFi starts so the records are ready when the first probe fires.
+         * mdns_hostname_set() stores the hostname in the daemon without
+         * probing (no active PCBs yet); probing begins later when
+         * mdns_netif_action(ENABLE_IP4) is called from the IP handler.
+         * s_last_mdns_ip deliberately starts at {0} so the first GOT_IP
+         * always has ip_actually_changed=true → ENABLE_IP4 → mDNS interface
+         * properly initialised on every boot.  Without this initial ENABLE_IP4
+         * the daemon's PCB is never activated and mDNS would never announce. */
+        mdns_init();
+        mdns_hostname_set(s_hostname);
+        mdns_instance_name_set("Nextube Remaster");
+        mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+        /* Register the STA netif so mdns_netif_action() can find it.
+         * With PREDEF_STA=n the daemon's s_esp_netifs[] table has no predefined
+         * STA entry; without this call get_if_from_netif() returns
+         * MDNS_MAX_INTERFACES (= invalid) and every mdns_netif_action()
+         * returns ESP_ERR_INVALID_STATE.
+         * In the 2025 refactored component mdns_register_netif() is a pure
+         * registry operation — it stores the netif pointer in a free slot and
+         * installs NO LWIP callbacks and NO esp-event handlers. */
+        {
+            esp_err_t reg_err = mdns_register_netif(s_sta_netif);
+            if (reg_err != ESP_OK) {
+                ESP_LOGE(TAG, "mDNS: mdns_register_netif failed (%s) — "
+                         "mdns_netif_action will return INVALID_STATE",
+                         esp_err_to_name(reg_err));
+            } else {
+                ESP_LOGI(TAG, "mDNS: STA netif registered (no LWIP callbacks)");
+            }
+        }
+        ESP_LOGI(TAG, "mDNS initialised: http://%s.local (probe deferred until first IP)",
+                 s_hostname);
+    } else {
+        ESP_LOGI(TAG, "mDNS disabled in config — not advertising");
+    }
 
     /* load (or generate on first boot) the per-device WPA2 PIN. */
     ensure_ap_pin();
@@ -436,23 +454,19 @@ void wifi_manager_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
 
     /* Mode policy:
-     *   No SSID configured  → APSTA from boot.  AP stays up indefinitely
-     *                          (no fallback timer needed) so the user
-     *                          can configure WiFi via the captive web UI.
-     *   SSID configured     → demote to STA only.  AP fallback timer
-     *                          armed for AP_FALLBACK_TIMEOUT_US — if STA
-     *                          doesn't obtain an IP in that window, AP
-     *                          comes up as a recovery path (ap_fallback_cb).
+     *   No SSID configured  → APSTA from boot.  AP stays up indefinitely so
+     *                          the user can configure WiFi via the web UI.
+     *   SSID configured     → demote to STA only.  The setup AP is NOT
+     *                          brought up automatically on failure; the user
+     *                          summons it on demand with the LEFT+RIGHT touch
+     *                          hotkey (→ wifi_manager_force_ap()).
      *
-     * Avoids unnecessarily broadcasting "Nextube-Setup" every boot on a
-     * working device — the setup AP only appears when actually needed
-     * (first boot, or STA recovery after creds stop working). */
+     * Avoids unnecessarily broadcasting "Nextube-Setup" — the setup AP only
+     * appears on first boot or when the user explicitly requests it. */
     if (have_creds) {
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         s_ap_active = false;
-        ESP_LOGI(TAG, "STA: connecting to \"%s\" (AP fallback in %.0f s if no IP)",
-                 ssid, AP_FALLBACK_TIMEOUT_US / 1e6);
-        esp_timer_start_once(s_ap_fallback_timer, AP_FALLBACK_TIMEOUT_US);
+        ESP_LOGI(TAG, "STA: connecting to \"%s\" (hold LEFT+RIGHT touch 30 s for setup AP)", ssid);
     } else {
         s_ap_active = true;
         ESP_LOGI(TAG, "No STA credentials — AP-only mode for first-boot setup");
@@ -477,9 +491,8 @@ void wifi_manager_reconnect_sta(void)
     /* User just saved credentials and is most likely connected via the AP.
      * Force APSTA so they remain on the AP during the connection attempt;
      * if STA succeeds, IP_EVENT_STA_GOT_IP schedules the 60 s grace-period
-     * AP shutdown.  If STA fails, the AP stays up (no fallback timer
-     * needed — we're already broadcasting). */
-    if (s_ap_fallback_timer) esp_timer_stop(s_ap_fallback_timer);
+     * AP shutdown.  If STA fails, the AP stays up — we're already
+     * broadcasting. */
     s_ap_active = true;
     esp_wifi_set_mode(WIFI_MODE_APSTA);
 

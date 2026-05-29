@@ -12,9 +12,16 @@ on:
     paths-ignore:
       - 'README.md'
       - 'docs/**'
+  schedule:
+    # Run the artifact cleanup daily at 03:00 UTC even without a push.
+    # The build + release jobs are skipped on schedule (they require a push/tag);
+    # only cleanup-artifacts runs.
+    - cron: '0 3 * * *'
 
 jobs:
   build:
+    # Skip on the daily schedule run — that trigger exists only to run cleanup.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v5.5.3
@@ -145,6 +152,7 @@ jobs:
         with:
           name: nextube-firmware
           path: artifacts/
+          retention-days: 7
 
   release:
     needs: build
@@ -225,3 +233,57 @@ jobs:
             Nextube-Remaster v${{ needs.build.outputs.build_version }}.zip
           draft: false
           prerelease: false
+
+  # ── Artifact cleanup ────────────────────────────────────────────────────────
+  # Runs daily at 03:00 UTC (schedule trigger) and after every build push/PR
+  # to delete any artifacts that are older than 7 days.
+  # • retention-days: 7 on upload-artifact handles all new uploads going forward.
+  # • This job sweeps up anything uploaded before that setting was added, and
+  #   acts as a belt-and-suspenders catch for any edge case the native expiry
+  #   might miss (e.g. artifacts uploaded by forks or other workflows).
+  cleanup-artifacts:
+    runs-on: ubuntu-latest
+    # No dependency on build — runs independently so it also fires on the
+    # daily schedule trigger (where build is skipped).  Cleanup only deletes
+    # artifacts older than 7 days, so running in parallel with a live build
+    # is safe: the new artifact won't be 7 days old.
+    # Skip on pull_request events — PRs don't upload artifacts and the
+    # GITHUB_TOKEN write scope is more restricted on fork PRs.
+    if: github.event_name != 'pull_request'
+    permissions:
+      actions: write
+
+    steps:
+      - name: Delete artifacts older than 7 days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:     ${{ github.repository }}
+        run: |
+          CUTOFF=$(date -d '7 days ago' +%s)
+          PAGE=1
+          DELETED=0
+
+          while true; do
+            # Fetch one page of artifacts (100 per page is the API maximum)
+            RESPONSE=$(gh api \
+              "repos/${REPO}/actions/artifacts?per_page=100&page=${PAGE}" \
+              --jq '.artifacts[] | "\(.id) \(.created_at)"')
+
+            [ -z "$RESPONSE" ] && break
+
+            while IFS=' ' read -r ID CREATED_AT; do
+              [ -z "$ID" ] && continue
+              CREATED_TS=$(date -d "$CREATED_AT" +%s 2>/dev/null || echo 0)
+              if [ "$CREATED_TS" -lt "$CUTOFF" ]; then
+                gh api --method DELETE "repos/${REPO}/actions/artifacts/${ID}" \
+                  --silent && DELETED=$((DELETED + 1)) || true
+              fi
+            done <<< "$RESPONSE"
+
+            # Stop when the page returned fewer than 100 results
+            COUNT=$(echo "$RESPONSE" | wc -l)
+            [ "$COUNT" -lt 100 ] && break
+            PAGE=$((PAGE + 1))
+          done
+
+          echo "Deleted ${DELETED} artifact(s) older than 7 days."

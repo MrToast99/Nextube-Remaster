@@ -11,6 +11,12 @@ bool wifi_manager_is_connected(void);
 const char *wifi_manager_get_ip(void);
 void wifi_manager_scan_start(void);
 
+/* Bring the setup AP ("Nextube-Setup") up on demand, regardless of STA state.
+ * Triggered by the LEFT+RIGHT touch-pad hotkey (held 30 s).  Idempotent —
+ * a no-op if the AP is already broadcasting.  The AP closes automatically
+ * 60 s after STA next obtains an IP (so a browser session can migrate). */
+void wifi_manager_force_ap(void);
+
 /* ──────— setup AP PIN ──────────────────────────────────────────────
  * The setup AP ("Nextube-Setup") is WPA2-secured with a per-device
  * 8-digit PIN.  PIN is generated on first boot, persisted in the NVS
