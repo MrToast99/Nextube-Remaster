@@ -12,6 +12,7 @@
 #include "weather.h"
 #include "sht30.h"              /* sht30_get() — indoor H/T for 24H_CX panel */
 #include "wifi_manager.h"       /* AP PIN visibility (S1) */
+#include "ha_mqtt.h"            /* ticker overlay (ha_mqtt_ticker_active / _clear) */
 #include "jpeg_decoder.h"       /* espressif/esp_jpeg v1.x managed component */
 #include "esp_random.h"         /* esp_fill_random — static-snow burn-in */
 #include <stdio.h>
@@ -107,6 +108,29 @@ static const uint16_t s_burnin_colors[] = {
  * stack (SRAM).  Used by display_show_image() and display_show_image_region().
  * Defined at file scope so both functions can share the same constant. */
 #define DISP_CHUNK_ROWS 8
+
+/* ── MQTT Ticker overlay ─────────────────────────────────────────────────────
+ * When the MQTT ticker is active the display task calls render_ticker() each
+ * 200 ms tick and skips normal mode rendering.  The text scrolls from right to
+ * left across all 6 tubes using the logisoso28 font at 4 px/tick (20 px/s).
+ * render_ticker() clears the ticker and blanks all tubes once the text has
+ * fully scrolled off the left edge of tube 0.
+ *
+ * U8G2_16BIT is defined globally (see components/u8g2/CMakeLists.txt) so
+ * u8g2_uint_t = uint16_t and u8g2_int_t = int16_t.  Drawing at a negative x
+ * (e.g. text already half-scrolled off left) works correctly: the cast
+ * (u8g2_uint_t)negative_int wraps to the two's-complement uint16 value, and
+ * U8g2's internal clip uses (u8g2_int_t) to restore the signed value, safely
+ * discarding any glyph whose right edge is ≤ 0.                               */
+#define TICKER_MAX_LEN   255
+#define TICKER_SCROLL_PX   4   /* pixels per 200 ms tick  → 20 px/s */
+
+static struct {
+    char  text[TICKER_MAX_LEN + 1]; /* current message being scrolled */
+    int   x_start;                  /* left edge of text in global 6×80 px canvas */
+    int   text_px_w;                /* measured pixel width of text */
+    bool  running;                  /* true while a scroll is in progress */
+} s_ticker_state;
 
 /* Static-snow burn-in: each frame writes truly random RGB565 pixels to every
  * tube in the mask, exercising each sub-pixel independently rather than as a
@@ -3178,6 +3202,62 @@ void display_timer_toggle(void)
     xSemaphoreGive(s_timer_mutex);
 }
 
+/* ── render_ticker ───────────────────────────────────────────────────
+ * Called once per 200 ms tick while an MQTT ticker is active.
+ *
+ * The text scrolls right-to-left across all 6 tubes using logisoso28.
+ * For tube i, the text is drawn at x = s_ticker_state.x_start − i×80
+ * in the U8g2 local coordinate space.  With U8G2_16BIT, negative values
+ * cause U8g2 to clip correctly: glyphs whose right edge ≤ 0 are skipped,
+ * and glyphs that straddle x=0 are rendered with their left columns
+ * clipped — exactly the "partial entry from left" behaviour required.
+ * ht_blit_at reads only columns 0..79 from the 128-wide U8g2 buffer, so
+ * text drawn beyond column 79 is automatically invisible on that tube.
+ *
+ * Vertical layout: logisoso28 ascent ≈28 descent ≈−6 → text band ~34 px.
+ * The buffer (64 rows) is centred in the 160-row tube at y_tube = 48. */
+static void render_ticker(const nextube_config_t *cfg)
+{
+    uint16_t fg = ht_sample_theme_color(cfg->apps[0].theme);
+
+    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso28_tf);
+    int ascent  = (int)u8g2_GetAscent(&s_u8g2);
+    int descent = (int)u8g2_GetDescent(&s_u8g2);
+    /* Baseline position that centres the text glyph band in 64 buffer rows */
+    int y_base = (64 + ascent + descent) / 2;
+    if (y_base < ascent) y_base = ascent;
+    if (y_base > 63)     y_base = 63;
+    /* Top of the 64-row blit band, centred in the 160-row tube */
+    int y_tube = (LCD_HEIGHT - 64) / 2;
+
+    for (int tube = 0; tube < LCD_COUNT; tube++) {
+        u8g2_ClearBuffer(&s_u8g2);
+        /* x_draw: where the text string starts in THIS tube's local space.
+         * Negative x_draw means the text has partially scrolled off left;
+         * U8g2 clips glyphs that fall entirely left of the buffer edge.
+         * Cast: (u8g2_uint_t)(int16_t)x_draw preserves two's complement so
+         * U8g2 internal (u8g2_int_t) re-interpretation works correctly. */
+        int x_draw = s_ticker_state.x_start - tube * LCD_WIDTH;
+        u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x_draw,
+                      (u8g2_uint_t)y_base,
+                      s_ticker_state.text);
+        ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2),
+                   64, y_tube, fg, NULL);
+    }
+
+    /* Advance scroll position */
+    s_ticker_state.x_start -= TICKER_SCROLL_PX;
+
+    /* Finished when the text's right edge has scrolled past tube 0's left edge */
+    if (s_ticker_state.x_start + s_ticker_state.text_px_w < 0) {
+        s_ticker_state.running = false;
+        ha_mqtt_ticker_clear();
+        /* Blank all tubes so the normal mode gets a clean canvas on the next tick */
+        for (int _t = 0; _t < LCD_COUNT; _t++) display_fill(_t, 0x0000);
+        ESP_LOGI(TAG, "Ticker scroll complete");
+    }
+}
+
 /* ── Main display task ──────────────────────────────────────────────── */
 static void display_task(void *arg)
 {
@@ -3529,6 +3609,39 @@ static void display_task(void *arg)
         /* Set true inside APP_MODE_WEATHER when the sun animation panel is
          * active; used below to drive FAST tick and per-frame anim updates. */
         bool    sun_anim            = false;
+
+        /* ── MQTT ticker overlay ────────────────────────────────────────────
+         * When a message is published to nextube/<host>/ticker/set the text
+         * scrolls across all 6 tubes at 4 px/200 ms (≈ 20 px/s).  While the
+         * ticker is running we skip mode rendering, burn-in, and rotation so
+         * the ticker has exclusive control of the display for its duration.
+         * The delay is issued here so the loop runs at the normal 5 Hz rate.
+         * Backlight and brightness (applied above) continue to take effect.  */
+        {
+            char ticker_buf[TICKER_MAX_LEN + 1];
+            if (ha_mqtt_ticker_active(ticker_buf, sizeof(ticker_buf))) {
+                /* New message or text changed — (re-)initialise scroll */
+                if (!s_ticker_state.running ||
+                    strcmp(ticker_buf, s_ticker_state.text) != 0) {
+                    strncpy(s_ticker_state.text, ticker_buf, TICKER_MAX_LEN);
+                    s_ticker_state.text[TICKER_MAX_LEN] = '\0';
+                    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso28_tf);
+                    s_ticker_state.text_px_w =
+                        (int)u8g2_GetUTF8Width(&s_u8g2, s_ticker_state.text);
+                    /* Start with text fully off the right edge of the display */
+                    s_ticker_state.x_start  = LCD_COUNT * LCD_WIDTH;
+                    s_ticker_state.running  = true;
+                    ESP_LOGI(TAG, "Ticker starting: \"%s\" (%d px)",
+                             s_ticker_state.text, s_ticker_state.text_px_w);
+                }
+                render_ticker(cfg);
+                vTaskDelayUntil(&wake, pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW));
+                continue;   /* skip mode switch, burn-in, rotation this tick */
+            } else {
+                /* Ticker not active — ensure running flag is clear */
+                s_ticker_state.running = false;
+            }
+        }
 
         switch (mode) {
 

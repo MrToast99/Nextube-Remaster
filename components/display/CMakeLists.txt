@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "display.c"
     INCLUDE_DIRS "include"
-    REQUIRES driver config_mgr board espressif__esp_jpeg ntp_time weather subscribers microphone wifi_manager sht30 u8g2
+    REQUIRES driver config_mgr board espressif__esp_jpeg ntp_time weather subscribers microphone wifi_manager sht30 u8g2 ha_mqtt
 )
 
 # IDF 5.x: managed component include dirs don't always propagate through REQUIRES.

@@ -14,16 +14,14 @@
  * immediately.  A mutex serialises concurrent play requests.
  *
  * DAC mode lifecycle:
- *   disabled – dac_continuous ring held at level 0 (DAC driver stays live).
- *             The output buffer remains active and presents a low-impedance
- *             termination (~50 Ω resistor-string) to the amp's AC-coupled
- *             input, preventing WS2812/SPI rail noise from coupling in.
- *             Hi-Z and GPIO OUTPUT LOW both leave a higher-impedance node
- *             that acts as an antenna and produces audible hiss.
- *             The AC cap charges to the amp-bias voltage (~0.9 V) and
- *             thereafter the amp sees 0 V AC → near silence.
- *             On re-enable a 500 ms cosine fade (0 → 128) tracks the cap
- *             voltage back to VDD/2 without a pop.
+ *   disabled – dac_oneshot holds GPIO25 at 128 (≈1.65 V DC, VDD/2).
+ *             The AC coupling cap charges to this voltage; thereafter the
+ *             amp sees 0 V AC differential → genuine silence.  No I²S,
+ *             no DMA, no periodic AHB activity.
+ *             Changing audio_enabled requires a reboot — the setting is
+ *             saved to config.json before esp_restart() so it takes effect
+ *             clean at next boot.  Mixing oneshot and dac_continuous in
+ *             the same boot session is unreliable on original ESP32.
  *
  *   playing – leds_set_audio_active(true) pauses WS2812 RMT first.
  *             A flat-128 prime buffer fills the ring before playback so
@@ -36,6 +34,7 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
+#include "driver/dac_oneshot.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -58,6 +57,10 @@ static SemaphoreHandle_t s_play_mutex  = NULL;
 
 /* DAC handle – running when audio is enabled, NULL when disabled / Hi-Z */
 static dac_continuous_handle_t s_dac_cont        = NULL;
+/* Oneshot handle – held open when audio is disabled at boot to keep GPIO25
+ * at mid-rail (128 ≈ 1.65 V).  Never mixed with dac_continuous in the same
+ * boot session (unreliable on original ESP32). */
+static dac_oneshot_handle_t    s_dac_os_silence  = NULL;
 static volatile bool           s_audio_enabled   = true;
 /* Set while a DAC test mode is active — blocks audio_play_file(). */
 static volatile bool           s_dac_test_active = false;
@@ -385,25 +388,33 @@ void audio_init(bool enabled)
 
     if (!enabled) {
         s_audio_enabled = false;
-        /* Drive GPIO25 OUTPUT LOW rather than leaving it Hi-Z.
+        /* Hold GPIO25 at mid-rail (128 ≈ 1.65 V DC) via dac_oneshot.
          *
-         * The LTK8002D amplifier input is AC-coupled.  A Hi-Z or floating
-         * GPIO25 acts as an antenna for WS2812 current spikes and SPI
-         * bus transitions on the shared 3.3 V rail → audible hiss.
-         * Driving OUTPUT LOW presents ~50 Ω source impedance — the same
-         * order as the DAC output buffer — so the AC coupling cap charges
-         * to 0 V and thereafter the amp input sees ~0 V AC: near silence.
+         * The LTK8002D input is AC-coupled.  A stable VDD/2 DC level
+         * charges the AC cap to VDD/2; thereafter the amp sees 0 V AC
+         * differential — genuine silence.  dac_oneshot uses the RTC DAC
+         * path: no I²S, no DMA, no periodic AHB bus activity.
          *
-         * The I²S0 peripheral, APLL, and DMA ring buffers are never
-         * allocated (~16 KB heap + ~1.6 s APLL lock delay saved).
-         * audio_set_enabled(true) called later from the web UI will call
-         * dac_restart(), which reconfigures GPIO25 for DAC use at that
-         * point (one-time ~1.6 s APLL lock on first enable). */
-        gpio_reset_pin(PIN_AUDIO_DAC);
-        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-        gpio_set_level(PIN_AUDIO_DAC, 0);
-        ESP_LOGI(TAG, "Audio disabled at init — GPIO%d driven LOW, DAC not started",
-                 PIN_AUDIO_DAC);
+         * The handle is kept open for the life of the boot session so
+         * GPIO25 stays in DAC mode.  Changing audio_enabled takes effect
+         * after a reboot (the web server saves config then calls
+         * esp_restart); we never transition oneshot → dac_continuous in
+         * the same session — that path is unreliable on original ESP32. */
+        dac_oneshot_config_t os_cfg = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&os_cfg, &s_dac_os_silence) == ESP_OK) {
+            dac_oneshot_output_voltage(s_dac_os_silence, 128);
+            ESP_LOGI(TAG, "Audio disabled at init — GPIO%d held at 128 (~1.65 V) via oneshot",
+                     PIN_AUDIO_DAC);
+        } else {
+            /* Fallback: drive GPIO25 LOW.  Less ideal (AC cap charges to 0 V
+             * instead of VDD/2, coupling any supply ripple as AC to the amp)
+             * but still much quieter than Hi-Z. */
+            gpio_reset_pin(PIN_AUDIO_DAC);
+            gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+            gpio_set_level(PIN_AUDIO_DAC, 0);
+            ESP_LOGW(TAG, "Audio disabled at init — oneshot failed, GPIO%d driven LOW",
+                     PIN_AUDIO_DAC);
+        }
         return;
     }
 
@@ -415,77 +426,18 @@ void audio_init(bool enabled)
 
 void audio_set_enabled(bool enabled)
 {
-    ESP_LOGI(TAG, "audio_set_enabled(%d)  current=%d", (int)enabled, (int)s_audio_enabled);
-    if ((bool)s_audio_enabled == enabled) return;  /* no-op if unchanged */
-    s_audio_enabled = enabled;
-
-    if (!enabled) {
-        /* Stop any active playback task first. */
-        s_stop_flag = true;
-        for (int i = 0; i < 30 && s_audio_task != NULL; i++)
-            vTaskDelay(pdMS_TO_TICKS(10));
-
-        s_dac_test_active = false;
-
-        /* Tear down the continuous DAC driver completely.
-         *
-         * Previous approach (keep DMA ring running at level 0) was intended
-         * to maintain a low-impedance clamp on GPIO25, but the I²S0 DMA
-         * controller generates periodic AHB bus activity at 32 kHz even with
-         * constant output — those bus transactions create current spikes on
-         * the shared 3.3 V rail that couple back through the DAC output
-         * buffer into the amplifier → audible noise.
-         *
-         * Tearing the driver down completely stops all I²S0 / DMA activity.
-         * GPIO25 is then driven OUTPUT LOW: the ESP32 GPIO drive transistor
-         * presents ~12 Ω to GND (lower than the DAC R-2R ladder at level 0),
-         * the AC coupling cap charges to 0 V, and the amp input thereafter
-         * sees ~0 V AC differential — the same quiet state as before, with
-         * no DMA-induced rail noise.
-         *
-         * Trade-off: re-enabling calls dac_restart() which incurs the APLL
-         * re-lock delay (~10 ms if APLL is already locked, or up to ~1.6 s
-         * if it was fully released by the IDF) and the 500 ms anti-pop fade.
-         * This is acceptable — re-enabling is a deliberate user action. */
-        if (s_dac_cont) {
-            dac_continuous_disable(s_dac_cont);
-            dac_continuous_del_channels(s_dac_cont);
-            s_dac_cont = NULL;
-        }
-        gpio_reset_pin(PIN_AUDIO_DAC);
-        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-        gpio_set_level(PIN_AUDIO_DAC, 0);
-        ESP_LOGI(TAG, "Audio disabled — DAC torn down, GPIO%d driven LOW", PIN_AUDIO_DAC);
-    } else {
-        if (s_dac_cont) {
-            /* DAC was left running (e.g. a DAC test mode held it alive while
-             * s_audio_enabled was false).  Fade 0 → 128 so the AC cap tracks
-             * back to VDD/2 without a pop, then settle to mid-rail silence. */
-            size_t n = ((FIXED_DAC_RATE * 500) / 1000 + 3) & ~3;
-            uint8_t *fade = (uint8_t *)calloc(1, n);
-            if (fade) {
-                for (size_t i = 0; i < n; i++) {
-                    float t = (float)i / (float)n;
-                    fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
-                }
-                size_t w;
-                dac_continuous_write(s_dac_cont, fade, n, &w, portMAX_DELAY);
-                free(fade);
-            }
-            uint8_t silence[DAC_DMA_BUF_SIZE];
-            memset(silence, 128, sizeof(silence));
-            size_t w;
-            for (int i = 0; i < DAC_DESC_NUM; i++)
-                dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
-        } else {
-            /* DAC torn down (normal disable or test mode) — full restart.
-             * dac_restart() reconfigures GPIO25 for DAC output, locks the
-             * APLL if needed, and plays the 0→128 anti-pop fade so the AC
-             * coupling cap tracks to VDD/2 without a thump. */
-            dac_restart();
-        }
-        ESP_LOGI(TAG, "Audio enabled");
-    }
+    /* audio_enabled changes take effect after a reboot.  The web server
+     * saves the new value to config.json then calls esp_restart(); on the
+     * next boot audio_init() picks up the correct state.
+     *
+     * Dynamic switching is intentionally not supported: transitioning from
+     * dac_oneshot (used when audio is disabled at boot) to dac_continuous
+     * in the same boot session is unreliable on the original ESP32 — the
+     * I²S0 controller sometimes fails to release state after oneshot use,
+     * causing dac_continuous_new_channels() to return an error even after
+     * repeated retries. */
+    (void)enabled;
+    ESP_LOGI(TAG, "audio_set_enabled: change saved — takes effect after reboot");
 }
 
 void audio_play_file(const char *path)

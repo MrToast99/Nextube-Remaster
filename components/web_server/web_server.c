@@ -250,9 +250,9 @@ static esp_err_t api_post_settings(httpd_req_t *r)
      *   2. Boot-time feature flags — tasks are created once in app_main and
      *      cannot be started/stopped at runtime, so a reboot is required for
      *      changes to weather_enabled / youtube_enabled / mdns_enabled /
-     *      mic_enabled to take effect. */
+     *      mic_enabled / audio_enabled to take effect. */
     char old_ssid[64], old_pass[64], old_hostname[32];
-    bool old_weather_en, old_youtube_en, old_mdns_en, old_mic_en;
+    bool old_weather_en, old_youtube_en, old_mdns_en, old_mic_en, old_audio_en;
     uint8_t old_invert_mask;
     uint8_t old_init_profile[6];
     uint8_t old_vcom[6];
@@ -268,6 +268,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     old_youtube_en   = old_cfg->youtube_enabled;
     old_mdns_en      = old_cfg->mdns_enabled;
     old_mic_en       = old_cfg->mic_enabled;
+    old_audio_en     = old_cfg->audio_enabled;
     old_invert_mask  = old_cfg->lcd_invert_mask;
     memcpy(old_init_profile,    old_cfg->lcd_init_profile,    sizeof(old_init_profile));
     memcpy(old_vcom,            old_cfg->lcd_vcom,            sizeof(old_vcom));
@@ -338,13 +339,17 @@ static esp_err_t api_post_settings(httpd_req_t *r)
 
     /* Boot-time feature flags or hostname changed — reboot required.
      * Hostname is baked into LWIP netif, DHCP option 12, and mDNS at start-up;
-     * changing it live is not supported.  Respond first so the browser gets
-     * confirmation before the TCP connection drops. */
+     * changing it live is not supported.  audio_enabled uses dac_oneshot at
+     * boot when disabled; mixing oneshot and dac_continuous in the same session
+     * is unreliable on original ESP32, so it also requires a reboot.
+     * Respond first so the browser gets confirmation before the TCP connection
+     * drops. */
     bool needs_reboot = (strcmp(old_hostname, new_hostname) != 0) ||
                         (old_weather_en != new_weather_en) ||
                         (old_youtube_en != new_youtube_en) ||
                         (old_mdns_en    != new_mdns_en)    ||
-                        (old_mic_en     != new_mic_en);
+                        (old_mic_en     != new_mic_en)     ||
+                        (old_audio_en   != new_audio_enabled);
     if (needs_reboot) {
         send_json(r, ok ? "{\"status\":\"ok\",\"reboot\":true}"
                         : "{\"status\":\"error\",\"reboot\":false}");

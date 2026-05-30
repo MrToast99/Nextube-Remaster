@@ -12,6 +12,7 @@
  *   nextube/<host>/brightness/state          "75"
  *   nextube/<host>/theme/state               "NixieOY"
  *   nextube/<host>/rotation/state            "ON" or "OFF"
+ *   nextube/<host>/ticker/state              current ticker text, or "" when cleared
  *
  * Subscribed:
  *   nextube/<host>/mode/set                  "Weather"
@@ -19,6 +20,7 @@
  *   nextube/<host>/brightness/set            "75"
  *   nextube/<host>/theme/set                 "DarkSlate"
  *   nextube/<host>/rotation/set              "ON" or "OFF"
+ *   nextube/<host>/ticker/set                UTF-8 string ≤ 255 chars; empty = cancel
  *
  * HA auto-discovery:
  *   homeassistant/sensor/<host>_temp/config
@@ -29,6 +31,7 @@
  *   homeassistant/switch/<host>_display/config
  *   homeassistant/switch/<host>_rotation/config
  *   homeassistant/number/<host>_brightness/config
+ *   homeassistant/text/<host>_ticker/config
  *
  * Firmware version:
  *   nextube/<host>/firmware/state              "1.10.0"  (retained)
@@ -47,6 +50,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "mqtt_client.h"
 
 static const char *TAG = "ha_mqtt";
@@ -54,6 +58,14 @@ static const char *TAG = "ha_mqtt";
 /* ── File-scope state ──────────────────────────────────────────────── */
 static esp_mqtt_client_handle_t s_client = NULL;
 static volatile bool            s_connected = false;
+
+/* ── Ticker state ──────────────────────────────────────────────────── */
+#define TICKER_MAX_LEN 255
+static char              s_ticker_text[TICKER_MAX_LEN + 1] = "";
+static SemaphoreHandle_t s_ticker_mutex                    = NULL;
+/* Precomputed topic strings (built once in ha_mqtt_start) */
+static char s_topic_ticker_set  [TOPIC_MAXLEN] = "";
+static char s_topic_ticker_state[TOPIC_MAXLEN] = "";
 
 /* Cached config values read at start() — broker may not be reachable
  * immediately; these are used throughout the task lifetime. */
@@ -309,6 +321,62 @@ static void publish_sensors(void)
     publish(topic, payload, 0);
 }
 
+/* ── Ticker discovery ─────────────────────────────────────────────── */
+static void publish_ticker_discovery(void)
+{
+    char topic[TOPIC_MAXLEN];
+    char payload[512];
+    char dev[192];
+    snprintf(dev, sizeof(dev),
+             "\"identifiers\":[\"%s\"],\"name\":\"Nextube\","
+             "\"model\":\"Nextube-Remaster\","
+             "\"manufacturer\":\"MrToast99\","
+             "\"sw_version\":\"%s\"",
+             s_hostname, FW_VERSION_STR);
+
+    snprintf(topic, sizeof(topic),
+             "homeassistant/text/%s_ticker/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Ticker\","
+             "\"unique_id\":\"%s_ticker\","
+             "\"state_topic\":\"%s\","
+             "\"command_topic\":\"%s\","
+             "\"max\":255,"
+             "\"icon\":\"mdi:message-text\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, s_topic_ticker_state, s_topic_ticker_set, dev);
+    publish(topic, payload, 1);
+}
+
+/* ── Ticker public API ────────────────────────────────────────────── */
+bool ha_mqtt_ticker_active(char *out, size_t len)
+{
+    if (!s_ticker_mutex) return false;
+    xSemaphoreTake(s_ticker_mutex, portMAX_DELAY);
+    bool active = (s_ticker_text[0] != '\0');
+    if (active && out && len > 0) {
+        size_t n = strlen(s_ticker_text);
+        if (n >= len) n = len - 1;
+        memcpy(out, s_ticker_text, n);
+        out[n] = '\0';
+    }
+    xSemaphoreGive(s_ticker_mutex);
+    return active;
+}
+
+void ha_mqtt_ticker_clear(void)
+{
+    if (!s_ticker_mutex) return;
+    xSemaphoreTake(s_ticker_mutex, portMAX_DELAY);
+    s_ticker_text[0] = '\0';
+    xSemaphoreGive(s_ticker_mutex);
+    /* Publish empty state so HA reflects the cleared ticker */
+    publish(s_topic_ticker_state, "", 0);
+    ESP_LOGI(TAG, "Ticker cleared");
+}
+
 /* ── MQTT event handler ────────────────────────────────────────────── */
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data)
@@ -470,6 +538,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             esp_mqtt_client_subscribe(s_client, topic, 1);
             make_topic(topic, sizeof(topic), "rotation/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            esp_mqtt_client_subscribe(s_client, s_topic_ticker_set, 1);
+        }
+
+        /* HA auto-discovery: ticker entity — added after both SHT30 branches */
+        if (s_discovery) {
+            publish_ticker_discovery();
         }
 
         /* Publish current state immediately after (re-)connect */
@@ -585,6 +659,26 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             config_set_json(json, strlen(json));
             publish_rotation(enable);
             ESP_LOGI(TAG, "Mode rotation %s via MQTT", enable ? "ON" : "OFF");
+            break;
+        }
+
+        /* ── ticker/set ── */
+        if (strcmp(t, s_topic_ticker_set) == 0) {
+            /* Use event->data directly — up to TICKER_MAX_LEN chars, bypassing
+             * the 128-byte p[] buffer used for other (shorter) payloads. */
+            int ticker_n = event->data_len < TICKER_MAX_LEN
+                         ? event->data_len : TICKER_MAX_LEN;
+            if (ticker_n == 0) {
+                ha_mqtt_ticker_clear();   /* empty payload = cancel ticker */
+                ESP_LOGI(TAG, "Ticker cancelled via MQTT");
+            } else {
+                xSemaphoreTake(s_ticker_mutex, portMAX_DELAY);
+                memcpy(s_ticker_text, event->data, ticker_n);
+                s_ticker_text[ticker_n] = '\0';
+                xSemaphoreGive(s_ticker_mutex);
+                publish(s_topic_ticker_state, s_ticker_text, 0);
+                ESP_LOGI(TAG, "Ticker set: \"%.*s\"", ticker_n, event->data);
+            }
             break;
         }
 
@@ -732,6 +826,14 @@ void ha_mqtt_start(void)
     strncpy(s_pass, cfg->mqtt_password, sizeof(s_pass) - 1);
     s_discovery = cfg->mqtt_ha_discovery;
     config_unlock();
+
+    /* Precompute ticker topic strings (hostname is now set above) */
+    make_topic(s_topic_ticker_set,   sizeof(s_topic_ticker_set),   "ticker/set");
+    make_topic(s_topic_ticker_state, sizeof(s_topic_ticker_state), "ticker/state");
+
+    /* Create ticker mutex — must be done before the MQTT task starts so any
+     * early ha_mqtt_ticker_* calls from other tasks are safe. */
+    if (!s_ticker_mutex) s_ticker_mutex = xSemaphoreCreateMutex();
 
     xTaskCreatePinnedToCore(ha_mqtt_task, "ha_mqtt",
                             4096, NULL, 3, NULL, 0);
