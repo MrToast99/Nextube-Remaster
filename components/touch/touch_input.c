@@ -34,11 +34,11 @@ static const char *TAG = "touch";
  *   longer than typical EMI glitches on the capacitive pads. */
 #define PRESS_DEBOUNCE  3
 
-/* ── Setup-AP hotkey: hold LEFT + RIGHT together for ~30 s ─────────────────
- * 30 000 ms / 50 ms poll = 600 consecutive "both pressed" samples.  A small
+/* ── Setup-AP hotkey: hold LEFT + RIGHT together for ~15 s ─────────────────
+ * 15 000 ms / 50 ms poll = 300 consecutive "both pressed" samples.  A small
  * miss tolerance (COMBO_MISS_TOL × 50 ms) rides over brief capacitive flicker
  * so the long hold doesn't reset on a single noisy sample. */
-#define COMBO_HOLD_SAMPLES  (30000 / 50)   /* 600 = 30 s */
+#define COMBO_HOLD_SAMPLES  (15000 / 50)   /* 300 = 15 s */
 #define COMBO_MISS_TOL      4               /* up to 200 ms flicker tolerated */
 
 /* ── Touch pad channel numbers (match GPIO from board_pins.h) ───────── */
@@ -164,7 +164,7 @@ static void touch_poll_task(void *arg)
             was_pressed[i] = pressed;
         }
 
-        /* ── Setup-AP hotkey: LEFT + RIGHT held together ~30 s ──────────────
+        /* ── Setup-AP hotkey: LEFT + RIGHT held together ~15 s ──────────────
          * Uses the instantaneous raw press state (raw_now[]), NOT the debounced
          * single-press path, so it works independently of the per-channel
          * stuck-press recovery that disarms long holds.  Fires the combo
@@ -175,7 +175,7 @@ static void touch_poll_task(void *arg)
             if (combo_count < COMBO_HOLD_SAMPLES) combo_count++;
             if (combo_count >= COMBO_HOLD_SAMPLES && !combo_fired) {
                 combo_fired = true;
-                ESP_LOGW(TAG, "Touch combo LEFT+RIGHT held 30 s — firing combo callback");
+                ESP_LOGW(TAG, "Touch combo LEFT+RIGHT held 15 s — firing combo callback");
                 if (combo_cb) combo_cb();
             }
         } else if (combo_count > 0 && ++combo_miss > COMBO_MISS_TOL) {

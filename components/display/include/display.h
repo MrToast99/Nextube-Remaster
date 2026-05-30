@@ -193,6 +193,14 @@ void display_timer_toggle(void);
  *  on its next render cycle. */
 void display_album_invalidate(void);
 
+/** Set the MQTT ticker scroll speed in on-screen pixels per 200 ms tick
+ *  (clamped to 1–20). Driven by the Home Assistant "Ticker Speed" number
+ *  entity. RAM-only — resets to the default (4) on reboot. */
+void display_set_ticker_speed(int px);
+
+/** Get the current ticker scroll speed (px per 200 ms tick). */
+int  display_get_ticker_speed(void);
+
 /** Force a full repaint of all six tubes on the next display-task tick.
  *  Use after changing display-config properties at runtime (e.g. col/row
  *  offsets, gamma, brightness) so the new settings are visible immediately

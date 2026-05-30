@@ -604,7 +604,7 @@ The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi prov
 
 **Recovery hotkey — force the AP on demand:**
 
-Hold the **LEFT** and **RIGHT** touch pads at the same time for **30 seconds**. The `Nextube-Setup` network starts broadcasting immediately. The AP closes automatically 60 seconds after the device next obtains a WiFi IP. This works regardless of whether STA is connected or disconnected, and is a no-op if the AP is already active.
+Hold the **LEFT** and **RIGHT** touch pads at the same time for **15 seconds**. The `Nextube-Setup` network starts broadcasting immediately. The AP closes automatically 60 seconds after the device next obtains a WiFi IP. This works regardless of whether STA is connected or disconnected, and is a no-op if the AP is already active.
 
 After setup, access the management interface via:
 
@@ -705,7 +705,7 @@ Enable **Theme Rotation** in Display settings to automatically cycle through the
 | LEFT | Previous enabled mode |
 | MIDDLE | **Countdown / Pomodoro:** pause / resume the timer. **All other modes:** toggle LCD displays on/off (backlight) |
 | RIGHT | Next enabled mode |
-| LEFT + RIGHT (hold 30 s) | Force the setup AP on — broadcasts `Nextube-Setup` so you can reach the web UI at `192.168.4.1` to fix WiFi credentials |
+| LEFT + RIGHT (hold 15 s) | Force the setup AP on — broadcasts `Nextube-Setup` so you can reach the web UI at `192.168.4.1` to fix WiFi credentials |
 
 ## Weather
 
@@ -926,6 +926,7 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 | **Nextube Display** | `switch` | Turn the backlight ON or OFF (same as the middle touch button) |
 | **Nextube Brightness** | `number` | LCD brightness 0–100 slider |
 | **Nextube Ticker** | `text` | Scrolling message ticker — type any text and press Enter to display it across all 6 tubes |
+| **Nextube Ticker Speed** | `number` | Marquee scroll speed slider, 1–20 px per tick (higher = faster). RAM-only; resets to 4 on reboot |
 
 ### Setup
 
@@ -956,12 +957,15 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | **Subscribe** | `nextube/<hostname>/brightness/set` | `75` (integer 0–100) |
 | Publish | `nextube/<hostname>/ticker/state` | Current ticker text, or `""` when cleared |
 | **Subscribe** | `nextube/<hostname>/ticker/set` | UTF-8 string ≤ 255 chars; empty payload = cancel |
+| Publish | `nextube/<hostname>/ticker_speed/state` | `4` (integer 1–20, px per tick) |
+| **Subscribe** | `nextube/<hostname>/ticker_speed/set` | `4` (integer 1–20; clamped, echoed back) |
 | Publish | `homeassistant/sensor/<hostname>_temp/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/sensor/<hostname>_hum/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/select/<hostname>_mode/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/switch/<hostname>_display/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/number/<hostname>_brightness/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/text/<hostname>_ticker/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/number/<hostname>_ticker_speed/config` | HA discovery JSON (retained) |
 
 ### Notes
 
@@ -981,7 +985,7 @@ mosquitto_pub -h <broker> -t "nextube/nextube-remaster/ticker/set" -m "Good morn
 
 | Behaviour | Detail |
 |---|---|
-| **Scroll speed** | 4 px per 200 ms tick → 20 px/s on screen. The text is rendered at double size, so a typical 15-character message (~600 px wide) scrolls for about 75 seconds. |
+| **Scroll speed** | Default 4 px per 200 ms tick → 20 px/s on screen. Adjustable 1–20 via the **Nextube Ticker Speed** number entity (or `ticker_speed/set`). At the default, a typical 15-character message (~600 px wide, rendered double size) scrolls for about 75 seconds. RAM-only — resets to 4 on reboot. |
 | **Cancel** | Publish an empty payload to `ticker/set` — the display returns to the previous mode immediately. |
 | **New message while scrolling** | The current scroll stops and the new message starts from the right edge. |
 | **Font** | `u8g2_font_logisoso28_tf` rendered with 2× pixel scaling (effective ~56 px) — full Latin character set including accented glyphs (é á ö ü ñ etc.). |

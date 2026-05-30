@@ -65,7 +65,7 @@ static esp_ip4_addr_t s_last_mdns_ip = {0};
 
 /* The setup AP is NOT brought up automatically when STA fails.  Instead the
  * user summons it on demand by holding the LEFT + RIGHT touch pads together
- * for 30 s (touch_input combo → wifi_manager_force_ap()).  This avoids the AP
+ * for 15 s (touch_input combo → wifi_manager_force_ap()).  This avoids the AP
  * popping up unexpectedly during transient WiFi outages, and is reliable even
  * during a connect-retry storm (which previously kept resetting the old timer
  * so it never elapsed). */
@@ -466,7 +466,7 @@ void wifi_manager_start(void)
     if (have_creds) {
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         s_ap_active = false;
-        ESP_LOGI(TAG, "STA: connecting to \"%s\" (hold LEFT+RIGHT touch 30 s for setup AP)", ssid);
+        ESP_LOGI(TAG, "STA: connecting to \"%s\" (hold LEFT+RIGHT touch 15 s for setup AP)", ssid);
     } else {
         s_ap_active = true;
         ESP_LOGI(TAG, "No STA credentials — AP-only mode for first-boot setup");

@@ -13,6 +13,7 @@
  *   nextube/<host>/theme/state               "NixieOY"
  *   nextube/<host>/rotation/state            "ON" or "OFF"
  *   nextube/<host>/ticker/state              current ticker text, or "" when cleared
+ *   nextube/<host>/ticker_speed/state        ticker scroll speed (px per 200 ms tick)
  *
  * Subscribed:
  *   nextube/<host>/mode/set                  "Weather"
@@ -21,6 +22,7 @@
  *   nextube/<host>/theme/set                 "DarkSlate"
  *   nextube/<host>/rotation/set              "ON" or "OFF"
  *   nextube/<host>/ticker/set                UTF-8 string ≤ 255 chars; empty = cancel
+ *   nextube/<host>/ticker_speed/set          ticker scroll speed 1–20 (px per 200 ms tick)
  *
  * HA auto-discovery:
  *   homeassistant/sensor/<host>_temp/config
@@ -32,6 +34,7 @@
  *   homeassistant/switch/<host>_rotation/config
  *   homeassistant/number/<host>_brightness/config
  *   homeassistant/text/<host>_ticker/config
+ *   homeassistant/number/<host>_ticker_speed/config
  *
  * Firmware version:
  *   nextube/<host>/firmware/state              "1.10.0"  (retained)
@@ -42,6 +45,7 @@
 #include "fw_version.h"
 #include "sht30.h"
 #include "wifi_manager.h"
+#include "display.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -304,6 +308,15 @@ static void publish_rotation(bool enabled)
     publish(topic, enabled ? "ON" : "OFF", 0);
 }
 
+static void publish_ticker_speed(int px)
+{
+    char topic[TOPIC_MAXLEN];
+    char buf[8];
+    make_topic(topic, sizeof(topic), "ticker_speed/state");
+    snprintf(buf, sizeof(buf), "%d", px);
+    publish(topic, buf, 0);
+}
+
 static void publish_sensors(void)
 {
     const sht30_reading_t *s = sht30_get();
@@ -347,6 +360,26 @@ static void publish_ticker_discovery(void)
              "\"device\":{%s}"
              "}",
              s_hostname, s_topic_ticker_state, s_topic_ticker_set, dev);
+    publish(topic, payload, 1);
+
+    /* ── Ticker speed number (px per 200 ms tick; higher = faster) ── */
+    char ts_state[TOPIC_MAXLEN], ts_cmd[TOPIC_MAXLEN];
+    make_topic(ts_state, sizeof(ts_state), "ticker_speed/state");
+    make_topic(ts_cmd,   sizeof(ts_cmd),   "ticker_speed/set");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/number/%s_ticker_speed/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Ticker Speed\","
+             "\"unique_id\":\"%s_ticker_speed\","
+             "\"state_topic\":\"%s\","
+             "\"command_topic\":\"%s\","
+             "\"min\":1,\"max\":20,\"step\":1,"
+             "\"mode\":\"slider\","
+             "\"icon\":\"mdi:speedometer\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, ts_state, ts_cmd, dev);
     publish(topic, payload, 1);
 }
 
@@ -538,6 +571,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             esp_mqtt_client_subscribe(s_client, topic, 1);
             make_topic(topic, sizeof(topic), "rotation/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            make_topic(topic, sizeof(topic), "ticker_speed/set");
+            esp_mqtt_client_subscribe(s_client, topic, 1);
             esp_mqtt_client_subscribe(s_client, s_topic_ticker_set, 1);
         }
 
@@ -564,6 +599,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             publish_brightness(cur_br);
             publish_theme(cur_theme);
             publish_rotation(cur_rot);
+            publish_ticker_speed(display_get_ticker_speed());
             if (sht30_is_present()) publish_sensors();
 
             /* Firmware version — retained so HA has it after broker restart */
@@ -659,6 +695,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             config_set_json(json, strlen(json));
             publish_rotation(enable);
             ESP_LOGI(TAG, "Mode rotation %s via MQTT", enable ? "ON" : "OFF");
+            break;
+        }
+
+        /* ── ticker_speed/set ── */
+        char tspeed_cmd_topic[TOPIC_MAXLEN];
+        make_topic(tspeed_cmd_topic, sizeof(tspeed_cmd_topic), "ticker_speed/set");
+        if (strcmp(t, tspeed_cmd_topic) == 0) {
+            display_set_ticker_speed(atoi(p));        /* clamps to 1–20 internally */
+            publish_ticker_speed(display_get_ticker_speed());  /* echo clamped value */
+            ESP_LOGI(TAG, "Ticker speed set to %d via MQTT", display_get_ticker_speed());
             break;
         }
 

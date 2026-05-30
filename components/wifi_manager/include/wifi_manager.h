@@ -12,7 +12,7 @@ const char *wifi_manager_get_ip(void);
 void wifi_manager_scan_start(void);
 
 /* Bring the setup AP ("Nextube-Setup") up on demand, regardless of STA state.
- * Triggered by the LEFT+RIGHT touch-pad hotkey (held 30 s).  Idempotent —
+ * Triggered by the LEFT+RIGHT touch-pad hotkey (held 15 s).  Idempotent —
  * a no-op if the AP is already broadcasting.  The AP closes automatically
  * 60 s after STA next obtains an IP (so a browser session can migrate). */
 void wifi_manager_force_ap(void);

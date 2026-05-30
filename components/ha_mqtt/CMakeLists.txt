@@ -3,6 +3,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES
         config_mgr
+        display
         sht30
         wifi_manager
         mqtt

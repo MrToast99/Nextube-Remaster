@@ -122,8 +122,14 @@ static const uint16_t s_burnin_colors[] = {
  * (u8g2_uint_t)negative_int wraps to the two's-complement uint16 value, and
  * U8g2's internal clip uses (u8g2_int_t) to restore the signed value, safely
  * discarding any glyph whose right edge is ≤ 0.                               */
-#define TICKER_MAX_LEN   255
-#define TICKER_SCROLL_PX   4   /* pixels per 200 ms tick  → 20 px/s */
+#define TICKER_MAX_LEN     255
+#define TICKER_SCROLL_PX     4   /* default px per 200 ms tick → 20 px/s */
+#define TICKER_SCROLL_MIN    1   /* slowest (≈ 5 px/s)  */
+#define TICKER_SCROLL_MAX   20   /* fastest (≈ 100 px/s) */
+/* Runtime scroll speed in on-screen pixels per 200 ms tick.  Adjustable at
+ * runtime via display_set_ticker_speed() (driven by the Home Assistant MQTT
+ * "Ticker Speed" number entity).  RAM-only — resets to the default on reboot. */
+static int s_ticker_scroll_px = TICKER_SCROLL_PX;
 /* The ticker text is rendered into the 128×64 U8g2 buffer at native logisoso28
  * size, then blitted with 2× pixel scaling (both axes) so it appears double
  * size (~56 px) — the same technique as the big clock digits (pin_draw_tube).
@@ -3314,8 +3320,8 @@ static void render_ticker(const nextube_config_t *cfg)
         ht_blit_ticker_2x(tube, u8g2_GetBufferPtr(&s_u8g2), fg);
     }
 
-    /* Advance scroll position (on-screen pixels — same 20 px/s as before) */
-    s_ticker_state.x_start -= TICKER_SCROLL_PX;
+    /* Advance scroll position (on-screen pixels; speed set via HA MQTT) */
+    s_ticker_state.x_start -= s_ticker_scroll_px;
 
     /* Finished when the text's right edge has scrolled past tube 0's left edge.
      * text_px_w is the on-screen width (2× the native glyph width). */
@@ -3326,6 +3332,25 @@ static void render_ticker(const nextube_config_t *cfg)
         for (int _t = 0; _t < LCD_COUNT; _t++) display_fill(_t, 0x0000);
         ESP_LOGI(TAG, "Ticker scroll complete");
     }
+}
+
+/* ── Ticker speed API ────────────────────────────────────────────────
+ * Set/get the marquee scroll speed in on-screen pixels per 200 ms tick.
+ * Driven by the Home Assistant MQTT "Ticker Speed" number entity.
+ * A plain int read/write is atomic on the ESP32, so no lock is needed:
+ * the display task reads s_ticker_scroll_px once per tick and the MQTT
+ * task writes it from the event handler. */
+void display_set_ticker_speed(int px)
+{
+    if (px < TICKER_SCROLL_MIN) px = TICKER_SCROLL_MIN;
+    if (px > TICKER_SCROLL_MAX) px = TICKER_SCROLL_MAX;
+    s_ticker_scroll_px = px;
+    ESP_LOGI(TAG, "Ticker speed set to %d px/tick", px);
+}
+
+int display_get_ticker_speed(void)
+{
+    return s_ticker_scroll_px;
 }
 
 /* ── Main display task ──────────────────────────────────────────────── */
