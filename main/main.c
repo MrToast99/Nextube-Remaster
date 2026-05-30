@@ -404,7 +404,7 @@ void app_main(void)
     leds_task_start();
     touch_input_init();
     touch_input_register_callback(on_touch);
-    /* Hold LEFT+RIGHT touch pads together for 30 s to summon the WiFi setup AP
+    /* Hold LEFT+RIGHT touch pads together for 15 s to summon the WiFi setup AP
      * on demand (replaces the old automatic 90 s fallback timer). */
     touch_input_register_combo_callback(wifi_manager_force_ap);
     sht30_init();               /* probe optional sensor; safe no-op if absent */
