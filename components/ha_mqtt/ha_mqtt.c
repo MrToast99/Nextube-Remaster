@@ -325,7 +325,7 @@ static void publish_sensors(void)
 static void publish_ticker_discovery(void)
 {
     char topic[TOPIC_MAXLEN];
-    char payload[512];
+    char payload[768];
     char dev[192];
     snprintf(dev, sizeof(dev),
              "\"identifiers\":[\"%s\"],\"name\":\"Nextube\","
