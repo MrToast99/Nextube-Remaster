@@ -73,9 +73,19 @@ static volatile bool           s_audio_enabled   = true;
 static volatile bool           s_dac_test_active = false;
 
 /* Static idle DC level held via dac_oneshot when audio is disabled.
- * 1 (≈ 13 mV) measured as the quietest setting on this hardware via the
- * DAC debug page.  The original firmware settled near 0 with no clock. */
-#define DAC_IDLE_LEVEL  1
+ *
+ * 0 (true 0 V), not 1, on purpose: the DAC output = (level/255) × VDD, so a
+ * nonzero idle level SCALES with the supply rail.  The per-second display SPI
+ * burst droops the shared 3.3 V rail; at level 1 (≈13 mV) that droop blips the
+ * DAC output downward and AC-couples a 1 Hz "tick" into the always-on amp.  At
+ * level 0 the output is 0 × VDD = 0 V — independent of VDD — so rail droop
+ * produces no DAC-path coupling.  This matches the original firmware, which
+ * idled the DAC near 0 with no clock running.
+ *
+ * (The earlier "level 1 is quietest" debug-page finding was with dac_continuous
+ * running — that compared DMA artefacts, not this VDD-droop coupling path.
+ * With oneshot there is no DMA, so level 0 carries no broadband static.) */
+#define DAC_IDLE_LEVEL  0
 
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
 #define FIXED_DAC_RATE     32000
