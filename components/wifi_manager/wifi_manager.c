@@ -473,7 +473,22 @@ void wifi_manager_start(void)
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "WiFi started.  AP SSID: Nextube-Setup (WPA2) %s",
+
+    /* Disable WiFi modem-sleep (audio noise reduction).
+     *
+     * The IDF default is WIFI_PS_MIN_MODEM: the radio sleeps between DTIM
+     * beacons and wakes in periodic bursts (~every 100 ms).  Those current
+     * bursts droop the shared 3.3 V rail and couple into the always-powered
+     * LTK8002D amplifier as a regular tick/buzz.
+     *
+     * WIFI_PS_NONE keeps the radio at a steady draw — no periodic sleep/wake
+     * transient — which is the quietest option for the audio output.  The
+     * extra ~20–30 mA is irrelevant on this mains-powered clock.  This matches
+     * the original firmware, which explicitly managed WiFi power-save
+     * (esp_wifi_set_ps) rather than leaving it at the bursty default. */
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    ESP_LOGI(TAG, "WiFi started (PS=NONE).  AP SSID: Nextube-Setup (WPA2) %s",
              have_creds ? "(staged, not broadcasting)" : "(broadcasting)");
 }
 
