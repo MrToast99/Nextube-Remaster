@@ -3741,6 +3741,19 @@ static void display_task(void *arg)
                              s_ticker_state.text, s_ticker_state.text_px_w);
                 }
                 render_ticker(cfg);
+                /* Hold change-detection state "stale" while the ticker owns the
+                 * display, so the first normal-mode tick after it ends repaints
+                 * from scratch (the ticker blanked every tube).  Crucially,
+                 * reset last_display_epoch so the clock does NOT fast-forward
+                 * 1 s/tick (5×) through the ticker's whole duration on resume —
+                 * that catch-up is what made the colon blink rapidly.  Same
+                 * approach as the AP-PIN exit handling below. */
+                last_mode          = (app_mode_t)-1;
+                last_t             = (struct tm){0};
+                last_display_epoch = 0;
+                first              = true;
+                strncpy(last_theme, cfg->theme, sizeof(last_theme) - 1);
+                last_theme[sizeof(last_theme) - 1] = '\0';
                 vTaskDelayUntil(&wake, pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW));
                 continue;   /* skip mode switch, burn-in, rotation this tick */
             } else {
