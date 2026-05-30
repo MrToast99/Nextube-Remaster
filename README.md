@@ -31,6 +31,7 @@
     - [Returning to factory firmware](#returning-to-the-original-factory-firmware)
 - [Web Management UI](#web-management-ui)
   - [Admin Authentication](#admin-authentication-optional)
+  - [Web UI Language](#web-ui-language)
   - [Setup AP (WiFi Provisioning)](#setup-ap-wifi-provisioning)
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
 - [Modes](#modes)
@@ -95,6 +96,8 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Home Assistant MQTT integration (sensor + mode + display + brightness) | ✅ Working |
 | WLED Sync — receive UDP Notifier broadcasts; accent LEDs follow WLED colour | ✅ Working |
 | Weather Panel 3 — animated sunrise/sunset (20 Hz rising/setting sun + mountains) | ✅ Working |
+| Multilingual web UI — 11 languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI) with per-browser preference | ✅ Working |
+| Tube display localisation — day-of-week abbreviation in 11 languages on clock/date panels | ✅ Working |
 
 ## Hardware
 
@@ -136,18 +139,29 @@ on GPIO25 is the only audio source.
 
 #### DAC driver — `dac_continuous` (ESP-IDF v5)
 
-The firmware uses `dac_continuous_new_channels()` from ESP-IDF v5, which
-internally configures the I²S0 peripheral in **DAC mode** (`i2s_set_dac_mode`
-equivalent). The I²S peripheral clocks 8-bit unsigned PCM samples from a DMA
-ring buffer directly into the DAC register at **32 kHz**. The DAC runs
-continuously at all times — there is no Hi-Z idle state between sounds.
+When audio is **enabled**, the firmware uses `dac_continuous_new_channels()`
+from ESP-IDF v5, which internally configures the I²S0 peripheral in **DAC mode**
+(`i2s_set_dac_mode` equivalent). The I²S peripheral clocks 8-bit unsigned PCM
+samples from a DMA ring buffer directly into the DAC register at **32 kHz**.
+While enabled the continuous DAC runs at all times, idling at level 128.
+
+When audio is **disabled** (the default — see the toggle section below), the
+continuous driver is **not** started. Instead `dac_oneshot` holds GPIO25 at a
+single static level with **no I²S, no DMA, and no clock running** — mirroring how
+the original firmware idled the DAC. This is the key to a silent idle: a
+continuously-clocked DMA engine puts periodic switching activity on the shared
+3.3 V rail (audible as static), whereas the one-shot RTC DAC has nothing
+switching. Toggling audio requires a reboot, so the two drivers never coexist in
+one boot session (the `dac_oneshot → dac_continuous` transition is unreliable on
+the original ESP32).
 
 | Parameter | Value |
 |---|---|
-| Sample rate | 32 000 Hz (fixed) |
+| Sample rate | 32 000 Hz (fixed, enabled mode) |
 | Bit depth | 8-bit unsigned PCM (0–255) |
 | Channels | Mono (DAC channel 0, GPIO25) |
-| Silence level | **128** (= VDD/2 ≈ 1.65 V) |
+| Playback idle level (audio enabled) | **128** (= VDD/2 ≈ 1.65 V) |
+| Idle level (audio disabled) | **0** via `dac_oneshot` — no DMA, no clock |
 | DMA buffers | 8 × 2048 bytes |
 
 #### Silence level — why 128, not 0
@@ -185,9 +199,16 @@ ramp rather than a step, eliminating the startup thump.
 
 The first-ever call to `dac_continuous_new_channels()` after power-on triggers
 ESP32 APLL lock and I²S peripheral initialisation — a one-time ~1.6 s stall.
-To hide this cost from the user, `audio_init()` performs a **warm-up start**
-at boot (creates and immediately tears down the DAC handle) so the APLL is
-already locked before the first sound is needed.
+
+When **Enable audio output** is checked in the web UI, `audio_init()` starts the
+DAC at boot (in the deferred-start task, 8 s after power-on) so the APLL is
+already locked before any sound is triggered by the user.
+
+When **Enable audio output** is unchecked (the default), the continuous DAC and
+I²S0 peripheral are **never initialised** — `dac_oneshot` holds GPIO25 at a
+static level instead, the ~1.6 s APLL lock never occurs, and the ~16 KB DMA ring
+is not allocated. Because the toggle takes effect on reboot, the cold-start
+delay is only ever paid once, on a boot where audio is enabled.
 
 #### LTK8002D hardware limitations
 
@@ -204,15 +225,15 @@ gain itself is fixed.
 
 #### `Audio → Enable audio output` toggle
 
-When the **Enable audio output** checkbox in the web UI is unchecked:
+Audio output is **disabled by default**. The toggle takes effect on the **next reboot** — when the web UI saves a change to this setting it triggers a restart so the audio subsystem comes up cleanly in the chosen state. Dynamic switching is intentionally not supported: the `dac_oneshot → dac_continuous` transition is unreliable on the original ESP32 (the I²S0 controller does not always release state after one-shot use), so the firmware never mixes the two drivers in a single boot session.
 
-1. Any in-progress playback is stopped
-2. `dac_continuous_disable()` + `dac_continuous_del_channels()` tears down the DMA ring
-3. `gpio_reset_pin(GPIO25)` + `GPIO_MODE_OUTPUT` + `gpio_set_level(GPIO25, 0)` drives the pin **LOW (0 V)**
+**Boot with audio disabled (default):** `audio_init(false)` is called. The continuous DAC, I²S0 peripheral, APLL, and DMA ring are never started. `dac_oneshot` holds GPIO25 at a static level (`DAC_IDLE_LEVEL = 0` ≈ 0 V) with **no DMA and no clock**. The AC coupling cap charges to that level; thereafter the amplifier sees ~0 V AC differential — silent. Because nothing is clocked, there is no periodic rail-switching activity to couple into the amp. ~16 KB DMA heap and the ~1.6 s APLL cold-start delay are avoided entirely.
 
-Driving 0 V (rather than floating Hi-Z) clamps the amplifier's AC-coupled input at a stable, low-impedance reference (~50 Ω GPIO source resistance). The AC coupling cap charges to +VDD/2 differential within a few RC time constants and the amplifier input thereafter sees 0 V AC — near silence. A floating Hi-Z node acts as an antenna: WS2812 and SPI rail-switching transients couple into the high-impedance input and are amplified as audible hiss. **Note:** the LTK8002D itself remains powered (SD pin tied high), so its thermal self-noise floor is still present, but at a much lower level than with a floating input.
+**Boot with audio enabled:** `audio_init(true)` brings up `dac_continuous`, plays the `0 → 128` anti-pop boot fade, and idles the ring at 128 (VDD/2) ready for playback.
 
-Re-enabling runs the full `dac_restart()` sequence including the boot fade.
+**Note:** the LTK8002D itself remains powered (SD pin tied high) in both cases, so its thermal self-noise floor is still present at a low level — see *Residual noise floor* below.
+
+> **Why level 0, not 1, when disabled:** the DAC output equals `(level / 255) × VDD`, so a non-zero idle level *scales with the supply rail*. The per-second clock-face redraw briefly droops the 3.3 V rail; at a non-zero level that droop modulates the DAC output and couples a faint 1 Hz tick into the amp. At level 0 the output is `0 × VDD = 0 V` regardless of rail voltage, so rail droop produces no DAC-path coupling.
 
 #### Idle noise — WS2812B LEDs (~400 Hz)
 
@@ -225,7 +246,8 @@ input.
 
 | Mitigation | Effect |
 |---|---|
-| GPIO25 driven 0 V when audio disabled (`Audio → Enable audio output` unchecked) | DAC buffer powered off; 0 V clamps the amp's AC-coupled input — rail-switching noise cannot couple into the high-impedance node |
+| `dac_oneshot` static idle at level 0 when audio disabled (default) | No I²S/DMA/clock running — eliminates the continuous-DMA switching noise; level 0 is also immune to supply-rail droop (see toggle section) |
+| `WIFI_PS_NONE` set after `esp_wifi_start()` | Disables WiFi modem-sleep, removing the periodic ~DTIM-rate radio wake/sleep current bursts that otherwise tick the shared rail. The extra ~20–30 mA is irrelevant on a mains-powered clock |
 | RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
 | Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
 
@@ -247,15 +269,16 @@ faint baseline hiss may still be audible. Root cause: the LTK8002D SD pin is
 tied to VDD_5V with no GPIO control — the amp remains fully powered and
 amplifies its own thermal noise (~3× gain into a 4 Ω speaker).
 
-Driving GPIO25 LOW (0 V) when audio is disabled (see above) greatly reduces
-this hiss by providing a stable, low-impedance reference to the amp input.
-For complete silence a hardware modification is required:
+Holding GPIO25 at a static level via `dac_oneshot` when audio is disabled (see
+above) gives the quietest idle the firmware can achieve — no DMA, no clock, and
+a 0 V output that does not track supply droop. The remaining hiss is the amp's
+own thermal noise, which is independent of the input. For complete silence a
+hardware modification is required:
 
 > **Hardware mod:** Cut the SD pull-up resistor and wire the SD pin to a free
 > ESP32 GPIO. `gpio_set_level(PIN_AMP_SHDN, 0)` will draw the amp's shutdown
 > current to < 0.5 µA — complete silence. Define `PIN_AMP_SHDN` in
-> `board_pins.h` and call it from `audio_set_enabled()` to assert shutdown
-> alongside the DAC teardown.
+> `board_pins.h` and assert it whenever audio is disabled.
 
 ### Microphone Notes
 
@@ -532,6 +555,30 @@ Authentication can be disabled again at any time from the same **Lock Webui** ca
 
 Sessions are **RAM-only** and lost on reboot — you will be asked to log in once after each restart.
 
+### Web UI Language
+
+The web interface is available in **11 languages**:
+
+| Code | Language |
+|---|---|
+| `en` | English *(default, always inline — no file load needed)* |
+| `de` | German |
+| `fr` | French |
+| `es` | Spanish |
+| `it` | Italian |
+| `pt` | Portuguese |
+| `nl` | Dutch |
+| `sv` | Swedish |
+| `no` | Norwegian |
+| `da` | Danish |
+| `fi` | Finnish |
+
+On first load the UI auto-detects your **browser's preferred language**. If a matching translation is available it is fetched from `/lang/<code>.json` on the device and applied; otherwise the UI falls back to English. Your selection is saved in `localStorage` and persists across reloads and browser restarts.
+
+To switch languages manually, use the **Language** dropdown at the top of any page.
+
+**Tube display language** (the day-of-week abbreviation shown on clock and date panels — e.g. *Mon*, *Lun*, *Mo*) is a separate **device-wide** setting stored in firmware config. Configure it under **Network → Date & Time → Language**. It defaults to English and does not follow the web UI language — this lets the physical clock show one language while the management interface is in another.
+
 ### Setup AP (WiFi Provisioning)
 
 The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi provisioning. The password is an **8-digit PIN** unique to each device, generated on first boot and stored in NVS.
@@ -551,9 +598,13 @@ The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi prov
 
 **AP lifecycle:**
 - **No credentials saved** — AP stays up indefinitely for first-time setup.
-- **Credentials saved, STA connects** — AP closes **90 seconds** after the device gets an IP, giving the browser time to finish loading the UI.
-- **Credentials saved, STA fails to connect** — AP opens automatically after a **90-second** fallback timeout so you can always recover access. The device keeps retrying STA in the background.
-- **STA drops after connecting** — AP comes back so you can reach the device at `192.168.4.1` to fix credentials.
+- **Credentials saved, STA connects** — AP closes **60 seconds** after the device gets an IP, giving the browser time to finish loading the UI.
+- **Credentials saved, STA fails to connect** — The AP does **not** reopen automatically. Use the touch-pad hotkey (see below) to bring it up on demand. The device keeps retrying STA in the background.
+- **STA drops after connecting** — The AP does **not** return automatically. Use the touch-pad hotkey to regain access at `192.168.4.1`.
+
+**Recovery hotkey — force the AP on demand:**
+
+Hold the **LEFT** and **RIGHT** touch pads at the same time for **30 seconds**. The `Nextube-Setup` network starts broadcasting immediately. The AP closes automatically 60 seconds after the device next obtains a WiFi IP. This works regardless of whether STA is connected or disconnected, and is a no-op if the AP is already active.
 
 After setup, access the management interface via:
 
@@ -654,6 +705,7 @@ Enable **Theme Rotation** in Display settings to automatically cycle through the
 | LEFT | Previous enabled mode |
 | MIDDLE | **Countdown / Pomodoro:** pause / resume the timer. **All other modes:** toggle LCD displays on/off (backlight) |
 | RIGHT | Next enabled mode |
+| LEFT + RIGHT (hold 30 s) | Force the setup AP on — broadcasts `Nextube-Setup` so you can reach the web UI at `192.168.4.1` to fix WiFi credentials |
 
 ## Weather
 
@@ -873,6 +925,7 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 | **Nextube Mode** | `select` | Read and set the active display mode (Clock, Weather, YouTube, …) |
 | **Nextube Display** | `switch` | Turn the backlight ON or OFF (same as the middle touch button) |
 | **Nextube Brightness** | `number` | LCD brightness 0–100 slider |
+| **Nextube Ticker** | `text` | Scrolling message ticker — type any text and press Enter to display it across all 6 tubes |
 
 ### Setup
 
@@ -901,11 +954,14 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | **Subscribe** | `nextube/<hostname>/display/set` | `ON` or `OFF` |
 | Publish | `nextube/<hostname>/brightness/state` | `75` (integer 0–100) |
 | **Subscribe** | `nextube/<hostname>/brightness/set` | `75` (integer 0–100) |
+| Publish | `nextube/<hostname>/ticker/state` | Current ticker text, or `""` when cleared |
+| **Subscribe** | `nextube/<hostname>/ticker/set` | UTF-8 string ≤ 255 chars; empty payload = cancel |
 | Publish | `homeassistant/sensor/<hostname>_temp/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/sensor/<hostname>_hum/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/select/<hostname>_mode/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/switch/<hostname>_display/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/number/<hostname>_brightness/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/text/<hostname>_ticker/config` | HA discovery JSON (retained) |
 
 ### Notes
 
@@ -914,6 +970,28 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 - **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
 - **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
 - **Multiple devices** — each Nextube uses its hostname as the unique ID. Give each device a different hostname in **Network Settings** to avoid topic collisions.
+
+### Ticker
+
+Publish any UTF-8 string to `nextube/<hostname>/ticker/set` to display a scrolling marquee across all 6 LCD tubes:
+
+```
+mosquitto_pub -h <broker> -t "nextube/nextube-remaster/ticker/set" -m "Good morning! Motion detected."
+```
+
+| Behaviour | Detail |
+|---|---|
+| **Scroll speed** | 4 px per 200 ms tick → 20 px/s on screen. The text is rendered at double size, so a typical 15-character message (~600 px wide) scrolls for about 75 seconds. |
+| **Cancel** | Publish an empty payload to `ticker/set` — the display returns to the previous mode immediately. |
+| **New message while scrolling** | The current scroll stops and the new message starts from the right edge. |
+| **Font** | `u8g2_font_logisoso28_tf` rendered with 2× pixel scaling (effective ~56 px) — full Latin character set including accented glyphs (é á ö ü ñ etc.). |
+| **Background** | All tubes are blanked to solid black for the duration of the scroll, so the marquee shows on a clean background regardless of the previous mode. |
+| **Colour** | Matches the currently loaded theme's digit colour. |
+| **Mode rotation** | Paused for the duration of the ticker; resumes when the text finishes scrolling. |
+| **Not persistent** | Ticker text is RAM-only; clears on device reboot. |
+| **Requires MQTT** | Ticker is only available when Home Assistant MQTT integration is enabled. |
+
+In Home Assistant, the **Nextube Ticker** appears as a `text` entity on the Nextube device card — type your message and press Enter.
 
 ## WLED Sync
 
@@ -933,7 +1011,7 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 
 | Behaviour | Detail |
 |---|---|
-| **Colour fidelity** | Works precisely for Solid and single-colour effects. For animated effects (Rainbow, Breath, Twinkle) Nextube shows the dominant colour at the moment each broadcast fires. |
+| **Colour fidelity** | Solid effects: the exact solid colour is mirrored. Single-colour animations (Breath, Chase, Blink, etc.): the configured primary colour is shown statically — WLED UDP Notifier sends state, not per-frame pixel data. Palette-based animations (Rainbow, Fire, Ocean, Color Cycle, etc.): Nextube runs its own rainbow animation, because these effects don't publish a meaningful primary colour in the sync packet. |
 | **WLED offline** | Nextube holds the last received colour indefinitely — no crash, no fallback to black. |
 | **First boot** | Before any packet is received `wled_sync_get()` returns false → the accent LEDs run their normal config-driven effect (Static/Breath/Rainbow/Off). No delay or dark flash. |
 | **Boot-time gate** | The UDP listener task is only created if **Enable** is checked at boot. Restart required after toggling. |
@@ -1124,13 +1202,14 @@ nextube-fw/
 │   ├── touch/                     # Capacitive touch input (L/R = mode cycle, M = pause/resume or backlight)
 │   ├── rtc/                       # PCF8563 RTC driver
 │   ├── audio/                     # DAC audio playback (WAV)
-│   ├── wifi_manager/              # AP+STA WiFi (WPA2 setup AP; 90 s fallback if STA fails; NVS-backed per-device PIN)
+│   ├── wifi_manager/              # AP+STA WiFi (WPA2 setup AP; on-demand via LEFT+RIGHT hotkey; NVS-backed per-device PIN)
 │   ├── web_server/                # HTTP server + REST API + OTA handlers + log viewer
 │   ├── ntp_time/                  # NTP synchronisation
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
 │   └── subscribers/               # Subscriber/follower counter (YouTube, Bilibili, Instagram, TikTok)
 ├── data/web/                      # Web UI source (bundled into LittleFS)
-│   ├── index.html                 # Self-contained SPA
+│   ├── index.html                 # Self-contained SPA (English inline; i18n engine built-in)
+│   ├── lang/                      # Lazy-loaded translation files (de fr es it pt nl sv no da fi)
 │   └── version.txt                # Auto-generated by CMake — do not edit manually
 ├── helpers/
 │   ├── image_converter/

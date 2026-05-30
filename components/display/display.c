@@ -124,6 +124,15 @@ static const uint16_t s_burnin_colors[] = {
  * discarding any glyph whose right edge is ≤ 0.                               */
 #define TICKER_MAX_LEN   255
 #define TICKER_SCROLL_PX   4   /* pixels per 200 ms tick  → 20 px/s */
+/* The ticker text is rendered into the 128×64 U8g2 buffer at native logisoso28
+ * size, then blitted with 2× pixel scaling (both axes) so it appears double
+ * size (~56 px) — the same technique as the big clock digits (pin_draw_tube).
+ * x_start / text_px_w stay in on-screen pixels; only the per-tube draw offset
+ * is halved into buffer space.  Output band = 64×2 = 128 rows, centred with a
+ * 16-row top/bottom margin in the 160-row tube. */
+#define TICKER_SCALE       2
+#define TICKER_OUT_H       (64 * TICKER_SCALE)                 /* 128 */
+#define TICKER_Y_MARGIN    ((LCD_HEIGHT - TICKER_OUT_H) / 2)   /* 16  */
 
 static struct {
     char  text[TICKER_MAX_LEN + 1]; /* current message being scrolled */
@@ -3216,6 +3225,68 @@ void display_timer_toggle(void)
  *
  * Vertical layout: logisoso28 ascent ≈28 descent ≈−6 → text band ~34 px.
  * The buffer (64 rows) is centred in the 160-row tube at y_tube = 48. */
+/* 2× pixel-scaled blit of the ticker text band for one tube.
+ * Reads LCD_WIDTH/TICKER_SCALE = 40 source columns and 64 source rows from the
+ * U8g2 buffer and scales each pixel to a 2×2 block → 80×128 output, written at
+ * a TICKER_Y_MARGIN-row top offset.  Non-lit pixels are solid black; the 16-row
+ * top/bottom margins are left untouched (blanked once at ticker start), so the
+ * band stays centred in the 160-row tube without repainting the margins each
+ * tick.  Mirrors the scaling loop in pin_draw_tube(). */
+static void ht_blit_ticker_2x(int tube, const uint8_t *tile_buf, uint16_t fg)
+{
+    /* Per-tube brightness + gamma on fg (bg is always black → stays black). */
+    {
+        uint8_t  br     = s_tube_brightness[tube];
+        bool     do_br  = (br < 100);
+        bool     do_gam = s_gamma_lut_active[tube];
+        if (do_br || do_gam) {
+            uint32_t r = (fg >> 11) & 0x1Fu;
+            uint32_t g = (fg >>  5) & 0x3Fu;
+            uint32_t b =  fg        & 0x1Fu;
+            if (do_br)  { r = r * br / 100u; g = g * br / 100u; b = b * br / 100u; }
+            if (do_gam) { r = s_gamma_lut_5bit[tube][r];
+                          g = s_gamma_lut_6bit[tube][g];
+                          b = s_gamma_lut_5bit[tube][b]; }
+            fg = (uint16_t)((r << 11) | (g << 5) | b);
+        }
+    }
+    uint8_t fg_hi = (uint8_t)(fg >> 8);
+    uint8_t fg_lo = (uint8_t)(fg & 0xFF);
+    const int BUF_W = 128;
+
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
+                            + (int)s_col_offsets[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube]
+                            + TICKER_Y_MARGIN);
+    open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)TICKER_OUT_H);
+
+    uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];   /* 1280 B — SRAM stack */
+    for (int out_row = 0; out_row < TICKER_OUT_H; out_row += DISP_CHUNK_ROWS) {
+        int rows = (out_row + DISP_CHUNK_ROWS <= TICKER_OUT_H) ? DISP_CHUNK_ROWS
+                                                               : TICKER_OUT_H - out_row;
+        for (int r = 0; r < rows; r++) {
+            int src_row  = (out_row + r) / TICKER_SCALE;
+            int tile_row = src_row / 8;
+            int bit      = src_row % 8;
+            for (int src_col = 0; src_col < LCD_WIDTH / TICKER_SCALE; src_col++) {
+                bool    lit = (tile_buf[tile_row * BUF_W + src_col] >> bit) & 1;
+                uint8_t hi  = lit ? fg_hi : 0x00;
+                uint8_t lo  = lit ? fg_lo : 0x00;
+                int     oc  = src_col * TICKER_SCALE;
+                chunk[(r * LCD_WIDTH + oc    ) * 2]     = hi;
+                chunk[(r * LCD_WIDTH + oc    ) * 2 + 1] = lo;
+                chunk[(r * LCD_WIDTH + oc + 1) * 2]     = hi;
+                chunk[(r * LCD_WIDTH + oc + 1) * 2 + 1] = lo;
+            }
+        }
+        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
+                                 .tx_buffer = chunk };
+        spi_device_polling_transmit(spi_dev, &t);
+    }
+    deselect_all();
+}
+
 static void render_ticker(const nextube_config_t *cfg)
 {
     uint16_t fg = ht_sample_theme_color(cfg->theme);
@@ -3223,32 +3294,31 @@ static void render_ticker(const nextube_config_t *cfg)
     u8g2_SetFont(&s_u8g2, u8g2_font_logisoso28_tf);
     int ascent  = (int)u8g2_GetAscent(&s_u8g2);
     int descent = (int)u8g2_GetDescent(&s_u8g2);
-    /* Baseline position that centres the text glyph band in 64 buffer rows */
+    /* Baseline that centres the glyph band in the 64-row buffer; the 2× blit
+     * then doubles it into the 128-row output band. */
     int y_base = (64 + ascent + descent) / 2;
     if (y_base < ascent) y_base = ascent;
     if (y_base > 63)     y_base = 63;
-    /* Top of the 64-row blit band, centred in the 160-row tube */
-    int y_tube = (LCD_HEIGHT - 64) / 2;
 
     for (int tube = 0; tube < LCD_COUNT; tube++) {
         u8g2_ClearBuffer(&s_u8g2);
-        /* x_draw: where the text string starts in THIS tube's local space.
-         * Negative x_draw means the text has partially scrolled off left;
-         * U8g2 clips glyphs that fall entirely left of the buffer edge.
-         * Cast: (u8g2_uint_t)(int16_t)x_draw preserves two's complement so
-         * U8g2 internal (u8g2_int_t) re-interpretation works correctly. */
-        int x_draw = s_ticker_state.x_start - tube * LCD_WIDTH;
+        /* The U8g2 buffer is half the on-screen resolution (each buffer pixel
+         * becomes a 2×2 on-screen block), so the per-tube draw offset is the
+         * on-screen offset divided by TICKER_SCALE.  (x_start - tube*80) is
+         * always a multiple of 4, so the /2 is exact even when negative.
+         * Negative x_draw lets U8g2 clip glyphs scrolling off the left edge. */
+        int x_draw = (s_ticker_state.x_start - tube * LCD_WIDTH) / TICKER_SCALE;
         u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x_draw,
                       (u8g2_uint_t)y_base,
                       s_ticker_state.text);
-        ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2),
-                   64, y_tube, fg, NULL);
+        ht_blit_ticker_2x(tube, u8g2_GetBufferPtr(&s_u8g2), fg);
     }
 
-    /* Advance scroll position */
+    /* Advance scroll position (on-screen pixels — same 20 px/s as before) */
     s_ticker_state.x_start -= TICKER_SCROLL_PX;
 
-    /* Finished when the text's right edge has scrolled past tube 0's left edge */
+    /* Finished when the text's right edge has scrolled past tube 0's left edge.
+     * text_px_w is the on-screen width (2× the native glyph width). */
     if (s_ticker_state.x_start + s_ticker_state.text_px_w < 0) {
         s_ticker_state.running = false;
         ha_mqtt_ticker_clear();
@@ -3626,11 +3696,22 @@ static void display_task(void *arg)
                     strncpy(s_ticker_state.text, ticker_buf, TICKER_MAX_LEN);
                     s_ticker_state.text[TICKER_MAX_LEN] = '\0';
                     u8g2_SetFont(&s_u8g2, u8g2_font_logisoso28_tf);
-                    s_ticker_state.text_px_w =
+                    /* On-screen width = native glyph width × TICKER_SCALE,
+                     * since render_ticker blits the buffer at 2× scale. */
+                    s_ticker_state.text_px_w = TICKER_SCALE *
                         (int)u8g2_GetUTF8Width(&s_u8g2, s_ticker_state.text);
                     /* Start with text fully off the right edge of the display */
                     s_ticker_state.x_start  = LCD_COUNT * LCD_WIDTH;
                     s_ticker_state.running  = true;
+                    /* Blank every tube to solid black once, before the first
+                     * scroll frame.  render_ticker() only repaints the 128-row
+                     * text band (rows 16–143); without this one-time fill the
+                     * 16-row top/bottom margins would keep whatever the previous
+                     * mode drew.  The ticker has exclusive control of the display
+                     * while running, so the black margins persist for the whole
+                     * scroll — no need to refill every tick. */
+                    for (int _t = 0; _t < LCD_COUNT; _t++)
+                        display_fill(_t, 0x0000);
                     ESP_LOGI(TAG, "Ticker starting: \"%s\" (%d px)",
                              s_ticker_state.text, s_ticker_state.text_px_w);
                 }
