@@ -59,6 +59,9 @@ static const char *TAG = "ha_mqtt";
 static esp_mqtt_client_handle_t s_client = NULL;
 static volatile bool            s_connected = false;
 
+/* ── Topic helpers ─────────────────────────────────────────────────── */
+#define TOPIC_MAXLEN 96
+
 /* ── Ticker state ──────────────────────────────────────────────────── */
 #define TICKER_MAX_LEN 255
 static char              s_ticker_text[TICKER_MAX_LEN + 1] = "";
@@ -75,9 +78,6 @@ static uint16_t s_port;
 static char   s_user[32];
 static char   s_pass[64];
 static bool   s_discovery;
-
-/* ── Topic helpers ─────────────────────────────────────────────────── */
-#define TOPIC_MAXLEN 96
 
 static void make_topic(char *buf, size_t n, const char *suffix)
 {

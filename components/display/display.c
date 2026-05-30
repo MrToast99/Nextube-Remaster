@@ -3218,7 +3218,7 @@ void display_timer_toggle(void)
  * The buffer (64 rows) is centred in the 160-row tube at y_tube = 48. */
 static void render_ticker(const nextube_config_t *cfg)
 {
-    uint16_t fg = ht_sample_theme_color(cfg->apps[0].theme);
+    uint16_t fg = ht_sample_theme_color(cfg->theme);
 
     u8g2_SetFont(&s_u8g2, u8g2_font_logisoso28_tf);
     int ascent  = (int)u8g2_GetAscent(&s_u8g2);
