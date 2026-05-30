@@ -113,7 +113,8 @@ static void set_defaults(void)
     strncpy(s_cfg.timer_file, "/spiffs/audio/timer.wav", sizeof(s_cfg.timer_file) - 1);
     strncpy(s_cfg.click_file, "/spiffs/audio/click.wav", sizeof(s_cfg.click_file) - 1);
     s_cfg.button_sound  = true;
-    s_cfg.audio_enabled = true;
+    s_cfg.audio_enabled = false;   /* off by default — amp is always powered,
+                                    * user opts in via Settings > Audio */
     s_cfg.volume = 20;
     s_cfg.mic_enabled      = true;
     s_cfg.mic_adc_channel  = 7;      /* ADC1_CH7 = GPIO35 — confirmed via hardware debug */

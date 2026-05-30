@@ -14,12 +14,20 @@
  * immediately.  A mutex serialises concurrent play requests.
  *
  * DAC mode lifecycle:
- *   disabled – GPIO25 is left as a plain Hi-Z input (no DAC, no driver).
- *             The LTK8002D's own input bias current charges the AC
- *             coupling cap to VDD/2 (~1.65 V) over time, establishing the
- *             correct DC operating point with 0 V AC differential at the
- *             amp input — matching the behaviour of the original Rotrics
- *             firmware, which never configured GPIO25 and was silent.
+ *   disabled – dac_oneshot holds GPIO25 at a static low level (DAC_IDLE_LEVEL).
+ *             This is the IDF5 equivalent of how the ORIGINAL Rotrics firmware
+ *             idled the DAC.  That firmware (Arduino-ESP32 2.0.x + ESP8266Audio
+ *             on the legacy driver/i2s.h built-in-DAC path) installed I2S only
+ *             while a clip played and called i2s_driver_uninstall() the instant
+ *             it finished ("UNINSTALL I2S" log) — leaving the RTC DAC holding a
+ *             static value with NO clock, NO APLL and NO DMA running.  Nothing
+ *             switches, so nothing couples onto the shared 3.3 V rail → silence.
+ *
+ *             dac_continuous (used during playback) CANNOT idle silently: it
+ *             requires a perpetually-running I2S0 DMA + clock to feed the DAC,
+ *             and that switching activity is itself the source of the idle
+ *             static.  dac_oneshot uses the RTC DAC directly — no DMA, no
+ *             clock — so the idle state is truly quiet, matching the original.
  *             Changing audio_enabled requires a reboot.
  *
  *   playing – leds_set_audio_active(true) pauses WS2812 RMT first.
@@ -33,6 +41,7 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
+#include "driver/dac_oneshot.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -53,11 +62,20 @@ static volatile bool     s_stop_flag   = false;
 static TaskHandle_t      s_audio_task  = NULL;
 static SemaphoreHandle_t s_play_mutex  = NULL;
 
-/* DAC handle – running when audio is enabled, NULL when disabled / Hi-Z */
+/* Continuous DAC handle – live only while audio is enabled (streams clips
+ * via I2S0 DMA).  NULL when disabled. */
 static dac_continuous_handle_t s_dac_cont        = NULL;
+/* Oneshot DAC handle – holds GPIO25 at a static low level when audio is
+ * disabled.  No DMA / no clock → no idle static (matches original firmware). */
+static dac_oneshot_handle_t    s_dac_idle        = NULL;
 static volatile bool           s_audio_enabled   = true;
 /* Set while a DAC test mode is active — blocks audio_play_file(). */
 static volatile bool           s_dac_test_active = false;
+
+/* Static idle DC level held via dac_oneshot when audio is disabled.
+ * 1 (≈ 13 mV) measured as the quietest setting on this hardware via the
+ * DAC debug page.  The original firmware settled near 0 with no clock. */
+#define DAC_IDLE_LEVEL  1
 
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
 #define FIXED_DAC_RATE     32000
@@ -161,6 +179,38 @@ static void dac_restart(void)
         dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
 
     ESP_LOGI(TAG, "DAC started (32 kHz continuous)");
+}
+
+/*
+ * Enter the disabled-audio idle state: hold GPIO25 at a static low level via
+ * dac_oneshot — no I2S0 DMA, no clock, nothing switching → no idle static.
+ * This is the IDF5 equivalent of how the original firmware idled the DAC
+ * (RTC DAC holding a static value after uninstalling I2S between clips).
+ *
+ * Any live continuous channel is released first.  On oneshot-init failure the
+ * pin falls back to Hi-Z (the LTK8002D input bias still settles the AC cap,
+ * just less precisely than a defined static level).
+ */
+static void dac_enter_idle_oneshot(void)
+{
+    if (s_dac_cont) {
+        dac_continuous_disable(s_dac_cont);
+        dac_continuous_del_channels(s_dac_cont);
+        s_dac_cont = NULL;
+    }
+    if (!s_dac_idle) {
+        dac_oneshot_config_t os_cfg = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&os_cfg, &s_dac_idle) != ESP_OK) {
+            s_dac_idle = NULL;
+            gpio_reset_pin(PIN_AUDIO_DAC);
+            gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
+            ESP_LOGW(TAG, "Audio idle — oneshot init failed, GPIO%d Hi-Z", PIN_AUDIO_DAC);
+            return;
+        }
+    }
+    dac_oneshot_output_voltage(s_dac_idle, DAC_IDLE_LEVEL);
+    ESP_LOGI(TAG, "Audio idle — GPIO%d held at level %d via oneshot (no DMA/clock)",
+             PIN_AUDIO_DAC, DAC_IDLE_LEVEL);
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
@@ -381,28 +431,19 @@ void audio_init(bool enabled)
     xSemaphoreGive(s_play_mutex);
 
     if (!enabled) {
+        /* Disabled: hold GPIO25 at a static low level via dac_oneshot — no
+         * DMA, no clock, no idle static.  Matches the original firmware,
+         * which uninstalled I2S between clips and left the RTC DAC static.
+         * s_dac_cont stays NULL so audio_play_file() can never stream.
+         * Re-enabling requires a reboot (next boot starts clean with
+         * dac_restart(); oneshot↔continuous in one session is unreliable). */
         s_audio_enabled = false;
-        /* Leave GPIO25 as a plain Hi-Z input — no DAC, no driver, no clock.
-         *
-         * The original Rotrics firmware never configured GPIO25 (it had no
-         * audio), so the pin stayed in the ESP32 reset default: Hi-Z input.
-         * That state was silent because the LTK8002D's own input bias
-         * current slowly charges the AC coupling cap to VDD/2, producing
-         * 0 V AC differential at the amp input.
-         *
-         * dac_oneshot at 128 is equivalent in theory, but in practice the
-         * RTC DAC circuitry on the original ESP32 introduces noise (clock
-         * leakage, output-buffer instability) that plain Hi-Z avoids. */
-        gpio_reset_pin(PIN_AUDIO_DAC);
-        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
-        ESP_LOGI(TAG, "Audio disabled at init — GPIO%d Hi-Z, DAC not started",
-                 PIN_AUDIO_DAC);
+        dac_enter_idle_oneshot();
         return;
     }
 
-    /* Audio is enabled: bring up the DAC immediately so the APLL locks now
-     * (during the deferred-start task, before any user action) rather than
-     * introducing a ~1.6 s stall on the first audio_play_file() call. */
+    /* Audio is enabled: bring up the continuous DAC now so the first
+     * audio_play_file() call has no start-up stall. */
     dac_restart();
 }
 
@@ -411,8 +452,10 @@ void audio_set_enabled(bool enabled)
     /* audio_enabled changes take effect after a reboot.  The web server
      * saves the new value to config.json then calls esp_restart(); on the
      * next boot audio_init() applies the correct state from scratch.
-     * Dynamic switching is not supported — GPIO25 is either Hi-Z (disabled)
-     * or owned by dac_continuous (enabled) depending on the boot config. */
+     * Dynamic switching is not supported — at idle GPIO25 is owned by
+     * dac_oneshot (disabled) or dac_continuous (enabled), and transitioning
+     * between the two drivers in one boot session is unreliable on the
+     * original ESP32. */
     (void)enabled;
     ESP_LOGI(TAG, "audio_set_enabled: change saved — takes effect after reboot");
 }
@@ -488,13 +531,19 @@ void audio_stop(void)
  *   retries up to 3 × 100 ms to handle I2S0 settling.
  */
 
-/* Helper: tear down the active test dac_continuous channel. */
+/* Helper: release whichever DAC driver currently owns the channel so a test
+ * mode can claim it.  Covers both the continuous channel (audio enabled) and
+ * the oneshot idle channel (audio disabled). */
 static void dac_test_teardown(void)
 {
     if (s_dac_cont) {
         dac_continuous_disable(s_dac_cont);
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
+    }
+    if (s_dac_idle) {
+        dac_oneshot_del_channel(s_dac_idle);
+        s_dac_idle = NULL;
     }
 }
 
@@ -521,18 +570,11 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
 
         if (s_audio_enabled) {
             dac_restart();   /* retry loop in dac_restart() handles I2S0 settling */
-            ESP_LOGI(TAG, "DAC test: normal idle restored");
+            ESP_LOGI(TAG, "DAC test: normal idle restored (continuous)");
         } else {
-            /* Audio disabled: restart DAC then immediately fill with 0. */
-            dac_restart();
-            if (s_dac_cont) {
-                uint8_t zero[DAC_DMA_BUF_SIZE];
-                memset(zero, 0, sizeof(zero));
-                size_t w;
-                for (int i = 0; i < DAC_DESC_NUM; i++)
-                    dac_continuous_write(s_dac_cont, zero, sizeof(zero), &w, pdMS_TO_TICKS(200));
-            }
-            ESP_LOGI(TAG, "DAC test: restored to level-0 idle (audio_enabled=false)");
+            /* Audio disabled: return to the static oneshot idle (no DMA/clock). */
+            dac_enter_idle_oneshot();
+            ESP_LOGI(TAG, "DAC test: restored to oneshot idle (audio_enabled=false)");
         }
         return;
     }
