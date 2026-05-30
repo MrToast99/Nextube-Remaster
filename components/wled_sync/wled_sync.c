@@ -109,8 +109,10 @@ static void wled_sync_task(void *arg)
         s_have_state = true;
         xSemaphoreGive(s_mutex);
 
-        ESP_LOGD(TAG, "Sync → #%02X%02X%02X  bri=%u  fx=%u  ver=%u",
-                 r, g, b, bri, buf[8], buf[11]);
+        char src_ip[16];
+        inet_ntoa_r(src.sin_addr, src_ip, sizeof(src_ip));
+        ESP_LOGI(TAG, "Packet from %s (%d B): #%02X%02X%02X  bri=%u  fx=%u  ver=%u",
+                 src_ip, len, r, g, b, bri, buf[8], buf[11]);
     }
 }
 
