@@ -373,6 +373,7 @@
   "js.enter_pw_ph": "Syötä salasana",
   "js.confirm_partial_reset": "Palautetaanko KAIKKI asetukset?\n\nAdmin-salasana ja AP-PIN säilytetään.",
   "js.confirm_reboot": "Käynnistetäänkö laite uudelleen?",
+  "js.confirm_fs_ota": "Tämä ylikirjoittaa KOKO LittleFS-flashin, mukaan lukien kaikki ladatut mukautetut tiedostot.\n\nAsetuksesi (Wi-Fi, teema, kirkkaus jne.) tallennetaan automaattisesti ja palautetaan päivityksen jälkeen.\n\nMukautetut teemat, albumikuvat ja äänitiedostot poistetaan — varmuuskopioi ne ensin kohdasta Järjestelmä → LittleFS-tiedostot.\n\nJatketaanko?",
   "js.ota_wrong_file": "Väärä tiedosto: lataa nextube-fw-ota.bin, ei nextube-fw-full.bin",
   "js.ota_wrong_file_fs": "Väärä tiedosto: tämä on LittleFS-image — käytä 'LittleFS-päivitys'-osiota alla",
   "js.themes_refreshed": "Teemat päivitetty ({0} löydetty)",

@@ -373,6 +373,7 @@
   "js.enter_pw_ph": "Skriv inn passord",
   "js.confirm_partial_reset": "Tilbakestille ALLE innstillinger?\n\nAdmin-passord og AP-PIN beholdes.",
   "js.confirm_reboot": "Starte enheten på nytt?",
+  "js.confirm_fs_ota": "Dette vil overskrive ALL LittleFS-flash, inkludert alle opplastede egendefinerte filer.\n\nInnstillingene dine (Wi-Fi, tema, lysstyrke osv.) lagres automatisk og gjenopprettes etter oppdateringen.\n\nEgendefinerte temaer, albumbilder og lydfiler slettes — sikkerhetskopier dem først via System → LittleFS-filer.\n\nFortsett?",
   "js.ota_wrong_file": "Feil fil: last opp nextube-fw-ota.bin, ikke nextube-fw-full.bin",
   "js.ota_wrong_file_fs": "Feil fil: det er et LittleFS-image — bruk 'LittleFS-oppdatering'-seksjonen nedenfor",
   "js.themes_refreshed": "Temaer oppdatert ({0} funnet)",

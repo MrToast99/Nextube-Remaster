@@ -376,6 +376,7 @@
   "js.enter_pw_ph": "Ingresar contraseña",
   "js.confirm_partial_reset": "¿Restablecer TODOS los ajustes?\n\nContraseña admin y PIN AP conservados.",
   "js.confirm_reboot": "¿Reiniciar el dispositivo?",
+  "js.confirm_fs_ota": "Esto sobrescribirá TODO el flash LittleFS, incluidos los archivos personalizados subidos.\n\nTu configuración (Wi-Fi, tema, brillo, etc.) se guarda automáticamente y se restaurará tras la actualización.\n\nLos temas, imágenes de álbum y archivos de audio subidos se eliminarán — guárdalos primero en Sistema → Archivos LittleFS.\n\n¿Continuar?",
   "js.ota_wrong_file": "Archivo incorrecto: suba nextube-fw-ota.bin, no nextube-fw-full.bin",
   "js.ota_wrong_file_fs": "Archivo incorrecto: eso es una imagen LittleFS — usa la sección 'Actualización LittleFS' abajo"
 }

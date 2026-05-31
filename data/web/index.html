@@ -1638,7 +1638,8 @@ Object.assign(I18N.en, {
   "js.mic_reset_ok":"↺ Auto-calibration restarted (~4 s ramp on next boot)",
   "js.pw_saved_ph":"(saved — leave blank to keep)","js.enter_pw_ph":"Enter password",
   "js.confirm_partial_reset":"Reset ALL settings to factory defaults?\n\nAdmin password and AP PIN are preserved.",
-  "js.confirm_reboot":"Reboot the device?"
+  "js.confirm_reboot":"Reboot the device?",
+  "js.confirm_fs_ota":"This will overwrite ALL LittleFS flash including any uploaded custom files.\n\nYour settings (Wi-Fi, theme, brightness, etc.) are saved automatically and will be restored after the update.\n\nCustom themes, album images, and audio files you have uploaded will be erased — back them up first via System → LittleFS Files.\n\nContinue?"
 });
 let uiLang = "en";
 /* Only English is inlined (the baseline + guaranteed fallback); every other
@@ -2867,11 +2868,7 @@ async function doFSOTA() {
   if (!file.name.toLowerCase().includes('littlefs')) {
     if (!confirm('File name doesn\'t look like a LittleFS image — upload anyway?')) return;
   }
-  if (!confirm(
-    'This will overwrite ALL LittleFS flash including any uploaded custom files.\n\n' +
-    'Built-in themes will be restored. Custom themes/images will be erased.\n\n' +
-    'Continue?'
-  )) return;
+  if (!confirm(tr('js.confirm_fs_ota'))) return;
   /* Pre-flight auth check — same reason as doOTA above. */
   try { await secureFetch('/api/auth/check'); }
   catch(e) { return; }

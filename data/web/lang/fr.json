@@ -376,6 +376,7 @@
   "js.enter_pw_ph": "Entrer le mot de passe",
   "js.confirm_partial_reset": "Réinitialiser TOUS les paramètres ?\n\nMot de passe et PIN AP conservés.",
   "js.confirm_reboot": "Redémarrer l'appareil ?",
+  "js.confirm_fs_ota": "Cela écrasera TOUT le flash LittleFS, y compris les fichiers personnalisés téléversés.\n\nVos paramètres (Wi-Fi, thème, luminosité, etc.) sont sauvegardés automatiquement et seront restaurés après la mise à jour.\n\nLes thèmes personnalisés, images d'album et fichiers audio seront effacés — sauvegardez-les d'abord via Système → Fichiers LittleFS.\n\nContinuer ?",
   "js.ota_wrong_file": "Mauvais fichier : téléverser nextube-fw-ota.bin, pas nextube-fw-full.bin",
   "js.ota_wrong_file_fs": "Mauvais fichier : c'est une image LittleFS — utilise la section 'Mise à jour LittleFS' ci-dessous"
 }

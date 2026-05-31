@@ -376,6 +376,7 @@
   "js.enter_pw_ph": "Passwort eingeben",
   "js.confirm_partial_reset": "Alle Einstellungen zurücksetzen?\n\nAdmin-Passwort und AP-PIN bleiben erhalten.",
   "js.confirm_reboot": "Gerät neu starten?",
+  "js.confirm_fs_ota": "Dadurch wird der gesamte LittleFS-Flash einschließlich aller hochgeladenen Dateien überschrieben.\n\nDeine Einstellungen (WLAN, Theme, Helligkeit usw.) werden automatisch gesichert und nach dem Update wiederhergestellt.\n\nBenutzerdefinierte Themes, Album-Bilder und Audiodateien werden gelöscht — sichere sie zuerst über System → LittleFS-Dateien.\n\nFortfahren?",
   "js.ota_wrong_file": "Falsche Datei: nextube-fw-ota.bin hochladen, nicht nextube-fw-full.bin",
   "js.ota_wrong_file_fs": "Falsche Datei: das ist ein LittleFS-Image — nutze den Abschnitt 'LittleFS-Update' unten"
 }

@@ -373,6 +373,7 @@
   "js.enter_pw_ph": "Indtast adgangskode",
   "js.confirm_partial_reset": "Nulstille ALLE indstillinger?\n\nAdgangskode og AP-PIN bevares.",
   "js.confirm_reboot": "Genstart enheden?",
+  "js.confirm_fs_ota": "Dette overskriver AL LittleFS-flash, inklusive alle uploadede brugerdefinerede filer.\n\nDine indstillinger (Wi-Fi, tema, lysstyrke osv.) gemmes automatisk og gendannes efter opdateringen.\n\nBrugerdefinerede temaer, albumbilleder og lydfiler slettes — sikkerhedskopier dem først via System → LittleFS-filer.\n\nFortsæt?",
   "js.ota_wrong_file": "Forkert fil: upload nextube-fw-ota.bin, ikke nextube-fw-full.bin",
   "js.ota_wrong_file_fs": "Forkert fil: det er et LittleFS-image — brug sektionen 'LittleFS-opdatering' nedenfor",
   "js.themes_refreshed": "Temaer opdateret ({0} fundet)",

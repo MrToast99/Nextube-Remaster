@@ -373,6 +373,7 @@
   "js.enter_pw_ph": "Digite a senha",
   "js.confirm_partial_reset": "Redefinir TODAS as configurações?\n\nSenha admin e PIN AP conservados.",
   "js.confirm_reboot": "Reiniciar o dispositivo?",
+  "js.confirm_fs_ota": "Isso substituirá TODO o flash LittleFS, incluindo todos os arquivos personalizados enviados.\n\nSuas configurações (Wi-Fi, tema, brilho, etc.) são salvas automaticamente e serão restauradas após a atualização.\n\nTemas personalizados, imagens de álbum e arquivos de áudio enviados serão apagados — faça backup deles primeiro em Sistema → Arquivos LittleFS.\n\nContinuar?",
   "js.ota_wrong_file": "Arquivo errado: envie nextube-fw-ota.bin, não nextube-fw-full.bin",
   "js.ota_wrong_file_fs": "Arquivo errado: isso é uma imagem LittleFS — use a seção 'Atualização LittleFS' abaixo",
   "js.themes_refreshed": "Temas atualizados ({0} encontrados)",

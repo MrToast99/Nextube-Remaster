@@ -519,7 +519,9 @@ The web UI provides two separate OTA upload paths under **System**:
 
 After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web UI version doesn't match the new firmware's expected version. Follow the prompt to upload the matching `littlefs.bin` via **System → Web UI Update**.
 
-**LittleFS update warning:** flashing `littlefs.bin` overwrites all LittleFS flash, including any custom themes or images you have uploaded. Back up custom files using the LittleFS file browser (**System → LittleFS Files**) before updating.
+**Settings are preserved automatically:** before wiping the partition the firmware saves your `config.json` to NVS (a separate flash partition that is never erased by a LittleFS update). After the new image is mounted the saved config is restored and the NVS copy is deleted. You do not need to re-enter your Wi-Fi credentials, theme, brightness, or any other settings after a Web UI Update.
+
+**Custom files are not preserved:** any themes, album images, or audio files you have uploaded to LittleFS will be erased. Back them up using the LittleFS file browser (**System → LittleFS Files**) before updating.
 
 #### Automatic Update Checks
 
