@@ -865,6 +865,12 @@ static uint32_t          s_cache_clock = 0;
 static uint8_t *s_jpeg_work_buf  = NULL;   /* JPEG_WORK_BUF_SIZE bytes (PSRAM) */
 static uint8_t *s_flip_frame_buf = NULL;   /* FLIP_FRAME_BYTES bytes (PSRAM)   */
 
+/* Forward-declared here so img_cache_flush() (below) can invalidate the memo
+ * without requiring the full definition to appear first.  Defined near
+ * ht_sample_theme_color() further down in this file. */
+static char     s_theme_color_memo_theme[32];
+static uint16_t s_theme_color_memo_color;
+
 /* Evict all cache entries (called on theme change so stale paths age out). */
 static void img_cache_flush(void)
 {
@@ -1542,11 +1548,6 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
  *   U8g2 buffer    : 128 wide × 64 tall, 1 bpp column-major tiles
  *   Blit offset    : dst_y + 8 px → centres the 64-row block in each 80-row half
  */
-
-/* Memo for ht_sample_theme_color() — file-scope so img_cache_flush() can
- * invalidate it when the image cache is wiped on a theme change. */
-static char     s_theme_color_memo_theme[32] = {0};
-static uint16_t s_theme_color_memo_color     = 0xFFFF;
 
 /* Extract the theme's foreground text colour from its '1' digit image.
  *
