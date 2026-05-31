@@ -874,6 +874,9 @@ static void img_cache_flush(void)
         /* Retain the data allocation — it will be overwritten on next use. */
     }
     s_cache_clock = 0;
+    /* Invalidate the theme-color memo: '1.jpg' has been evicted so the
+     * cached colour no longer matches the new theme. */
+    s_theme_color_memo_theme[0] = '\0';
     ESP_LOGI(TAG, "Image cache flushed");
 }
 
@@ -1540,20 +1543,92 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
  *   Blit offset    : dst_y + 8 px → centres the 64-row block in each 80-row half
  */
 
-/* Sample the centre pixel of the theme's '1' digit from the PSRAM image cache
- * to extract the dominant foreground colour used by the active theme.
- * Falls back to white (0xFFFF) when the image is not yet cached or its centre
- * pixel is too dark to be visible against a black background.               */
+/* Memo for ht_sample_theme_color() — file-scope so img_cache_flush() can
+ * invalidate it when the image cache is wiped on a theme change. */
+static char     s_theme_color_memo_theme[32] = {0};
+static uint16_t s_theme_color_memo_color     = 0xFFFF;
+
+/* Extract the theme's foreground text colour from its '1' digit image.
+ *
+ * Strategy:
+ *   1. Sample the background brightness from the four corner pixels of the
+ *      image (corners are reliably background on any digit glyph).
+ *   2. If the background is BRIGHT  → return the DARKEST  pixel in the image
+ *      (the text stroke on a light-background theme).
+ *      If the background is DARK    → return the BRIGHTEST pixel in the image
+ *      (the accent colour on a dark-background theme).
+ *
+ * This correctly handles both dark-bg/light-text and light-bg/dark-text themes
+ * without any per-theme configuration.
+ *
+ * Luminance weights: 2r + g + 2b normalises RGB565's 5/6/5 bit depths so R,G,B
+ * contribute roughly equally and no channel biases the bright/dark selection.
+ *
+ * Memoised by theme name — runs once per theme switch, not every render tick. */
 static uint16_t ht_sample_theme_color(const char *theme)
 {
+    if (theme && theme[0] && strcmp(theme, s_theme_color_memo_theme) == 0)
+        return s_theme_color_memo_color;
+
     char path[256];
     display_path_number(path, sizeof(path), theme, 1);
     int w = 0, h = 0;
     const uint8_t *px = img_cache_get(path, &w, &h);
-    if (!px || w <= 0 || h <= 0) return 0xFFFF;
-    int idx = ((h / 2) * w + (w / 2)) * 2;   /* centre pixel, big-endian RGB565 */
-    uint16_t c = ((uint16_t)px[idx] << 8) | px[idx + 1];
-    return (c < 0x2000) ? 0xFFFF : c;          /* too dark → fall back to white */
+    if (!px || w <= 0 || h <= 0)
+        return 0xFFFF;   /* not cached yet — don't memoise, retry next tick */
+
+    /* ── Step 1: background brightness from four corners ── */
+    int corners[4] = {
+        0,                          /* top-left     */
+        (w - 1),                    /* top-right    */
+        (h - 1) * w,                /* bottom-left  */
+        (h - 1) * w + (w - 1),     /* bottom-right */
+    };
+    uint32_t bg_lum = 0;
+    for (int i = 0; i < 4; i++) {
+        int ci = corners[i];
+        uint16_t c = ((uint16_t)px[ci * 2] << 8) | px[ci * 2 + 1];
+        uint32_t r = (c >> 11) & 0x1Fu;
+        uint32_t g = (c >>  5) & 0x3Fu;
+        uint32_t b =  c        & 0x1Fu;
+        bg_lum += (r << 1) + g + (b << 1);
+    }
+    bg_lum /= 4;   /* average corner luminance, 0..187 */
+
+    /* Threshold: >93 (~50% of max) = bright background */
+    bool bright_bg = (bg_lum > 93);
+
+    /* ── Step 2: scan for brightest or darkest pixel ── */
+    uint16_t best     = bright_bg ? 0xFFFF : 0x0000;
+    uint32_t best_lum = bright_bg ? UINT32_MAX : 0;
+
+    int n = w * h;
+    for (int i = 0; i < n; i++) {
+        uint16_t c = ((uint16_t)px[i * 2] << 8) | px[i * 2 + 1];
+        uint32_t r = (c >> 11) & 0x1Fu;
+        uint32_t g = (c >>  5) & 0x3Fu;
+        uint32_t b =  c        & 0x1Fu;
+        uint32_t lum = (r << 1) + g + (b << 1);
+        if (bright_bg ? (lum < best_lum) : (lum > best_lum)) {
+            best_lum = lum;
+            best     = c;
+        }
+    }
+
+    /* Sanity fallback: if the chosen colour is too close to the background
+     * (near-identical luminance), the image is essentially monochrome —
+     * fall back to white on dark or black on light. */
+    uint16_t color;
+    if (bright_bg)
+        color = (best_lum > 80) ? 0x0000 : best;   /* darkest too light → black */
+    else
+        color = (best_lum < 8)  ? 0xFFFF : best;   /* brightest too dark → white */
+
+    strncpy(s_theme_color_memo_theme, theme ? theme : "",
+            sizeof(s_theme_color_memo_theme) - 1);
+    s_theme_color_memo_theme[sizeof(s_theme_color_memo_theme) - 1] = '\0';
+    s_theme_color_memo_color = color;
+    return color;
 }
 
 /* Convert the U8g2 1-bpp tile buffer to RGB565 and push 64 rows to tube 5,
@@ -3420,6 +3495,8 @@ static void display_task(void *arg)
     TickType_t    album_switch        = 0;
     TickType_t    rotation_tick       = 0;     /* tick when current mode started */
     TickType_t    theme_rotation_tick = 0;     /* tick when current theme started */
+    bool          last_mode_rot_en    = false; /* mode-rotation enable edge tracker  */
+    bool          last_theme_rot_en   = false; /* theme-rotation enable edge tracker */
     int           weather_panel      = WEATHER_PANEL_TEMP;
     TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
     bool          first              = true;
@@ -3492,6 +3569,13 @@ static void display_task(void *arg)
          * Effective dwell = rotation_interval_s × rotation_weights[mode].
          * A weight of 1 (default) gives the base interval; a weight of 10
          * keeps the current mode on-screen 10× longer than a weight-1 mode. */
+        /* Reset the baseline when mode rotation is first enabled, so the first
+         * switch waits a full interval instead of firing immediately off a
+         * stale (boot-time) tick. */
+        if (cfg->rotation_enabled && !last_mode_rot_en)
+            rotation_tick = xTaskGetTickCount();
+        last_mode_rot_en = cfg->rotation_enabled;
+
         if (mode_changed) {
             rotation_tick = xTaskGetTickCount();
         } else if (cfg->rotation_enabled && !first) {
@@ -3512,6 +3596,13 @@ static void display_task(void *arg)
          * save or a previous rotation step) resets the timer so each theme
          * gets its full interval.  advance_theme() is RAM-only; the cache
          * flush fires on the next tick when theme_changed becomes true.  */
+        /* Reset the baseline when theme rotation is first enabled, so the first
+         * theme switch waits a full interval instead of firing immediately off
+         * a stale (boot-time) tick. */
+        if (cfg->theme_rotation_enabled && !last_theme_rot_en)
+            theme_rotation_tick = xTaskGetTickCount();
+        last_theme_rot_en = cfg->theme_rotation_enabled;
+
         if (theme_changed) {
             theme_rotation_tick = xTaskGetTickCount();
         } else if (cfg->theme_rotation_enabled && !first) {
@@ -3520,6 +3611,10 @@ static void display_task(void *arg)
             uint32_t t_ms  = (uint32_t)pdTICKS_TO_MS(
                                  xTaskGetTickCount() - theme_rotation_tick);
             if (t_ms >= (uint32_t)t_int * 1000u) {
+                /* Diagnostic: prints the interval actually used at runtime so a
+                 * mismatch with the configured value is visible in the log. */
+                ESP_LOGI(TAG, "Theme rotation fired: interval=%u s, elapsed=%u ms",
+                         (unsigned)t_int, (unsigned)t_ms);
                 advance_theme(cfg->theme,
                               cfg->theme_rotation_count,
                               (const char (*)[THEME_NAME_MAX_ROT])cfg->theme_rotation_themes);
