@@ -96,7 +96,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Home Assistant MQTT integration (sensor + mode + display + brightness) | ✅ Working |
 | WLED Sync — receive UDP Notifier broadcasts; accent LEDs follow WLED colour | ✅ Working |
 | Weather Panel 3 — animated sunrise/sunset (20 Hz rising/setting sun + mountains) | ✅ Working |
-| Multilingual web UI — 11 languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI) with per-browser preference | ✅ Working |
+| Multilingual web UI — 11 languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI) <br> with per-browser preference | ✅ Working |
 | Tube display localisation — day-of-week abbreviation in 11 languages on clock/date panels | ✅ Working |
 
 ## Hardware
