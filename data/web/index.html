@@ -185,6 +185,23 @@ select option{background:var(--accent);color:var(--text)}
         <label for="f-notify-update" style="margin:0;cursor:pointer;font-weight:normal"><span data-i18n="disp.notify_update">Enable clock face update notification</span> <span style="color:var(--dim);font-size:.82rem" data-i18n="disp.notify_update_hint">(shows a 2-row red indicator at the bottom of tube 6 when a firmware update is available)</span></label>
       </div>
     </div>
+    <div class="field">
+      <label for="f-language" data-i18n="net.display_language">Clock Display language</label>
+      <select id="f-language" class="select" onchange="markDirty()">
+        <option value="en">English</option>
+        <option value="da">Dansk (Danish)</option>
+        <option value="de">Deutsch (German)</option>
+        <option value="es">Español (Spanish)</option>
+        <option value="fr">Français (French)</option>
+        <option value="it">Italiano (Italian)</option>
+        <option value="nl">Nederlands (Dutch)</option>
+        <option value="no">Norsk (Norwegian)</option>
+        <option value="pt">Português (Portuguese)</option>
+        <option value="fi">Suomi (Finnish)</option>
+        <option value="sv">Svenska (Swedish)</option>
+      </select>
+      <small style="color:var(--dim)" data-i18n="net.display_language_hint">Language of the day-of-week text shown on tube 6 (Week/Date panel). The web interface language is set separately, top-right.</small>
+    </div>
     <div class="field" id="tube5-section" style="display:none"><label data-i18n="disp.tube6_display">Tube 6 Display</label>
       <select id="f-tube5"><option value="blank" data-i18n="opt.blank">Blank</option><option value="weather" data-i18n="opt.weather_icon">Weather Icon</option></select>
     </div>
@@ -598,23 +615,6 @@ select option{background:var(--accent);color:var(--text)}
         <option value="DD/MM/YY" data-i18n="net.datefmt_dmy">DD/MM/YY &nbsp;(day / month / year)</option>
         <option value="MM/DD/YY" data-i18n="net.datefmt_mdy">MM/DD/YY &nbsp;(month / day / year)</option>
       </select>
-    </div>
-    <div class="field">
-      <label for="f-language" data-i18n="net.display_language">Display language</label>
-      <select id="f-language" class="select" onchange="markDirty()">
-        <option value="en">English</option>
-        <option value="da">Dansk (Danish)</option>
-        <option value="de">Deutsch (German)</option>
-        <option value="es">Español (Spanish)</option>
-        <option value="fr">Français (French)</option>
-        <option value="it">Italiano (Italian)</option>
-        <option value="nl">Nederlands (Dutch)</option>
-        <option value="no">Norsk (Norwegian)</option>
-        <option value="pt">Português (Portuguese)</option>
-        <option value="fi">Suomi (Finnish)</option>
-        <option value="sv">Svenska (Swedish)</option>
-      </select>
-      <small style="color:var(--dim)" data-i18n="net.display_language_hint">Language of the day-of-week text shown on tube 6 (Week/Date panel). The web interface language is set separately, top-right.</small>
     </div>
   </div>
   <div class="card">

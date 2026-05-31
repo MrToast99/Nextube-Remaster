@@ -1698,11 +1698,14 @@ static void ht_draw_label(const char *str, int y_tube, uint16_t fg,
     int ascent  = (int)u8g2_GetAscent(&s_u8g2);
     int descent = (int)u8g2_GetDescent(&s_u8g2);   /* negative */
     int blit_h  = ascent - descent;                 /* = HT_LABEL_H */
-    u8g2_uint_t w = u8g2_GetStrWidth(&s_u8g2, str);
+    /* UTF-8 width/draw so localised labels with Latin-1 glyphs (e.g. the
+     * Finnish "Sisä") render correctly — DrawStr would treat each byte as a
+     * separate Latin-1 glyph and mangle multi-byte UTF-8 sequences. */
+    u8g2_uint_t w = u8g2_GetUTF8Width(&s_u8g2, str);
     int x = ((int)LCD_WIDTH - (int)w) / 2;
     if (x < 0) x = 0;
     /* Place baseline at `ascent` so glyphs start at buffer row 0.           */
-    u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)ascent, str);
+    u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)ascent, str);
     ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), blit_h, y_tube, fg, bg);
 }
 
@@ -1773,6 +1776,29 @@ static const char *weekday_abbrev(const char *lang, int wday)
         else if (!strcmp(lang, "fi")) return fi[wday];
     }
     return en[wday];
+}
+
+/* ── Localised "Indoor"/"Outdoor" label (tube-6 H/T panels) ───────────────
+ * Short label drawn above the indoor / outdoor temperature+humidity panels.
+ * Kept ≤4 chars so it fits the 80-px tube at logisoso20.  Rendered through
+ * ht_draw_label()'s UTF-8 path, so Latin-1 glyphs (ä) display correctly.
+ * indoor=true → "In"-style, false → "Out"-style.  Unknown/empty language
+ * falls back to English.  ß is deliberately avoided (spelled "ss"). */
+static const char *inout_label(const char *lang, bool indoor)
+{
+    if (lang && lang[0]) {
+        if      (!strcmp(lang, "de")) return indoor ? "Inn"  : "Auss";
+        else if (!strcmp(lang, "fr")) return indoor ? "Int"  : "Ext";
+        else if (!strcmp(lang, "es")) return indoor ? "Int"  : "Ext";
+        else if (!strcmp(lang, "it")) return indoor ? "Int"  : "Est";
+        else if (!strcmp(lang, "pt")) return indoor ? "Int"  : "Ext";
+        else if (!strcmp(lang, "nl")) return indoor ? "Bin"  : "Bui";
+        else if (!strcmp(lang, "sv")) return indoor ? "Inne" : "Ute";
+        else if (!strcmp(lang, "no")) return indoor ? "Inne" : "Ute";
+        else if (!strcmp(lang, "da")) return indoor ? "Inde" : "Ude";
+        else if (!strcmp(lang, "fi")) return indoor ? "Sisä" : "Ulko";
+    }
+    return indoor ? "In" : "Out";
 }
 
 /* Render a UTF-8 string into the U8g2 buffer using the 28-px
@@ -2106,7 +2132,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
             uint16_t fg = ht_sample_theme_color(cfg->theme);
 
             /* "In" label — rows 15–38 (HT_LABEL_H=24, shifted +15) */
-            ht_draw_label("In", 18, fg, bg);
+            ht_draw_label(inout_label(cfg->language, true), 18, fg, bg);
 
             /* Indoor temperature — rows 39–94 (56-row band, logisoso28, shifted +15) */
             {
@@ -2160,7 +2186,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
             uint16_t fg = ht_sample_theme_color(cfg->theme);
 
             /* "Out" label — rows 15–38 (HT_LABEL_H=24, shifted +15) */
-            ht_draw_label("Out", 18, fg, bg);
+            ht_draw_label(inout_label(cfg->language, false), 18, fg, bg);
 
             /* Outdoor temperature — rows 39–94 (56-row band, shifted +15) */
             {
