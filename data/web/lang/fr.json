@@ -376,5 +376,6 @@
   "js.enter_pw_ph": "Entrer le mot de passe",
   "js.confirm_partial_reset": "Réinitialiser TOUS les paramètres ?\n\nMot de passe et PIN AP conservés.",
   "js.confirm_reboot": "Redémarrer l'appareil ?",
-  "js.ota_wrong_file": "Mauvais fichier : téléverser nextube-fw-ota.bin, pas nextube-fw-full.bin"
+  "js.ota_wrong_file": "Mauvais fichier : téléverser nextube-fw-ota.bin, pas nextube-fw-full.bin",
+  "js.ota_wrong_file_fs": "Mauvais fichier : c'est une image LittleFS — utilise la section 'Mise à jour LittleFS' ci-dessous"
 }

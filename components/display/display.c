@@ -2142,10 +2142,10 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
         /* ── Week/Date panel — U8g2 text over blank.jpg background ──────────
          * Top half    (rows   0– 79) : day name — "Sun" … "Sat"
          *                             U8g2 logisoso28, centred in 64-row band
-         *                             at tube rows 8–71 (8-px fringe each side)
+         *                             at tube rows 16–79
          * Bottom half (rows  80–159) : date "MM/DD"
          *                             U8g2 logisoso28, centred in 64-row band
-         *                             at tube rows 88–151 (8-px fringe each side)
+         *                             at tube rows 96–159
          *
          * Background: theme's AMPM/blank.jpg decoded via image cache.  The
          * 8-px fringes at the top/bottom of each half are preserved from the
@@ -2176,7 +2176,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
         /* Day name — top half, centred in 64-row U8g2 band (rows 8–71).
          * Localised per cfg->language (tube display language setting). */
         const char *day = weekday_abbrev(cfg->language, t->tm_wday);
-        ht_draw_str_at(day, 26, 64, u8g2_font_logisoso28_tf, fg, bg);
+        ht_draw_str_at(day, 16, 64, u8g2_font_logisoso28_tf, fg, bg);
 
         /* Date — bottom half, respects Network › Date format setting.
          * "MM/DD/YY": month first → MMDD   (US format)
@@ -2189,7 +2189,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 snprintf(buf, sizeof(buf), "%02d%02d", mo, t->tm_mday);
             else
                 snprintf(buf, sizeof(buf), "%02d%02d", t->tm_mday, mo);
-            ht_draw_str_at(buf, HALF + 26, 64, u8g2_font_logisoso28_tf, fg, bg);
+            ht_draw_str_at(buf, HALF + 16, 64, u8g2_font_logisoso28_tf, fg, bg);
         }
 
     } else if (kind == 2) {

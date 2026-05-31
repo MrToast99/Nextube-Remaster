@@ -376,5 +376,6 @@
   "js.enter_pw_ph": "Ingresar contraseña",
   "js.confirm_partial_reset": "¿Restablecer TODOS los ajustes?\n\nContraseña admin y PIN AP conservados.",
   "js.confirm_reboot": "¿Reiniciar el dispositivo?",
-  "js.ota_wrong_file": "Archivo incorrecto: suba nextube-fw-ota.bin, no nextube-fw-full.bin"
+  "js.ota_wrong_file": "Archivo incorrecto: suba nextube-fw-ota.bin, no nextube-fw-full.bin",
+  "js.ota_wrong_file_fs": "Archivo incorrecto: eso es una imagen LittleFS — usa la sección 'Actualización LittleFS' abajo"
 }

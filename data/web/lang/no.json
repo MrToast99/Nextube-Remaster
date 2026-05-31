@@ -374,6 +374,7 @@
   "js.confirm_partial_reset": "Tilbakestille ALLE innstillinger?\n\nAdmin-passord og AP-PIN beholdes.",
   "js.confirm_reboot": "Starte enheten på nytt?",
   "js.ota_wrong_file": "Feil fil: last opp nextube-fw-ota.bin, ikke nextube-fw-full.bin",
+  "js.ota_wrong_file_fs": "Feil fil: det er et LittleFS-image — bruk 'LittleFS-oppdatering'-seksjonen nedenfor",
   "js.themes_refreshed": "Temaer oppdatert ({0} funnet)",
   "js.themes_no_new": "Ingen nye temaer",
   "js.themes_err": "Kan ikke nå /api/themes"

@@ -374,6 +374,7 @@
   "js.confirm_partial_reset": "Ripristinare TUTTE le impostazioni?\n\nPassword admin e PIN AP conservati.",
   "js.confirm_reboot": "Riavviare il dispositivo?",
   "js.ota_wrong_file": "File errato: caricare nextube-fw-ota.bin, non nextube-fw-full.bin",
+  "js.ota_wrong_file_fs": "File errato: è un'immagine LittleFS — usa la sezione 'Aggiornamento LittleFS' qui sotto",
   "js.themes_refreshed": "Temi aggiornati ({0} trovati)",
   "js.themes_no_new": "Nessun nuovo tema",
   "js.themes_err": "Impossibile raggiungere /api/themes"

@@ -1619,6 +1619,7 @@ Object.assign(I18N.en, {
   "js.scanning":"Scanning…","js.no_file_path":"No file path set",
   "js.playing":"▶ Playing…","js.playback_failed":"Playback failed",
   "js.ota_wrong_file":"Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin",
+  "js.ota_wrong_file_fs":"Wrong file: that's a LittleFS image — use the LittleFS Update section below",
   "js.ota_complete":"OTA complete! Rebooting…","js.ota_failed":"OTA failed: {0}",
   "js.ota_conn_lost":"OTA complete — device rebooting…","js.ota_stalled":"OTA failed: upload stalled at {0}%",
   "js.fs_updated":"LittleFS updated! Rebooting…","js.fs_failed":"LittleFS update failed: {0}",
@@ -2771,6 +2772,9 @@ async function doOTA() {
   if (!file) return toast(tr('js.no_file_path'), true);
   if (file.name.toLowerCase().includes('full')) {
     return toast(tr('js.ota_wrong_file'), true);
+  }
+  if (file.name.toLowerCase().includes('littlefs')) {
+    return toast(tr('js.ota_wrong_file_fs'), true);
   }
   /* Pre-flight auth check — must happen before the binary is sent.
    * If the session has expired the server returns 401 and closes the

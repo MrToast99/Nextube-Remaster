@@ -374,6 +374,7 @@
   "js.confirm_partial_reset": "Nulstille ALLE indstillinger?\n\nAdgangskode og AP-PIN bevares.",
   "js.confirm_reboot": "Genstart enheden?",
   "js.ota_wrong_file": "Forkert fil: upload nextube-fw-ota.bin, ikke nextube-fw-full.bin",
+  "js.ota_wrong_file_fs": "Forkert fil: det er et LittleFS-image — brug sektionen 'LittleFS-opdatering' nedenfor",
   "js.themes_refreshed": "Temaer opdateret ({0} fundet)",
   "js.themes_no_new": "Ingen nye temaer",
   "js.themes_err": "Kan ikke nå /api/themes"
