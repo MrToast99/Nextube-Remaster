@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "config";
 static const char *CONFIG_PATH = "/spiffs/config.json";
@@ -834,6 +835,81 @@ static void save_to_flash(void)
     free(json);
 }
 
+/* ── NVS config backup / restore ───────────────────────────────────── */
+#define NVS_CFG_NS  "nextube_cfg"
+#define NVS_CFG_KEY "cfg_backup"
+
+void config_backup_to_nvs(void)
+{
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (!f) {
+        ESP_LOGW(TAG, "cfg backup: no config.json to back up");
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 8192) { fclose(f); return; }
+
+    char *buf = malloc((size_t)sz);
+    if (!buf) { fclose(f); return; }
+
+    bool ok = (fread(buf, 1, (size_t)sz, f) == (size_t)sz);
+    fclose(f);
+
+    if (ok) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_CFG_NS, NVS_READWRITE, &h) == ESP_OK) {
+            if (nvs_set_blob(h, NVS_CFG_KEY, buf, (size_t)sz) == ESP_OK) {
+                nvs_commit(h);
+                ESP_LOGI(TAG, "Config backed up to NVS (%ld B)", sz);
+            } else {
+                ESP_LOGE(TAG, "cfg backup: nvs_set_blob failed");
+            }
+            nvs_close(h);
+        }
+    }
+    free(buf);
+}
+
+/* Returns true if a backup was found, restored to LittleFS, and deleted. */
+static bool config_restore_from_nvs(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_CFG_NS, NVS_READWRITE, &h) != ESP_OK)
+        return false;
+
+    size_t sz = 0;
+    if (nvs_get_blob(h, NVS_CFG_KEY, NULL, &sz) != ESP_OK || sz == 0 || sz > 8192) {
+        nvs_close(h);
+        return false;
+    }
+
+    char *buf = malloc(sz);
+    if (!buf) { nvs_close(h); return false; }
+
+    bool restored = false;
+    if (nvs_get_blob(h, NVS_CFG_KEY, buf, &sz) == ESP_OK) {
+        FILE *f = fopen(CONFIG_PATH, "w");
+        if (f) {
+            fwrite(buf, 1, sz, f);
+            fclose(f);
+            parse_json(buf, sz);
+            ESP_LOGI(TAG, "Config restored from NVS backup (%u B)", (unsigned)sz);
+            restored = true;
+        } else {
+            ESP_LOGE(TAG, "cfg restore: cannot write %s", CONFIG_PATH);
+        }
+    }
+    free(buf);
+    if (restored) {
+        nvs_erase_key(h, NVS_CFG_KEY);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    return restored;
+}
+
 /* ── Public API ────────────────────────────────────────────────────── */
 
 void config_mgr_init(void)
@@ -846,7 +922,8 @@ void config_mgr_init(void)
     /* Plain mutex: TLS semaphore is never re-acquired by the same task. */
     s_tls_sem = xSemaphoreCreateMutex();
     set_defaults();
-    load_from_flash();
+    if (!config_restore_from_nvs())
+        load_from_flash();
 }
 
 void config_lock(void)   { xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY); }

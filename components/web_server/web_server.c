@@ -1029,6 +1029,7 @@ static esp_err_t api_fs_ota(httpd_req_t *r)
         }
         ESP_LOGI(TAG, "FS OTA: receive done, unmounting + flashing %zu B…", alloc_len);
 
+        config_backup_to_nvs();
         /* Unmount LittleFS — receive is complete, safe to touch the partition. */
         esp_vfs_littlefs_unregister("littlefs");
 
@@ -1068,6 +1069,7 @@ static esp_err_t api_fs_ota(httpd_req_t *r)
         /* Show wait screen and suspend tasks BEFORE unmounting LittleFS. */
         display_show_wait();
         ota_suspend_tasks();
+        config_backup_to_nvs();
         esp_vfs_littlefs_unregister("littlefs");
 
 #define FS_OTA_FAIL(msg) do { \

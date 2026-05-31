@@ -237,6 +237,11 @@ typedef struct {
 /** Initialise config module – loads from flash or sets defaults. */
 void config_mgr_init(void);
 
+/** Save current config.json to NVS before a LittleFS wipe.
+ *  config_mgr_init() will restore it automatically if no config.json
+ *  is found on the freshly-flashed filesystem. */
+void config_backup_to_nvs(void);
+
 /** Global TLS serialisation – acquire before any esp_http_client HTTPS call,
  *  release after esp_http_client_cleanup().  Guarantees only one mbedTLS
  *  SSL context exists at a time, preventing internal-SRAM exhaustion when

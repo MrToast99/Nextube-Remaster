@@ -1566,10 +1566,22 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
  * contribute roughly equally and no channel biases the bright/dark selection.
  *
  * Memoised by theme name — runs once per theme switch, not every render tick. */
+/* Themes whose mid-tone background fools the bright/dark classifier.
+ * Add entries here instead of fighting the heuristic.  Values are RGB565. */
+static const struct { const char *theme; uint16_t color; } s_fg_overrides[] = {
+    /* tan bg lum≈87 < threshold 93 → misclassified as dark; JPEG ringing picks white */
+    { "RetroPaper", 0x30E2 },   /* dark ink brown #321C11 from Numbers/1.jpg */
+};
+
 static uint16_t ht_sample_theme_color(const char *theme)
 {
     if (theme && theme[0] && strcmp(theme, s_theme_color_memo_theme) == 0)
         return s_theme_color_memo_color;
+
+    for (size_t i = 0; i < sizeof(s_fg_overrides) / sizeof(s_fg_overrides[0]); i++) {
+        if (theme && strcmp(theme, s_fg_overrides[i].theme) == 0)
+            return s_fg_overrides[i].color;
+    }
 
     char path[256];
     display_path_number(path, sizeof(path), theme, 1);

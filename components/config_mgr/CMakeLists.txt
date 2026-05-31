@@ -45,7 +45,7 @@ endif()
 idf_component_register(
     SRCS "config_mgr.c"
     INCLUDE_DIRS "include"
-    REQUIRES json joltwallet__littlefs
+    REQUIRES json joltwallet__littlefs nvs_flash
 )
 
 # PUBLIC: applies to config_mgr itself AND to every component that REQUIRES

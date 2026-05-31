@@ -17,9 +17,3 @@
 # flash release — the full flash already delivers every asset, so carrying
 # old entries forward would bloat every subsequent hotpatch unnecessarily.
 
-# ── System ────────────────────────────────────────────────────────────────────
-images/system/wait.jpg
-images/system/youtube.jpg
-images/system/instagram.jpg
-images/system/tiktok.jpg
-images/system/mastodon.jpg
