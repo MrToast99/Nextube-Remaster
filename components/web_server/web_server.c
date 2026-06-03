@@ -150,6 +150,72 @@ static esp_err_t api_audio_play(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/weather  — inject externally-sourced weather data.
+ * Lets a home-automation system push its own (e.g. multi-provider averaged)
+ * reading instead of the firmware fetching a single online service.
+ *
+ * Body — all fields optional (omitted fields keep their current value):
+ *   {
+ *     "temp_c":       15.3,              // °C   — send EITHER temp_c OR temp_f,
+ *     "temp_f":       59.5,              // °F     not both (temp_c wins if both)
+ *     "humidity":     65,                // %
+ *     "condition":    "Cloudy",          // free text shown on the panel
+ *     "icon":         "overcastClouds",  // one of the 8 built-in icon names
+ *     "weather_code": 3,                 // WMO code; fills icon/condition if absent
+ *     "lat":          51.3,              // optional — for Sunrise & Sunset panel
+ *     "lon":          -114.0
+ *   }
+ *
+ * Temperature is stored internally in Celsius (the UI °C/°F setting only affects
+ * display), so temp_f is converted on ingest.  You only need to send ONE of the
+ * two temperature fields in whichever unit your source produces.
+ *
+ * Set weather_source = "external" (Display/weather settings) so the internal
+ * poller doesn't overwrite the pushed value.  Honours auth like every other
+ * mutation route: with no admin password set this is open on the LAN;
+ * otherwise send the Bearer token. */
+static esp_err_t api_post_weather(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char buf[512] = {0};
+    int  n = httpd_req_recv(r, buf, sizeof(buf) - 1);
+    if (n <= 0) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "No body"), ESP_FAIL;
+    buf[n] = '\0';
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
+
+    /* Temperature: accept temp_c (Celsius) or temp_f (Fahrenheit).  Stored
+     * internally as Celsius, so temp_f is converted on ingest.  Send only one;
+     * temp_c takes precedence if both are present. */
+    float temp = NAN, hum = NAN;
+    cJSON *jt = cJSON_GetObjectItem(root, "temp_c");
+    cJSON *jf = cJSON_GetObjectItem(root, "temp_f");
+    cJSON *jh = cJSON_GetObjectItem(root, "humidity");
+    if (cJSON_IsNumber(jt))      temp = (float)jt->valuedouble;
+    else if (cJSON_IsNumber(jf)) temp = ((float)jf->valuedouble - 32.0f) * 5.0f / 9.0f;
+    if (cJSON_IsNumber(jh)) hum  = (float)jh->valuedouble;
+
+    const char *cond = NULL, *icon = NULL;
+    cJSON *jc = cJSON_GetObjectItem(root, "condition");
+    cJSON *ji = cJSON_GetObjectItem(root, "icon");
+    if (cJSON_IsString(jc)) cond = jc->valuestring;
+    if (cJSON_IsString(ji)) icon = ji->valuestring;
+
+    int wmo = -1;
+    cJSON *jw = cJSON_GetObjectItem(root, "weather_code");
+    if (cJSON_IsNumber(jw)) wmo = jw->valueint;
+
+    weather_set_external(temp, hum, cond, icon, wmo);
+
+    cJSON *jlat = cJSON_GetObjectItem(root, "lat");
+    cJSON *jlon = cJSON_GetObjectItem(root, "lon");
+    if (cJSON_IsNumber(jlat) && cJSON_IsNumber(jlon))
+        weather_set_external_location((float)jlat->valuedouble, (float)jlon->valuedouble);
+
+    cJSON_Delete(root);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 static esp_err_t api_get_settings(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
@@ -2109,6 +2175,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/reset",           api_reset),
     R(HTTP_POST, "/api/reboot",          api_reboot),
     R(HTTP_POST, "/api/audio/play",      api_audio_play),
+    R(HTTP_POST, "/api/weather",         api_post_weather),
     R(HTTP_GET,  "/api/status",          api_status),
     R(HTTP_POST, "/api/update_firmware", api_ota),
     R(HTTP_POST, "/api/update_fs",          api_fs_ota),

@@ -234,8 +234,12 @@ CONFIG_NVS_ENCRYPTION=n
 # FreeRTOS tick hook and utility functions don't need to be in IRAM.
 CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
 
-# We use spi_device_polling_transmit exclusively – the DMA/ISR path
-# for SPI master is never exercised, so save the IRAM it would occupy.
+# Pixel blits use spi_device_transmit (interrupt/DMA path) to yield the CPU
+# during large transfers, reducing the sustained current the CPU+SPI combination
+# draws from the shared 3.3 V rail — the main firmware-accessible lever for SPI
+# induced audio noise.  The SPI ISR is kept in flash (not IRAM) to preserve the
+# limited IRAM budget; ISR latency is acceptable since display renders are not
+# timing-critical at 5 Hz / 50 ms.
 CONFIG_SPI_MASTER_ISR_IN_IRAM=n
 
 # Ring-buffer ISR and helper functions (used by RMT LED driver and I2S)

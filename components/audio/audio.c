@@ -14,21 +14,17 @@
  * immediately.  A mutex serialises concurrent play requests.
  *
  * DAC mode lifecycle:
- *   disabled – dac_oneshot holds GPIO25 at a static low level (DAC_IDLE_LEVEL).
- *             This is the IDF5 equivalent of how the ORIGINAL Rotrics firmware
- *             idled the DAC.  That firmware (Arduino-ESP32 2.0.x + ESP8266Audio
- *             on the legacy driver/i2s.h built-in-DAC path) installed I2S only
- *             while a clip played and called i2s_driver_uninstall() the instant
- *             it finished ("UNINSTALL I2S" log) — leaving the RTC DAC holding a
- *             static value with NO clock, NO APLL and NO DMA running.  Nothing
- *             switches, so nothing couples onto the shared 3.3 V rail → silence.
+ *   disabled – GPIO25 is driven OUTPUT LOW (push-pull, ~12 Ω to ground); NO
+ *             DAC is brought up at all.  Measured on hardware (with the SPI
+ *             display on DMA): a hard GPIO-LOW clamp is quieter than an active
+ *             RTC DAC buffer — the DAC's analog output stage has higher output
+ *             impedance and injects its own reference / 1/f noise, raising the
+ *             floor, whereas the low-impedance GPIO clamp shunts coupled noise
+ *             at the amp's AC-coupled input.  Changing audio_enabled needs a
+ *             reboot.
  *
- *             dac_continuous (used during playback) CANNOT idle silently: it
- *             requires a perpetually-running I2S0 DMA + clock to feed the DAC,
- *             and that switching activity is itself the source of the idle
- *             static.  dac_oneshot uses the RTC DAC directly — no DMA, no
- *             clock — so the idle state is truly quiet, matching the original.
- *             Changing audio_enabled requires a reboot.
+ *             (dac_continuous, used during playback, requires a perpetually
+ *             running I2S0 DMA + clock and so cannot serve as a quiet idle.)
  *
  *   playing – leds_set_audio_active(true) pauses WS2812 RMT first.
  *             A flat-128 prime buffer fills the ring before playback so
@@ -41,7 +37,6 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
-#include "driver/dac_oneshot.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -63,29 +58,11 @@ static TaskHandle_t      s_audio_task  = NULL;
 static SemaphoreHandle_t s_play_mutex  = NULL;
 
 /* Continuous DAC handle – live only while audio is enabled (streams clips
- * via I2S0 DMA).  NULL when disabled. */
+ * via I2S0 DMA).  NULL when disabled (GPIO25 is driven LOW instead). */
 static dac_continuous_handle_t s_dac_cont        = NULL;
-/* Oneshot DAC handle – holds GPIO25 at a static low level when audio is
- * disabled.  No DMA / no clock → no idle static (matches original firmware). */
-static dac_oneshot_handle_t    s_dac_idle        = NULL;
 static volatile bool           s_audio_enabled   = true;
 /* Set while a DAC test mode is active — blocks audio_play_file(). */
 static volatile bool           s_dac_test_active = false;
-
-/* Static idle DC level held via dac_oneshot when audio is disabled.
- *
- * 0 (true 0 V), not 1, on purpose: the DAC output = (level/255) × VDD, so a
- * nonzero idle level SCALES with the supply rail.  The per-second display SPI
- * burst droops the shared 3.3 V rail; at level 1 (≈13 mV) that droop blips the
- * DAC output downward and AC-couples a 1 Hz "tick" into the always-on amp.  At
- * level 0 the output is 0 × VDD = 0 V — independent of VDD — so rail droop
- * produces no DAC-path coupling.  This matches the original firmware, which
- * idled the DAC near 0 with no clock running.
- *
- * (The earlier "level 1 is quietest" debug-page finding was with dac_continuous
- * running — that compared DMA artefacts, not this VDD-droop coupling path.
- * With oneshot there is no DMA, so level 0 carries no broadband static.) */
-#define DAC_IDLE_LEVEL  0
 
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
 #define FIXED_DAC_RATE     32000
@@ -111,15 +88,21 @@ typedef struct __attribute__((packed)) {
 
 /* ── DAC lifecycle ──────────────────────────────────────────────────── */
 
+/* Per-clip fade duration (ms).  When audio is enabled, the DAC is torn down to
+ * the GPIO-LOW idle between clips (no continuous DMA = no idle noise floor,
+ * matching the stock firmware).  Each clip brings the DAC up with a fade_in
+ * (0 → 128) and the playback task fades out (128 → 0) before tearing down, so
+ * the GPIO-LOW⇄DAC level transitions don't pop.  Kept short to limit onset
+ * latency on short sounds like the button click. */
+#define PLAY_FADE_MS  120
+
 /*
- * Start (or restart) the continuous DAC from a powered-off / Hi-Z state.
- *
- * Called by audio_init() on boot and by audio_set_enabled(true) when the
- * user re-enables audio from the web UI.  The DMA ring is pre-filled with
- * flat 128 (VDD/2 = silence) immediately after enable so V_amp_in = VDD/2
- * from the first sample — no pop, no chirp.
+ * Bring up the continuous DAC from the GPIO-LOW idle, ramping 0 → 128 over
+ * fade_ms via a cosine S-curve so the AC coupling cap charges gently (no pop),
+ * then pre-fill the ring with mid-rail silence (128).  Called per clip by the
+ * playback task; torn back down by dac_teardown() when the clip ends.
  */
-static void dac_restart(void)
+static void dac_restart(int fade_ms)
 {
     if (s_dac_cont) return;  /* already running */
 
@@ -166,19 +149,19 @@ static void dac_restart(void)
         return;
     }
 
-    /* Anti-Pop Boot Fade: 0 → 128 over 500 ms via cosine S-curve.
-     * Gradually charges the AC cap so V_amp_in stays near 0 throughout. */
-    size_t fade_samples = (FIXED_DAC_RATE * 500) / 1000;
+    /* Anti-pop fade-in: 0 → 128 over fade_ms via cosine S-curve.
+     * Gradually charges the AC cap from the GPIO-LOW (0 V) idle to mid-rail. */
+    size_t fade_samples = (FIXED_DAC_RATE * (uint32_t)fade_ms) / 1000;
     fade_samples = (fade_samples + 3) & ~3;
-    uint8_t *boot_fade = (uint8_t *)calloc(1, fade_samples);
-    if (boot_fade) {
+    uint8_t *fade = (uint8_t *)calloc(1, fade_samples);
+    if (fade) {
         for (size_t i = 0; i < fade_samples; i++) {
             float t = (float)i / (float)fade_samples;
-            boot_fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
+            fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
         }
         size_t w;
-        dac_continuous_write(s_dac_cont, boot_fade, fade_samples, &w, portMAX_DELAY);
-        free(boot_fade);
+        dac_continuous_write(s_dac_cont, fade, fade_samples, &w, portMAX_DELAY);
+        free(fade);
     }
 
     /* Pre-fill the ring with silence so the DMA idles at mid-rail. */
@@ -188,39 +171,24 @@ static void dac_restart(void)
     for (int i = 0; i < DAC_DESC_NUM; i++)
         dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
 
-    ESP_LOGI(TAG, "DAC started (32 kHz continuous)");
+    ESP_LOGI(TAG, "DAC up (32 kHz, %d ms fade-in)", fade_ms);
 }
 
-/*
- * Enter the disabled-audio idle state: hold GPIO25 at a static low level via
- * dac_oneshot — no I2S0 DMA, no clock, nothing switching → no idle static.
- * This is the IDF5 equivalent of how the original firmware idled the DAC
- * (RTC DAC holding a static value after uninstalling I2S between clips).
- *
- * Any live continuous channel is released first.  On oneshot-init failure the
- * pin falls back to Hi-Z (the LTK8002D input bias still settles the AC cap,
- * just less precisely than a defined static level).
- */
-static void dac_enter_idle_oneshot(void)
+/* Tear the continuous DAC down and return GPIO25 to the quiet OUTPUT-LOW idle.
+ * Called by the playback task after each clip so that — when audio is enabled —
+ * there is NO continuous I2S0 DMA running between clips (the idle-noise source).
+ * The caller should fade the DAC to 0 first so this teardown's transition to
+ * the GPIO-LOW clamp has no level step (no end-of-clip pop). */
+static void dac_teardown(void)
 {
     if (s_dac_cont) {
         dac_continuous_disable(s_dac_cont);
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
     }
-    if (!s_dac_idle) {
-        dac_oneshot_config_t os_cfg = { .chan_id = DAC_CHAN_0 };
-        if (dac_oneshot_new_channel(&os_cfg, &s_dac_idle) != ESP_OK) {
-            s_dac_idle = NULL;
-            gpio_reset_pin(PIN_AUDIO_DAC);
-            gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
-            ESP_LOGW(TAG, "Audio idle — oneshot init failed, GPIO%d Hi-Z", PIN_AUDIO_DAC);
-            return;
-        }
-    }
-    dac_oneshot_output_voltage(s_dac_idle, DAC_IDLE_LEVEL);
-    ESP_LOGI(TAG, "Audio idle — GPIO%d held at level %d via oneshot (no DMA/clock)",
-             PIN_AUDIO_DAC, DAC_IDLE_LEVEL);
+    gpio_reset_pin(PIN_AUDIO_DAC);
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_AUDIO_DAC, 0);
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
@@ -345,7 +313,13 @@ static void audio_play_task(void *arg)
      * Pausing RMT stops all transmissions; LEDs hold their last colour. */
     leds_set_audio_active(true);
 
-    /* Stream PCM to the perpetually running DMA */
+    /* Bring the DAC up for this clip.  When audio is enabled the DAC is torn
+     * down to the GPIO-LOW idle between clips (no continuous DMA floor), so we
+     * (re)create it here with a short fade-in.  On failure, skip to cleanup. */
+    dac_restart(PLAY_FADE_MS);
+    if (!s_dac_cont) goto task_cleanup;
+
+    /* Stream PCM to the DMA */
     {
         if (preload) {
             /* PSRAM path */
@@ -408,17 +382,34 @@ task_cleanup:
     if (preload) { free(preload); preload = NULL; }
 
     if (buf && s_dac_cont) {
-        /* Flush ring with pure silence (128) to safely drain audio 
-         * and leave the DMA perfectly resting at mid-rail. */
-        memset(buf, 128, STREAM_BUF_BYTES);
-        size_t w;
-        for (int i = 0; i < DAC_DESC_NUM; i++) {
-            dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE, &w, pdMS_TO_TICKS(200));
+        /* Fade-out 128 → 0 over PLAY_FADE_MS (cosine), queued behind the clip
+         * tail.  This ramps the AC coupling cap down to 0 V so the subsequent
+         * teardown → GPIO-LOW clamp has no level step (no end-of-clip pop). */
+        size_t fade_n = (FIXED_DAC_RATE * (uint32_t)PLAY_FADE_MS) / 1000;
+        fade_n = (fade_n + 3) & ~3;
+        size_t done = 0, w;
+        while (done < fade_n) {
+            size_t chunk = fade_n - done;
+            if (chunk > STREAM_BUF_BYTES) chunk = STREAM_BUF_BYTES;
+            for (size_t i = 0; i < chunk; i++) {
+                float t = (float)(done + i) / (float)fade_n;              /* 0..1   */
+                buf[i] = (uint8_t)(64.0f * (1.0f + cosf(t * (float)M_PI))); /* 128..0 */
+            }
+            if (dac_continuous_write(s_dac_cont, buf, chunk, &w, pdMS_TO_TICKS(500)) != ESP_OK)
+                break;
+            done += chunk;
         }
+        /* Wait for the ring to fully clock out before tearing down, so the tail
+         * and fade actually play (del_channels would otherwise cut them off).
+         * Worst case = full ring depth + the fade just queued. */
+        uint32_t ring_ms = (uint32_t)(1000ULL * DAC_DESC_NUM * DAC_DMA_BUF_SIZE / FIXED_DAC_RATE);
+        vTaskDelay(pdMS_TO_TICKS(ring_ms + PLAY_FADE_MS + 30));
     }
-    
+
     free(buf);
     leds_set_audio_active(false);
+    /* Tear the DAC down → GPIO-LOW idle: no continuous DMA between clips. */
+    dac_teardown();
 
 task_close:
     fclose(f);
@@ -441,31 +432,37 @@ void audio_init(bool enabled)
     xSemaphoreGive(s_play_mutex);
 
     if (!enabled) {
-        /* Disabled: hold GPIO25 at a static low level via dac_oneshot — no
-         * DMA, no clock, no idle static.  Matches the original firmware,
-         * which uninstalled I2S between clips and left the RTC DAC static.
-         * s_dac_cont stays NULL so audio_play_file() can never stream.
-         * Re-enabling requires a reboot (next boot starts clean with
-         * dac_restart(); oneshot↔continuous in one session is unreliable). */
+        /* Disabled: do NOT touch GPIO25 — leave it in the OUTPUT-LOW state the
+         * boot clamp (app_main) already established.  Every change to the pin's
+         * drive state is a DC step through the amp's AC coupling cap = a pop;
+         * re-driving it here was the source of the SECOND boot pop.  The low-Z
+         * clamp set at boot shunts SPI antenna pickup (no scroll chirping, no
+         * 1 Hz pulses) and persists untouched.  s_dac_cont stays NULL so
+         * audio_play_file() can never stream.  Re-enabling requires a reboot. */
         s_audio_enabled = false;
-        dac_enter_idle_oneshot();
+        ESP_LOGI(TAG, "Audio disabled — GPIO%d stays clamped LOW (untouched), no DAC",
+                 PIN_AUDIO_DAC);
         return;
     }
 
-    /* Audio is enabled: bring up the continuous DAC now so the first
-     * audio_play_file() call has no start-up stall. */
-    dac_restart();
+    /* Audio is enabled, but the DAC is NOT brought up at idle.  It is created
+     * per-clip by the playback task and torn down again afterwards (matching
+     * the stock firmware's install-on-play / uninstall-after behaviour), so
+     * there is no continuous I2S0 DMA running between clips — that continuous
+     * DMA was an idle-noise source.  GPIO25 stays in the boot clamp's quiet
+     * OUTPUT-LOW state until the first clip plays. */
+    s_audio_enabled = true;
+    ESP_LOGI(TAG, "Audio enabled — DAC brought up per-clip (GPIO%d LOW at idle)",
+             PIN_AUDIO_DAC);
 }
 
 void audio_set_enabled(bool enabled)
 {
     /* audio_enabled changes take effect after a reboot.  The web server
      * saves the new value to config.json then calls esp_restart(); on the
-     * next boot audio_init() applies the correct state from scratch.
-     * Dynamic switching is not supported — at idle GPIO25 is owned by
-     * dac_oneshot (disabled) or dac_continuous (enabled), and transitioning
-     * between the two drivers in one boot session is unreliable on the
-     * original ESP32. */
+     * next boot audio_init() applies the correct state from scratch — either
+     * GPIO25 driven LOW (disabled) or dac_continuous brought up (enabled).
+     * Dynamic switching is not supported. */
     (void)enabled;
     ESP_LOGI(TAG, "audio_set_enabled: change saved — takes effect after reboot");
 }
@@ -474,7 +471,8 @@ void audio_play_file(const char *path)
 {
     if (!s_audio_enabled)  return;
     if (s_dac_test_active) return;   /* a DAC test owns the output — skip playback */
-    if (!s_dac_cont)       return;   /* DAC not ready (e.g. after failed restart)   */
+    /* Note: s_dac_cont is NULL at idle now (DAC is torn down between clips and
+     * brought up by the playback task per clip), so we do NOT gate on it here. */
     if (!path || path[0] == '\0') return;
 
     const char *ext = strrchr(path, '.');
@@ -536,24 +534,18 @@ void audio_stop(void)
  *   complete without blocking.  Phase-continuous sine fills all descriptors
  *   and the DMA loops them.
  *
- * "normal"  : tear down the test dac_continuous channel, then call
- *   dac_restart() to restore the idle silence channel.  dac_restart()
- *   retries up to 3 × 100 ms to handle I2S0 settling.
+ * "normal"  : tear down the test dac_continuous channel and return GPIO25 to
+ *   the quiet OUTPUT-LOW idle (no DAC running).  This matches the normal idle
+ *   for both enabled and disabled audio — a clip brings the DAC up on demand.
  */
 
-/* Helper: release whichever DAC driver currently owns the channel so a test
- * mode can claim it.  Covers both the continuous channel (audio enabled) and
- * the oneshot idle channel (audio disabled). */
+/* Helper: release the continuous DAC channel so a test mode can claim it. */
 static void dac_test_teardown(void)
 {
     if (s_dac_cont) {
         dac_continuous_disable(s_dac_cont);
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
-    }
-    if (s_dac_idle) {
-        dac_oneshot_del_channel(s_dac_idle);
-        s_dac_idle = NULL;
     }
 }
 
@@ -578,14 +570,13 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         dac_test_teardown();
         s_dac_test_active = false;
 
-        if (s_audio_enabled) {
-            dac_restart();   /* retry loop in dac_restart() handles I2S0 settling */
-            ESP_LOGI(TAG, "DAC test: normal idle restored (continuous)");
-        } else {
-            /* Audio disabled: return to the static oneshot idle (no DMA/clock). */
-            dac_enter_idle_oneshot();
-            ESP_LOGI(TAG, "DAC test: restored to oneshot idle (audio_enabled=false)");
-        }
+        /* Restore the normal idle: GPIO25 driven LOW with no DAC running.
+         * This is the idle for BOTH enabled (DAC is per-clip now) and disabled
+         * audio.  A clip will bring the DAC up again on demand. */
+        gpio_reset_pin(PIN_AUDIO_DAC);
+        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+        gpio_set_level(PIN_AUDIO_DAC, 0);
+        ESP_LOGI(TAG, "DAC test: restored to GPIO-LOW idle");
         return;
     }
 

@@ -90,9 +90,15 @@ typedef struct {
     char             ntp_servers[4][64]; /* NTP server hostnames; empty string = skip slot */
 
     /* Weather */
-    char             weather_source[16]; /* "wttr" (no key) or "openweather" (API key) */
+    char             weather_source[16]; /* "wttr"/"openmeteo"/"metno" (no key), "openweather" (API key), or "external" (POST /api/weather) */
     char             weather_api_key[48];
     char             city[64];
+    /* Last lat/lon pushed via POST /api/weather (external source).  Persisted so
+     * the on-device Sunrise & Sunset panel works immediately on boot without a
+     * geocoding call.  Written only when the coordinates change. */
+    float            weather_ext_lat;
+    float            weather_ext_lon;
+    bool             weather_ext_loc_valid;
     char             temp_format[12];    /* "Celsius" or "Fahrenheit" */
 
     /* YouTube / Bilibili */

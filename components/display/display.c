@@ -271,7 +271,7 @@ static void lcd_cmd(uint8_t cmd)
 {
     gpio_set_level(PIN_LCD_DC, 0);
     spi_transaction_t t = { .length = 8, .tx_buffer = &cmd };
-    spi_device_polling_transmit(spi_dev, &t);
+    spi_device_polling_transmit(spi_dev, &t);   /* 1 byte — polling cheaper than DMA setup */
 }
 
 static void lcd_data(const uint8_t *data, int len)
@@ -279,7 +279,7 @@ static void lcd_data(const uint8_t *data, int len)
     if (len <= 0) return;
     gpio_set_level(PIN_LCD_DC, 1);
     spi_transaction_t t = { .length = len * 8, .tx_buffer = data };
-    spi_device_polling_transmit(spi_dev, &t);
+    spi_device_polling_transmit(spi_dev, &t);   /* ≤8 bytes — polling cheaper than DMA setup */
 }
 
 static void lcd_data_byte(uint8_t val) { lcd_data(&val, 1); }
@@ -654,7 +654,7 @@ void display_fill(int tube, uint16_t color)
     for (int x = 0; x < LCD_WIDTH; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
     for (int y = 0; y < LCD_HEIGHT; y++) {
         spi_transaction_t t = { .length = sizeof(line)*8, .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -707,7 +707,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
             }
         }
         spi_transaction_t t = { .length = (size_t)(rows * w * 2) * 8, .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
 
     /* ── Update indicator overlay ──────────────────────────────────────── */
@@ -729,7 +729,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
         for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
         for (int row = 0; row < 4; row++) {
             spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
-            spi_device_polling_transmit(spi_dev, &tr);
+            spi_device_transmit(spi_dev, &tr);
         }
     }
 
@@ -780,7 +780,7 @@ static void display_fill_snow(int tube)
     for (int y = 0; y < LCD_HEIGHT; y++) {
         esp_fill_random(line, sizeof(line));
         spi_transaction_t t = {.length = sizeof(line) * 8, .tx_buffer = line};
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -1041,7 +1041,7 @@ static void display_show_image_region(int tube, const char *path,
             int rows = (y + DISP_CHUNK_ROWS <= src_h) ? DISP_CHUNK_ROWS : src_h - y;
             spi_transaction_t tr = { .length = (size_t)(rows * src_w * 2) * 8,
                                      .tx_buffer = chunk };
-            spi_device_polling_transmit(spi_dev, &tr);
+            spi_device_transmit(spi_dev, &tr);
         }
         deselect_all();
         return;
@@ -1100,7 +1100,7 @@ static void display_show_image_region(int tube, const char *path,
             .length    = (size_t)(rows * src_w * 2) * 8,
             .tx_buffer = chunk,
         };
-        spi_device_polling_transmit(spi_dev, &tr);
+        spi_device_transmit(spi_dev, &tr);
     }
     deselect_all();
 }
@@ -1319,6 +1319,110 @@ void display_show_ampm(int tube, const char *name, const char *theme)
     display_show_image(tube, p);
 }
 
+/* ── Colon-blink partial update ──────────────────────────────────────────
+ * The colon tube alternates colon.jpg / blank.jpg every second.  Those two
+ * images differ ONLY in the small colon-dot region; the rest of the tube is
+ * identical.  Pushing the full 80×160 tube every second is a large per-second
+ * SPI burst that couples into the always-on amplifier (audible 1 Hz pulse).
+ * Instead we push ONLY the bounding box of pixels that differ between the two
+ * images, leaving the identical background untouched — slashing the per-second
+ * SPI burst (and its coupled noise).  The diff box is computed once per theme. */
+static char s_colon_box_theme[32] = {0};
+static int  s_colon_box_state = 0;   /* 0=unknown, 1=valid, -1=unavailable */
+static int  s_colon_bx0, s_colon_by0, s_colon_bw, s_colon_bh;
+
+static void colon_box_compute(const char *theme)
+{
+    if (s_colon_box_state != 0 && strcmp(theme, s_colon_box_theme) == 0)
+        return;
+    strncpy(s_colon_box_theme, theme, sizeof(s_colon_box_theme) - 1);
+    s_colon_box_theme[sizeof(s_colon_box_theme) - 1] = '\0';
+    s_colon_box_state = -1;
+
+    char pc[256], pb[256];
+    display_path_ampm(pc, sizeof(pc), theme, "colon");
+    display_path_ampm(pb, sizeof(pb), theme, "blank");
+    int wc = 0, hc = 0, wb = 0, hb = 0;
+    const uint8_t *c = img_cache_get(pc, &wc, &hc);
+    const uint8_t *b = img_cache_get(pb, &wb, &hb);
+    if (!c || !b || wc != wb || hc != hb || wc <= 0 || hc <= 0) return;
+
+    int x0 = wc, y0 = hc, x1 = -1, y1 = -1;
+    for (int y = 0; y < hc; y++) {
+        const uint8_t *cr = c + (size_t)y * wc * 2;
+        const uint8_t *brow = b + (size_t)y * wc * 2;
+        for (int x = 0; x < wc; x++) {
+            if (cr[x*2] != brow[x*2] || cr[x*2+1] != brow[x*2+1]) {
+                if (x < x0) x0 = x;
+                if (x > x1) x1 = x;
+                if (y < y0) y0 = y;
+                if (y > y1) y1 = y;
+            }
+        }
+    }
+    if (x1 < 0) return;              /* identical → keep full-draw fallback */
+    s_colon_bx0 = x0; s_colon_by0 = y0;
+    s_colon_bw  = x1 - x0 + 1;
+    s_colon_bh  = y1 - y0 + 1;
+    s_colon_box_state = 1;
+    ESP_LOGI(TAG, "Colon diff box '%s': x%d y%d %dx%d (was 80x160)",
+             theme, x0, y0, s_colon_bw, s_colon_bh);
+}
+
+/* Per-second colon blink: push only the colon-dot diff box instead of the full
+ * tube.  Falls back to a full display_show_ampm() if the box is unavailable.
+ * Applies the same per-tube brightness/gamma as display_show_digit so the dots
+ * match the digit colour.  The non-box background is already on-screen from the
+ * last full render (identical in both images), so it needs no repaint. */
+static void display_show_colon_blink(int tube, const char *theme, bool show_colon)
+{
+    colon_box_compute(theme);
+    if (s_colon_box_state != 1) {
+        display_show_ampm(tube, show_colon ? "colon" : "blank", theme);
+        return;
+    }
+    char p[256];
+    display_path_ampm(p, sizeof(p), theme, show_colon ? "colon" : "blank");
+    int w = 0, h = 0;
+    const uint8_t *img = img_cache_get(p, &w, &h);
+    if (!img || w <= 0 || h <= 0) {
+        display_show_ampm(tube, show_colon ? "colon" : "blank", theme);
+        return;
+    }
+
+    uint8_t br     = s_tube_brightness[tube];
+    bool    do_br  = (br < 100);
+    bool    do_gam = s_gamma_lut_active[tube];
+
+    select_tube(tube);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
+                            + (int)s_col_offsets[tube] + s_colon_bx0);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + s_colon_by0);
+    open_lcd_window(ox, oy, (uint8_t)s_colon_bw, (uint8_t)s_colon_bh);
+
+    uint8_t line[LCD_WIDTH * 2];
+    for (int yy = 0; yy < s_colon_bh; yy++) {
+        const uint8_t *src = img + ((size_t)(s_colon_by0 + yy) * w + s_colon_bx0) * 2;
+        if (do_br || do_gam) {
+            for (int xx = 0; xx < s_colon_bw; xx++) {
+                uint16_t px = ((uint16_t)src[xx*2] << 8) | src[xx*2+1];
+                uint32_t r = (px >> 11) & 0x1Fu, g = (px >> 5) & 0x3Fu, b = px & 0x1Fu;
+                if (do_br)  { r = r*br/100u; g = g*br/100u; b = b*br/100u; }
+                if (do_gam) { r = s_gamma_lut_5bit[tube][r];
+                              g = s_gamma_lut_6bit[tube][g];
+                              b = s_gamma_lut_5bit[tube][b]; }
+                px = (uint16_t)((r << 11) | (g << 5) | b);
+                line[xx*2] = (uint8_t)(px >> 8); line[xx*2+1] = (uint8_t)(px & 0xFF);
+            }
+        } else {
+            memcpy(line, src, (size_t)s_colon_bw * 2);
+        }
+        spi_transaction_t t = { .length = (size_t)(s_colon_bw * 2) * 8, .tx_buffer = line };
+        spi_device_transmit(spi_dev, &t);
+    }
+    deselect_all();
+}
+
 /* ════════════════════════════════════════════════════════════════════
  *  Display task – full mode renderer
  * ════════════════════════════════════════════════════════════════════ */
@@ -1445,7 +1549,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
         int rows = (r + DISP_CHUNK_ROWS <= MARGIN) ? DISP_CHUNK_ROWS : MARGIN - r;
         spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
                                  .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
 
     /* ── Text region: 2× pixel-scaled blit (128 output rows) ──────────
@@ -1472,7 +1576,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
         }
         spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
                                  .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
 
     /* ── Bottom black margin (16 rows) ── */
@@ -1482,7 +1586,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
         int rows = (r + DISP_CHUNK_ROWS <= bot) ? DISP_CHUNK_ROWS : bot - r;
         spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
                                  .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
 
     deselect_all();
@@ -1695,7 +1799,7 @@ static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
             line[col * 2 + 1] = lit ? fg_lo : 0x00;
         }
         spi_transaction_t t = { .length = sizeof(line) * 8, .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -1764,7 +1868,7 @@ static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
             }
         }
         spi_transaction_t t = { .length = sizeof(line) * 8, .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -2064,7 +2168,7 @@ static void cx6_stamp_update_indicator(void)
     for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
     for (int row = 0; row < 4; row++) {
         spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
-        spi_device_polling_transmit(spi_dev, &tr);
+        spi_device_transmit(spi_dev, &tr);
     }
     deselect_all();
 }
@@ -2733,7 +2837,7 @@ static void render_spectrum(const nextube_config_t *cfg)
                 .length    = LCD_WIDTH * 2 * 8,
                 .tx_buffer = line,
             };
-            spi_device_polling_transmit(spi_dev, &t);
+            spi_device_transmit(spi_dev, &t);
         }
         deselect_all();
     }
@@ -3402,7 +3506,7 @@ static void ht_blit_ticker_2x(int tube, const uint8_t *tile_buf, uint16_t fg)
         }
         spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
                                  .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -4040,9 +4144,12 @@ static void display_task(void *arg)
                  * and 24H_CX where time_changed only fires on minute boundaries.
                  * In plain 24H the seconds digits change every second so
                  * time_changed fires first and this branch is never reached.
-                 * FlipClock: colon_blink_changed is always false so also safe. */
-                display_show_ampm(2, (t.tm_sec % 2 == 0) ? "colon" : "blank",
-                                  cfg->theme);
+                 * FlipClock: colon_blink_changed is always false so also safe.
+                 *
+                 * Uses display_show_colon_blink() — a partial push of only the
+                 * colon-dot diff box, not the full 80×160 tube — to minimise the
+                 * per-second SPI burst that couples into the amplifier. */
+                display_show_colon_blink(2, cfg->theme, t.tm_sec % 2 == 0);
                 last_t = t;
                 last_display_epoch = now_epoch;
             }
@@ -4346,9 +4453,11 @@ static void display_task(void *arg)
 
         /* Re-sync wake timer when we've fallen behind the current tick budget.
          *
-         * Background: spi_device_polling_transmit() is a busy-wait spin that
-         * never yields the CPU.  In Spectrum mode (tick = 50 ms) a full frame
-         * is 6 tubes × 160 row-transactions; total render time can exceed 50 ms.
+         * Background: pixel blits use spi_device_transmit() (interrupt/DMA path)
+         * which yields the CPU while the DMA engine clocks out each chunk.
+         * In Spectrum mode (tick = 50 ms) a full frame is 6 tubes ×
+         * 160 row-transactions; even with CPU-yielding transfers the total
+         * render time can occasionally exceed the tick budget.
          * When that happens vTaskDelayUntil's target is already in the past —
          * it returns immediately without sleeping, so IDLE1 on CPU 1 never runs
          * and the Task Watchdog fires after 5 s.

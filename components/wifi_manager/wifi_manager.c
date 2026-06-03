@@ -474,21 +474,20 @@ void wifi_manager_start(void)
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* Disable WiFi modem-sleep (audio noise reduction).
+    /* WiFi power-save: modem-sleep (IDF default, matches stock firmware).
      *
-     * The IDF default is WIFI_PS_MIN_MODEM: the radio sleeps between DTIM
-     * beacons and wakes in periodic bursts (~every 100 ms).  Those current
-     * bursts droop the shared 3.3 V rail and couple into the always-powered
-     * LTK8002D amplifier as a regular tick/buzz.
-     *
-     * WIFI_PS_NONE keeps the radio at a steady draw — no periodic sleep/wake
-     * transient — which is the quietest option for the audio output.  The
-     * extra ~20–30 mA is irrelevant on this mains-powered clock.  This matches
-     * the original firmware, which explicitly managed WiFi power-save
-     * (esp_wifi_set_ps) rather than leaving it at the bursty default. */
-    esp_wifi_set_ps(WIFI_PS_NONE);
+     * We previously forced WIFI_PS_NONE to remove the periodic DTIM wake/sleep
+     * tick.  But PS_NONE keeps the radio PA powered continuously (~120 mA
+     * steady) instead of sleeping between DTIM beacons (~20–40 mA average) —
+     * that continuous draw on the shared 3.3 V rail is itself a continuous
+     * noise floor coupled into the always-on amplifier via its PSRR.  Ghidra
+     * decompilation confirmed the stock firmware runs default modem-sleep and
+     * is silent at idle, so we revert to WIFI_PS_MIN_MODEM to drop the
+     * continuous rail current.  (Trade-off: a faint periodic DTIM tick may
+     * return; A/B against the PS_NONE build to compare.) */
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
-    ESP_LOGI(TAG, "WiFi started (PS=NONE).  AP SSID: Nextube-Setup (WPA2) %s",
+    ESP_LOGI(TAG, "WiFi started (PS=MIN_MODEM).  AP SSID: Nextube-Setup (WPA2) %s",
              have_creds ? "(staged, not broadcasting)" : "(broadcasting)");
 }
 

@@ -315,18 +315,23 @@ void app_main(void)
     ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster  ║");
     ESP_LOGI(TAG, "╚═════════════════════════════════════════════════════╝");
 
-    /* ── Clamp the DAC output pin immediately ────────────────────────────
-     * GPIO25 (DAC_CHAN_0 → LTK8002D amplifier) is Hi-Z at ESP32 power-on.
-     * The LTK8002D SD pin is tied high so the amp is always powered.  A
-     * floating Hi-Z input acts as an antenna for WS2812 (≈400 Hz) and SPI
-     * switching transients on the shared 3.3 V rail → audible hiss until
-     * the audio subsystem initialises (up to 8 s into boot).
-     * Drive OUTPUT LOW here unconditionally: the AC coupling cap on the amp
-     * input charges to 0 V and the amp sees ~0 V AC differential — near
-     * silence.  GPIO source impedance (~12 Ω drive-strength-3) is lower than
-     * the DAC resistor ladder, providing effective noise rejection.
-     * If audio is enabled, dac_restart() in the deferred task reconfigures
-     * GPIO25 for DAC use automatically — this GPIO mode is overridden.  */
+    /* ── Clamp the DAC output pin LOW once, then never touch it ──────────
+     * GPIO25 (DAC_CHAN_0 → LTK8002D amplifier) is Hi-Z at power-on.  A floating
+     * Hi-Z node is a high-impedance ANTENNA: the intense SPI switching during
+     * the AP-PIN scroll (and the per-second colon redraw) couples capacitively
+     * into it and chirps through the amp.  Driving it OUTPUT LOW presents a
+     * low-impedance node that SHUNTS that pickup — measured to remove the
+     * scroll chirping and the 1 Hz pulses.
+     *
+     * The cost is one DC step (Hi-Z → 0 V) through the amp's AC coupling cap =
+     * a single boot pop.  We accept that one pop but drive the pin EXACTLY ONCE
+     * here; audio_init(false) deliberately does NOT re-drive it (re-driving was
+     * the source of the second boot pop).
+     *
+     * A residual static floor remains (supply-coupled via the amp's PSRR,
+     * present regardless of this pin's state).  If audio is enabled,
+     * dac_restart() in the deferred task reconfigures GPIO25 for DAC use;
+     * otherwise it stays clamped LOW, untouched, for the whole session. */
     gpio_reset_pin(PIN_AUDIO_DAC);
     gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_AUDIO_DAC, 0);

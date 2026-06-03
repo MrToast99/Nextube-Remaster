@@ -76,6 +76,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Open-Meteo weather (free, no key) | ✅ Working |
 | OpenWeatherMap weather (free-tier API key) | ✅ Working |
 | Met.no weather (free, no key, elevation-aware) | ✅ Working |
+| External weather (push your own data via `POST /api/weather`) | ✅ Working |
 | YouTube subscriber counter (direct + relay) | ✅ Working |
 | Bilibili follower counter (direct) | ✅ Working |
 | Instagram follower counter (direct unofficial API) | ✅ Working |
@@ -137,32 +138,37 @@ The LTK8002D is a **pure analog** Class-AB BTL amplifier — it has no I²S,
 PDM, or any other digital audio interface. The ESP32's built-in 8-bit DAC
 on GPIO25 is the only audio source.
 
-#### DAC driver — `dac_continuous` (ESP-IDF v5)
+#### DAC driver — `dac_continuous`, brought up **per-clip** (ESP-IDF v5)
 
-When audio is **enabled**, the firmware uses `dac_continuous_new_channels()`
-from ESP-IDF v5, which internally configures the I²S0 peripheral in **DAC mode**
-(`i2s_set_dac_mode` equivalent). The I²S peripheral clocks 8-bit unsigned PCM
-samples from a DMA ring buffer directly into the DAC register at **32 kHz**.
-While enabled the continuous DAC runs at all times, idling at level 128.
+The firmware uses `dac_continuous_new_channels()` from ESP-IDF v5, which
+internally configures the I²S0 peripheral in **DAC mode** (`i2s_set_dac_mode`
+equivalent). The I²S peripheral clocks 8-bit unsigned PCM samples from a DMA
+ring buffer directly into the DAC register at **32 kHz**.
 
-When audio is **disabled** (the default — see the toggle section below), the
-continuous driver is **not** started. Instead `dac_oneshot` holds GPIO25 at a
-single static level with **no I²S, no DMA, and no clock running** — mirroring how
-the original firmware idled the DAC. This is the key to a silent idle: a
-continuously-clocked DMA engine puts periodic switching activity on the shared
-3.3 V rail (audible as static), whereas the one-shot RTC DAC has nothing
-switching. Toggling audio requires a reboot, so the two drivers never coexist in
-one boot session (the `dac_oneshot → dac_continuous` transition is unreliable on
-the original ESP32).
+Crucially, the DAC is **not** left running between sounds. It is created and
+enabled **per clip** by the playback task (`dac_restart()`), and torn down again
+(`dac_teardown()`) the moment the clip — plus its fade-out — finishes. This
+mirrors how the stock firmware behaved: silence means *nothing is clocked*. A
+continuously-running DMA/I²S engine puts periodic switching activity on the
+shared 3.3 V rail (audible as static); by only bringing the engine up while a
+sound is actually playing, the idle is genuinely quiet.
+
+**Idle state (no clip playing), in *both* the enabled and disabled cases:**
+GPIO25 is driven as a plain **GPIO output held LOW** — no I²S, no DMA, no clock.
+(The earlier `dac_oneshot` idle was dropped: the `dac_oneshot → dac_continuous`
+transition is unreliable on the original ESP32 — the I²S0 controller does not
+always release state after one-shot use, which then blocks
+`dac_continuous_new_channels()` — so the firmware never mixes the two drivers.)
 
 | Parameter | Value |
 |---|---|
-| Sample rate | 32 000 Hz (fixed, enabled mode) |
+| Sample rate | 32 000 Hz (fixed) |
 | Bit depth | 8-bit unsigned PCM (0–255) |
 | Channels | Mono (DAC channel 0, GPIO25) |
-| Playback idle level (audio enabled) | **128** (= VDD/2 ≈ 1.65 V) |
-| Idle level (audio disabled) | **0** via `dac_oneshot` — no DMA, no clock |
-| DMA buffers | 8 × 2048 bytes |
+| Playback operating point | **128** (= VDD/2 ≈ 1.65 V) — the centre the ring is fed around |
+| Idle (between clips, either enabled or disabled) | GPIO25 = **OUTPUT LOW** (0 V), no DMA, no clock |
+| Per-clip fade in/out | **120 ms** cosine S-curve (`PLAY_FADE_MS`) |
+| DMA buffers | 8 × 2048 bytes (allocated per clip, freed on teardown) |
 
 #### Silence level — why 128, not 0
 
@@ -180,35 +186,36 @@ The pipeline uses **128** because:
   to a different voltage, and the next sound would start from the wrong
   operating point, producing an audible pop as the cap re-centres
 
-#### Startup pop prevention — boot fade
+#### Pop prevention — per-clip fade in/out
 
-When the DAC DMA ring first starts, the output transitions from 0 V (hardware
-reset state) to 128 (silence). Through the coupling cap this looks like a DC
-step — a large low-frequency thump. The firmware prevents this with a
-**cosine S-curve fade** from 0 → 128 over **500 ms** written into the DMA
-buffer immediately after `dac_continuous_enable()`:
+Each time the DAC ring is brought up for a clip, the output would otherwise
+step from 0 V (the LOW idle) to 128 (the playback centre). Through the coupling
+cap that step looks like a DC transient — an audible thump. The firmware
+prevents it at **both ends of every clip** with a **cosine S-curve fade** over
+**120 ms** (`PLAY_FADE_MS`):
 
 ```c
-boot_fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * M_PI)));  // 0..128
+fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * M_PI)));  // 0..128
 ```
 
-This keeps `dV/dt` low enough that the AC-coupled amp sees only the gentle
-ramp rather than a step, eliminating the startup thump.
+- **Fade-in (0 → 128)** is written immediately after `dac_continuous_enable()`,
+  before the clip's samples.
+- **Fade-out (128 → 0)** is queued after the clip's last sample; the task then
+  waits out the ring depth before `dac_teardown()` so the fade actually reaches
+  the speaker (otherwise `del_channels()` would cut it off).
+
+This keeps `dV/dt` low enough that the AC-coupled amp sees a gentle ramp rather
+than a step at the start and end of each sound.
 
 #### APLL cold-start delay
 
 The first-ever call to `dac_continuous_new_channels()` after power-on triggers
 ESP32 APLL lock and I²S peripheral initialisation — a one-time ~1.6 s stall.
-
-When **Enable audio output** is checked in the web UI, `audio_init()` starts the
-DAC at boot (in the deferred-start task, 8 s after power-on) so the APLL is
-already locked before any sound is triggered by the user.
-
-When **Enable audio output** is unchecked (the default), the continuous DAC and
-I²S0 peripheral are **never initialised** — `dac_oneshot` holds GPIO25 at a
-static level instead, the ~1.6 s APLL lock never occurs, and the ~16 KB DMA ring
-is not allocated. Because the toggle takes effect on reboot, the cold-start
-delay is only ever paid once, on a boot where audio is enabled.
+Because the DAC is now brought up **per clip** (not at boot), this one-time lock
+is paid on the **first sound played** in a boot session rather than during
+startup. Subsequent clips re-create the channel quickly (APLL already locked).
+When audio output is disabled, the continuous DAC / I²S0 peripheral is never
+touched at all, so the APLL lock and the ~16 KB DMA ring allocation never occur.
 
 #### LTK8002D hardware limitations
 
@@ -225,11 +232,11 @@ gain itself is fixed.
 
 #### `Audio → Enable audio output` toggle
 
-Audio output is **disabled by default**. The toggle takes effect on the **next reboot** — when the web UI saves a change to this setting it triggers a restart so the audio subsystem comes up cleanly in the chosen state. Dynamic switching is intentionally not supported: the `dac_oneshot → dac_continuous` transition is unreliable on the original ESP32 (the I²S0 controller does not always release state after one-shot use), so the firmware never mixes the two drivers in a single boot session.
+Audio output is **disabled by default**. The toggle takes effect on the **next reboot** — when the web UI saves a change to this setting it triggers a restart so the audio subsystem comes up cleanly in the chosen state.
 
-**Boot with audio disabled (default):** `audio_init(false)` is called. The continuous DAC, I²S0 peripheral, APLL, and DMA ring are never started. `dac_oneshot` holds GPIO25 at a static level (`DAC_IDLE_LEVEL = 0` ≈ 0 V) with **no DMA and no clock**. The AC coupling cap charges to that level; thereafter the amplifier sees ~0 V AC differential — silent. Because nothing is clocked, there is no periodic rail-switching activity to couple into the amp. ~16 KB DMA heap and the ~1.6 s APLL cold-start delay are avoided entirely.
+**Boot with audio disabled (default):** `audio_init(false)` is called. The continuous DAC, I²S0 peripheral, APLL, and DMA ring are never started. GPIO25 is reset to a plain **GPIO output held LOW** (0 V) with **no DMA and no clock**. The AC coupling cap charges to that level; thereafter the amplifier sees ~0 V AC differential — silent. Because nothing is clocked, there is no periodic rail-switching activity to couple into the amp. The ~16 KB DMA heap and the ~1.6 s APLL cold-start delay are avoided entirely.
 
-**Boot with audio enabled:** `audio_init(true)` brings up `dac_continuous`, plays the `0 → 128` anti-pop boot fade, and idles the ring at 128 (VDD/2) ready for playback.
+**Boot with audio enabled:** `audio_init(true)` only sets the enabled flag and leaves GPIO25 driven LOW. The DAC is **not** brought up at boot — it is created per clip by the playback task (`dac_restart()` → fade-in → clip → fade-out → `dac_teardown()`), so idle is identical to the disabled case (GPIO LOW, nothing clocked). This is the key difference from earlier builds, which left the ring running at 128 between sounds.
 
 **Note:** the LTK8002D itself remains powered (SD pin tied high) in both cases, so its thermal self-noise floor is still present at a low level — see *Residual noise floor* below.
 
@@ -246,8 +253,11 @@ input.
 
 | Mitigation | Effect |
 |---|---|
-| `dac_oneshot` static idle at level 0 when audio disabled (default) | No I²S/DMA/clock running — eliminates the continuous-DMA switching noise; level 0 is also immune to supply-rail droop (see toggle section) |
-| `WIFI_PS_NONE` set after `esp_wifi_start()` | Disables WiFi modem-sleep, removing the periodic ~DTIM-rate radio wake/sleep current bursts that otherwise tick the shared rail. The extra ~20–30 mA is irrelevant on a mains-powered clock |
+| GPIO25 driven **LOW** at idle (between clips, enabled *and* disabled) | No I²S/DMA/clock running — eliminates the continuous-DMA switching noise; a 0 V output is also immune to supply-rail droop (see toggle section) |
+| DAC created/destroyed **per clip** (`dac_restart` / `dac_teardown`) | The DMA/I²S engine only runs while a sound is actually playing, then is fully torn down — matching the stock firmware's silent idle |
+| `WIFI_PS_MIN_MODEM` (default modem-sleep) | Restores standard WiFi modem-sleep. An earlier build forced `WIFI_PS_NONE`, which kept the radio fully powered and added a **continuous** noise-floor component; reverting to `MIN_MODEM` was the single biggest reduction in the idle floor |
+| Bulk LCD pixel pushes use `spi_device_transmit()` (interrupt/DMA) instead of `spi_device_polling_transmit()` | The DMA path **yields the CPU** while each chunk clocks out, instead of busy-waiting with interrupts hot. This lowered the SPI-induced switching component of the noise floor during every clock-face/ticker redraw. Small command/parameter writes (≤8 bytes) stay on the polling path, where DMA setup would cost more than it saves |
+| Colon-blink **partial push** (diff-box) | The once-per-second colon blink rewrites only the two changed colon-dot rectangles instead of repainting the whole tube — far less per-second SPI traffic (and CPU) on the shared rail |
 | RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
 | Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
 
@@ -269,11 +279,12 @@ faint baseline hiss may still be audible. Root cause: the LTK8002D SD pin is
 tied to VDD_5V with no GPIO control — the amp remains fully powered and
 amplifies its own thermal noise (~3× gain into a 4 Ω speaker).
 
-Holding GPIO25 at a static level via `dac_oneshot` when audio is disabled (see
-above) gives the quietest idle the firmware can achieve — no DMA, no clock, and
-a 0 V output that does not track supply droop. The remaining hiss is the amp's
-own thermal noise, which is independent of the input. For complete silence a
-hardware modification is required:
+Driving GPIO25 LOW (0 V) at idle — with the DAC torn down so no DMA or clock is
+running — gives the quietest idle the firmware can achieve: a 0 V output that
+does not track supply droop and no switching activity on the rail. The remaining
+hiss is the amp's own thermal noise (and supply-coupled noise via its finite
+PSRR), which is independent of the DAC input. For complete silence a hardware
+modification is required:
 
 > **Hardware mod:** Cut the SD pull-up resistor and wire the SD pin to a free
 > ESP32 GPIO. `gpio_set_level(PIN_AMP_SHDN, 0)` will draw the amp's shutdown
@@ -719,6 +730,7 @@ Weather mode cycles through all enabled weather APIs until one succeeds. Support
 | **Open-Meteo** | None | Open-Meteo geocoding API | Splits `City,CC` into name + country filter |
 | **OpenWeatherMap** | Free-tier key | OWM built-in | Accepts city, state, zip — see below. Register at [openweathermap.org](https://home.openweathermap.org/users/sign_up) — free tier includes 1 000 calls/day |
 | **Met.no** | None | Open-Meteo geocoding API | **Default.** Uses same geocoder as Open-Meteo; elevation auto-fetched for accurate forecasts |
+| **External** | None | None (you supply lat/lon) | No online fetch — you push your own reading via `POST /api/weather`. See [External weather (push your own data)](#external-weather-push-your-own-data) |
 
 ### City format
 
@@ -758,7 +770,60 @@ Austin,Texas,US          ← City, state, country (useful for US cities)
 EC1A,GB                  ← UK postcode prefix
 ```
 
-Weather fetching: On WiFi connect the first fetch happens immediately with automatic 5-second retries until data arrives. After the first successful fetch, weather is refreshed every 10 minutes.
+### External weather (push your own data)
+
+Selecting **Services → Weather → Source → External** stops the firmware from contacting any online service. Instead, *you* push readings to the device — ideal if your home-automation system already averages several providers for a more stable result. Set the source to **External** and save (no reboot needed; the poller stops on its next cycle).
+
+**Endpoint:** `POST /api/weather`
+
+```json
+{
+  "temp_c":       15.3,
+  "humidity":     65,
+  "condition":    "Cloudy",
+  "icon":         "overcastClouds",
+  "weather_code": 3,
+  "lat":          51.30,
+  "lon":          -114.02
+}
+```
+
+All fields are **optional** — any field you omit keeps its current value (partial updates work, exactly like the network providers):
+
+| Field | Type | Notes |
+|---|---|---|
+| `temp_c` | number | Temperature in **°C**. Omit to leave unchanged. |
+| `temp_f` | number | Temperature in **°F** — converted to Celsius on ingest. **Send only one of `temp_c` / `temp_f`**, in whichever unit your source produces; if both are present, `temp_c` wins. |
+| `humidity` | number | Relative humidity %. Omit to leave unchanged. |
+| `condition` | string | Free text shown on the panel (e.g. `"Cloudy"`). |
+| `icon` | string | One of the built-in icon names (below). Unknown names are ignored (previous icon kept). |
+| `weather_code` | number | [WMO weather code](https://open-meteo.com/en/docs#weathervariables). Fills `icon`/`condition` automatically when those are absent — so Open-Meteo-style data works directly. |
+| `lat` / `lon` | number | Optional. Used **on-device** for the Sunrise & Sunset panel (no extra API call). Send both or neither. |
+
+> **Temperature units:** send your reading in **only one** format — `temp_c` *or* `temp_f` — using whichever unit your source produces. The firmware stores everything in Celsius internally and converts `temp_f` on the way in. What the clock *displays* (°C or °F) is controlled separately by **Services → Weather → Units**, independent of which format you POST.
+
+**Built-in icon names:** `sun`, `fewClouds`, `overcastClouds`, `fog`, `rain`, `snow`, `squalls`, `thunderstorm`.
+
+**Icon selection** — send any one of:
+- an explicit `"icon"` name from the list above, **or**
+- a `"weather_code"` (WMO) and the firmware maps it to an icon + condition, **or**
+- neither, to leave the current icon unchanged.
+
+**Sunrise/Sunset location:** the sun panel computes rise/set times locally from `lat`/`lon`. In External mode there is no geocoding, so coordinates come only from your push. The last pushed `lat`/`lon` is **persisted to flash** (written only when it changes, so periodic pushes don't wear flash) and **restored on boot**, so the panel works immediately after a reboot. Send `lat`/`lon` once (or in every push — harmless); until coordinates are provided the panel shows `--:--`.
+
+**Requirements & notes:**
+- Weather must be **enabled** (**Services → Weather → Enable**) so the panel and subsystem are running.
+- The endpoint honours auth like every other mutation route: with no admin password set it is open on the LAN; once a password is set, send the `Authorization: Bearer <token>` header.
+- Pushed data is held until the next push; it does not expire. If your automation stops pushing, the last value stays on screen.
+
+Example with `curl`:
+```bash
+curl -X POST http://nextube.local/api/weather \
+     -H "Content-Type: application/json" \
+     -d '{"temp_c":15.3,"humidity":65,"condition":"Cloudy","icon":"overcastClouds","lat":51.30,"lon":-114.02}'
+```
+
+Weather fetching (online sources): On WiFi connect the first fetch happens immediately with automatic 5-second retries until data arrives. After the first successful fetch, weather is refreshed every 10 minutes.
 
 Weather mode auto-cycles between up to three panels on a configurable interval (default 5 s). Each panel can be individually enabled or disabled under **Services → Weather → Display Panels**; at least one must remain on.
 
@@ -789,7 +854,7 @@ tube 3 : blank
 tube 4 : animated sunset  — sun descends into mountains, holds at bottom, loops
 tube 5 : local sunset time "HH:MM"
 ```
-Solar times are calculated on-device using the NOAA solar position algorithm from geocoded lat/lon — the same coordinates resolved by the weather fetch. No extra API call is made. Before the first successful weather fetch (or if no city is configured) the times show `--:--`. The animation runs at 20 Hz; switching from another weather panel to Panel 3 starts the animation within 50 ms.
+Solar times are calculated on-device using the NOAA solar position algorithm from lat/lon — the coordinates resolved by the weather fetch (online sources), or the `lat`/`lon` you supply via `POST /api/weather` (External source, persisted across reboots). No extra API call is made. Before coordinates are available (no successful fetch yet, no city configured, or no coordinates pushed) the times show `--:--`. The animation runs at 20 Hz; switching from another weather panel to Panel 3 starts the animation within 50 ms.
 
 **Waiting (no data yet):**
 ```
@@ -1170,7 +1235,8 @@ GET  /api/status             → live status: time, wifi, weather, heap, firmwar
 
 # Settings (requires auth)
 GET  /api/settings           → full configuration JSON
-POST /api/settings           → update config (JSON body)
+POST /api/settings           → update config (JSON body; partial — only keys present are changed)
+POST /api/weather            → push external weather data (External source); JSON: temp_c OR temp_f, humidity, condition, icon, weather_code, lat, lon (all optional)
 GET  /api/firmwareVersion    → {"version":"1.0.0"}
 GET  /api/hardwareVersion    → {"version":"1.31"}
 POST /api/reset              → reset settings to defaults + reboot (preserves admin password & AP PIN)

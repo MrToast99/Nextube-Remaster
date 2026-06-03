@@ -12,6 +12,7 @@
 #include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 static const char *TAG = "weather";
 static weather_data_t s_weather = {0};
@@ -755,6 +756,99 @@ static void fetch_met_no(const wx_cfg_snap_t *cfg)
              temp, (int)hum, s_weather.condition);
 }
 
+/* ── External push (POST /api/weather) ──────────────────────────────── */
+/* The set of icon filenames the display knows how to render. */
+static bool icon_is_known(const char *name)
+{
+    static const char *known[] = {
+        "sun", "fewClouds", "overcastClouds", "fog",
+        "rain", "snow", "squalls", "thunderstorm",
+    };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (strcmp(name, known[i]) == 0) return true;
+    return false;
+}
+
+void weather_set_external(float temp_c, float humidity,
+                          const char *condition, const char *icon, int wmo_code)
+{
+    if (!s_wx_mutex) return;   /* weather subsystem not started */
+
+    /* Resolve icon/condition outside the lock. */
+    char res_icon[16] = {0};
+    char res_cond[32] = {0};
+    bool have_icon = (icon && icon[0] != '\0');
+    bool have_cond = (condition && condition[0] != '\0');
+
+    if (have_icon) {
+        if (!icon_is_known(icon)) {
+            ESP_LOGW(TAG, "external: unknown icon '%s' ignored", icon);
+            have_icon = false;          /* keep previous icon */
+        } else {
+            strncpy(res_icon, icon, sizeof(res_icon) - 1);
+        }
+    }
+    if (have_cond) strncpy(res_cond, condition, sizeof(res_cond) - 1);
+
+    if (wmo_code >= 0) {
+        if (!have_icon) { strncpy(res_icon, wmo_icon(wmo_code),      sizeof(res_icon) - 1); have_icon = true; }
+        if (!have_cond) { strncpy(res_cond, wmo_condition(wmo_code), sizeof(res_cond) - 1); have_cond = true; }
+    }
+
+    xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+    if (!isnan(temp_c))   s_weather.temp_c   = temp_c;
+    if (!isnan(humidity)) s_weather.humidity = humidity;
+    if (have_icon) strncpy(s_weather.icon,      res_icon, sizeof(s_weather.icon)      - 1);
+    if (have_cond) strncpy(s_weather.condition, res_cond, sizeof(s_weather.condition) - 1);
+    s_weather.valid = true;
+    float t = s_weather.temp_c, h = s_weather.humidity;
+    xSemaphoreGive(s_wx_mutex);
+
+    ESP_LOGI(TAG, "external: %.1f°C  %d%%  %s", t, (int)h,
+             have_cond ? res_cond : "(unchanged)");
+}
+
+void weather_set_external_location(float lat, float lon)
+{
+    if (!s_wx_mutex) return;
+    xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+    s_wx_lat = lat; s_wx_lon = lon; s_wx_location_valid = true;
+    xSemaphoreGive(s_wx_mutex);
+
+    /* Persist to flash, but ONLY when the coordinates actually change — a fixed
+     * clock's location is set once, so periodic pushes must not wear flash.
+     * config_set_json merges (partial update) and saves; ~55 m epsilon. */
+    bool changed;
+    config_lock();
+    const nextube_config_t *c = config_get();
+    changed = !c->weather_ext_loc_valid ||
+              fabsf(c->weather_ext_lat - lat) > 0.0005f ||
+              fabsf(c->weather_ext_lon - lon) > 0.0005f;
+    config_unlock();
+    if (changed) {
+        char j[112];
+        snprintf(j, sizeof(j),
+                 "{\"weather_ext_lat\":%.5f,\"weather_ext_lon\":%.5f,"
+                 "\"weather_ext_loc_valid\":true}", (double)lat, (double)lon);
+        config_set_json(j, strlen(j));
+        ESP_LOGI(TAG, "external: location persisted %.4f, %.4f", (double)lat, (double)lon);
+    } else {
+        ESP_LOGI(TAG, "external: location %.4f, %.4f", (double)lat, (double)lon);
+    }
+}
+
+/* True when the user has selected the external-push source.  Read live so a
+ * settings change takes effect on the weather task's next loop iteration. */
+static bool weather_source_is_external(void)
+{
+    char src[16];
+    config_lock();
+    strncpy(src, config_get()->weather_source, sizeof(src) - 1);
+    src[sizeof(src) - 1] = '\0';
+    config_unlock();
+    return strcmp(src, "external") == 0;
+}
+
 /* ── Task ───────────────────────────────────────────────────────────── */
 static void fetch_weather(void)
 {
@@ -804,6 +898,12 @@ static void weather_task(void *arg)
     ESP_LOGI(TAG, "WiFi ready – fetching weather");
     uint32_t retry_ms = 2000;
     while (!s_weather.valid) {
+        /* External-push source: data arrives via weather_set_external(); the
+         * firmware must not fetch (or it would have nothing to fetch from). */
+        if (weather_source_is_external()) {
+            ESP_LOGI(TAG, "weather_source=external — awaiting POST /api/weather");
+            break;
+        }
         fetch_weather();
         if (!s_weather.valid) {
             ESP_LOGW(TAG, "Weather fetch failed, retrying in %lu s",
@@ -817,6 +917,8 @@ static void weather_task(void *arg)
     /* Subsequent fetches every 10 minutes */
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(600000));
+        if (weather_source_is_external())
+            continue;   /* don't overwrite externally-pushed data */
         ESP_LOGI(TAG, "fetching weather...");
         fetch_weather();
     }
@@ -825,6 +927,20 @@ static void weather_task(void *arg)
 void weather_start(void)
 {
     s_wx_mutex = xSemaphoreCreateMutex();
+    /* Seed location from the persisted external-push coordinates so the
+     * Sunrise & Sunset panel works immediately on boot (external source),
+     * before the first push of this session arrives.  Safe to write directly:
+     * the task has not been created yet, so there is no concurrent reader. */
+    config_lock();
+    const nextube_config_t *c = config_get();
+    if (c->weather_ext_loc_valid) {
+        s_wx_lat = c->weather_ext_lat;
+        s_wx_lon = c->weather_ext_lon;
+        s_wx_location_valid = true;
+        ESP_LOGI(TAG, "seeded location from saved external coords: %.4f, %.4f",
+                 (double)s_wx_lat, (double)s_wx_lon);
+    }
+    config_unlock();
     xTaskCreate(weather_task, "weather", 8192, NULL, 3, NULL);
 }
 

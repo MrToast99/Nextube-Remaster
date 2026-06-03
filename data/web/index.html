@@ -667,8 +667,14 @@ select option{background:var(--accent);color:var(--text)}
         <option value="openmeteo" data-i18n="svc.wsrc_openmeteo">Open-Meteo – free, no key needed</option>
         <option value="metno" data-i18n="svc.wsrc_metno">Met.no – free, no key needed</option>
         <option value="openweather" data-i18n="svc.wsrc_openweather">OpenWeatherMap – free API key required</option>
+        <option value="external" data-i18n="svc.wsrc_external">External – push your own via POST /api/weather</option>
       </select>
     </div>
+    <p id="f-wsrc-ext-hint" style="display:none;color:var(--dim);font-size:.78rem;margin:.4rem 0 0 0" data-i18n-html="svc.wsrc_external_hint">
+      The clock will not fetch any online service. Push readings from your home-automation system to
+      <code>POST /api/weather</code> with JSON, e.g. <code>{"temp_c":15.3,"humidity":65,"condition":"Cloudy","icon":"overcastClouds"}</code>.
+      Send <code>temp_c</code> or <code>temp_f</code> (only one). Icons: <code>sun, fewClouds, overcastClouds, fog, rain, snow, squalls, thunderstorm</code> (or send a WMO <code>weather_code</code>).
+    </p>
     <div class="field" id="f-wkey-row" style="display:none"><label data-i18n="svc.api_key">API Key</label><input id="f-wkey" type="text"></div>
     <div class="row">
       <div class="field"><label data-i18n="svc.city">City</label><input id="f-city" type="text" placeholder="City name" data-i18n-ph="svc.city_ph"></div>
@@ -1453,6 +1459,8 @@ Object.assign(I18N.en, {
   "svc.source":"Source",
   "svc.wsrc_wttr":"wttr.in – free, no key needed","svc.wsrc_openmeteo":"Open-Meteo – free, no key needed",
   "svc.wsrc_metno":"Met.no – free, no key needed","svc.wsrc_openweather":"OpenWeatherMap – free API key required",
+  "svc.wsrc_external":"External – push your own via POST /api/weather",
+  "svc.wsrc_external_hint":"The clock will not fetch any online service. Push readings from your home-automation system to <code>POST /api/weather</code> with JSON, e.g. <code>{&quot;temp_c&quot;:15.3,&quot;humidity&quot;:65,&quot;condition&quot;:&quot;Cloudy&quot;,&quot;icon&quot;:&quot;overcastClouds&quot;}</code>. Send <code>temp_c</code> or <code>temp_f</code> (only one). Icons: <code>sun, fewClouds, overcastClouds, fog, rain, snow, squalls, thunderstorm</code> (or send a WMO <code>weather_code</code>).",
   "svc.api_key":"API Key","svc.city":"City","svc.city_ph":"City name","svc.units":"Units",
   "opt.celsius":"Celsius","opt.fahrenheit":"Fahrenheit",
   "svc.panel_rotation":"Panel Rotation (seconds)","svc.display_panels":"Display Panels",
@@ -1749,10 +1757,14 @@ function onWxPanelToggle(changedId) {
 /* ── Weather source toggle ─────────────────────────── */
 function toggleWeatherKey() {
   const src = $('f-wsrc') ? $('f-wsrc').value : 'wttr';
+  const ext = (src === 'external');
   /* Only OpenWeatherMap needs an API key; wttr.in and Open-Meteo are keyless */
   $('f-wkey-row').style.display = (src === 'openweather') ? '' : 'none';
-  /* City placeholder varies by service */
+  /* External push needs no city (no geocoding) — show the push instructions. */
+  if ($('f-wsrc-ext-hint')) $('f-wsrc-ext-hint').style.display = ext ? '' : 'none';
   if ($('f-city')) {
+    $('f-city').closest('.field').style.display = ext ? 'none' : '';
+    /* City placeholder varies by service */
     $('f-city').placeholder = (src === 'openweather')
       ? 'e.g. London or London,GB'
       : 'e.g. Ottawa or Ottawa,Canada';
@@ -3247,7 +3259,10 @@ async function dacTest(mode) {
   } catch(e) { msg.textContent = '✗ ' + e.message; }
 }
 async function dacTestDc() {
-  const level = parseInt($('dac-dc-level').value) || 128;
+  let level = parseInt($('dac-dc-level').value, 10);
+  if (!Number.isFinite(level)) level = 128;   /* empty/invalid → default */
+  if (level < 0)   level = 0;
+  if (level > 255) level = 255;
   const msg = $('dac-test-msg');
   msg.textContent = 'Sending…';
   try {

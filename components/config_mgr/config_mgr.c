@@ -99,6 +99,9 @@ static void set_defaults(void)
 
     strncpy(s_cfg.weather_source, "metno", sizeof(s_cfg.weather_source) - 1); /* default: free, no API key needed */
     strncpy(s_cfg.weather_api_key, "", sizeof(s_cfg.weather_api_key) - 1);
+    s_cfg.weather_ext_lat       = 0.0f;
+    s_cfg.weather_ext_lon       = 0.0f;
+    s_cfg.weather_ext_loc_valid = false;
     strncpy(s_cfg.city, "", sizeof(s_cfg.city) - 1);
     strncpy(s_cfg.temp_format, "Celsius", sizeof(s_cfg.temp_format) - 1);
     strncpy(s_cfg.date_format, "DD/MM/YY", sizeof(s_cfg.date_format) - 1);
@@ -271,6 +274,12 @@ static void parse_json(const char *json, size_t len)
     json_read_str(root, "bili_uid",         s_cfg.bili_uid,        sizeof(s_cfg.bili_uid));
     json_read_str(root, "weather_source",   s_cfg.weather_source,  sizeof(s_cfg.weather_source));
     json_read_str(root, "weather_api_key",  s_cfg.weather_api_key, sizeof(s_cfg.weather_api_key));
+    json_read_float(root, "weather_ext_lat", &s_cfg.weather_ext_lat);
+    json_read_float(root, "weather_ext_lon", &s_cfg.weather_ext_lon);
+    {
+        cJSON *v = cJSON_GetObjectItem(root, "weather_ext_loc_valid");
+        if (cJSON_IsBool(v)) s_cfg.weather_ext_loc_valid = cJSON_IsTrue(v);
+    }
     json_read_str(root, "City",             s_cfg.city,            sizeof(s_cfg.city));
     /* Accept the old misspelled key first, then the corrected one so that
      * new configs with the fixed key take precedence over legacy files. */
@@ -976,6 +985,9 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "weather_source",   s_cfg.weather_source);
     cJSON_AddStringToObject(root, "weather_api_key",  s_cfg.weather_api_key);
     cJSON_AddStringToObject(root, "City",             s_cfg.city);
+    cJSON_AddNumberToObject(root, "weather_ext_lat",  s_cfg.weather_ext_lat);
+    cJSON_AddNumberToObject(root, "weather_ext_lon",  s_cfg.weather_ext_lon);
+    cJSON_AddBoolToObject(root,   "weather_ext_loc_valid", s_cfg.weather_ext_loc_valid);
     cJSON_AddStringToObject(root, "temperature_format",  s_cfg.temp_format);
     cJSON_AddStringToObject(root, "date_format",         s_cfg.date_format);
     cJSON_AddStringToObject(root, "language",            s_cfg.language);
