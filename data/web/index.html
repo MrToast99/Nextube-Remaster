@@ -1044,7 +1044,7 @@ select option{background:var(--accent);color:var(--text)}
     <input type="file" id="ota-file" accept=".bin" style="margin-bottom:.5rem">
     <div class="progress ota" id="ota-progress" style="display:none"><div class="progress-bar" id="ota-bar"></div></div>
     <p id="ota-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
+    <div class="btn-group"><button id="ota-btn" class="btn btn-primary" onclick="doOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
   </div>
   <div class="card">
     <h2 data-i18n="sys.webui_update">Web UI Update</h2>
@@ -1097,7 +1097,7 @@ select option{background:var(--accent);color:var(--text)}
     <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
     <div class="progress ota" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
     <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doFSOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
+    <div class="btn-group"><button id="fsota-btn" class="btn btn-primary" onclick="doFSOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
   </div>
   <div class="card">
     <h2 data-i18n="sys.logs">Device Logs</h2>
@@ -2779,8 +2779,15 @@ async function micResetCal() {
  *  - setClockFaceUpdateIndicator calls are skipped (device is busy)
  * Reset to false on completion, error, or page unload. */
 let _otaInProgress = false;
+/* Toggle the in-progress flag and disable both OTA buttons together, so a flash
+ * cannot be started twice — or one started while the other is running. */
+function _otaSetBusy(busy) {
+  _otaInProgress = busy;
+  ['ota-btn', 'fsota-btn'].forEach(id => { const b = $(id); if (b) b.disabled = busy; });
+}
 
 async function doOTA() {
+  if (_otaInProgress) return toast('An update is already in progress — please wait.', true);
   const file = $('ota-file').files[0];
   if (!file) return toast(tr('js.no_file_path'), true);
   if (file.name.toLowerCase().includes('full')) {
@@ -2809,11 +2816,11 @@ async function doOTA() {
   bar.style.background = 'var(--hi)';
   bar.classList.remove('pulsing');
   stat.textContent = 'Starting upload…';
-  _otaInProgress = true;
+  _otaSetBusy(true);
 
   /* ── helpers ── */
   const otaDone = (ok, msg) => {
-    _otaInProgress = false;
+    _otaSetBusy(false);
     bar.classList.remove('pulsing');
     bar.style.width = '100%';
     bar.style.background = ok ? 'var(--ok)' : 'var(--hi)';
@@ -2845,7 +2852,7 @@ async function doOTA() {
 
   /* Phase 3 — Response received (device sends 200 before reboot) */
   xhr.onload = () => {
-    if (_xhrHandle401(xhr)) { _otaInProgress = false; return; }
+    if (_xhrHandle401(xhr)) { _otaSetBusy(false); return; }
     if (xhr.status === 200) {
       otaDone('fast', 'Rebooting… page reloads in 15 s');
       toast(tr('js.ota_complete'));
@@ -2875,6 +2882,7 @@ async function doOTA() {
 
 /* ── LittleFS OTA ────────────────────────────────────── */
 async function doFSOTA() {
+  if (_otaInProgress) return toast('An update is already in progress — please wait.', true);
   const file = $('spiffs-file').files[0];
   if (!file) return toast(tr('js.no_file_path'), true);
   if (!file.name.toLowerCase().includes('littlefs')) {
@@ -2895,11 +2903,11 @@ async function doFSOTA() {
   bar.classList.remove('pulsing');
   stat.style.color = 'var(--dim)';
   stat.textContent = 'Starting upload…';
-  _otaInProgress = true;
+  _otaSetBusy(true);
 
   /* ── helpers ── */
   const fsDone = (ok, msg) => {
-    _otaInProgress = false;
+    _otaSetBusy(false);
     bar.classList.remove('pulsing');
     bar.style.width = '100%';
     bar.style.background = ok ? 'var(--ok)' : 'var(--hi)';
@@ -2932,7 +2940,7 @@ async function doFSOTA() {
 
   /* Phase 3 — Response received */
   xhr.onload = () => {
-    if (_xhrHandle401(xhr)) { _otaInProgress = false; stat.textContent = 'Sign in required'; return; }
+    if (_xhrHandle401(xhr)) { _otaSetBusy(false); stat.textContent = 'Sign in required'; return; }
     if (xhr.status === 200) {
       fsDone('fast', 'Rebooting… page reloads in 15 s');
       toast(tr('js.fs_updated'));

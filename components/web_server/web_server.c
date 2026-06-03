@@ -883,9 +883,63 @@ static void ota_suspend_tasks(void)
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
+/* ── OTA double-flash guard + clean deferred reboot ────────────────────────
+ * Two protections against an OTA being applied twice (observed when the
+ * browser tab is backgrounded during a flash):
+ *
+ *  1. s_ota_active — rejects a second /api/update_firmware (or /api/update_fs)
+ *     while one is already running, returning HTTP 409.  Set by the api_ota /
+ *     api_fs_ota wrappers and cleared only if the flash FAILS; a successful
+ *     flash reboots, so it intentionally stays set until then.
+ *
+ *  2. Deferred reboot — calling esp_restart() inside the handler tears the TCP
+ *     socket with an RST before a slow/backgrounded browser has read the 200.
+ *     The browser then sees a broken connection with no response and
+ *     transparently retries the POST → a second flash.  Instead we send the
+ *     response, set "Connection: close", return ESP_OK so the HTTP server
+ *     flushes the body and closes the socket cleanly, and fire esp_restart()
+ *     from a one-shot timer ~1.5 s later — by which time the browser has its
+ *     answer and has no reason to retry.  (The esp_timer task is not suspended
+ *     by ota_suspend_tasks(), so this callback still runs.) */
+static volatile bool s_ota_active = false;
+
+static void ota_reboot_timer_cb(void *arg) { esp_restart(); }
+
+static esp_err_t ota_finish_and_reboot(httpd_req_t *r, const char *json_msg)
+{
+    httpd_resp_set_hdr(r, "Connection", "close");
+    send_json(r, json_msg);
+    static esp_timer_handle_t t = NULL;
+    if (!t) {
+        const esp_timer_create_args_t a = {
+            .callback = ota_reboot_timer_cb, .name = "ota_reboot",
+        };
+        if (esp_timer_create(&a, &t) != ESP_OK) esp_restart();  /* fallback */
+    }
+    esp_timer_start_once(t, 1500 * 1000);   /* 1.5 s in µs */
+    return ESP_OK;
+}
+
+/* Guard wrapper — auth, reject concurrent OTA, then run the flash.  s_ota_active
+ * is cleared only on failure; a success path defers a reboot (stays locked). */
+static esp_err_t api_ota_impl(httpd_req_t *r);
 static esp_err_t api_ota(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
+    if (s_ota_active) {
+        httpd_resp_set_status(r, "409 Conflict");
+        httpd_resp_set_type(r, "application/json");
+        httpd_resp_sendstr(r, "{\"error\":\"ota_in_progress\"}");
+        return ESP_OK;   /* complete response already sent */
+    }
+    s_ota_active = true;
+    esp_err_t e = api_ota_impl(r);
+    if (e != ESP_OK) s_ota_active = false;   /* failed → unlock; success → reboot pending */
+    return e;
+}
+
+static esp_err_t api_ota_impl(httpd_req_t *r)
+{
     if (r->content_len <= 0)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Content-Length required"), ESP_FAIL;
 
@@ -1015,10 +1069,7 @@ static esp_err_t api_ota(httpd_req_t *r)
             return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA finalize fail"), ESP_FAIL;
     }
 
-    send_json(r, "{\"status\":\"ok\",\"message\":\"Rebooting...\"}");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    esp_restart();
-    return ESP_OK;
+    return ota_finish_and_reboot(r, "{\"status\":\"ok\",\"message\":\"Rebooting...\"}");
 }
 
 /* ── LittleFS (web UI) OTA ─────────────────────────────────────────── */
@@ -1035,9 +1086,25 @@ static esp_err_t api_ota(httpd_req_t *r)
  * The old /api/update_spiffs URL is kept as a backward-compatible alias
  * (see route table) so existing scripts and OTA tools continue to work. */
 #define FS_SECTOR 4096
+/* Guard wrapper — see api_ota above for the s_ota_active / deferred-reboot rationale. */
+static esp_err_t api_fs_ota_impl(httpd_req_t *r);
 static esp_err_t api_fs_ota(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
+    if (s_ota_active) {
+        httpd_resp_set_status(r, "409 Conflict");
+        httpd_resp_set_type(r, "application/json");
+        httpd_resp_sendstr(r, "{\"error\":\"ota_in_progress\"}");
+        return ESP_OK;   /* complete response already sent */
+    }
+    s_ota_active = true;
+    esp_err_t e = api_fs_ota_impl(r);
+    if (e != ESP_OK) s_ota_active = false;
+    return e;
+}
+
+static esp_err_t api_fs_ota_impl(httpd_req_t *r)
+{
     const esp_partition_t *part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, "littlefs");
     if (!part)
@@ -1171,10 +1238,7 @@ static esp_err_t api_fs_ota(httpd_req_t *r)
         ESP_LOGI(TAG, "FS OTA: %d bytes written (sector loop)", written);
     }
 
-    send_json(r, "{\"status\":\"ok\",\"message\":\"LittleFS updated, rebooting...\"}");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    esp_restart();
-    return ESP_OK;
+    return ota_finish_and_reboot(r, "{\"status\":\"ok\",\"message\":\"LittleFS updated, rebooting...\"}");
 }
 
 /* ── Hot Patch (ZIP → VFS) ─────────────────────────────────────────────────
