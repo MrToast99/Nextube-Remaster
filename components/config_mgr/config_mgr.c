@@ -96,7 +96,6 @@ static void set_defaults(void)
     strncpy(s_cfg.ntp_servers[1], "1.pool.ntp.org", sizeof(s_cfg.ntp_servers[1]) - 1);
     strncpy(s_cfg.ntp_servers[2], "2.pool.ntp.org", sizeof(s_cfg.ntp_servers[2]) - 1);
     strncpy(s_cfg.ntp_servers[3], "3.pool.ntp.org", sizeof(s_cfg.ntp_servers[3]) - 1);
-    s_cfg.time_discipline_mode = 0;   /* reactive NTP only (original behaviour) */
 
     strncpy(s_cfg.weather_source, "metno", sizeof(s_cfg.weather_source) - 1); /* default: free, no API key needed */
     strncpy(s_cfg.weather_api_key, "", sizeof(s_cfg.weather_api_key) - 1);
@@ -412,8 +411,6 @@ static void parse_json(const char *json, size_t len)
             json_read_str(root, "ntp_server", s_cfg.ntp_servers[0],
                           sizeof(s_cfg.ntp_servers[0]));
         }
-        json_read_u8(root, "time_discipline_mode", &s_cfg.time_discipline_mode);
-        if (s_cfg.time_discipline_mode > 2) s_cfg.time_discipline_mode = 0;
     }
     /* Timezone — POSIX TZ string; migrate from legacy numeric time_zone if absent */
     {
@@ -1032,7 +1029,6 @@ char *config_to_json(void)
         for (int i = 0; i < 4; i++)
             cJSON_AddItemToArray(ntp_arr, cJSON_CreateString(s_cfg.ntp_servers[i]));
     }
-    cJSON_AddNumberToObject(root, "time_discipline_mode", s_cfg.time_discipline_mode);
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);

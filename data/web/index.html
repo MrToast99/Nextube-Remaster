@@ -1176,22 +1176,6 @@ select option{background:var(--accent);color:var(--text)}
   <!-- Hidden debug panel — toggle by clicking firmware version 5× or #debug in URL -->
   <div id="debug-panel" style="display:none">
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
-      <h2 style="color:#ffa000">&#x23F1;&#xFE0F; Time Disciplining (experimental)</h2>
-      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.8rem">
-        How the clock is held <em>between</em> hourly NTP syncs. A <code>DRIFT</code> line is logged
-        to the serial console at every sync in <strong>all</strong> modes, giving the measured drift of both
-        the ESP crystal and the PCF8563 so you can compare them. Applied live — no reboot.
-      </p>
-      <div class="field">
-        <label>Mode</label>
-        <select id="dbg-tdm" onchange="saveDiscipline()">
-          <option value="0">Off — reactive NTP only (default)</option>
-          <option value="1">ESP frequency disciplining</option>
-          <option value="2">PCF8563 slaving</option>
-        </select>
-      </div>
-    </div>
-    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
       <h2 style="color:#ffa000">&#x1F527; Hardware Debug</h2>
       <p style="font-size:.8rem;color:var(--dim);margin-bottom:.8rem">
         Runtime ADC pin selection — change takes effect immediately without a rebuild.
@@ -2059,7 +2043,6 @@ async function loadSettings() {
   const ntpArr = cfg.ntp_servers || [cfg.ntp_server || ntpDef[0]];
   for (let i = 0; i < 4; i++)
     $('f-ntp' + i).value = (ntpArr[i] !== undefined && ntpArr[i] !== null) ? ntpArr[i] : (i < 2 ? ntpDef[i] : '');
-  if ($('dbg-tdm')) $('dbg-tdm').value = String(cfg.time_discipline_mode ?? 0);
   $('f-wsrc').value = cfg.weather_source || 'wttr'; toggleWeatherKey();
   $('f-wkey').value = cfg.weather_api_key || '';
   $('f-city').value = cfg.City || '';
@@ -3217,20 +3200,6 @@ function dbgShow() {
     $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
   if (cfg && cfg.mic_silence_gate != null)
     dbgSetGate(cfg.mic_silence_gate);
-  if (cfg && cfg.time_discipline_mode != null)
-    $('dbg-tdm').value = String(cfg.time_discipline_mode);
-}
-
-/* Switch clock-disciplining mode live (partial settings update — no reboot). */
-function saveDiscipline() {
-  const v = parseInt($('dbg-tdm').value, 10) || 0;
-  secureFetch('/api/settings', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ time_discipline_mode: v })
-  }).then(() => { if (cfg) cfg.time_discipline_mode = v;
-                  toast('Time mode: ' + ['Off','ESP disciplining','PCF8563 slaving'][v]); })
-    .catch(() => toast('Save failed', true));
 }
 
 function dbgHide() {

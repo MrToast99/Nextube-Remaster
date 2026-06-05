@@ -4084,7 +4084,13 @@ static void display_task(void *arg)
                 ESP_LOGI(TAG, "Boot NTP sync detected — display clamp reset");
             }
 
-            if (last_display_epoch > 0 && !first && !mode_changed && !theme_changed) {
+            /* Dual-panel 24H Custom shows no seconds and no blinking colon, so
+             * nothing re-renders between minute boundaries to advance
+             * last_display_epoch.  The per-tick clamp below would then pin the
+             * time at +1 s and the minute would never roll over (clock appears
+             * frozen) — so skip clamping in that mode and track real time. */
+            bool dual_cx = (strcmp(cfg->time_type, "24H_CX") == 0) && cfg->cx_dual_panel;
+            if (last_display_epoch > 0 && !first && !mode_changed && !theme_changed && !dual_cx) {
                 time_t delta = now_epoch - last_display_epoch;
                 if (delta > CLOCK_MAX_STEP_S) {
                     now_epoch = last_display_epoch + CLOCK_MAX_STEP_S; /* fast-forward */
@@ -4096,8 +4102,7 @@ static void display_task(void *arg)
             localtime_r(&now_epoch, &t);
 
             bool is_24ns  = (strcmp(cfg->time_type, "24H_NS") == 0);
-            bool is_24cx  = (strcmp(cfg->time_type, "24H_CX") == 0);
-            bool dual_cx  = is_24cx && cfg->cx_dual_panel;   /* tubes 5&6 panels, no colon */
+            bool is_24cx  = (strcmp(cfg->time_type, "24H_CX") == 0);  /* dual_cx computed above */
             bool dual_changed = (dual_cx != last_cx_dual);
             bool is_nosec = is_24ns || is_24cx;
             bool is_flip  = (strcmp(cfg->theme, "FlipClock")  == 0);
