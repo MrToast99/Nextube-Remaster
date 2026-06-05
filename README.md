@@ -686,7 +686,7 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 
 | Mode | Description |
 |---|---|
-| **Clock** | 12H or 24H digital clock. **24H Custom** rotates tube 6 through up to five info panels (configurable under Display → 24H Custom): Day+date, Indoor temp & humidity (SHT30), Outdoor temperature, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon. |
+| **Clock** | 12H or 24H digital clock. **24H Custom** shows rotating info panel(s) on the right-hand tube(s) (configurable under Display → 24H Custom). Available panels: Day+date, Indoor temp & humidity (SHT30), Outdoor temperature, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon. **Single-panel (default):** `H H : M M` with one rotating panel on tube 6. **Dual-panel:** the colon is dropped (`H H  M M`) and tubes 5 **and** 6 each show an **independently-configured** rotating panel — each tube has its own enabled-panel set and cycles through it on the shared rotation interval. |
 | **Date** | Date display (DD/MM/YY). Can be enabled alongside Clock — both appear as separate stops in the touch cycle. |
 | **Countdown** | Configurable countdown timer. Middle touch pauses/resumes. |
 | **Pomodoro** | Work/break timer with configurable work and break durations. Middle touch pauses/resumes. Automatically flips between work and break phases. |

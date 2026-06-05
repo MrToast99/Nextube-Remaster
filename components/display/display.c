@@ -61,10 +61,14 @@ static volatile bool s_update_indicator = false;
  * Tracks which info panel is currently on tube 6 and when it started.
  * Both variables are only ever read/written from the display task, so no
  * additional mutex is required. */
-static uint8_t  s_cx_panel        = 0;   /* index into the enabled panel list */
-static int64_t  s_cx_panel_start  = 0;   /* esp_timer_get_time() µs when panel began */
-static struct tm s_cx_last_t;            /* last struct tm at which tube 6 was rendered */
-static int8_t   s_cx_last_kind    = -1;  /* panel kind (0-3) last drawn; -1 = none rendered yet */
+static uint8_t  s_cx_panel        = 0;   /* tube 6: index into its enabled panel list */
+static int64_t  s_cx_panel_start  = 0;   /* esp_timer_get_time() µs when panel began (shared) */
+static struct tm s_cx_last_t;            /* last struct tm at which the panels were rendered */
+static int8_t   s_cx_last_kind    = -1;  /* tube 6: panel kind last drawn; -1 = none yet */
+/* Dual-panel mode: tube 5 (LCD index 4) rotates through its own enabled set,
+ * with its own index and last-kind so each panel clears/animates independently. */
+static uint8_t  s_cx_panel5       = 0;   /* tube 5: index into its enabled panel list */
+static int8_t   s_cx_last_kind5   = -1;  /* tube 5: panel kind last drawn; -1 = none yet */
 
 /* ── Timer / burn-in mutex ───────────────────────────────────────────────────
  * Declared here (before the burn-in setter functions) so the setters can use
@@ -1882,7 +1886,7 @@ static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
  * u8g2_font_logisoso20_tf (ascent=20, descent=−4, total glyph height=24 px).
  * y_tube: absolute tube row where the top of the label should appear.
  * bg: optional RGB565 background buffer (see ht_blit_at); NULL = solid black.*/
-static void ht_draw_label(const char *str, int y_tube, uint16_t fg,
+static void ht_draw_label(int tube, const char *str, int y_tube, uint16_t fg,
                            const uint8_t *bg)
 {
     u8g2_ClearBuffer(&s_u8g2);
@@ -1898,7 +1902,7 @@ static void ht_draw_label(const char *str, int y_tube, uint16_t fg,
     if (x < 0) x = 0;
     /* Place baseline at `ascent` so glyphs start at buffer row 0.           */
     u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)ascent, str);
-    ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), blit_h, y_tube, fg, bg);
+    ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), blit_h, y_tube, fg, bg);
 }
 
 /* Render a UTF-8 string centred horizontally (within LCD_WIDTH=80 px) and
@@ -1906,7 +1910,7 @@ static void ht_draw_label(const char *str, int y_tube, uint16_t fg,
  * font: pointer to any compiled-in U8g2 font constant.
  * Blits at most 64 rows (the U8g2 buffer height limit).
  * bg: optional RGB565 background buffer (see ht_blit_at); NULL = solid black.*/
-static void ht_draw_str_at(const char *str, int y_tube, int height,
+static void ht_draw_str_at(int tube, const char *str, int y_tube, int height,
                             const uint8_t *font, uint16_t fg,
                             const uint8_t *bg)
 {
@@ -1928,7 +1932,7 @@ static void ht_draw_str_at(const char *str, int y_tube, int height,
     if (y > BUF_H)  y = BUF_H;
 
     u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)y, str);
-    ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), blit_h, y_tube, fg, bg);
+    ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), blit_h, y_tube, fg, bg);
 }
 
 /* ── Localised weekday abbreviation (tube-6 WEEKDATE panel) ───────────────
@@ -2099,7 +2103,7 @@ static void solar_calc(float lat_deg, float lon_deg, const struct tm *t,
  * fg: RGB565 foreground colour (from ht_sample_theme_color).
  * bg: optional decoded RGB565 background image (LCD_WIDTH × LCD_HEIGHT);
  *     NULL = solid black background for "off" pixels.                          */
-static void ht_draw_suntime(const char *timestr, bool rising,
+static void ht_draw_suntime(int tube, const char *timestr, bool rising,
                              int y_tube, uint16_t fg, const uint8_t *bg)
 {
     u8g2_ClearBuffer(&s_u8g2);
@@ -2144,7 +2148,7 @@ static void ht_draw_suntime(const char *timestr, bool rising,
 
     /* Blit 56 rows (0-55): captures icon (top ~y=2) and text (baseline y=50,
      * descent to y=54).  ht_blit_at clamps if y_tube+56 > LCD_HEIGHT.        */
-    ht_blit_at(5, u8g2_GetBufferPtr(&s_u8g2), 56, y_tube, fg, bg);
+    ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), 56, y_tube, fg, bg);
 }
 
 /* ── cx6_stamp_update_indicator ──────────────────────────────────────────────
@@ -2155,10 +2159,9 @@ static void ht_draw_suntime(const char *timestr, bool rising,
  * display_show_image() had drawn there.
  * Call this once after ALL blits for tube 5 are complete to re-stamp the
  * indicator when s_update_indicator is active.  No-op when inactive.          */
-static void cx6_stamp_update_indicator(void)
+static void cx6_stamp_update_indicator(int tube)
 {
     if (!s_update_indicator) return;
-    const int tube = LCD_COUNT - 1;
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
                             + (int)s_col_offsets[tube]);
@@ -2201,20 +2204,18 @@ static void cx6_stamp_update_indicator(void)
  *
  * panel_id is an index into the ordered list [weather, weekdate, ht, temp, sunrise];
  * the caller resolves which concrete panel this maps to.                       */
-static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
-                             uint8_t panel_id)
+/* Render one 24H-Custom info panel onto `lcd_tube` (5 = rightmost, 4 = the
+ * 2nd-from-right in dual mode).  `enabled[5]` is the caller's panel set
+ * (tube6_panel_* or tube5_panel_*); `panel_id` indexes the enabled entries;
+ * `*last_kind` tracks the previously drawn kind for that tube so backgrounds
+ * are cleared only on a panel switch. */
+static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
+                             int lcd_tube, const bool enabled[5],
+                             uint8_t panel_id, int8_t *last_kind)
 {
-    /* Resolve panel_id → concrete panel type.
-     * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise+sunset
-     * We iterate through the ordered list and pick the panel_id-th enabled entry. */
-    const bool enabled[5] = {
-        cfg->tube6_panel_weather,
-        cfg->tube6_panel_weekdate,
-        cfg->tube6_panel_ht,
-        cfg->tube6_panel_temp,
-        cfg->tube6_panel_sunrise,
-    };
-    int kind = -1;   /* 0=weather icon, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise+sunset */
+    /* Resolve panel_id → concrete panel kind by walking the caller's enabled[].
+     * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor H/T, 4=sunrise. */
+    int kind = -1;
     int count = 0;
     for (int i = 0; i < 5; i++) {
         if (enabled[i]) {
@@ -2232,14 +2233,14 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
          * Falls back to black when the weather API has no valid data.       */
         const weather_data_t *w = weather_get();
         if (!w || !w->valid) {
-            if (kind != s_cx_last_kind) display_fill(5, 0x0000);
+            if (kind != *last_kind) display_fill(lcd_tube, 0x0000);
             goto cx_tube6_done;
         }
         {
             const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
             char path[256];
             display_path_weather(path, sizeof(path), cfg->theme, icon);
-            display_show_image(5, path);
+            display_show_image(lcd_tube, path);
         }
 
     } else if (kind == 1) {
@@ -2269,10 +2270,10 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
         if (bg) {
             /* Write the full background so rows not covered by ht_draw_str_at
              * (the 8-px fringes) show the theme image rather than stale pixels. */
-            display_show_image(5, bg_path);
+            display_show_image(lcd_tube, bg_path);
         } else {
             /* No valid background — clear to black on panel switch only. */
-            if (kind != s_cx_last_kind) display_fill(5, 0x0000);
+            if (kind != *last_kind) display_fill(lcd_tube, 0x0000);
         }
 
         uint16_t fg = ht_sample_theme_color(cfg->theme);
@@ -2280,7 +2281,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
         /* Day name — top half, centred in 64-row U8g2 band (rows 8–71).
          * Localised per cfg->language (tube display language setting). */
         const char *day = weekday_abbrev(cfg->language, t->tm_wday);
-        ht_draw_str_at(day, 16, 64, u8g2_font_logisoso28_tf, fg, bg);
+        ht_draw_str_at(lcd_tube, day, 16, 64, u8g2_font_logisoso28_tf, fg, bg);
 
         /* Date — bottom half, respects Network › Date format setting.
          * "MM/DD/YY": month first → MMDD   (US format)
@@ -2293,7 +2294,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 snprintf(buf, sizeof(buf), "%02d%02d", mo, t->tm_mday);
             else
                 snprintf(buf, sizeof(buf), "%02d%02d", t->tm_mday, mo);
-            ht_draw_str_at(buf, HALF + 16, 64, u8g2_font_logisoso28_tf, fg, bg);
+            ht_draw_str_at(lcd_tube, buf, HALF + 16, 64, u8g2_font_logisoso28_tf, fg, bg);
         }
 
     } else if (kind == 2) {
@@ -2306,7 +2307,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
          * no longer needed and have been removed from the filesystem image.  */
         const sht30_reading_t *s = sht30_get();
         if (!s || !s->valid) {
-            if (kind != s_cx_last_kind) display_fill(5, 0x0000);
+            if (kind != *last_kind) display_fill(lcd_tube, 0x0000);
             goto cx_tube6_done;
         }
 
@@ -2318,13 +2319,13 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
             int bg_w = 0, bg_h = 0;
             const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
             if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
-            if (bg) display_show_image(5, bg_path);
-            else    display_fill(5, 0x0000);
+            if (bg) display_show_image(lcd_tube, bg_path);
+            else    display_fill(lcd_tube, 0x0000);
 
             uint16_t fg = ht_sample_theme_color(cfg->theme);
 
             /* "In" label — rows 15–38 (HT_LABEL_H=24, shifted +15) */
-            ht_draw_label(inout_label(cfg->language, true), 18, fg, bg);
+            ht_draw_label(lcd_tube, inout_label(cfg->language, true), 18, fg, bg);
 
             /* Indoor temperature — rows 39–94 (56-row band, logisoso28, shifted +15) */
             {
@@ -2336,7 +2337,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 char buf[16];
                 /* UTF-8 degree symbol U+00B0 = 0xC2 0xB0 (supported by _tf fonts) */
                 snprintf(buf, sizeof(buf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
-                ht_draw_str_at(buf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
+                ht_draw_str_at(lcd_tube, buf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
             }
 
             /* Indoor humidity — rows 95–158 (64-row blit centred in 80-px half,
@@ -2347,7 +2348,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 if (hum <  0) hum = 0;
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%d%%", hum);
-                ht_draw_str_at(buf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
+                ht_draw_str_at(lcd_tube, buf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
             }
         }
 
@@ -2360,7 +2361,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
          * Falls back to black when weather API has no valid data.            */
         const weather_data_t *ow = weather_get();
         if (!ow || !ow->valid) {
-            if (kind != s_cx_last_kind) display_fill(5, 0x0000);
+            if (kind != *last_kind) display_fill(lcd_tube, 0x0000);
             goto cx_tube6_done;
         }
 
@@ -2372,13 +2373,13 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
             int bg_w = 0, bg_h = 0;
             const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
             if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
-            if (bg) display_show_image(5, bg_path);
-            else    display_fill(5, 0x0000);
+            if (bg) display_show_image(lcd_tube, bg_path);
+            else    display_fill(lcd_tube, 0x0000);
 
             uint16_t fg = ht_sample_theme_color(cfg->theme);
 
             /* "Out" label — rows 15–38 (HT_LABEL_H=24, shifted +15) */
-            ht_draw_label(inout_label(cfg->language, false), 18, fg, bg);
+            ht_draw_label(lcd_tube, inout_label(cfg->language, false), 18, fg, bg);
 
             /* Outdoor temperature — rows 39–94 (56-row band, shifted +15) */
             {
@@ -2389,7 +2390,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 if (temp < -99) temp = -99;
                 char buf[16];
                 snprintf(buf, sizeof(buf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
-                ht_draw_str_at(buf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
+                ht_draw_str_at(lcd_tube, buf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
             }
 
             /* Outdoor humidity — rows 95–158 (64-row blit centred in 80-px half,
@@ -2400,7 +2401,7 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
                 if (hum <  0) hum = 0;
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%d%%", hum);
-                ht_draw_str_at(buf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
+                ht_draw_str_at(lcd_tube, buf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
             }
         }
 
@@ -2421,8 +2422,8 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
             int bg_w = 0, bg_h = 0;
             const uint8_t *bg = img_cache_get(bg_path, &bg_w, &bg_h);
             if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
-            if (bg) display_show_image(5, bg_path);
-            else    display_fill(5, 0x0000);
+            if (bg) display_show_image(lcd_tube, bg_path);
+            else    display_fill(lcd_tube, 0x0000);
 
             uint16_t fg = ht_sample_theme_color(cfg->theme);
 
@@ -2440,18 +2441,18 @@ static void render_cx_tube6(const nextube_config_t *cfg, const struct tm *t,
             }
 
             /* Top half: sunrise (y_tube=14), bottom half: sunset (y_tube=HALF+14) */
-            ht_draw_suntime(rise_str, /*rising=*/true,  14,        fg, bg);
-            ht_draw_suntime(set_str,  /*rising=*/false, HALF + 14, fg, bg);
+            ht_draw_suntime(lcd_tube, rise_str, /*rising=*/true,  14,        fg, bg);
+            ht_draw_suntime(lcd_tube, set_str,  /*rising=*/false, HALF + 14, fg, bg);
         }
     }
 
-    s_cx_last_kind = (int8_t)kind;   /* record which panel was just drawn */
+    *last_kind = (int8_t)kind;   /* record which panel was just drawn */
 
 cx_tube6_done:
-    /* Re-stamp the update indicator after every tube-6 panel render.
+    /* Re-stamp the update indicator after every panel render.
      * ht_blit_at paths overwrite the bottom rows; display_fill misses it
      * entirely.  cx6_stamp_update_indicator() is a no-op when inactive. */
-    cx6_stamp_update_indicator();
+    cx6_stamp_update_indicator(lcd_tube);
 }
 
 static void render_clock(const nextube_config_t *cfg, const struct tm *t)
@@ -2484,10 +2485,10 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
         display_show_number(4, m % 10,        cfg->theme);
         display_show_ampm  (5, pm ? "pm" : "am", cfg->theme);
     } else if (is_24ns || is_24cx) {
-        /* 24H no-seconds / 24H Custom: H1  H2  colon  M1  M2  [tube5]
-         * For 24H_NS, tube5 is user-configurable: "blank" or "weather".
-         * For 24H_CX, tube5 is rendered separately by render_cx_tube6()
-         * so render_clock() leaves it alone. */
+        /* 24H Custom dual-panel: H1 H2 M1 M2 [p5][p6] — colon dropped, minutes
+         * shift left to tubes 2 & 3, and tubes 4 & 5 are independent info panels
+         * drawn by render_cx_panel().  Otherwise: H1 H2 : M1 M2 [tube5]. */
+        bool dual_cx = is_24cx && cfg->cx_dual_panel;
         if (h / 10 == 0) {
             if (cfg->leading_zero)
                 display_show_number(0, 0,     cfg->theme);
@@ -2497,24 +2498,30 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
             display_show_number(0, h / 10,    cfg->theme);
         }
         display_show_number(1, h % 10,        cfg->theme);
-        display_show_ampm  (2, colon_img,     cfg->theme);
-        display_show_number(3, m / 10,        cfg->theme);
-        display_show_number(4, m % 10,        cfg->theme);
-        if (is_24ns) {
-            if (strcmp(cfg->clock_tube5, "weather") == 0) {
-                const weather_data_t *w = weather_get();
-                if (w && w->valid && w->icon[0] != '\0') {
-                    char path[128];
-                    display_path_weather(path, sizeof(path), cfg->theme, w->icon);
-                    display_show_image(5, path);
+        if (dual_cx) {
+            display_show_number(2, m / 10,    cfg->theme);
+            display_show_number(3, m % 10,    cfg->theme);
+            /* tubes 4 & 5 handled by render_cx_panel() — leave alone */
+        } else {
+            display_show_ampm  (2, colon_img, cfg->theme);
+            display_show_number(3, m / 10,    cfg->theme);
+            display_show_number(4, m % 10,    cfg->theme);
+            if (is_24ns) {
+                if (strcmp(cfg->clock_tube5, "weather") == 0) {
+                    const weather_data_t *w = weather_get();
+                    if (w && w->valid && w->icon[0] != '\0') {
+                        char path[128];
+                        display_path_weather(path, sizeof(path), cfg->theme, w->icon);
+                        display_show_image(5, path);
+                    } else {
+                        display_show_ampm(5, "blank", cfg->theme);
+                    }
                 } else {
                     display_show_ampm(5, "blank", cfg->theme);
                 }
-            } else {
-                display_show_ampm(5, "blank", cfg->theme);
             }
+            /* is_24cx single-panel: tube 5 handled by render_cx_panel() */
         }
-        /* is_24cx: tube 5 handled by render_cx_tube6() — do nothing here */
     } else {
         /* 24H: all six tubes = H1 H2 M1 M2 S1 S2 (no colon tube) */
         if (!cfg->leading_zero && h / 10 == 0)
@@ -3607,6 +3614,7 @@ static void display_task(void *arg)
     bool          last_wx_valid = false;       /* detect when data first arrives */
     int           last_wx_min   = -1;          /* solar time change detection (minute) */
     bool          last_leading_zero = false;    /* leading-zero change detection */
+    bool          last_cx_dual  = false;       /* 24H_CX dual-panel toggle change detection */
     bool          last_bl_on    = true;        /* backlight on/off tracking */
     uint8_t       last_bl_brt   = 255;         /* sentinel: force-apply on first tick */
     TickType_t    album_switch        = 0;
@@ -4089,6 +4097,8 @@ static void display_task(void *arg)
 
             bool is_24ns  = (strcmp(cfg->time_type, "24H_NS") == 0);
             bool is_24cx  = (strcmp(cfg->time_type, "24H_CX") == 0);
+            bool dual_cx  = is_24cx && cfg->cx_dual_panel;   /* tubes 5&6 panels, no colon */
+            bool dual_changed = (dual_cx != last_cx_dual);
             bool is_nosec = is_24ns || is_24cx;
             bool is_flip  = (strcmp(cfg->theme, "FlipClock")  == 0);
             bool time_type_changed    = (strcmp(cfg->time_type, last_time_type) != 0);
@@ -4100,41 +4110,50 @@ static void display_task(void *arg)
             if (!is_nosec) time_changed |= (t.tm_sec != last_t.tm_sec);
             /* Colon blinks every other second — need a re-render on each
              * even/odd transition even when only the colon image changes. */
-            bool colon_blink_changed = !is_flip &&
+            bool colon_blink_changed = !is_flip && !dual_cx &&
                                        (t.tm_sec % 2 != last_t.tm_sec % 2);
 
-            /* 24H_CX: track tube-6 info panel rotation.
-             * s_cx_panel is an index into the ordered list of enabled panels;
-             * it advances once per tube6_panel_ms milliseconds. */
+            /* 24H_CX: advance the info-panel rotation(s).  Tube 6 always rotates
+             * its own enabled set; in dual mode tube 5 rotates its independent
+             * set on the same timer.  Each index wraps modulo its own count. */
             bool panel_changed = false;
             if (is_24cx) {
-                int cx_panel_count = (cfg->tube6_panel_weather  ? 1 : 0)
-                                   + (cfg->tube6_panel_weekdate ? 1 : 0)
-                                   + (cfg->tube6_panel_ht       ? 1 : 0)
-                                   + (cfg->tube6_panel_temp     ? 1 : 0)
-                                   + (cfg->tube6_panel_sunrise  ? 1 : 0);
-                if (cx_panel_count < 1) cx_panel_count = 1;  /* config enforces ≥1 */
+                int cnt6 = (cfg->tube6_panel_weather  ? 1 : 0)
+                         + (cfg->tube6_panel_weekdate ? 1 : 0)
+                         + (cfg->tube6_panel_ht       ? 1 : 0)
+                         + (cfg->tube6_panel_temp     ? 1 : 0)
+                         + (cfg->tube6_panel_sunrise  ? 1 : 0);
+                if (cnt6 < 1) cnt6 = 1;  /* config enforces ≥1 */
+                int cnt5 = (cfg->tube5_panel_weather  ? 1 : 0)
+                         + (cfg->tube5_panel_weekdate ? 1 : 0)
+                         + (cfg->tube5_panel_ht       ? 1 : 0)
+                         + (cfg->tube5_panel_temp     ? 1 : 0)
+                         + (cfg->tube5_panel_sunrise  ? 1 : 0);
+                if (cnt5 < 1) cnt5 = 1;
                 uint32_t panel_ms = cfg->tube6_panel_ms < 1000 ? 5000
                                                                 : cfg->tube6_panel_ms;
                 int64_t  now_us = esp_timer_get_time();
-                if (first || mode_changed || time_type_changed || s_cx_panel_start == 0) {
-                    s_cx_panel       = 0;
+                if (first || mode_changed || time_type_changed || dual_changed ||
+                        s_cx_panel_start == 0) {
+                    s_cx_panel = 0;  s_cx_panel5 = 0;
                     s_cx_panel_start = now_us;
-                    s_cx_last_kind   = -1;   /* force background clear on first draw */
+                    s_cx_last_kind = -1;  s_cx_last_kind5 = -1;  /* force bg clear */
                     panel_changed    = true;
                 } else if ((now_us - s_cx_panel_start) >= (int64_t)panel_ms * 1000LL) {
-                    uint8_t next = (uint8_t)((s_cx_panel + 1) % cx_panel_count);
                     s_cx_panel_start = now_us;   /* always reset timer */
-                    if (next != s_cx_panel) {    /* only flag changed when index moves */
-                        s_cx_panel    = next;
-                        panel_changed = true;
+                    uint8_t n6 = (uint8_t)((s_cx_panel + 1) % cnt6);
+                    if (n6 != s_cx_panel) { s_cx_panel = n6; panel_changed = true; }
+                    if (dual_cx) {
+                        uint8_t n5 = (uint8_t)((s_cx_panel5 + 1) % cnt5);
+                        if (n5 != s_cx_panel5) { s_cx_panel5 = n5; panel_changed = true; }
                     }
                 }
             }
 
-            /* ── Tubes 0-4: clock digits + colon ─────────────────────────── */
+            /* ── Clock digits (+ colon in single-panel layout) ───────────── */
             if (first || mode_changed || theme_changed || time_type_changed ||
-                    time_changed || leading_zero_changed || burnin_force_render) {
+                    time_changed || leading_zero_changed || dual_changed ||
+                    burnin_force_render) {
                 render_clock(cfg, &t);
                 last_t = t;
                 last_display_epoch = now_epoch;
@@ -4154,25 +4173,39 @@ static void display_task(void *arg)
                 last_display_epoch = now_epoch;
             }
 
-            /* ── Tube 6: 24H_CX info panel ────────────────────────────────
-             * Only re-render when the panel rotates, the displayed data
-             * changes, or a mode/theme change forces a full redraw.
-             * Colon blinks and second ticks do NOT affect tube 6 content.
-             * s_cx_last_t tracks the last time tube 6 was actually drawn. */
+            /* ── 24H_CX info panel(s): tube 6 (LCD 5) always; tube 5 (LCD 4)
+             * in dual mode.  Re-render only when a panel rotates, the data
+             * changes, or a mode/theme/layout change forces a full redraw.
+             * Colon blinks and second ticks do NOT affect panel content.
+             * s_cx_last_t tracks the last time the panels were drawn. */
             if (is_24cx) {
-                bool cx6_render =
+                bool cx_render =
                     first || mode_changed || theme_changed || time_type_changed ||
-                    panel_changed || burnin_force_render ||
+                    dual_changed || panel_changed || burnin_force_render ||
                     t.tm_min  != s_cx_last_t.tm_min  ||  /* H/T: refresh each minute */
                     t.tm_mday != s_cx_last_t.tm_mday;    /* date panel: new day      */
-                if (cx6_render) {
-                    render_cx_tube6(cfg, &t, s_cx_panel);
+                if (cx_render) {
+                    const bool en6[5] = {
+                        cfg->tube6_panel_weather, cfg->tube6_panel_weekdate,
+                        cfg->tube6_panel_ht,      cfg->tube6_panel_temp,
+                        cfg->tube6_panel_sunrise,
+                    };
+                    render_cx_panel(cfg, &t, 5, en6, s_cx_panel, &s_cx_last_kind);
+                    if (dual_cx) {
+                        const bool en5[5] = {
+                            cfg->tube5_panel_weather, cfg->tube5_panel_weekdate,
+                            cfg->tube5_panel_ht,      cfg->tube5_panel_temp,
+                            cfg->tube5_panel_sunrise,
+                        };
+                        render_cx_panel(cfg, &t, 4, en5, s_cx_panel5, &s_cx_last_kind5);
+                    }
                     s_cx_last_t = t;
                 }
             }
             strncpy(last_time_type, cfg->time_type, sizeof(last_time_type) - 1);
             last_time_type[sizeof(last_time_type) - 1] = '\0';
             last_leading_zero = cfg->leading_zero;
+            last_cx_dual      = dual_cx;
             break;
         }
 

@@ -88,6 +88,8 @@ typedef struct {
     /* Time */
     char             timezone[64];       /* POSIX TZ string e.g. "EST5EDT,M3.2.0,M11.1.0" */
     char             ntp_servers[4][64]; /* NTP server hostnames; empty string = skip slot */
+    uint8_t          time_discipline_mode; /* between-sync clock keeping: 0=off (reactive NTP),
+                                            * 1=ESP frequency disciplining, 2=PCF8563 slaving */
 
     /* Weather */
     char             weather_source[16]; /* "wttr"/"openmeteo"/"metno" (no key), "openweather" (API key), or "external" (POST /api/weather) */
@@ -238,6 +240,18 @@ typedef struct {
     bool             tube6_panel_temp;       /* Outdoor temperature and humidity (OpenWeatherMap) */
     bool             tube6_panel_sunrise;    /* Sunrise & sunset times (U8g2 icon + local time) */
     uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
+    /* Dual info-panel mode (24H Custom): when true the colon is dropped and an
+     * INDEPENDENT info panel is shown on BOTH tube 5 (2nd-from-right, LCD index
+     * 4) and tube 6 (rightmost, LCD index 5).  Layout becomes H H M M [p5][p6].
+     * tube 5 rotates through its own enabled set below; tube 6 keeps using the
+     * tube6_panel_* set above.  When false: original single-panel layout
+     * H H : M M [p6] with the colon. */
+    bool             cx_dual_panel;
+    bool             tube5_panel_weather;
+    bool             tube5_panel_weekdate;
+    bool             tube5_panel_ht;
+    bool             tube5_panel_temp;
+    bool             tube5_panel_sunrise;
 } nextube_config_t;
 
 /** Initialise config module – loads from flash or sets defaults. */

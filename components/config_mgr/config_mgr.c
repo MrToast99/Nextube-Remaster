@@ -96,6 +96,7 @@ static void set_defaults(void)
     strncpy(s_cfg.ntp_servers[1], "1.pool.ntp.org", sizeof(s_cfg.ntp_servers[1]) - 1);
     strncpy(s_cfg.ntp_servers[2], "2.pool.ntp.org", sizeof(s_cfg.ntp_servers[2]) - 1);
     strncpy(s_cfg.ntp_servers[3], "3.pool.ntp.org", sizeof(s_cfg.ntp_servers[3]) - 1);
+    s_cfg.time_discipline_mode = 0;   /* reactive NTP only (original behaviour) */
 
     strncpy(s_cfg.weather_source, "metno", sizeof(s_cfg.weather_source) - 1); /* default: free, no API key needed */
     strncpy(s_cfg.weather_api_key, "", sizeof(s_cfg.weather_api_key) - 1);
@@ -174,6 +175,12 @@ static void set_defaults(void)
     s_cfg.tube6_panel_temp     = false;
     s_cfg.tube6_panel_sunrise  = false;
     s_cfg.tube6_panel_ms       = 5000;
+    s_cfg.cx_dual_panel        = false;   /* single panel + colon (original layout) */
+    s_cfg.tube5_panel_weather  = false;
+    s_cfg.tube5_panel_weekdate = false;
+    s_cfg.tube5_panel_ht       = true;    /* sensible distinct default vs tube 6 */
+    s_cfg.tube5_panel_temp     = false;
+    s_cfg.tube5_panel_sunrise  = false;
 
     /* Rotation off by default; user must explicitly enable it */
     s_cfg.rotation_enabled    = false;
@@ -405,6 +412,8 @@ static void parse_json(const char *json, size_t len)
             json_read_str(root, "ntp_server", s_cfg.ntp_servers[0],
                           sizeof(s_cfg.ntp_servers[0]));
         }
+        json_read_u8(root, "time_discipline_mode", &s_cfg.time_discipline_mode);
+        if (s_cfg.time_discipline_mode > 2) s_cfg.time_discipline_mode = 0;
     }
     /* Timezone — POSIX TZ string; migrate from legacy numeric time_zone if absent */
     {
@@ -484,6 +493,20 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_temp = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tube6_panel_sunrise");
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_sunrise = cJSON_IsTrue(v);
+
+        /* Dual-panel mode + tube 5's independent panel set */
+        v = cJSON_GetObjectItem(root, "cx_dual_panel");
+        if (cJSON_IsBool(v)) s_cfg.cx_dual_panel = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_weather");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_weather = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_weekdate");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_weekdate = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_ht");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_ht = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_temp");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_temp = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_sunrise");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_sunrise = cJSON_IsTrue(v);
     }
     json_read_u16(root, "tube6_panel_ms", &s_cfg.tube6_panel_ms);
     if (s_cfg.tube6_panel_ms < 1000) s_cfg.tube6_panel_ms = 5000;
@@ -492,6 +515,12 @@ static void parse_json(const char *json, size_t len)
         !s_cfg.tube6_panel_ht      && !s_cfg.tube6_panel_temp     &&
         !s_cfg.tube6_panel_sunrise)
         s_cfg.tube6_panel_weekdate = true;
+    /* Tube 5 only matters in dual mode — guarantee ≥1 panel there too. */
+    if (s_cfg.cx_dual_panel &&
+        !s_cfg.tube5_panel_weather && !s_cfg.tube5_panel_weekdate &&
+        !s_cfg.tube5_panel_ht      && !s_cfg.tube5_panel_temp     &&
+        !s_cfg.tube5_panel_sunrise)
+        s_cfg.tube5_panel_ht = true;
 
     /* Backlight mode */
     char bl_mode[16] = {0};
@@ -1003,6 +1032,7 @@ char *config_to_json(void)
         for (int i = 0; i < 4; i++)
             cJSON_AddItemToArray(ntp_arr, cJSON_CreateString(s_cfg.ntp_servers[i]));
     }
+    cJSON_AddNumberToObject(root, "time_discipline_mode", s_cfg.time_discipline_mode);
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);
@@ -1060,6 +1090,12 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "tube6_panel_temp",       s_cfg.tube6_panel_temp);
     cJSON_AddBoolToObject  (root, "tube6_panel_sunrise",    s_cfg.tube6_panel_sunrise);
     cJSON_AddNumberToObject(root, "tube6_panel_ms",         s_cfg.tube6_panel_ms);
+    cJSON_AddBoolToObject  (root, "cx_dual_panel",          s_cfg.cx_dual_panel);
+    cJSON_AddBoolToObject  (root, "tube5_panel_weather",    s_cfg.tube5_panel_weather);
+    cJSON_AddBoolToObject  (root, "tube5_panel_weekdate",   s_cfg.tube5_panel_weekdate);
+    cJSON_AddBoolToObject  (root, "tube5_panel_ht",         s_cfg.tube5_panel_ht);
+    cJSON_AddBoolToObject  (root, "tube5_panel_temp",       s_cfg.tube5_panel_temp);
+    cJSON_AddBoolToObject  (root, "tube5_panel_sunrise",    s_cfg.tube5_panel_sunrise);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off","WLED"};
     unsigned bl_idx = (unsigned)s_cfg.backlight_mode;
