@@ -96,6 +96,7 @@ static void set_defaults(void)
     strncpy(s_cfg.ntp_servers[1], "1.pool.ntp.org", sizeof(s_cfg.ntp_servers[1]) - 1);
     strncpy(s_cfg.ntp_servers[2], "2.pool.ntp.org", sizeof(s_cfg.ntp_servers[2]) - 1);
     strncpy(s_cfg.ntp_servers[3], "3.pool.ntp.org", sizeof(s_cfg.ntp_servers[3]) - 1);
+    s_cfg.time_discipline_mode = 2;   /* PCF8563 slave — best between-sync accuracy (recommended) */
 
     strncpy(s_cfg.weather_source, "metno", sizeof(s_cfg.weather_source) - 1); /* default: free, no API key needed */
     strncpy(s_cfg.weather_api_key, "", sizeof(s_cfg.weather_api_key) - 1);
@@ -236,6 +237,39 @@ static void json_read_float(cJSON *root, const char *key, float *dst)
 {
     cJSON *item = cJSON_GetObjectItem(root, key);
     if (cJSON_IsNumber(item)) *dst = (float)item->valuedouble;
+}
+
+/* Parse a 6-element per-tube integer array from a JSON key.
+ * Values are clamped to [lo, hi] and cast to T via the caller's pointer.
+ * Avoids six near-identical copy-pasted blocks for lcd_* per-tube fields. */
+#define JSON_READ_TUBE_INT_ARRAY(root, key, field, lo, hi, T) do {             \
+    cJSON *_arr = cJSON_GetObjectItem((root), (key));                           \
+    if (cJSON_IsArray(_arr)) {                                                  \
+        int _cnt = cJSON_GetArraySize(_arr); if (_cnt > 6) _cnt = 6;           \
+        for (int _i = 0; _i < _cnt; _i++) {                                    \
+            cJSON *_v = cJSON_GetArrayItem(_arr, _i);                           \
+            if (cJSON_IsNumber(_v)) {                                           \
+                int _val = _v->valueint;                                        \
+                if (_val < (lo)) _val = (lo);                                   \
+                if (_val > (hi)) _val = (hi);                                   \
+                s_cfg.field[_i] = (T)_val;                                     \
+            }                                                                   \
+        }                                                                       \
+    }                                                                           \
+} while (0)
+
+/* Serialise a 6-element per-tube uint8_t array to a JSON array. */
+static void json_add_tube_u8(cJSON *root, const char *key, const uint8_t *v)
+{
+    cJSON *arr = cJSON_AddArrayToObject(root, key);
+    for (int i = 0; i < 6; i++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(v[i]));
+}
+
+/* Serialise a 6-element per-tube int8_t array to a JSON array. */
+static void json_add_tube_i8(cJSON *root, const char *key, const int8_t *v)
+{
+    cJSON *arr = cJSON_AddArrayToObject(root, key);
+    for (int i = 0; i < 6; i++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(v[i]));
 }
 
 static void parse_json(const char *json, size_t len)
@@ -411,6 +445,8 @@ static void parse_json(const char *json, size_t len)
             json_read_str(root, "ntp_server", s_cfg.ntp_servers[0],
                           sizeof(s_cfg.ntp_servers[0]));
         }
+        json_read_u8(root, "time_discipline_mode", &s_cfg.time_discipline_mode);
+        if (s_cfg.time_discipline_mode > 2) s_cfg.time_discipline_mode = 0;
     }
     /* Timezone — POSIX TZ string; migrate from legacy numeric time_zone if absent */
     {
@@ -691,37 +727,11 @@ static void parse_json(const char *json, size_t len)
     json_read_u8(root, "lcd_invert_mask", &s_cfg.lcd_invert_mask);
     s_cfg.lcd_invert_mask &= 0x3F;   /* only 6 tubes */
 
-    /* Per-tube panel profile — 0=Standard, 1=Vivid; clamp to valid range */
-    {
-        cJSON *arr = cJSON_GetObjectItem(root, "lcd_init_profile");
-        if (cJSON_IsArray(arr)) {
-            int cnt = cJSON_GetArraySize(arr);
-            if (cnt > 6) cnt = 6;
-            for (int i = 0; i < cnt; i++) {
-                cJSON *v = cJSON_GetArrayItem(arr, i);
-                if (cJSON_IsNumber(v))
-                    s_cfg.lcd_init_profile[i] = (v->valueint >= 1) ? 1 : 0;
-            }
-        }
-    }
+    /* Per-tube panel profile — 0=Standard, 1=Vivid */
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_init_profile", lcd_init_profile, 0, 1, uint8_t);
 
     /* Per-tube VCOM (VMCTR1) — clamped to 0x00..0x3F (0–63) */
-    {
-        cJSON *arr = cJSON_GetObjectItem(root, "lcd_vcom");
-        if (cJSON_IsArray(arr)) {
-            int cnt = cJSON_GetArraySize(arr);
-            if (cnt > 6) cnt = 6;
-            for (int i = 0; i < cnt; i++) {
-                cJSON *v = cJSON_GetArrayItem(arr, i);
-                if (cJSON_IsNumber(v)) {
-                    int val = v->valueint;
-                    if (val < 0x00) val = 0x00;
-                    if (val > 0x3F) val = 0x3F;
-                    s_cfg.lcd_vcom[i] = (uint8_t)val;
-                }
-            }
-        }
-    }
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_vcom", lcd_vcom, 0x00, 0x3F, uint8_t);
 
     /* Per-tube software gamma — clamped to 0.5..3.0.
      * Accepts both the new array form [g0,g1,g2,g3,g4,g5] and the legacy
@@ -752,55 +762,10 @@ static void parse_json(const char *json, size_t len)
     }
 
     /* Per-tube CASET/RASET window offset adjustments — clamped to -8..+8 */
-    {
-        cJSON *arr = cJSON_GetObjectItem(root, "lcd_col_offset");
-        if (cJSON_IsArray(arr)) {
-            int cnt = cJSON_GetArraySize(arr);
-            if (cnt > 6) cnt = 6;
-            for (int i = 0; i < cnt; i++) {
-                cJSON *v = cJSON_GetArrayItem(arr, i);
-                if (cJSON_IsNumber(v)) {
-                    int off = v->valueint;
-                    if (off < -8) off = -8;
-                    if (off >  8) off =  8;
-                    s_cfg.lcd_col_offset[i] = (int8_t)off;
-                }
-            }
-        }
-    }
-    {
-        cJSON *arr = cJSON_GetObjectItem(root, "lcd_row_offset");
-        if (cJSON_IsArray(arr)) {
-            int cnt = cJSON_GetArraySize(arr);
-            if (cnt > 6) cnt = 6;
-            for (int i = 0; i < cnt; i++) {
-                cJSON *v = cJSON_GetArrayItem(arr, i);
-                if (cJSON_IsNumber(v)) {
-                    int off = v->valueint;
-                    if (off < -8) off = -8;
-                    if (off >  8) off =  8;
-                    s_cfg.lcd_row_offset[i] = (int8_t)off;
-                }
-            }
-        }
-    }
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_col_offset", lcd_col_offset, -8, 8, int8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_row_offset", lcd_row_offset, -8, 8, int8_t);
     /* Per-tube software brightness — clamped to 0-100 */
-    {
-        cJSON *arr = cJSON_GetObjectItem(root, "lcd_tube_brightness");
-        if (cJSON_IsArray(arr)) {
-            int cnt = cJSON_GetArraySize(arr);
-            if (cnt > 6) cnt = 6;
-            for (int i = 0; i < cnt; i++) {
-                cJSON *v = cJSON_GetArrayItem(arr, i);
-                if (cJSON_IsNumber(v)) {
-                    int br = v->valueint;
-                    if (br < 0)   br = 0;
-                    if (br > 100) br = 100;
-                    s_cfg.lcd_tube_brightness[i] = (uint8_t)br;
-                }
-            }
-        }
-    }
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_tube_brightness", lcd_tube_brightness, 0, 100, uint8_t);
 
     /* ── Post-parse normalization ──────────────────────────────────────
      * mic_enabled is no longer a user-settable toggle — it is derived
@@ -1029,6 +994,7 @@ char *config_to_json(void)
         for (int i = 0; i < 4; i++)
             cJSON_AddItemToArray(ntp_arr, cJSON_CreateString(s_cfg.ntp_servers[i]));
     }
+    cJSON_AddNumberToObject(root, "time_discipline_mode", s_cfg.time_discipline_mode);
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);
@@ -1149,36 +1115,16 @@ char *config_to_json(void)
 
     cJSON_AddBoolToObject(root, "notify_update_on_display", s_cfg.notify_update_on_display);
     cJSON_AddNumberToObject(root, "lcd_invert_mask", s_cfg.lcd_invert_mask);
-    {
-        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_init_profile");
-        for (int i = 0; i < 6; i++)
-            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_init_profile[i]));
-    }
-    {
-        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_vcom");
-        for (int i = 0; i < 6; i++)
-            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_vcom[i]));
-    }
+    json_add_tube_u8(root, "lcd_init_profile",   s_cfg.lcd_init_profile);
+    json_add_tube_u8(root, "lcd_vcom",            s_cfg.lcd_vcom);
     {
         cJSON *arr = cJSON_AddArrayToObject(root, "lcd_gamma");
         for (int i = 0; i < 6; i++)
             cJSON_AddItemToArray(arr, cJSON_CreateNumber((double)s_cfg.lcd_gamma[i]));
     }
-    {
-        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_col_offset");
-        for (int i = 0; i < 6; i++)
-            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_col_offset[i]));
-    }
-    {
-        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_row_offset");
-        for (int i = 0; i < 6; i++)
-            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_row_offset[i]));
-    }
-    {
-        cJSON *arr = cJSON_AddArrayToObject(root, "lcd_tube_brightness");
-        for (int i = 0; i < 6; i++)
-            cJSON_AddItemToArray(arr, cJSON_CreateNumber(s_cfg.lcd_tube_brightness[i]));
-    }
+    json_add_tube_i8(root, "lcd_col_offset",      s_cfg.lcd_col_offset);
+    json_add_tube_i8(root, "lcd_row_offset",      s_cfg.lcd_row_offset);
+    json_add_tube_u8(root, "lcd_tube_brightness", s_cfg.lcd_tube_brightness);
 
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

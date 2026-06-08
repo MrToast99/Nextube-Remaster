@@ -37,6 +37,7 @@ Like the work? Help keep me Caffeinated! <br>
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
 - [Modes](#modes)
 - [Weather](#weather)
+- [NTP & Clock Accuracy](#ntp--clock-accuracy)
 - [Social Media Counters](#social-media-counters)
   - [Local Relay (`social_relay.py`)](#local-relay-social_relaypy)
 - [Home Assistant MQTT](#home-assistant-mqtt)
@@ -66,6 +67,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | PCF8563 RTC (battery-backed) | ✅ Working |
 | WiFi AP+STA (WPA2-secured setup network with per-device PIN) | ✅ Working |
 | NTP time sync | ✅ Working |
+| PCF8563 RTC-disciplined clock (PCF slave mode — ~1 ms between NTP syncs, default) | ✅ Working |
 | Built-in web management UI (SPA) | ✅ Working |
 | REST API (backward-compatible + extensions) | ✅ Working |
 | mDNS (`http://nextube-remaster.local`) | ✅ Working |
@@ -871,6 +873,52 @@ MutiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
                         rain.jpg  snow.jpg  squalls.jpg  thunderstorm.jpg
                         sand.jpg  tornado.jpg  volcanicAsh.jpg
 ```
+
+## NTP & Clock Accuracy
+
+The Nextube synchronises its system clock from NTP servers immediately on WiFi connect, then once per hour. Between syncs, accuracy depends on the active **Time Discipline Mode**.
+
+### How synchronisation works
+
+On each hourly NTP sync the firmware:
+
+1. Measures how far the ESP32 internal clock has drifted against the NTP timestamp.
+2. Hard-sets or gradually slews the clock depending on the active discipline mode and the magnitude of drift.
+3. Writes the **rounded NTP second** to the PCF8563 RTC so the battery-backed time survives a power cycle. The write rounds to the nearest second (not truncates), eliminating the 0–1 s systematic bias truncation would otherwise introduce.
+
+### Time discipline modes
+
+| Mode | Name | How it works | Typical accuracy between NTP syncs |
+|---|---|---|---|
+| **0** | Off | Clock set exactly to NTP each hour; no correction applied between syncs | ESP32 XTAL drift — typically 100–350 ppm (360–1260 ms/hr, erratic) |
+| **1** | ESP Rate | Learns the ESP32 XTAL drift rate via an exponential moving average and pre-compensates continuously using `adjtime()` | ~10–50 ms/hr depending on XTAL stability |
+| **2** | PCF8563 Slave *(default)* | Every minute, reads the PCF8563 RTC and applies a small `adjtime()` nudge to keep the system clock aligned with the RTC crystal | ~1–2 ms steady-state; one-off ≤0.5 s realignment immediately after each NTP sync |
+
+**Mode 2 is the default and recommended setting.** The PCF8563's crystal is far more stable than the ESP32's internal XTAL oscillator — in testing the PCF8563 shows ~0 ppm drift per hour while the ESP32 XTAL varies between 112–337 ppm (erratic, not temperature-correlated). PCF slave mode delivers ~1 ms steady-state clock accuracy on the physical tubes at the cost of one I²C read per minute.
+
+> **Why does an NTP sync cause a brief realignment?** NTP corrects the system clock by up to ~1 s (one full RTC-second boundary). The next minute-tick after the sync the PCF slave sees that offset and corrects it — this is the `post-sync re-align` value in the hourly summary log. Subsequent ticks return to ~1 ms steady state.
+
+### Hourly diagnostic log
+
+At each NTP sync the following lines are emitted at `INFO` level on the `ntp` tag:
+
+```
+ntp: NTP re-sync [diag]: raw ESP timer drifted +1048 ms vs NTP over 3600060 ms
+ntp: NTP re-sync [applied]: hard-set to NTP; between-sync drift handled by discipline mode
+ntp: DRIFT [diag, not applied]  raw ESP XTAL +1048.0 ms/hr (+291.1 ppm) | PCF8563 +0.0 ms/hr (0.0 ppm, 1 s res)
+ntp: PCF slave [diag]: last hour — 58 ticks, |drift| avg 1.1 ms, max 4 ms; post-sync re-align +728 ms
+ntp: RTC updated: 2026-06-07 05:44:18 (local)
+```
+
+| Tag | Meaning |
+|---|---|
+| `[diag]` | Measurement only — no clock change |
+| `[applied]` | A correction was made |
+| `[diag, not applied]` | Drift was measured but no action was taken (e.g. discipline mode is handling it instead) |
+
+The `PCF slave [diag]` line summarises the previous hour: number of minute-corrections, average and peak steady-state |drift|, and the one-off post-NTP realignment. Per-minute corrections are suppressed at `INFO` and only visible at `DEBUG` log level.
+
+---
 
 ## Social Media Counters
 

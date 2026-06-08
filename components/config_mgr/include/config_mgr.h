@@ -88,6 +88,9 @@ typedef struct {
     /* Time */
     char             timezone[64];       /* POSIX TZ string e.g. "EST5EDT,M3.2.0,M11.1.0" */
     char             ntp_servers[4][64]; /* NTP server hostnames; empty string = skip slot */
+    uint8_t          time_discipline_mode; /* experimental between-sync clock keeping (debug):
+                                            * 0=off (reactive NTP), 1=ESP frequency disciplining,
+                                            * 2=PCF8563 slaving */
 
     /* Weather */
     char             weather_source[16]; /* "wttr"/"openmeteo"/"metno" (no key), "openweather" (API key), or "external" (POST /api/weather) */

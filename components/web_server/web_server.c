@@ -2085,6 +2085,51 @@ static esp_err_t api_debug_pwm(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/debug/loglevel  — runtime per-tag log verbosity (esp_log_level_set).
+ * Body: { "tag": "weather", "enabled": false }   → silence that subsystem
+ *    or { "tag": "*",       "level": 3 }          → set a level explicitly
+ * level: 0=NONE 1=ERROR 2=WARN 3=INFO 4=DEBUG 5=VERBOSE.  "*" sets the global
+ * default.  Runtime only — NOT persisted, resets on reboot.  Handy for getting
+ * a clean long log of one subsystem (e.g. ntp) without others' chatter. */
+static esp_err_t api_debug_loglevel(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char buf[128] = {0};
+    int  n = httpd_req_recv(r, buf, sizeof(buf) - 1);
+    if (n <= 0) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "No body"), ESP_FAIL;
+    buf[n] = '\0';
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
+
+    cJSON *jt = cJSON_GetObjectItem(root, "tag");
+    if (!cJSON_IsString(jt) || jt->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing tag"), ESP_FAIL;
+    }
+
+    esp_log_level_t lvl;
+    cJSON *je = cJSON_GetObjectItem(root, "enabled");
+    cJSON *jl = cJSON_GetObjectItem(root, "level");
+    if (cJSON_IsBool(je)) {
+        lvl = cJSON_IsTrue(je) ? ESP_LOG_INFO : ESP_LOG_NONE;
+    } else if (cJSON_IsNumber(jl)) {
+        int v = jl->valueint;
+        if (v < 0) v = 0;
+        if (v > 5) v = 5;
+        lvl = (esp_log_level_t)v;
+    } else {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Need 'enabled' or 'level'"), ESP_FAIL;
+    }
+
+    /* esp_log_level_set() copies the tag string into its cache, so the
+     * transient buffer is safe. */
+    esp_log_level_set(jt->valuestring, lvl);
+    ESP_LOGW("web_srv", "log level: tag='%s' -> %d", jt->valuestring, (int)lvl);
+    cJSON_Delete(root);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* ── Log ring API ──────────────────────────────────────────────────── */
 /* GET /api/logs  → {"lines":["I (12) tag: msg", ...]}  chronological  */
 static esp_err_t api_get_logs(httpd_req_t *r)
@@ -2258,6 +2303,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/debug/adc",       api_debug_adc),
     R(HTTP_POST, "/api/debug/dac",       api_debug_dac),
     R(HTTP_POST, "/api/debug/pwm",       api_debug_pwm),
+    R(HTTP_POST, "/api/debug/loglevel",  api_debug_loglevel),
     R(HTTP_POST, "/api/mic/calibrate",          api_mic_calibrate),
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
