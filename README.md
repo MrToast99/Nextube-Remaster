@@ -896,27 +896,28 @@ On each hourly NTP sync the firmware:
 
 **Mode 2 is the default and recommended setting.** The PCF8563's crystal is far more stable than the ESP32's internal XTAL oscillator — in testing the PCF8563 shows ~0 ppm drift per hour while the ESP32 XTAL varies between 112–337 ppm (erratic, not temperature-correlated). PCF slave mode delivers ~1 ms steady-state clock accuracy on the physical tubes at the cost of one I²C read per minute.
 
-> **Why does an NTP sync cause a brief realignment?** NTP corrects the system clock by up to ~1 s (one full RTC-second boundary). The next minute-tick after the sync the PCF slave sees that offset and corrects it — this is the `post-sync re-align` value in the hourly summary log. Subsequent ticks return to ~1 ms steady state.
+### NTP sync log
 
-### Hourly diagnostic log
+At each NTP sync a single line is emitted at `INFO` level on the `ntp` tag:
 
-At each NTP sync the following lines are emitted at `INFO` level on the `ntp` tag:
-
+**Mode 2 — PCF slave (default):**
 ```
-ntp: NTP re-sync [diag]: raw ESP timer drifted +1048 ms vs NTP over 3600060 ms
-ntp: NTP re-sync [applied]: hard-set to NTP; between-sync drift handled by discipline mode
-ntp: DRIFT [diag, not applied]  raw ESP XTAL +1048.0 ms/hr (+291.1 ppm) | PCF8563 +0.0 ms/hr (0.0 ppm, 1 s res)
-ntp: PCF slave [diag]: last hour — 58 ticks, |drift| avg 1.1 ms, max 4 ms; post-sync re-align +728 ms
-ntp: RTC updated: 2026-06-07 05:44:18 (local)
+ntp: NTP sync: XTAL was +1048 ms — PCF kept <=4 ms between syncs
 ```
 
-| Tag | Meaning |
-|---|---|
-| `[diag]` | Measurement only — no clock change |
-| `[applied]` | A correction was made |
-| `[diag, not applied]` | Drift was measured but no action was taken (e.g. discipline mode is handling it instead) |
+The XTAL offset shows how far the ESP32 crystal drifted since the last sync — this is what the clock *would* have been without discipline. The number after the dash is the worst single-minute error the PCF slave saw over the past hour.
 
-The `PCF slave [diag]` line summarises the previous hour: number of minute-corrections, average and peak steady-state |drift|, and the one-off post-NTP realignment. Per-minute corrections are suppressed at `INFO` and only visible at `DEBUG` log level.
+**Mode 0 — off, small drift (gradual slew):**
+```
+ntp: NTP sync: slewing +12 ms (~7 min)
+```
+
+**Mode 0 — off, large drift (hard set):**
+```
+ntp: NTP sync: +1048 ms corrected
+```
+
+Per-minute PCF corrections are silent at `INFO` level; set the `ntp` tag to `DEBUG` to see each individual tick correction.
 
 ---
 

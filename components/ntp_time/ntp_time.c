@@ -45,20 +45,13 @@ static bool       s_boot_synced    = false; /* set after first post-boot NTP syn
 static time_t     s_last_ntp_sec   = 0;     /* NTP epoch at last successful sync    */
 static int64_t    s_last_ntp_us    = 0;     /* esp_timer_get_time() µs at last sync */
 
-/* ── Oscillator drift comparison log ────────────────────────────────────────
- * Every genuine hourly re-sync logs a "DRIFT" line giving the measured drift of
- * both the ESP high-res timer (the crystal the system clock runs on) and the
- * PCF8563.  Purely diagnostic. */
-
-/* ── Experimental between-sync disciplining (debug only) ─────────────────────
- * cfg->time_discipline_mode (set from the hidden debug panel):
- *   0 = off — reactive NTP only (default).
- *   1 = ESP — learn the crystal's drift rate and pre-compensate it every
- *             minute with small adjtime() nudges.
- *   2 = PCF — edge-synced read of the PCF8563 each minute, slew toward it.
- * NOTE: the DRIFT log measures the raw esp_timer, which mode 1 does not alter,
- * so its effect is not visible there; and it partially fights the NTP smoother.
- * Kept as an experimental knob, not a recommended default. */
+/* ── Between-sync time disciplining ─────────────────────────────────────────
+ * cfg->time_discipline_mode:
+ *   0 = off — reactive NTP only; XTAL drift uncorrected between syncs.
+ *   1 = ESP — learn the crystal's drift rate and pre-compensate each minute
+ *             with small adjtime() nudges.
+ *   2 = PCF — edge-sync to the PCF8563 each minute; slew toward it.
+ *             Best between-sync accuracy (~1 ms). Default.              */
 #define DISCIPLINE_INTERVAL_S   60      /* ntp_task wakes every 60 s            */
 #define DRIFT_EMA_ALPHA         0.30    /* smoothing for the learned drift rate */
 
@@ -93,140 +86,95 @@ static void time_sync_cb(struct timeval *tv)
     int64_t now_us  = esp_timer_get_time();
 
     if (!s_boot_synced) {
-        /* ── Boot sync: leave the hard settimeofday() in place ────────────
-         * The device may have been off for any length of time; jumping
-         * straight to the correct time is always the right thing to do.   */
-        ESP_LOGI(TAG, "NTP sync: boot — hard set to %lld", (long long)ntp_sec);
+        ESP_LOGI(TAG, "NTP sync: boot — clock set");
         s_boot_synced = true;
 
     } else {
-        /* ── Post-boot callback: decide hard-set vs adjtime ───────────────
-         * Reconstruct elapsed real-time from esp_timer — the systimer/HRT, the
-         * same XTAL-locked source gettimeofday() uses.  NOT the FreeRTOS tick:
-         * xTaskGetTickCount() loses counts during long interrupt-disabled
-         * windows (SPI-DMA display pushes, LED RMT, flash writes), which
-         * overstated elapsed time by ~280 ppm and made the smoothing inject a
-         * ~900 ms/hr sawtooth.  adjtime() does not affect esp_timer.        */
-        int64_t    elapsed_ms    = (now_us - s_last_ntp_us) / 1000LL;
-        time_t     elapsed_s     = (time_t)(elapsed_ms / 1000LL);
-        time_t     expected      = s_last_ntp_sec + elapsed_s;
-        int64_t    offset_s      = (int64_t)ntp_sec - (int64_t)expected;
-        int64_t    offset_ms     = offset_s * 1000LL + (tv ? (int64_t)(tv->tv_usec / 1000) : 0LL);
-        int64_t    abs_offset    = offset_s >= 0 ? offset_s : -offset_s;
-
-        ESP_LOGI(TAG, "NTP re-sync [diag]: raw ESP timer drifted %+lld ms vs NTP over %lld ms",
-                 (long long)offset_ms, (long long)elapsed_ms);
+        /* Reconstruct elapsed real-time from esp_timer — adjtime-immune and
+         * unaffected by long interrupt-disabled windows (DMA, flash writes)
+         * that cause xTaskGetTickCount() to undercount.                    */
+        int64_t elapsed_ms = (now_us - s_last_ntp_us) / 1000LL;
+        time_t  elapsed_s  = (time_t)(elapsed_ms / 1000LL);
+        time_t  expected   = s_last_ntp_sec + elapsed_s;
+        int64_t offset_s   = (int64_t)ntp_sec - (int64_t)expected;
+        int64_t offset_ms  = offset_s * 1000LL + (tv ? (int64_t)(tv->tv_usec / 1000) : 0LL);
+        int64_t abs_offset = offset_s >= 0 ? offset_s : -offset_s;
 
         if (elapsed_s < NTP_BOOT_WINDOW_S) {
-            /* Still in the boot window — additional pool-server responses
-             * arrive within seconds of the first sync.  Treat them all as
-             * hard sets: the RTC seed may have been inaccurate and we want
-             * the clock locked to NTP as quickly as possible.             */
-            ESP_LOGI(TAG, "NTP re-sync [applied]: hard-set to NTP (boot window)");
+            /* Boot-window duplicate: extra pool responses arrive seconds
+             * after the first sync.  Hard-set already applied by SNTP.   */
+            ESP_LOGI(TAG, "NTP sync: %+lld ms (boot window)", (long long)offset_ms);
 
-        } else if (discipline_mode() != 0) {
-            /* A between-sync disciplining mode is active (ESP rate or PCF
-             * slaving).  Leave the SNTP engine's hard-set in place and DO NOT
-             * slew: the per-minute discipline_tick() holds the clock to its
-             * reference, and the smoother's adjtime would otherwise yank it
-             * ~offset ms off that reference once an hour. */
-            ESP_LOGI(TAG, "NTP re-sync [applied]: hard-set to NTP; between-sync drift handled by "
-                          "discipline mode (the raw-offset line above is diagnostic only)");
+        } else if (discipline_mode() == 2) {
+            /* PCF slave active: hard-set stays; PCF edge-sync holds the
+             * clock each minute.  Report worst-case error seen this hour. */
+            if (s_pcf_n > 0) {
+                ESP_LOGI(TAG, "NTP sync: XTAL was %+lld ms — PCF kept <=%.0f ms between syncs",
+                         (long long)offset_ms, s_pcf_max_abs);
+            } else {
+                ESP_LOGI(TAG, "NTP sync: XTAL was %+lld ms — PCF slave active",
+                         (long long)offset_ms);
+            }
+
+        } else if (discipline_mode() == 1) {
+            /* ESP rate discipline active: hard-set stays; rate nudge each
+             * minute.  Show raw XTAL drift for reference.                 */
+            ESP_LOGI(TAG, "NTP sync: XTAL was %+lld ms — ESP rate discipline active",
+                     (long long)offset_ms);
 
         } else if (abs_offset <= NTP_SMOOTH_MAX_S) {
-            /* Genuine hourly re-sync with small drift — slew with adjtime().
-             * adjtime() at ~500 µs/s never jumps the clock backwards.
-             * Indicative slew times:  1 s → ~33 min,  60 s → ~33 h.
-             * The display tick clamp (CLOCK_MAX_STEP_S = 1 in display.c)
-             * independently keeps the visual output smooth.               */
+            /* Mode 0, small drift: undo hard-set and slew smoothly so the
+             * clock never jumps backwards.  adjtime() at ~500 µs/s takes
+             * roughly 33 min per second of offset.                        */
             struct timeval tv_old  = { .tv_sec  = expected, .tv_usec = 0 };
             struct timeval tv_corr = { .tv_sec  = (time_t)offset_s,
                                        .tv_usec = tv ? tv->tv_usec : 0 };
-            settimeofday(&tv_old, NULL);   /* restore pre-correction position */
-            adjtime(&tv_corr, NULL);       /* slew to NTP target gradually    */
-            ESP_LOGI(TAG, "NTP re-sync [applied]: adjtime %+lld ms (smoothing)",
-                     (long long)offset_ms);
+            settimeofday(&tv_old, NULL);
+            adjtime(&tv_corr, NULL);
+            long long slew_min = (long long)abs_offset * 2000LL / 60LL;
+            ESP_LOGI(TAG, "NTP sync: slewing %+lld ms (~%lld min)",
+                     (long long)offset_ms, slew_min);
+
         } else {
-            /* Large drift — leave the hard settimeofday() in place.       */
-            ESP_LOGI(TAG, "NTP re-sync [applied]: hard-set %+lld ms (exceeds %d s smooth window)",
-                     (long long)offset_ms, NTP_SMOOTH_MAX_S);
+            /* Mode 0, large drift: hard-set stays.                        */
+            ESP_LOGI(TAG, "NTP sync: %+lld ms corrected", (long long)offset_ms);
         }
 
-        /* ── Drift comparison log (genuine hourly re-syncs only) ──
-         * Skip boot-window duplicates.  1 ppm = 1 µs/s = 3.6 ms/hr. */
+        /* Update XTAL drift EMA (silent — used by mode-1 discipline) and
+         * reset PCF-slave hourly accumulators.  Skip boot-window callbacks
+         * whose short elapsed time would corrupt the learned rate.         */
         if (elapsed_s >= NTP_BOOT_WINDOW_S && elapsed_ms > 0) {
             double esp_ppm = (double)offset_ms / (double)elapsed_ms * 1e6;
-
-            /* PCF8563 drift: read it BEFORE the post-sync write (below)
-             * overwrites it.  It was last set to NTP truth at the previous
-             * sync, so (pcf − ntp) over this interval is its own drift.
-             * 1 s read resolution → ~278 ppm granularity at a 1 h interval. */
-            struct tm pcf_t;
-            if (rtc_get_time(&pcf_t)) {
-                double pcf_ppm = (double)(((long long)mktime(&pcf_t) - (long long)ntp_sec) * 1000LL)
-                                 / (double)elapsed_ms * 1e6;
-                ESP_LOGI(TAG, "DRIFT [diag, not applied]  raw ESP XTAL %+.1f ms/hr (%+.1f ppm)  |  "
-                              "PCF8563 %+.1f ms/hr (%+.1f ppm, 1 s res)",
-                         esp_ppm * 3.6, esp_ppm, pcf_ppm * 3.6, pcf_ppm);
-            } else {
-                ESP_LOGI(TAG, "DRIFT [diag, not applied]  raw ESP XTAL %+.1f ms/hr (%+.1f ppm)  |  "
-                              "PCF8563 read failed",
-                         esp_ppm * 3.6, esp_ppm);
-            }
-
-            /* Learn the ESP crystal drift rate (EMA) for mode-1 disciplining.
-             * offset_ms is esp_timer-based (adjtime-immune), so it measures the
-             * raw rate with no feedback loop — a plain EMA converges to it. */
             s_esp_drift_ppm = s_drift_valid
                 ? (DRIFT_EMA_ALPHA * esp_ppm + (1.0 - DRIFT_EMA_ALPHA) * s_esp_drift_ppm)
                 : esp_ppm;
             if (++s_drift_samples >= 2) s_drift_valid = true;
 
-            /* PCF-slave (mode 2): one summary line per hour instead of ~60. */
-            if (s_pcf_n > 0 || s_pcf_realign_ms != 0.0) {
-                ESP_LOGI(TAG, "PCF slave [diag]: last hour — %d ticks, |drift| avg %.1f ms, "
-                              "max %.0f ms; post-sync re-align %+.0f ms",
-                         s_pcf_n, s_pcf_n ? s_pcf_sum_abs / s_pcf_n : 0.0,
-                         s_pcf_max_abs, s_pcf_realign_ms);
-            }
             s_pcf_n = 0; s_pcf_sum_abs = 0.0; s_pcf_max_abs = 0.0; s_pcf_realign_ms = 0.0;
         }
     }
 
-    s_synced     = true;
-    s_time_valid = true;
+    s_synced       = true;
+    s_time_valid   = true;
+    s_last_ntp_sec = ntp_sec;
+    s_last_ntp_us  = now_us;
 
-    /* Save reference point for the next re-sync's offset computation.     */
-    s_last_ntp_sec   = ntp_sec;
-    s_last_ntp_us = now_us;
-
-    /* Write the NTP time back to the battery-backed RTC so it survives
-     * power cuts and acts as a warm seed on the next boot.  Store local
-     * time so mktime() can reconstruct time_t without extra UTC handling
-     * (TZ is always applied before both writes and reads).
-     *
-     * The PCF8563 only stores whole seconds, so ROUND to the nearest second
-     * (instead of truncating tv_sec): this centres the RTC's error at ±0.5 s
-     * rather than 0..−1 s, halving the worst-case post-sync re-alignment when
-     * PCF slaving is active. */
+    /* Write NTP time back to the battery-backed RTC so it survives power
+     * cuts and provides a warm seed on the next boot.  Rounded to the
+     * nearest second to centre the PCF-slave post-sync re-alignment at
+     * ±0.5 s rather than 0..−1 s.                                        */
     time_t rtc_sec = ntp_sec + ((tv && tv->tv_usec >= 500000) ? 1 : 0);
     struct tm t;
     localtime_r(&rtc_sec, &t);
-    if (rtc_set_time(&t)) {
-        ESP_LOGI(TAG, "RTC updated: %04d-%02d-%02d %02d:%02d:%02d (local)",
-                 t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-                 t.tm_hour, t.tm_min, t.tm_sec);
-    } else {
+    if (!rtc_set_time(&t)) {
         ESP_LOGW(TAG, "RTC write failed after NTP sync");
     }
 
-    /* The RTC was just rewritten (whole-second), so the next PCF-slave tick is
-     * the one-off re-alignment — flag it so it's tracked separately from the
-     * steady-state per-minute drift in the hourly summary.
-     * Only set when mode 2 is actually active; otherwise the flag would stay
-     * true indefinitely (only the mode-2 tick handler clears it), and the
-     * first tick after switching to mode 2 would misclassify steady-state
-     * drift as a post-sync realignment. */
+    /* The RTC was just rewritten, so the next PCF-slave tick is a one-off
+     * whole-second re-alignment — flag it so discipline_tick() tracks it
+     * separately from the steady-state per-minute accumulator.
+     * Guard: only mode 2 ever clears this flag; setting it in other modes
+     * would leave it true indefinitely.                                   */
     if (discipline_mode() == 2) s_pcf_post_sync = true;
 }
 
