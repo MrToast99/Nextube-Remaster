@@ -151,10 +151,10 @@ ring buffer directly into the DAC register at **32 kHz**.
 Crucially, the DAC is **not** left running between sounds. It is created and
 enabled **per clip** by the playback task (`dac_restart()`), and torn down again
 (`dac_teardown()`) the moment the clip — plus its fade-out — finishes. This
-mirrors how the stock firmware behaved: silence means *nothing is clocked*. A
-continuously-running DMA/I²S engine puts periodic switching activity on the
-shared 3.3 V rail (audible as static); by only bringing the engine up while a
-sound is actually playing, the idle is genuinely quiet.
+mirrors how the stock firmware behaved: silence means *nothing is clocked*.
+Tearing down also lets the GPIO25 pad return to the isolated idle state between
+clips (the decisive noise factor — see below), and avoids keeping the I²S0
+engine, APLL, and a live DAC output buffer running for no benefit.
 
 **Idle state (no clip playing), in *both* the enabled and disabled cases:**
 the GPIO25 pad is **isolated** via `rtc_gpio_isolate()` — input and output
@@ -254,14 +254,20 @@ Audio output is **disabled by default**. The toggle takes effect on the **next r
 
 > **Why isolation beats a driven idle:** earlier builds drove GPIO25 LOW at idle (after digital Hi-Z was found to pick up SPI chirping). A staged-bring-up bisection later showed the LOW clamp itself was the dominant noise path: the pin's pull-down FET references the amp input to the digital ground, so the FreeRTOS tick produced a constant static floor, flash reads were audible as hiss, panel init as beeps, and the per-second redraw as a 1 Hz tick — independent of CPU speed, SPI clock, PSRAM use, or which tasks ran. `rtc_gpio_isolate()` removes the conduction path entirely and the idle is near-silent, matching stock.
 
-#### Idle noise — WS2812B LEDs (~400 Hz)
+#### Idle noise — RESOLVED (history and current state)
 
-The WS2812B LEDs use an **internal ~400 Hz PWM** to modulate their brightness.
-This creates current pulses on the shared 3.3 V rail at 400 Hz — solidly in
-the audible band — that couple through the DAC output buffer into the amplifier
-input.
-
-**Software mitigations (already implemented):**
+The idle noise floor (constant static, hiss during flash/SPI activity, and a
+1 Hz tick) was fully root-caused by a staged-bring-up bisection: the dominant
+path was the **GPIO25 idle drive state** conducting the ESP32's ground/supply
+transients into the amplifier — not any individual peripheral.  Suspected
+sources that were tested and **ruled out** along the way: FreeRTOS tick rate,
+ISR/stack placement, PSRAM traffic, touch sensing, the WS2812 LED strip and
+its internal ~400 Hz PWM, SPI clock speed, the display task, backlight PWM,
+and CPU frequency.  `rtc_gpio_isolate()` on GPIO25 (the stock firmware's idle
+pad state) removed the conduction path; the idle is now measured equivalent
+to stock.  The mitigations below remain in place — they reduce rail transients
+and per-second SPI/CPU load, which still matter for the small capacitive
+residual and for general efficiency:
 
 | Mitigation | Effect |
 |---|---|
@@ -273,16 +279,17 @@ input.
 | RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
 | Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
 
-**Why increasing PWM frequency does not help:**
-- The WS2812 internal ~400 Hz PWM is inside the chip and cannot be changed in software.
-- The LCD backlight PWM (`display.c`) is already at **50 kHz** — above the audible range.
-- The WS2812 RMT bit clock (`leds.c`) runs at **10 MHz** — this is a fixed protocol requirement, not a noise tone.
-- The interference is broadband current transients, not a single tone; moving the repetition rate higher does not reduce coupled energy.
+**Historical note — why frequency-shifting the noise sources never helped:**
+the interference was broadband current transients conducted through the GPIO25
+pin driver, not a single tone — so raising any PWM/clock frequency (WS2812
+internal ~400 Hz PWM is fixed in-chip anyway; backlight PWM is already 50 kHz;
+RMT bit clock is a 10 MHz protocol requirement) could never reduce it.  This
+is also why every activity-reduction experiment failed: the fix was removing
+the conduction path (pad isolation), not quieting the chip.
 
-**Permanent hardware fix:**
-Place a **100 µF + 100 nF** decoupling cap as close as possible to the ESP32
-`VDD3P3_RTC` pin. This absorbs the 400 Hz current spikes at the source before
-they can reach the DAC buffer.
+**Optional hardware hardening** (no longer required for quiet idle): a
+**100 µF + 100 nF** decoupling cap close to the ESP32 `VDD3P3_RTC` pin further
+reduces supply transients reaching the DAC's analog domain during playback.
 
 #### Residual noise floor with everything off
 
