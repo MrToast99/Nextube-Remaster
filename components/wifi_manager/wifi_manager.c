@@ -474,20 +474,25 @@ void wifi_manager_start(void)
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* WiFi power-save: modem-sleep (IDF default, matches stock firmware).
+    /* WiFi power-save: NONE (radio always on).
      *
-     * We previously forced WIFI_PS_NONE to remove the periodic DTIM wake/sleep
-     * tick.  But PS_NONE keeps the radio PA powered continuously (~120 mA
-     * steady) instead of sleeping between DTIM beacons (~20–40 mA average) —
-     * that continuous draw on the shared 3.3 V rail is itself a continuous
-     * noise floor coupled into the always-on amplifier via its PSRR.  Ghidra
-     * decompilation confirmed the stock firmware runs default modem-sleep and
-     * is silent at idle, so we revert to WIFI_PS_MIN_MODEM to drop the
-     * continuous rail current.  (Trade-off: a faint periodic DTIM tick may
-     * return; A/B against the PS_NONE build to compare.) */
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+     * History: PS_NONE was tried early, then reverted to MIN_MODEM because the
+     * radio's continuous rail current raised the audio noise floor.  We now
+     * know WHY it was audible: the noise conducted into the amplifier through
+     * the GPIO25 LOW clamp (amp input referenced to digital ground via the
+     * pin's pull-down FET).  That path was severed — GPIO25 is now isolated at
+     * idle via rtc_gpio_isolate() — so PS_NONE no longer carries a noise cost.
+     *
+     * Meanwhile MIN_MODEM had a real connectivity cost: the radio slept ~80%
+     * of the time (log: "pm stop, total sleep time") and dropped downlink
+     * frames — observed as MQTT "No PING_RESP" disconnects every keepalive
+     * interval and esp-tls select() timeouts on inbound handshake data, while
+     * uplink (connect/publish) worked.  PS_NONE keeps the receiver on and
+     * fixes the RX loss.  (Power cost: ~120 mA steady vs ~20–40 mA average —
+     * acceptable for a mains-powered clock.) */
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
-    ESP_LOGI(TAG, "WiFi started (PS=MIN_MODEM).  AP SSID: Nextube-Setup (WPA2) %s",
+    ESP_LOGI(TAG, "WiFi started (PS=NONE).  AP SSID: Nextube-Setup (WPA2) %s",
              have_creds ? "(staged, not broadcasting)" : "(broadcasting)");
 }
 

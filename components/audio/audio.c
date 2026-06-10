@@ -436,15 +436,15 @@ void audio_init(bool enabled)
     xSemaphoreGive(s_play_mutex);
 
     if (!enabled) {
-        /* Disabled: do NOT touch GPIO25 — leave it in the OUTPUT-LOW state the
-         * boot clamp (app_main) already established.  Every change to the pin's
-         * drive state is a DC step through the amp's AC coupling cap = a pop;
-         * re-driving it here was the source of the SECOND boot pop.  The low-Z
-         * clamp set at boot shunts SPI antenna pickup (no scroll chirping, no
-         * 1 Hz pulses) and persists untouched.  s_dac_cont stays NULL so
-         * audio_play_file() can never stream.  Re-enabling requires a reboot. */
+        /* Disabled: do NOT touch GPIO25 — leave it in the isolated state
+         * app_main already established (rtc_gpio_isolate: pad disconnected
+         * from the digital domain, the stock firmware's idle).  Any change to
+         * the pin's drive state is a DC step through the amp's AC coupling
+         * cap = a pop, so it is set exactly once at boot and never re-driven.
+         * s_dac_cont stays NULL so audio_play_file() can never stream.
+         * Re-enabling requires a reboot. */
         s_audio_enabled = false;
-        ESP_LOGI(TAG, "Audio disabled — GPIO%d stays clamped LOW (untouched), no DAC",
+        ESP_LOGI(TAG, "Audio disabled — GPIO%d stays isolated (untouched), no DAC",
                  PIN_AUDIO_DAC);
         return;
     }
@@ -453,8 +453,8 @@ void audio_init(bool enabled)
      * per-clip by the playback task and torn down again afterwards (matching
      * the stock firmware's install-on-play / uninstall-after behaviour), so
      * there is no continuous I2S0 DMA running between clips — that continuous
-     * DMA was an idle-noise source.  GPIO25 stays in the boot clamp's quiet
-     * OUTPUT-LOW state until the first clip plays. */
+     * DMA was an idle-noise source.  GPIO25 stays in the boot isolation
+     * state until the first clip plays. */
     s_audio_enabled = true;
     ESP_LOGI(TAG, "Audio enabled — DAC brought up per-clip (GPIO%d LOW at idle)",
              PIN_AUDIO_DAC);
