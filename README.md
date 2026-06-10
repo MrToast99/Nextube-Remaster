@@ -47,7 +47,6 @@ Like the work? Help keep me Caffeinated! <br>
   - [Image Converter Helper](#image-converter-helper)
 - [REST API](#rest-api)
 - [Project Structure](#project-structure)
-- [Contributing](#contributing)
 - [License](#license)
 - [Community](#community)
 
@@ -1360,14 +1359,6 @@ nextube-fw/
 ├── sdkconfig.defaults             # ESP-IDF SDK config overrides
 └── CMakeLists.txt                 # Project build file
 ```
-
-## Contributing
-
-This is a community reverse-engineering effort. Key areas needing help:
-
-1. ~~**Theme images** — Extract or recreate the Nixie/Digital/Flip digit artwork for the displays~~
-2. ~~**SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)~~
-3. **Date face** — Configuration UI for custom digit-mapped date face (mode switching already works)
 
 ## License
 
