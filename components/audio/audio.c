@@ -98,10 +98,10 @@ typedef struct __attribute__((packed)) {
 #define PLAY_FADE_MS  120
 
 /*
- * Bring up the continuous DAC from the GPIO-LOW idle, ramping 0 → 128 over
- * fade_ms via a cosine S-curve so the AC coupling cap charges gently (no pop),
- * then pre-fill the ring with mid-rail silence (128).  Called per clip by the
- * playback task; torn back down by dac_teardown() when the clip ends.
+ * Bring up the continuous DAC from the isolated-pad idle, ramping 0 → 128 over
+ * fade_ms via a cosine S-curve so the AC coupling cap charges gently (no pop).
+ * Clip data is queued by the caller immediately after this returns.  Called
+ * per clip by the playback task; torn back down by dac_teardown() at clip end.
  */
 static void dac_restart(int fade_ms)
 {
@@ -165,13 +165,13 @@ static void dac_restart(int fade_ms)
         free(fade);
     }
 
-    /* Pre-fill the ring with silence so the DMA idles at mid-rail. */
-    uint8_t silence[DAC_DMA_BUF_SIZE];
-    memset(silence, 128, sizeof(silence));
-    size_t w;
-    for (int i = 0; i < DAC_DESC_NUM; i++)
-        dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
-
+    /* NOTE: no silence pre-fill here.  The old always-running-ring design
+     * pre-filled the full ring (DAC_DESC_NUM × DAC_DMA_BUF_SIZE = 512 ms at
+     * 32 kHz) so the DMA idled at mid-rail between clips.  With the per-clip
+     * lifecycle the clip data is queued immediately after the fade-in
+     * (clips are preloaded to PSRAM before dac_restart is called), so a
+     * pre-fill would only insert 512 ms of dead air between the button press
+     * and the sound.  Onset latency is now just the fade-in. */
     ESP_LOGI(TAG, "DAC up (32 kHz, %d ms fade-in)", fade_ms);
 }
 
