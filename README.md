@@ -157,7 +157,16 @@ shared 3.3 V rail (audible as static); by only bringing the engine up while a
 sound is actually playing, the idle is genuinely quiet.
 
 **Idle state (no clip playing), in *both* the enabled and disabled cases:**
-GPIO25 is driven as a plain **GPIO output held LOW** — no I²S, no DMA, no clock.
+the GPIO25 pad is **isolated** via `rtc_gpio_isolate()` — input and output
+buffers off, no pulls, pad disconnected from the digital domain. This is the
+exact state the stock firmware's `dac_output_disable()` (IDF 3.3.5) left the
+pad in, and it is the critical detail for a silent idle: any *driven* idle
+state (output LOW was tried, as was digital Hi-Z input) connects the amp's
+AC-coupled input to the ESP32's digital ground/supply through the pin driver,
+and every current transient on the die — the 1 kHz FreeRTOS tick, flash read
+bursts, the per-second clock redraw — couples into the amp as a constant
+static floor, activity hiss, and a 1 Hz tick. With the pad isolated the idle
+is near-silent.
 (The earlier `dac_oneshot` idle was dropped: the `dac_oneshot → dac_continuous`
 transition is unreliable on the original ESP32 — the I²S0 controller does not
 always release state after one-shot use, which then blocks
@@ -169,7 +178,7 @@ always release state after one-shot use, which then blocks
 | Bit depth | 8-bit unsigned PCM (0–255) |
 | Channels | Mono (DAC channel 0, GPIO25) |
 | Playback operating point | **128** (= VDD/2 ≈ 1.65 V) — the centre the ring is fed around |
-| Idle (between clips, either enabled or disabled) | GPIO25 = **OUTPUT LOW** (0 V), no DMA, no clock |
+| Idle (between clips, either enabled or disabled) | GPIO25 pad **isolated** (`rtc_gpio_isolate` — stock firmware's idle state), no DMA, no clock |
 | Per-clip fade in/out | **120 ms** cosine S-curve (`PLAY_FADE_MS`) |
 | DMA buffers | 8 × 2048 bytes (allocated per clip, freed on teardown) |
 
@@ -192,7 +201,7 @@ The pipeline uses **128** because:
 #### Pop prevention — per-clip fade in/out
 
 Each time the DAC ring is brought up for a clip, the output would otherwise
-step from 0 V (the LOW idle) to 128 (the playback centre). Through the coupling
+step from 0 V (the DAC starts at code 0) to 128 (the playback centre). Through the coupling
 cap that step looks like a DC transient — an audible thump. The firmware
 prevents it at **both ends of every clip** with a **cosine S-curve fade** over
 **120 ms** (`PLAY_FADE_MS`):
@@ -237,13 +246,13 @@ gain itself is fixed.
 
 Audio output is **disabled by default**. The toggle takes effect on the **next reboot** — when the web UI saves a change to this setting it triggers a restart so the audio subsystem comes up cleanly in the chosen state.
 
-**Boot with audio disabled (default):** `audio_init(false)` is called. The continuous DAC, I²S0 peripheral, APLL, and DMA ring are never started. GPIO25 is reset to a plain **GPIO output held LOW** (0 V) with **no DMA and no clock**. The AC coupling cap charges to that level; thereafter the amplifier sees ~0 V AC differential — silent. Because nothing is clocked, there is no periodic rail-switching activity to couple into the amp. The ~16 KB DMA heap and the ~1.6 s APLL cold-start delay are avoided entirely.
+**Boot with audio disabled (default):** `audio_init(false)` is called. The continuous DAC, I²S0 peripheral, APLL, and DMA ring are never started. The GPIO25 pad stays **isolated** (`rtc_gpio_isolate()`, applied once at the top of `app_main`) — disconnected from the digital domain, no DMA, no clock. The ~16 KB DMA heap and the ~1.6 s APLL cold-start delay are avoided entirely.
 
-**Boot with audio enabled:** `audio_init(true)` only sets the enabled flag and leaves GPIO25 driven LOW. The DAC is **not** brought up at boot — it is created per clip by the playback task (`dac_restart()` → fade-in → clip → fade-out → `dac_teardown()`), so idle is identical to the disabled case (GPIO LOW, nothing clocked). This is the key difference from earlier builds, which left the ring running at 128 between sounds.
+**Boot with audio enabled:** `audio_init(true)` only sets the enabled flag; the pad stays isolated. The DAC is **not** brought up at boot — it is created per clip by the playback task (`dac_restart()` → fade-in → clip → fade-out → `dac_teardown()`, which re-isolates the pad), so idle is identical to the disabled case. This is the key difference from earlier builds, which left the ring running at 128 between sounds.
 
-**Note:** the LTK8002D itself remains powered (SD pin tied high) in both cases, so its thermal self-noise floor is still present at a low level — see *Residual noise floor* below.
+**Note:** the LTK8002D itself remains powered (SD pin tied high) in both cases, so its thermal self-noise floor is still present at a very low level.
 
-> **Why level 0, not 1, when disabled:** the DAC output equals `(level / 255) × VDD`, so a non-zero idle level *scales with the supply rail*. The per-second clock-face redraw briefly droops the 3.3 V rail; at a non-zero level that droop modulates the DAC output and couples a faint 1 Hz tick into the amp. At level 0 the output is `0 × VDD = 0 V` regardless of rail voltage, so rail droop produces no DAC-path coupling.
+> **Why isolation beats a driven idle:** earlier builds drove GPIO25 LOW at idle (after digital Hi-Z was found to pick up SPI chirping). A staged-bring-up bisection later showed the LOW clamp itself was the dominant noise path: the pin's pull-down FET references the amp input to the digital ground, so the FreeRTOS tick produced a constant static floor, flash reads were audible as hiss, panel init as beeps, and the per-second redraw as a 1 Hz tick — independent of CPU speed, SPI clock, PSRAM use, or which tasks ran. `rtc_gpio_isolate()` removes the conduction path entirely and the idle is near-silent, matching stock.
 
 #### Idle noise — WS2812B LEDs (~400 Hz)
 
@@ -256,7 +265,7 @@ input.
 
 | Mitigation | Effect |
 |---|---|
-| GPIO25 driven **LOW** at idle (between clips, enabled *and* disabled) | No I²S/DMA/clock running — eliminates the continuous-DMA switching noise; a 0 V output is also immune to supply-rail droop (see toggle section) |
+| GPIO25 pad **isolated** at idle (`rtc_gpio_isolate`, between clips, enabled *and* disabled) | No I²S/DMA/clock running, and the pad is disconnected from the digital domain — no conduction path for ground/supply transients into the amp (see toggle section) |
 | DAC created/destroyed **per clip** (`dac_restart` / `dac_teardown`) | The DMA/I²S engine only runs while a sound is actually playing, then is fully torn down — matching the stock firmware's silent idle |
 | `WIFI_PS_MIN_MODEM` (default modem-sleep) | Restores standard WiFi modem-sleep. An earlier build forced `WIFI_PS_NONE`, which kept the radio fully powered and added a **continuous** noise-floor component; reverting to `MIN_MODEM` was the single biggest reduction in the idle floor |
 | Bulk LCD pixel pushes use `spi_device_transmit()` (interrupt/DMA) instead of `spi_device_polling_transmit()` | The DMA path **yields the CPU** while each chunk clocks out, instead of busy-waiting with interrupts hot. This lowered the SPI-induced switching component of the noise floor during every clock-face/ticker redraw. Small command/parameter writes (≤8 bytes) stay on the polling path, where DMA setup would cost more than it saves |
@@ -282,12 +291,12 @@ faint baseline hiss may still be audible. Root cause: the LTK8002D SD pin is
 tied to VDD_5V with no GPIO control — the amp remains fully powered and
 amplifies its own thermal noise (~3× gain into a 4 Ω speaker).
 
-Driving GPIO25 LOW (0 V) at idle — with the DAC torn down so no DMA or clock is
-running — gives the quietest idle the firmware can achieve: a 0 V output that
-does not track supply droop and no switching activity on the rail. The remaining
-hiss is the amp's own thermal noise (and supply-coupled noise via its finite
-PSRR), which is independent of the DAC input. For complete silence a hardware
-modification is required:
+Isolating the GPIO25 pad at idle (`rtc_gpio_isolate()`, with the DAC torn down
+so no DMA or clock is running) gives a near-silent idle — measured equivalent
+to the stock firmware. The remaining hiss is the amp's own thermal noise (and
+supply-coupled noise via its finite PSRR), plus an occasional very faint 1 Hz
+tick from capacitive pickup of the per-second redraw on the floating DAC trace.
+For complete silence a hardware modification is required:
 
 > **Hardware mod:** Cut the SD pull-up resistor and wire the SD pin to a free
 > ESP32 GPIO. `gpio_set_level(PIN_AMP_SHDN, 0)` will draw the amp's shutdown

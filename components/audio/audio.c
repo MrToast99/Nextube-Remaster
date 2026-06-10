@@ -38,6 +38,7 @@
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"   /* rtc_gpio_isolate — GPIO25 idle state */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -186,9 +187,12 @@ static void dac_teardown(void)
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
     }
-    gpio_reset_pin(PIN_AUDIO_DAC);
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_AUDIO_DAC, 0);
+    /* Isolate the pad (stock firmware's idle state) rather than clamping LOW —
+     * a LOW clamp references the amp input to digital ground through the pin's
+     * pull-down FET and conducts every supply/ground transient into the amp
+     * (constant static floor + activity hiss).  rtc_gpio_isolate() disconnects
+     * the pad from the digital domain entirely; measured near-silent. */
+    rtc_gpio_isolate(PIN_AUDIO_DAC);
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
@@ -570,13 +574,11 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         dac_test_teardown();
         s_dac_test_active = false;
 
-        /* Restore the normal idle: GPIO25 driven LOW with no DAC running.
+        /* Restore the normal idle: pad isolated with no DAC running.
          * This is the idle for BOTH enabled (DAC is per-clip now) and disabled
          * audio.  A clip will bring the DAC up again on demand. */
-        gpio_reset_pin(PIN_AUDIO_DAC);
-        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-        gpio_set_level(PIN_AUDIO_DAC, 0);
-        ESP_LOGI(TAG, "DAC test: restored to GPIO-LOW idle");
+        rtc_gpio_isolate(PIN_AUDIO_DAC);
+        ESP_LOGI(TAG, "DAC test: restored to isolated-pad idle");
         return;
     }
 

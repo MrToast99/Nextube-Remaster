@@ -346,7 +346,11 @@ void display_init(void)
     for (int i = 0; i < LCD_COUNT; i++) {
         io.pin_bit_mask = 1ULL << cs_pins[i]; gpio_config(&io); gpio_set_level(cs_pins[i], 1);
     }
-    io.pin_bit_mask = (1ULL << PIN_LCD_DC) | (1ULL << PIN_LCD_RST); gpio_config(&io);
+    io.pin_bit_mask = (1ULL << PIN_LCD_DC);
+#if PIN_LCD_RST >= 0
+    io.pin_bit_mask |= (1ULL << PIN_LCD_RST);
+#endif
+    gpio_config(&io);
 
     spi_bus_config_t bus = {
         .mosi_io_num = PIN_LCD_MOSI, .miso_io_num = -1, .sclk_io_num = PIN_LCD_SCK,
@@ -380,10 +384,14 @@ void display_init(void)
     /* Initialise per-tube gamma LUT to identity (gamma = 1.0, no correction). */
     for (int i = 0; i < LCD_COUNT; i++) { s_gamma[i] = 1.0f; rebuild_gamma_lut(i); }
 
-    /* Hardware reset is shared — pulse RST once to reset all 6 displays,
-     * then send the init sequence to each tube individually. */
+    /* Hardware reset: if RST is wired to a GPIO, pulse it once to reset all
+     * 6 displays together.  If PIN_LCD_RST == -1 the RST line is tied to
+     * 3.3 V on the PCB — ST7735 comes up in reset-released state and the
+     * init sequence below is sufficient to bring every panel up cleanly. */
+#if PIN_LCD_RST >= 0
     gpio_set_level(PIN_LCD_RST, 0); vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_level(PIN_LCD_RST, 1); vTaskDelay(pdMS_TO_TICKS(120));
+#endif
     for (int i = 0; i < LCD_COUNT; i++) { st7735_init_one(i); display_fill(i, 0x0000); }
     /* display_apply_invert_mask(), display_apply_tube_offsets(), and
      * display_apply_tube_brightness() are called by app_main() after display_init()

@@ -405,9 +405,8 @@ static esp_err_t api_post_settings(httpd_req_t *r)
 
     /* Boot-time feature flags or hostname changed — reboot required.
      * Hostname is baked into LWIP netif, DHCP option 12, and mDNS at start-up;
-     * changing it live is not supported.  audio_enabled uses dac_oneshot at
-     * boot when disabled; mixing oneshot and dac_continuous in the same session
-     * is unreliable on original ESP32, so it also requires a reboot.
+     * changing it live is not supported.  audio_enabled gates the deferred
+     * audio task at boot, so toggling it also requires a reboot.
      * Respond first so the browser gets confirmation before the TCP connection
      * drops. */
     bool needs_reboot = (strcmp(old_hostname, new_hostname) != 0) ||

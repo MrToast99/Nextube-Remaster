@@ -117,7 +117,10 @@ static char *http_get(const char *url)
 
     esp_http_client_config_t hcfg = {
         .url               = url,
-        .timeout_ms        = 5000,   /* fail fast — frees TLS heap for web server */
+        .timeout_ms        = 10000,  /* 5 s proved too tight for cold-boot connects:
+                                      * select() timeouts on the first geocoding fetch
+                                      * while DNS/gateway are cold.  10 s matches the
+                                      * subscribers component (same tls_sem). */
         .user_agent        = HTTP_USER_AGENT,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };

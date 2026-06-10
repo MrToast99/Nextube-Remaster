@@ -11,12 +11,12 @@
 #define PIN_LCD_SCK       12
 #define PIN_LCD_MOSI      13
 #define PIN_LCD_DC        14
-#define PIN_LCD_RST       27
+#define PIN_LCD_RST       27   /* shared RST for tubes 4-6; tubes 1-3 RST tied to 3.3 V */
 #define PIN_LCD_BACKLIGHT  19   /* PWM-capable */
 
 /* ── LCD Chip Selects (active low) ─────────────────────────────────── */
 #define PIN_LCD1_CS       33   /* leftmost tube */
-#define PIN_LCD2_CS       26
+#define PIN_LCD2_CS       26   /* dual-use: LCD2 CS and DAC_CHAN_1 audio (time-shared in stock FW) */
 #define PIN_LCD3_CS       21
 #define PIN_LCD4_CS        0
 #define PIN_LCD5_CS        5

@@ -33,6 +33,9 @@
 #include "esp_heap_caps.h"
 
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"   /* rtc_gpio_isolate — GPIO25 idle state */
+/* dac_oneshot.h intentionally not included — GPIO26 (DAC_CHAN_1) is audio
+ * hardware on this PCB and must not be claimed by the application. */
 #include "board_pins.h"
 #include "config_mgr.h"
 #include "display.h"
@@ -315,26 +318,33 @@ void app_main(void)
     ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster  ║");
     ESP_LOGI(TAG, "╚═════════════════════════════════════════════════════╝");
 
-    /* ── Clamp the DAC output pin LOW once, then never touch it ──────────
-     * GPIO25 (DAC_CHAN_0 → LTK8002D amplifier) is Hi-Z at power-on.  A floating
-     * Hi-Z node is a high-impedance ANTENNA: the intense SPI switching during
-     * the AP-PIN scroll (and the per-second colon redraw) couples capacitively
-     * into it and chirps through the amp.  Driving it OUTPUT LOW presents a
-     * low-impedance node that SHUNTS that pickup — measured to remove the
-     * scroll chirping and the 1 Hz pulses.
+    /* ── Isolate the DAC output pad at idle ──────────────────────────────
+     * GPIO25 (DAC_CHAN_0 → LTK8002D amplifier).  Idle state matters enormously:
      *
-     * The cost is one DC step (Hi-Z → 0 V) through the amp's AC coupling cap =
-     * a single boot pop.  We accept that one pop but drive the pin EXACTLY ONCE
-     * here; audio_init(false) deliberately does NOT re-drive it (re-driving was
-     * the source of the second boot pop).
+     *   • Driven LOW (previous approach): references the amp's AC-coupled
+     *     input to the ESP32's DIGITAL GROUND through the pin's pull-down
+     *     FET.  Every current spike on the die then appears at the amp input
+     *     as ground bounce — measured as a constant static floor (1 kHz tick
+     *     wake-ups), hiss during flash reads, beeps during panel init, and a
+     *     1 Hz tick from the per-second redraw.
      *
-     * A residual static floor remains (supply-coupled via the amp's PSRR,
-     * present regardless of this pin's state).  If audio is enabled,
-     * dac_restart() in the deferred task reconfigures GPIO25 for DAC use;
-     * otherwise it stays clamped LOW, untouched, for the whole session. */
-    gpio_reset_pin(PIN_AUDIO_DAC);
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_AUDIO_DAC, 0);
+     *   • Digital INPUT (Hi-Z): input buffer + GPIO-matrix connection stay
+     *     alive; measured noisier than LOW for broadband pickup.
+     *
+     *   • rtc_gpio_isolate(): RTC mux, input/output buffers off, no pulls —
+     *     pad fully disconnected from the digital domain.  This is the exact
+     *     state IDF 3.3.5's dac_output_disable() left the pad in, i.e. the
+     *     stock firmware's idle.  Measured near-silent: no static floor, no
+     *     activity hiss, no boot pop (no DC step into the coupling cap).
+     *
+     * If audio is enabled, dac_restart() in the deferred task reconfigures
+     * the pad for DAC use per clip; dac_teardown() re-isolates it after.
+     *
+     * GPIO26 (DAC_CHAN_1) is dual-use on this PCB: it is also PIN_LCD2_CS.  The stock
+     * firmware time-shares it between LCD CS and audio DAC.  We use it only as SPI CS;
+     * the DAC driver must not claim it (dac_oneshot on DAC_CHAN_1 would conflict with
+     * the SPI driver asserting CS on the same pin).  Leave it to the SPI driver only. */
+    rtc_gpio_isolate(PIN_AUDIO_DAC);
 
     /* Allow power rails and SPI peripherals to fully settle. */
     vTaskDelay(pdMS_TO_TICKS(200));

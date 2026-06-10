@@ -46,6 +46,9 @@ CONFIG_SPIRAM_SIZE=4194304
 # CPU frequency
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
+# Bluetooth — fully disabled (not used; explicit to prevent accidental opt-in)
+CONFIG_BT_ENABLED=n
+
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
@@ -201,18 +204,25 @@ CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 #
 CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
 #
-# Hardware RSA accelerator — DISABLED (software RSA).
+# Hardware RSA accelerator — ENABLED.
 # With DEFAULT_MEM_ALLOC + ALWAYSINTERNAL=255, hardware RSA's staging buffers
-# (allocated via mbedtls_calloc → calloc → SPIRAM-aware) would also land in
-# PSRAM, which is safe for the ESP32 hardware RSA peripheral (it reads
-# operands via CPU register writes, not DMA).  However, software RSA is kept
-# for simplicity — re-enabling it is a future optimisation.
+# (allocated via mbedtls_calloc → calloc → SPIRAM-aware) land in PSRAM, which
+# is safe for the ESP32 hardware RSA peripheral: it receives operands via CPU
+# register writes (cache-mediated reads from PSRAM), NOT DMA — so the
+# PSRAM-split has no bearing on it.  (The historical PSRAM-related TLS
+# failures were allocator-mode problems: INTERNAL_MEM_ALLOC fragmentation
+# → 0x4290, and EXTERNAL_MEM_ALLOC breaking the supplicant's DMA buffers —
+# both documented above and both fixed by DEFAULT_MEM_ALLOC + threshold.)
 #
-# Performance trade-off: software RSA-4096 on ESP32 at 240 MHz takes roughly
-# 200–400 ms per public-key operation (vs ~50 ms hardware).  Weather fetches
-# every 10 minutes and social counters every 30 minutes make this latency
-# imperceptible in practice.
-CONFIG_MBEDTLS_HARDWARE_MPI=n
+# Why enabled: software RSA-4096 takes ~200–400 ms per public-key operation
+# (vs ~50 ms hardware).  A TLS handshake performs several, and on a cold boot
+# — DNS cold, router DHCP/ARP fresh, display + NTP + MQTT + social fetches
+# all competing — the weather client's 5 s fail-fast timeout was intermittently
+# exceeded ("esp-tls: Failed to open new connection in specified timeout" at
+# ~52 s, first fetch after WiFi).  Hardware RSA cuts the handshake's crypto
+# cost ~4–8×, keeping the first fetch inside its timeout.
+# If TLS verification ever fails consistently with this enabled, revert to =n.
+CONFIG_MBEDTLS_HARDWARE_MPI=y
 
 # MQTT
 # Reduce the esp-mqtt internal task stack from the default 6144 bytes to 4096.
