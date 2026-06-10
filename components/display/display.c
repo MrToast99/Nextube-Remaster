@@ -1609,6 +1609,13 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
     deselect_all();
 }
 
+/* Marquee change-detection: the display task ticks at 5 Hz during the PIN
+ * phase but the scroll position only advances at 1 Hz, so 4 of 5 ticks would
+ * repaint identical content.  Reset to -1 by the AP-PIN exit guard so a
+ * later re-entry (force-AP) repaints from scratch. */
+static int      s_pin_last_scroll = -1;
+static uint16_t s_pin_last_fg     = 0;
+
 static void render_ap_pin(const nextube_config_t *cfg)
 {
     const char *pin = wifi_manager_get_ap_pin();
@@ -1626,6 +1633,12 @@ static void render_ap_pin(const nextube_config_t *cfg)
 
     /* Sample theme colour once; white fallback when cache is cold. */
     uint16_t fg = ht_sample_theme_color(cfg->theme);
+
+    /* Skip the repaint when neither the scroll step nor the colour changed
+     * since the last tick — saves 6 full-tube SPI pushes on 4 of 5 ticks. */
+    if (scroll == s_pin_last_scroll && fg == s_pin_last_fg) return;
+    s_pin_last_scroll = scroll;
+    s_pin_last_fg     = fg;
 
     for (int tube = 0; tube < LCD_COUNT; tube++) {
         int  pos = (scroll + tube) % seq_len;
@@ -3075,10 +3088,10 @@ static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
 
     if (rising) {                /* advance exactly once per render frame */
         if (s_ph == 0) {
-            s_pos += 1.5f;
+            s_pos += 2.25f;      /* 1.5 px/frame × 1.5 speed-up */
             if (s_pos >= 110.0f) { s_pos = 110.0f; s_ph = 1; s_cnt = 0; }
         } else {
-            if (++s_cnt >= 60) { s_ph = 0; s_pos = 0.0f; }
+            if (++s_cnt >= 40) { s_ph = 0; s_pos = 0.0f; }  /* hold scaled to match */
         }
     }
 
@@ -3923,6 +3936,7 @@ static void display_task(void *arg)
          * entry point regardless of what mode was active before setup. */
         if (ap_pin_transition) {
             ap_pin_transition = false;
+            s_pin_last_scroll = -1;   /* marquee repaints from scratch on re-entry */
             for (int _t = 0; _t < LCD_COUNT; _t++) display_fill(_t, 0x0000);
             config_set_mode(APP_MODE_CLOCK);
             ESP_LOGI(TAG, "AP PIN exit — mode reset to Clock");

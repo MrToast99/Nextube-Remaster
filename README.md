@@ -180,7 +180,7 @@ always release state after one-shot use, which then blocks
 | Playback operating point | **128** (= VDD/2 ≈ 1.65 V) — the centre the ring is fed around |
 | Idle (between clips, either enabled or disabled) | GPIO25 pad **isolated** (`rtc_gpio_isolate` — stock firmware's idle state), no DMA, no clock |
 | Per-clip fade in/out | **120 ms** cosine S-curve (`PLAY_FADE_MS`) |
-| DMA buffers | 8 × 2048 bytes (allocated per clip, freed on teardown) |
+| DMA buffers | 4 × 1024 bytes (allocated per clip, freed on teardown; ring is silence-primed before each clip — onset latency ≈ fade-in + 128 ms) |
 
 #### Silence level — why 128, not 0
 

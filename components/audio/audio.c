@@ -14,14 +14,14 @@
  * immediately.  A mutex serialises concurrent play requests.
  *
  * DAC mode lifecycle:
- *   disabled – GPIO25 is driven OUTPUT LOW (push-pull, ~12 Ω to ground); NO
- *             DAC is brought up at all.  Measured on hardware (with the SPI
- *             display on DMA): a hard GPIO-LOW clamp is quieter than an active
- *             RTC DAC buffer — the DAC's analog output stage has higher output
- *             impedance and injects its own reference / 1/f noise, raising the
- *             floor, whereas the low-impedance GPIO clamp shunts coupled noise
- *             at the amp's AC-coupled input.  Changing audio_enabled needs a
- *             reboot.
+ *   disabled – the GPIO25 pad is ISOLATED (rtc_gpio_isolate: input/output
+ *             buffers off, no pulls — set once in app_main); NO DAC is
+ *             brought up at all.  Measured on hardware: isolation beats every
+ *             driven idle (OUTPUT-LOW clamp referenced the amp input to
+ *             digital ground and conducted the chip's activity in as a static
+ *             floor + 1 Hz tick; digital Hi-Z picked up broadband coupling;
+ *             a live DAC buffer injects its own reference / 1/f noise).
+ *             Changing audio_enabled needs a reboot.
  *
  *             (dac_continuous, used during playback, requires a perpetually
  *             running I2S0 DMA + clock and so cannot serve as a quiet idle.)
@@ -68,8 +68,16 @@ static volatile bool           s_dac_test_active = false;
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
 #define FIXED_DAC_RATE     32000
 #define STREAM_BUF_BYTES   4096   /* file read chunk; also 8-bit output buf */
-#define DAC_DESC_NUM          8   /* DMA descriptor count                   */
-#define DAC_DMA_BUF_SIZE   2048   /* bytes per DMA descriptor               */
+/* Ring sizing: 4 × 1024 = 4096 samples = 128 ms at 32 kHz.  The ring is
+ * pre-filled with silence before each clip (see dac_restart) — that full-ring
+ * priming is a stability invariant: removing it (v1.13.8 test) caused the
+ * device to wedge and task-WDT after 1–2 button clicks.  The old 8 × 2048
+ * (512 ms) sizing made that priming cost half a second of onset latency per
+ * click; 4 × 1024 keeps the invariant at a quarter of the latency.  Clips are
+ * preloaded to PSRAM, so 128 ms of buffering is ample against scheduling
+ * jitter, and the end-of-clip drain wait shrinks proportionally. */
+#define DAC_DESC_NUM          4   /* DMA descriptor count                   */
+#define DAC_DMA_BUF_SIZE   1024   /* bytes per DMA descriptor               */
 
 /* ── WAV RIFF header (44 bytes, little-endian) ─────────────────────── */
 typedef struct __attribute__((packed)) {
@@ -90,18 +98,19 @@ typedef struct __attribute__((packed)) {
 /* ── DAC lifecycle ──────────────────────────────────────────────────── */
 
 /* Per-clip fade duration (ms).  When audio is enabled, the DAC is torn down to
- * the GPIO-LOW idle between clips (no continuous DMA = no idle noise floor,
+ * the isolated-pad idle between clips (no continuous DMA = no idle noise floor,
  * matching the stock firmware).  Each clip brings the DAC up with a fade_in
  * (0 → 128) and the playback task fades out (128 → 0) before tearing down, so
- * the GPIO-LOW⇄DAC level transitions don't pop.  Kept short to limit onset
+ * the idle⇄DAC level transitions don't pop.  Kept short to limit onset
  * latency on short sounds like the button click. */
 #define PLAY_FADE_MS  120
 
 /*
  * Bring up the continuous DAC from the isolated-pad idle, ramping 0 → 128 over
- * fade_ms via a cosine S-curve so the AC coupling cap charges gently (no pop).
- * Clip data is queued by the caller immediately after this returns.  Called
- * per clip by the playback task; torn back down by dac_teardown() at clip end.
+ * fade_ms via a cosine S-curve so the AC coupling cap charges gently (no pop),
+ * then pre-fill the ring with mid-rail silence (full-ring priming — see the
+ * stability note at the pre-fill loop).  Called per clip by the playback
+ * task; torn back down by dac_teardown() at clip end.
  */
 static void dac_restart(int fade_ms)
 {
@@ -151,7 +160,7 @@ static void dac_restart(int fade_ms)
     }
 
     /* Anti-pop fade-in: 0 → 128 over fade_ms via cosine S-curve.
-     * Gradually charges the AC cap from the GPIO-LOW (0 V) idle to mid-rail. */
+     * Gradually charges the AC cap from its idle level (~0 V) to mid-rail. */
     size_t fade_samples = (FIXED_DAC_RATE * (uint32_t)fade_ms) / 1000;
     fade_samples = (fade_samples + 3) & ~3;
     uint8_t *fade = (uint8_t *)calloc(1, fade_samples);
@@ -165,21 +174,25 @@ static void dac_restart(int fade_ms)
         free(fade);
     }
 
-    /* NOTE: no silence pre-fill here.  The old always-running-ring design
-     * pre-filled the full ring (DAC_DESC_NUM × DAC_DMA_BUF_SIZE = 512 ms at
-     * 32 kHz) so the DMA idled at mid-rail between clips.  With the per-clip
-     * lifecycle the clip data is queued immediately after the fade-in
-     * (clips are preloaded to PSRAM before dac_restart is called), so a
-     * pre-fill would only insert 512 ms of dead air between the button press
-     * and the sound.  Onset latency is now just the fade-in. */
+    /* Pre-fill the ring with mid-rail silence so the DMA starts fully primed.
+     * This is a stability invariant, not just pop-protection: a build that
+     * skipped the pre-fill (v1.13.8 test) wedged and task-WDT'd after 1–2
+     * clicks.  Latency cost = ring depth (4 × 1024 = 128 ms), kept small by
+     * the ring sizing above. */
+    uint8_t silence[DAC_DMA_BUF_SIZE];
+    memset(silence, 128, sizeof(silence));
+    size_t w;
+    for (int i = 0; i < DAC_DESC_NUM; i++)
+        dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
+
     ESP_LOGI(TAG, "DAC up (32 kHz, %d ms fade-in)", fade_ms);
 }
 
-/* Tear the continuous DAC down and return GPIO25 to the quiet OUTPUT-LOW idle.
+/* Tear the continuous DAC down and return GPIO25 to the quiet isolated idle.
  * Called by the playback task after each clip so that — when audio is enabled —
  * there is NO continuous I2S0 DMA running between clips (the idle-noise source).
  * The caller should fade the DAC to 0 first so this teardown's transition to
- * the GPIO-LOW clamp has no level step (no end-of-clip pop). */
+ * the isolated pad has no level step (no end-of-clip pop). */
 static void dac_teardown(void)
 {
     if (s_dac_cont) {
@@ -318,8 +331,8 @@ static void audio_play_task(void *arg)
     leds_set_audio_active(true);
 
     /* Bring the DAC up for this clip.  When audio is enabled the DAC is torn
-     * down to the GPIO-LOW idle between clips (no continuous DMA floor), so we
-     * (re)create it here with a short fade-in.  On failure, skip to cleanup. */
+     * down to the isolated-pad idle between clips (no continuous DMA floor), so
+     * we (re)create it here with a short fade-in.  On failure, skip to cleanup. */
     dac_restart(PLAY_FADE_MS);
     if (!s_dac_cont) goto task_cleanup;
 
@@ -388,7 +401,7 @@ task_cleanup:
     if (buf && s_dac_cont) {
         /* Fade-out 128 → 0 over PLAY_FADE_MS (cosine), queued behind the clip
          * tail.  This ramps the AC coupling cap down to 0 V so the subsequent
-         * teardown → GPIO-LOW clamp has no level step (no end-of-clip pop). */
+         * teardown → pad isolation has no level step (no end-of-clip pop). */
         size_t fade_n = (FIXED_DAC_RATE * (uint32_t)PLAY_FADE_MS) / 1000;
         fade_n = (fade_n + 3) & ~3;
         size_t done = 0, w;
@@ -412,14 +425,14 @@ task_cleanup:
 
     free(buf);
     leds_set_audio_active(false);
-    /* Tear the DAC down → GPIO-LOW idle: no continuous DMA between clips. */
+    /* Tear the DAC down → isolated-pad idle: no continuous DMA between clips. */
     dac_teardown();
 
 task_close:
     fclose(f);
 task_exit:
-    xSemaphoreGive(s_play_mutex);
     s_audio_task = NULL;
+    xSemaphoreGive(s_play_mutex);
     vTaskDelete(NULL);
 }
 
@@ -456,7 +469,7 @@ void audio_init(bool enabled)
      * DMA was an idle-noise source.  GPIO25 stays in the boot isolation
      * state until the first clip plays. */
     s_audio_enabled = true;
-    ESP_LOGI(TAG, "Audio enabled — DAC brought up per-clip (GPIO%d LOW at idle)",
+    ESP_LOGI(TAG, "Audio enabled — DAC brought up per-clip (GPIO%d isolated at idle)",
              PIN_AUDIO_DAC);
 }
 
@@ -464,8 +477,8 @@ void audio_set_enabled(bool enabled)
 {
     /* audio_enabled changes take effect after a reboot.  The web server
      * saves the new value to config.json then calls esp_restart(); on the
-     * next boot audio_init() applies the correct state from scratch — either
-     * GPIO25 driven LOW (disabled) or dac_continuous brought up (enabled).
+     * next boot audio_init() applies the correct state from scratch — the
+     * GPIO25 pad stays isolated either way; only the enabled flag differs.
      * Dynamic switching is not supported. */
     (void)enabled;
     ESP_LOGI(TAG, "audio_set_enabled: change saved — takes effect after reboot");
@@ -484,11 +497,23 @@ void audio_play_file(const char *path)
 
     if (!s_play_mutex) return;
 
-    if (s_audio_task == NULL && uxSemaphoreGetCount(s_play_mutex) == 0) {
-        xSemaphoreGive(s_play_mutex);
-    }
 
-    if (xSemaphoreTake(s_play_mutex, 0) != pdTRUE) return;
+    if (xSemaphoreTake(s_play_mutex, 0) != pdTRUE) {
+        /* A previous clip is still playing or draining its tail.  Interrupt
+         * it rather than dropping this request: button-click feedback must
+         * sound on EVERY press.  s_stop_flag makes the playback task break
+         * out of its streaming loop at the next chunk boundary; it then
+         * fades out, drains the (now small, 128 ms) ring and releases the
+         * mutex — worst case ≈ 600 ms, typically much less.  The same
+         * stop-and-wait pattern is used by audio_dac_test_set(). */
+        s_stop_flag = true;
+        if (xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(700)) != pdTRUE) {
+            /* Playback task wedged or very slow — leave s_stop_flag set so
+             * it still exits ASAP; this press is dropped as a last resort. */
+            ESP_LOGW(TAG, "audio_play_file: busy >700 ms — press dropped");
+            return;
+        }
+    }
 
     s_stop_flag = false;
 
@@ -539,7 +564,7 @@ void audio_stop(void)
  *   and the DMA loops them.
  *
  * "normal"  : tear down the test dac_continuous channel and return GPIO25 to
- *   the quiet OUTPUT-LOW idle (no DAC running).  This matches the normal idle
+ *   the quiet isolated-pad idle (no DAC running).  This matches the normal idle
  *   for both enabled and disabled audio — a clip brings the DAC up on demand.
  */
 
