@@ -835,7 +835,12 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 #define WEATHER_PANEL_SUN   2   /* sunrise + sunset times */
 /* Stack: config snapshot (~1900 B) + JPEG decode call chain (~3-4 KB).
  * 8 KB was too tight — panic handler couldn't print a backtrace. */
-#define DISPLAY_STACK_SIZE   12288
+/* 12288 was borderline: cfg_snap (~1.9 KB) had to be moved to BSS because the
+ * JPEG-decode call chain alone approached the limit (see the static cfg_snap
+ * comment in display_task).  The AP-PIN digit renderer (pin_draw_tube) stacks
+ * a 1280 B SPI chunk buffer plus the U8g2 draw chain on top of the loop frame
+ * — the deepest single path in the task — so give it real headroom. */
+#define DISPLAY_STACK_SIZE   16384
 
 /* ── Theme error tracking ────────────────────────────────────────────────
  * Holds the path of the last image that failed to decode (e.g. wrong size,
@@ -2235,17 +2240,23 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
 
     const int HALF = LCD_HEIGHT / 2;   /* 80 */
 
+    /* Weather-dependent panels (0 = icon, 3 = outdoor H/T) with no data yet
+     * — cold boot: the first fetch takes 10 s to minutes — render the
+     * weekdate panel in their slot instead of a black tube.  Day + date only
+     * need the RTC-seeded clock, which is valid from the first tick.
+     * Self-healing: once weather_get() turns valid, the real panel renders
+     * on its next rotation (and *last_kind tracking forces the bg clear). */
+    if (kind == 0 || kind == 3) {
+        const weather_data_t *w = weather_get();
+        if (!w || !w->valid) kind = 1;
+    }
+
     if (kind == 0) {
         /* ── Weather icon panel ─────────────────────────────────────────────
-         * Displays the current weather condition icon full-tube (80×160).
-         * Falls back to black when the weather API has no valid data.       */
+         * Displays the current weather condition icon full-tube (80×160).   */
         const weather_data_t *w = weather_get();
-        if (!w || !w->valid) {
-            if (kind != *last_kind) display_fill(lcd_tube, 0x0000);
-            goto cx_tube6_done;
-        }
         {
-            const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
+            const char *icon = (w && w->icon[0] != '\0') ? w->icon : "sun";
             char path[256];
             display_path_weather(path, sizeof(path), cfg->theme, icon);
             display_show_image(lcd_tube, path);
