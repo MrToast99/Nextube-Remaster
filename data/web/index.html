@@ -3955,7 +3955,11 @@ async function startAutoUpdate(version, releaseZipUrl) {
       throw new Error('Update release ZIP URL could not be resolved from GitHub assets.');
     }
     
-    const response = await fetch(releaseZipUrl);
+    let fetchUrl = releaseZipUrl;
+    if (!fetchUrl.startsWith('http://localhost') && !fetchUrl.startsWith('http://127.0.0.1')) {
+      fetchUrl = 'https://corsproxy.io/?' + encodeURIComponent(fetchUrl);
+    }
+    const response = await fetch(fetchUrl);
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     const contentLength = response.headers.get('content-length');
     const total = parseInt(contentLength, 10);
