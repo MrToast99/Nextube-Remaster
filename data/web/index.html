@@ -3814,7 +3814,7 @@ function injectFflate() {
   return new Promise((resolve, reject) => {
     if (window.fflate) return resolve();
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/lib/browser.min.js';
+    s.src = 'https://cdn.jsdelivr.net/npm/fflate@0.8/umd/index.min.js';
     s.onload = resolve;
     s.onerror = () => reject(new Error('Failed to load unzip library (fflate) from CDN. Please check your internet connection.'));
     document.head.appendChild(s);
@@ -4437,7 +4437,7 @@ function onAuthSucceeded() {
     <h3 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
       <span id="autoupdate-title-icon">🚀</span> 
       <span id="autoupdate-title-text">Auto-Update</span> 
-      <span style="font-size: 0.85rem; padding: 0.2rem 0.5rem; background: rgba(78, 204, 163, 0.2); color: var(--accent, #4ecca3); border-radius: 12px;" id="autoupdate-target-ver">v1.13.8</span>
+      <span style="font-size: 0.85rem; padding: 0.2rem 0.5rem; background: rgba(78, 204, 163, 0.15); color: var(--ok, #4ecca3); border-radius: 12px;" id="autoupdate-target-ver">v1.13.11</span>
     </h3>
     <p style="margin: 0.5rem 0 1rem 0; color: var(--dim, #9ca3af); font-size: 0.85rem; line-height: 1.4;" id="autoupdate-sub-status">Initializing the installation sequence...</p>
     
@@ -4453,7 +4453,7 @@ function onAuthSucceeded() {
           </div>
           <!-- Small progress bar inside step -->
           <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 4px; overflow: hidden; display: none;" id="download-progress-container">
-            <div id="download-progress-bar" style="width: 0%; height: 100%; background: var(--accent, #4ecca3); transition: width 0.15s ease-out;"></div>
+            <div id="download-progress-bar" style="width: 0%; height: 100%; background: var(--ok, #4ecca3); transition: width 0.15s ease-out;"></div>
           </div>
         </div>
       </div>
@@ -4498,7 +4498,7 @@ function onAuthSucceeded() {
             <span id="ui-progress-text" style="font-size: 0.8rem; font-family: monospace; display: none;">0%</span>
           </div>
           <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 4px; overflow: hidden; display: none;" id="ui-progress-container">
-            <div id="ui-progress-bar" style="width: 0%; height: 100%; background: var(--accent, #4ecca3); transition: width 0.15s ease-out;"></div>
+            <div id="ui-progress-bar" style="width: 0%; height: 100%; background: var(--ok, #4ecca3); transition: width 0.15s ease-out;"></div>
           </div>
         </div>
       </div>
@@ -4524,7 +4524,7 @@ function onAuthSucceeded() {
     <!-- Action Footer / Error buttons -->
     <div id="autoupdate-actions" style="margin-top: 1.2rem; display: none; gap: 0.5rem;">
       <button id="autoupdate-close-btn" onclick="document.getElementById('autoupdate-modal').classList.remove('show')" style="background: rgba(255,255,255,0.1); color: var(--fg); margin: 0; width: auto; flex: 1; padding: 0.55rem; font-size: 0.88rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); cursor: pointer;">Close Window</button>
-      <button id="autoupdate-retry-btn" onclick="triggerAutoUpdate()" style="background: var(--accent); color: #000; margin: 0; width: auto; flex: 1; padding: 0.55rem; font-size: 0.88rem; font-weight: bold; border-radius: 6px; border: none; cursor: pointer;">Retry Update</button>
+      <button id="autoupdate-retry-btn" onclick="triggerAutoUpdate()" style="background: var(--ok, #4ecca3); color: #000; margin: 0; width: auto; flex: 1; padding: 0.55rem; font-size: 0.88rem; font-weight: bold; border-radius: 6px; border: none; cursor: pointer;">Retry Update</button>
     </div>
   </div>
 </div>
