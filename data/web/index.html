@@ -3736,6 +3736,10 @@ function shouldToastUpdate(latest) {
   } catch { return true; }
 }
 
+/* ── Auto-Update Configuration & State ────────────────────────────────────── */
+const GITHUB_REPO = 'Pascal/Nextube-Remaster';
+let _latestUpdateZipUrl = null;
+
 /* Tracks the latest available release version (null = up to date / not yet checked).
  * Read by onNotifyUpdateChange() and saveSettings() to sync the tube-6 indicator. */
 let _latestUpdate = null;
@@ -3799,6 +3803,338 @@ function dismissRtcBatteryToast() {
   $('rtc-toast').style.display = 'none';
 }
 
+/* Helper to trigger the auto-update modal from the toast notification button */
+function triggerAutoUpdate() {
+  if (!_latestUpdate) return toast('No update version loaded.', true);
+  startAutoUpdate(_latestUpdate, _latestUpdateZipUrl);
+}
+
+/* Inject fflate unzipping library dynamically from CDN only when needed */
+function injectFflate() {
+  return new Promise((resolve, reject) => {
+    if (window.fflate) return resolve();
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/lib/browser.min.js';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load unzip library (fflate) from CDN. Please check your internet connection.'));
+    document.head.appendChild(s);
+  });
+}
+
+/* Update visual step state with appropriate classes and status icons */
+function updateStepState(stepId, state) {
+  const el = $('step-' + stepId);
+  if (!el) return;
+  el.className = 'upd-step ' + state;
+  const iconEl = el.querySelector('.step-status-icon');
+  if (iconEl) {
+    if (state === 'active') {
+      iconEl.innerHTML = '<span class="nx-spinner" style="margin: 0; vertical-align: middle;"></span>';
+    } else if (state === 'complete') {
+      iconEl.textContent = '✓';
+      iconEl.style.color = 'var(--ok, #4ecca3)';
+    } else if (state === 'failed') {
+      iconEl.textContent = '❌';
+      iconEl.style.color = '#f87171';
+    } else {
+      iconEl.textContent = '⏳';
+      iconEl.style.color = 'var(--dim, #9ca3af)';
+    }
+  }
+}
+
+/* Update total progress percentage and adjust progress bar width */
+function updateTotalProgress(pct) {
+  const p = Math.min(100, Math.max(0, Math.round(pct)));
+  $('total-progress-bar').style.width = p + '%';
+  $('total-progress-text').textContent = p + '%';
+}
+
+/* Poll /api/ping to check when the ESP32 is back online post-reboot */
+async function waitForDeviceReconnect() {
+  const maxRetries = 40; // 40 * 1.5s = 60s
+  for (let i = 0; i < maxRetries; i++) {
+    $('reboot-timer-text').textContent = `Checking online status... (Attempt ${i + 1}/${maxRetries})`;
+    updateTotalProgress(50 + Math.round((i / maxRetries) * 15)); // Reboot represents 50% -> 65% total progress
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1200);
+      const r = await fetch('/api/ping', { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (r.ok) {
+        return true;
+      }
+    } catch (e) {
+      // Ignore network errors during reboot
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+  throw new Error('Device failed to reconnect after reboot. Please check power and WiFi, then reload.');
+}
+
+/* Sequentially flash the extracted Web UI package to LittleFS */
+function flashWebUI(uiBlob) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        $('ui-progress-bar').style.width = pct + '%';
+        $('ui-progress-text').textContent = pct + '%';
+        updateTotalProgress(65 + Math.round(pct * 0.30)); // Web UI represents 65% -> 95% total progress
+      }
+    };
+    xhr.onload = () => {
+      if (_xhrHandle401(xhr)) {
+        reject(new Error('Sign in required to upload Web UI. Please sign in first.'));
+        return;
+      }
+      try {
+        const d = JSON.parse(xhr.responseText);
+        if (xhr.status === 200 && d.written >= 0) {
+          resolve(d);
+        } else {
+          reject(new Error(d.error || xhr.statusText));
+        }
+      } catch (e) {
+        reject(new Error('Failed to parse Web UI update response'));
+      }
+    };
+    xhr.onerror = () => {
+      reject(new Error('Network error during Web UI upload'));
+    };
+    xhr.open('POST', '/api/update_fs_hotpatch');
+    xhr.setRequestHeader('Content-Type', 'application/zip');
+    _xhrAuthHeader(xhr);
+    xhr.send(uiBlob);
+  });
+}
+
+/* Core sequential updater engine */
+async function startAutoUpdate(version, releaseZipUrl) {
+  if (_otaInProgress) return toast('An update is already in progress.', true);
+  _otaInProgress = true;
+  
+  // Set up modal UI
+  $('autoupdate-target-ver').textContent = 'v' + version;
+  $('autoupdate-title-icon').textContent = '🚀';
+  $('autoupdate-title-text').textContent = 'Auto-Update';
+  $('autoupdate-sub-status').textContent = 'Initializing the installation sequence...';
+  $('autoupdate-sub-status').style.color = '';
+  $('autoupdate-warning').style.display = 'flex';
+  $('autoupdate-actions').style.display = 'none';
+  
+  // Reset all steps to pending
+  const steps = ['download', 'unpack', 'fw', 'reboot', 'ui'];
+  steps.forEach(s => {
+    updateStepState(s, 'pending');
+    const container = $(s + '-progress-container');
+    if (container) container.style.display = 'none';
+    const text = $(s + '-progress-text');
+    if (text) text.style.display = 'none';
+  });
+  $('reboot-timer-text').style.display = 'none';
+  $('step-fw').style.display = 'flex';
+  $('step-reboot').style.display = 'flex';
+  $('step-ui').style.display = 'flex';
+  updateTotalProgress(0);
+  
+  $('autoupdate-modal').classList.add('show');
+  
+  try {
+    // ---- Phase 1: Download ----
+    updateStepState('download', 'active');
+    $('autoupdate-sub-status').textContent = 'Downloading the update package from GitHub...';
+    $('download-progress-container').style.display = 'block';
+    $('download-progress-text').style.display = 'inline';
+    
+    // Dynamically inject fflate library
+    await injectFflate();
+    
+    if (!releaseZipUrl) {
+      throw new Error('Update release ZIP URL could not be resolved from GitHub assets.');
+    }
+    
+    const response = await fetch(releaseZipUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    const contentLength = response.headers.get('content-length');
+    const total = parseInt(contentLength, 10);
+    let buf;
+    if (isNaN(total)) {
+      buf = await response.arrayBuffer();
+    } else {
+      const reader = response.body.getReader();
+      let loaded = 0;
+      const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+        const pct = Math.round((loaded / total) * 100);
+        $('download-progress-bar').style.width = pct + '%';
+        $('download-progress-text').textContent = pct + '%';
+        updateTotalProgress(pct * 0.15); // Download is 15% of total progress
+      }
+      const blob = new Blob(chunks);
+      buf = await blob.arrayBuffer();
+    }
+    updateStepState('download', 'complete');
+    updateTotalProgress(15);
+    
+    // ---- Phase 2: Unpack ----
+    updateStepState('unpack', 'active');
+    $('autoupdate-sub-status').textContent = 'Extracting and preparing update files...';
+    
+    // Run decompression
+    const zip = fflate.unzipSync(new Uint8Array(buf));
+    
+    // Scan for firmware and UI hotpatch files inside the zip
+    const fwKey = Object.keys(zip).find(k => k.toLowerCase().endsWith('-ota.bin'));
+    const uiKey = Object.keys(zip).find(k => k.toLowerCase().includes('webui') && k.toLowerCase().endsWith('.zip'));
+    
+    if (!fwKey && !uiKey) {
+      throw new Error('The downloaded package does not contain a valid OTA firmware or Web UI update.');
+    }
+    
+    updateStepState('unpack', 'complete');
+    updateTotalProgress(20);
+    
+    // ---- Phase 3: Flash Firmware (OTA) ----
+    let firmwareFlashed = false;
+    if (fwKey) {
+      updateStepState('fw', 'active');
+      $('autoupdate-sub-status').textContent = 'Uploading and flashing the main firmware partition...';
+      $('fw-progress-container').style.display = 'block';
+      $('fw-progress-text').style.display = 'inline';
+      
+      const fwData = zip[fwKey];
+      const fwBlob = new Blob([fwData], { type: 'application/octet-stream' });
+      
+      // Pre-flight auth check
+      try { await secureFetch('/api/auth/check'); } catch(e) { throw new Error('Authentication session expired. Please sign in first.'); }
+      
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        let uploadPct = 0;
+        xhr.upload.onprogress = e => {
+          if (e.lengthComputable) {
+            uploadPct = (e.loaded / e.total) * 100;
+            $('fw-progress-bar').style.width = uploadPct.toFixed(1) + '%';
+            $('fw-progress-text').textContent = uploadPct.toFixed(0) + '%';
+            updateTotalProgress(20 + Math.round(uploadPct * 0.30)); // Firmware represents 20% -> 50% total progress
+          }
+        };
+        xhr.onload = () => {
+          if (_xhrHandle401(xhr)) {
+            reject(new Error('Sign in required to update firmware. Please sign in first.'));
+            return;
+          }
+          if (xhr.status === 200) {
+            resolve();
+          } else {
+            reject(new Error('Firmware upload failed: ' + (xhr.responseText || xhr.statusText)));
+          }
+        };
+        xhr.onerror = () => {
+          if (uploadPct >= 99.9) {
+            resolve(); // Device severed TCP to reboot; treat as success
+          } else {
+            reject(new Error('Firmware upload stalled at ' + Math.round(uploadPct) + '% — check WiFi connection'));
+          }
+        };
+        xhr.open('POST', '/api/update_firmware');
+        _xhrAuthHeader(xhr);
+        xhr.send(fwBlob);
+      });
+      
+      updateStepState('fw', 'complete');
+      updateTotalProgress(50);
+      firmwareFlashed = true;
+    } else {
+      $('step-fw').style.display = 'none';
+      updateTotalProgress(50);
+    }
+    
+    // ---- Phase 4: Reboot & Reconnect ----
+    if (firmwareFlashed) {
+      updateStepState('reboot', 'active');
+      $('autoupdate-sub-status').textContent = 'Nextube is rebooting to load the new firmware...';
+      $('reboot-timer-text').style.display = 'inline';
+      
+      // Allow a brief delay for connection to tear down
+      await new Promise(resolve => setTimeout(resolve, 4000));
+      
+      // Wait for online status
+      await waitForDeviceReconnect();
+      
+      updateStepState('reboot', 'complete');
+      updateTotalProgress(65);
+    } else {
+      $('step-reboot').style.display = 'none';
+      updateTotalProgress(65);
+    }
+    
+    // ---- Phase 5: Flash Web UI (Hot Patch) ----
+    if (uiKey) {
+      updateStepState('ui', 'active');
+      $('autoupdate-sub-status').textContent = 'Installing the Web User Interface files...';
+      $('ui-progress-container').style.display = 'block';
+      $('ui-progress-text').style.display = 'inline';
+      
+      const uiData = zip[uiKey];
+      const uiBlob = new Blob([uiData], { type: 'application/zip' });
+      
+      // Tiny cooldown delay post-reboot
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // Verify authorization again
+      try { await secureFetch('/api/auth/check'); } catch(e) { throw new Error('Authorization expired post-reboot. Please sign in first.'); }
+      
+      await flashWebUI(uiBlob);
+      
+      updateStepState('ui', 'complete');
+      updateTotalProgress(95);
+    } else {
+      $('step-ui').style.display = 'none';
+      updateTotalProgress(95);
+    }
+    
+    // ---- Phase 6: Complete ----
+    updateTotalProgress(100);
+    $('autoupdate-title-icon').textContent = '🎉';
+    $('autoupdate-title-text').textContent = 'Success!';
+    $('autoupdate-sub-status').textContent = 'Update successfully installed! Reloading Manager...';
+    $('autoupdate-sub-status').style.color = 'var(--ok, #4ecca3)';
+    _otaInProgress = false;
+    
+    setTimeout(() => {
+      location.reload();
+    }, 2000);
+    
+  } catch (e) {
+    _otaInProgress = false;
+    console.error('Auto-update failed:', e);
+    $('autoupdate-title-icon').textContent = '⚠️';
+    $('autoupdate-title-text').textContent = 'Update Failed';
+    $('autoupdate-sub-status').textContent = 'Error: ' + e.message;
+    $('autoupdate-sub-status').style.color = '#f87171';
+    $('autoupdate-warning').style.display = 'none';
+    $('autoupdate-actions').style.display = 'flex';
+    
+    // Locate and mark the active step as failed
+    const activeStep = $('autoupdate-steps').querySelector('.upd-step.active');
+    if (activeStep) {
+      activeStep.className = 'upd-step failed';
+      const icon = activeStep.querySelector('.step-status-icon');
+      if (icon) {
+        icon.textContent = '❌';
+        icon.style.color = '#f87171';
+      }
+    }
+  }
+}
+
 /* silent=true: suppress "up to date" toast (used for automatic checks).
  * silent=false (default): show button spinner, toast result, and always
  * show update toast if an update is found regardless of dismiss state. */
@@ -3808,7 +4144,7 @@ async function checkForUpdates(silent = false) {
   if (!silent && btn) btn.textContent = 'Checking…';
   try {
     const r = await fetch(
-      'https://api.github.com/repos/MrToast99/Nextube-Remaster/releases/latest',
+      `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
       { headers: { 'Accept': 'application/vnd.github+json' } }
     );
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -3821,6 +4157,11 @@ async function checkForUpdates(silent = false) {
     const current = (semverCmp(fwVer, fsVer) >= 0 ? fwVer : fsVer) || fwVer;
     if (!silent && btn) btn.textContent = prevLabel;
     if (!latest) throw new Error('No release found');
+    
+    // Resolve release package URL ending in .zip
+    const asset = data.assets && data.assets.find(a => a.name.endsWith('.zip'));
+    _latestUpdateZipUrl = asset ? asset.browser_download_url : null;
+    
     /* Skip comparison if device version hasn't loaded yet */
     if (!current || current === '--') return;
     if (semverCmp(latest, current) > 0) {
@@ -3832,6 +4173,7 @@ async function checkForUpdates(silent = false) {
         showUpdateToast(latest, data.html_url);
     } else {
       _latestUpdate = null;
+      _latestUpdateZipUrl = null;
       $('update-available').style.display = 'none';
       $('update-toast').style.display = 'none';
       setClockFaceUpdateIndicator(false);
@@ -3987,6 +4329,9 @@ function onAuthSucceeded() {
     <span>🆕 Update available: <strong>v<span id="ut-version"></span></strong></span>
     <a id="ut-url" href="#" target="_blank"
        style="color:#000;font-weight:600;white-space:nowrap;text-decoration:underline">See what's new ↗</a>
+    <button id="ut-autoupdate-btn" onclick="triggerAutoUpdate()"
+       style="background:#000;border:none;cursor:pointer;padding:.2rem .6rem;
+              border-radius:4px;font-size:.8rem;color:#4ecca3;font-weight:bold;white-space:nowrap">🚀 Auto-Update</button>
     <button onclick="dismissUpdateToast()"
        style="background:rgba(0,0,0,.15);border:none;cursor:pointer;padding:.2rem .6rem;
               border-radius:4px;font-size:.8rem;color:#000;white-space:nowrap">Dismiss once</button>
@@ -4050,6 +4395,29 @@ function onAuthSucceeded() {
     margin-right: .55em;
     vertical-align: -2px;
   }
+
+  /* Auto-Update Styles */
+  .upd-step {
+    transition: all 0.3s ease;
+  }
+  .upd-step.active {
+    color: var(--fg, #f5f5f5) !important;
+    font-weight: 600;
+  }
+  .upd-step.complete {
+    color: var(--ok, #4ecca3) !important;
+  }
+  .upd-step.failed {
+    color: #f87171 !important;
+  }
+  .step-status-icon {
+    font-size: 1.15rem;
+    width: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-shrink: 0;
+  }
 </style>
 
 <div id="setpw-modal" class="auth-overlay">
@@ -4061,6 +4429,103 @@ function onAuthSucceeded() {
     <input id="setpw-confirm" type="password" placeholder="Confirm password" autocomplete="new-password" onkeydown="if(event.key==='Enter')doSetPassword()">
     <button id="setpw-btn" onclick="doSetPassword()">Set password</button>
     <div id="setpw-err" class="auth-err"></div>
+  </div>
+</div>
+
+<div id="autoupdate-modal" class="auth-overlay">
+  <div class="auth-card" style="max-width: 480px; backdrop-filter: blur(10px); background: rgba(24, 24, 27, 0.92); border: 1px solid rgba(255,255,255,0.15);">
+    <h3 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+      <span id="autoupdate-title-icon">🚀</span> 
+      <span id="autoupdate-title-text">Auto-Update</span> 
+      <span style="font-size: 0.85rem; padding: 0.2rem 0.5rem; background: rgba(78, 204, 163, 0.2); color: var(--accent, #4ecca3); border-radius: 12px;" id="autoupdate-target-ver">v1.13.8</span>
+    </h3>
+    <p style="margin: 0.5rem 0 1rem 0; color: var(--dim, #9ca3af); font-size: 0.85rem; line-height: 1.4;" id="autoupdate-sub-status">Initializing the installation sequence...</p>
+    
+    <!-- Step indicators -->
+    <div id="autoupdate-steps" style="display: flex; flex-direction: column; gap: 0.8rem; margin: 1.2rem 0;">
+      <!-- Step 1: Download -->
+      <div id="step-download" class="upd-step" style="display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem; color: var(--dim);">
+        <div class="step-status-icon">⏳</div>
+        <div style="flex: 1;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span>Download update package</span>
+            <span id="download-progress-text" style="font-size: 0.8rem; font-family: monospace; display: none;">0%</span>
+          </div>
+          <!-- Small progress bar inside step -->
+          <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 4px; overflow: hidden; display: none;" id="download-progress-container">
+            <div id="download-progress-bar" style="width: 0%; height: 100%; background: var(--accent, #4ecca3); transition: width 0.15s ease-out;"></div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Step 2: Unpack -->
+      <div id="step-unpack" class="upd-step" style="display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem; color: var(--dim);">
+        <div class="step-status-icon">⏳</div>
+        <div style="flex: 1;">Extract & prepare files</div>
+      </div>
+      
+      <!-- Step 3: Flash FW -->
+      <div id="step-fw" class="upd-step" style="display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem; color: var(--dim);">
+        <div class="step-status-icon">⏳</div>
+        <div style="flex: 1;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span>Flash main firmware</span>
+            <span id="fw-progress-text" style="font-size: 0.8rem; font-family: monospace; display: none;">0%</span>
+          </div>
+          <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 4px; overflow: hidden; display: none;" id="fw-progress-container">
+            <div id="fw-progress-bar" style="width: 0%; height: 100%; background: #e67e22; transition: width 0.15s ease-out;"></div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Step 4: Reboot -->
+      <div id="step-reboot" class="upd-step" style="display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem; color: var(--dim);">
+        <div class="step-status-icon">⏳</div>
+        <div style="flex: 1;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span>Reboot & wait for device reconnect</span>
+            <span id="reboot-timer-text" style="font-size: 0.8rem; color: var(--dim); display: none;"></span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Step 5: Flash UI -->
+      <div id="step-ui" class="upd-step" style="display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem; color: var(--dim);">
+        <div class="step-status-icon">⏳</div>
+        <div style="flex: 1;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span>Install Web User Interface</span>
+            <span id="ui-progress-text" style="font-size: 0.8rem; font-family: monospace; display: none;">0%</span>
+          </div>
+          <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 4px; overflow: hidden; display: none;" id="ui-progress-container">
+            <div id="ui-progress-bar" style="width: 0%; height: 100%; background: var(--accent, #4ecca3); transition: width 0.15s ease-out;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Main Big Progress Bar -->
+    <div style="margin: 1.2rem 0 0.5rem 0;">
+      <div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--dim); margin-bottom: 0.4rem;">
+        <span>Total Progress</span>
+        <span id="total-progress-text">0%</span>
+      </div>
+      <div style="width: 100%; height: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden;">
+        <div id="total-progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #4ecca3, #e67e22); transition: width 0.3s ease-out;"></div>
+      </div>
+    </div>
+    
+    <!-- Warning notice -->
+    <div id="autoupdate-warning" style="background: rgba(230, 126, 34, 0.1); border: 1px solid rgba(230, 126, 34, 0.3); border-radius: 6px; padding: 0.6rem 0.8rem; font-size: 0.78rem; color: #e67e22; display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 1rem;">
+      <span>⚠️</span>
+      <span>Do not disconnect power or close this browser tab during the update process. Settings are automatically preserved.</span>
+    </div>
+    
+    <!-- Action Footer / Error buttons -->
+    <div id="autoupdate-actions" style="margin-top: 1.2rem; display: none; gap: 0.5rem;">
+      <button id="autoupdate-close-btn" onclick="document.getElementById('autoupdate-modal').classList.remove('show')" style="background: rgba(255,255,255,0.1); color: var(--fg); margin: 0; width: auto; flex: 1; padding: 0.55rem; font-size: 0.88rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); cursor: pointer;">Close Window</button>
+      <button id="autoupdate-retry-btn" onclick="triggerAutoUpdate()" style="background: var(--accent); color: #000; margin: 0; width: auto; flex: 1; padding: 0.55rem; font-size: 0.88rem; font-weight: bold; border-radius: 6px; border: none; cursor: pointer;">Retry Update</button>
+    </div>
   </div>
 </div>
 
