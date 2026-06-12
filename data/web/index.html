@@ -3957,7 +3957,7 @@ async function startAutoUpdate(version, releaseZipUrl) {
     
     let fetchUrl = releaseZipUrl;
     if (!fetchUrl.startsWith('http://localhost') && !fetchUrl.startsWith('http://127.0.0.1')) {
-      fetchUrl = 'https://corsproxy.io/?' + encodeURIComponent(fetchUrl);
+      fetchUrl = 'https://corsproxy.io/?url=' + encodeURIComponent(fetchUrl);
     }
     const response = await fetch(fetchUrl);
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -4441,7 +4441,7 @@ function onAuthSucceeded() {
     <h3 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
       <span id="autoupdate-title-icon">🚀</span> 
       <span id="autoupdate-title-text">Auto-Update</span> 
-      <span style="font-size: 0.85rem; padding: 0.2rem 0.5rem; background: rgba(78, 204, 163, 0.15); color: var(--ok, #4ecca3); border-radius: 12px;" id="autoupdate-target-ver">v1.13.11</span>
+      <span style="font-size: 0.85rem; padding: 0.2rem 0.5rem; background: rgba(78, 204, 163, 0.15); color: var(--ok, #4ecca3); border-radius: 12px;" id="autoupdate-target-ver">...</span>
     </h3>
     <p style="margin: 0.5rem 0 1rem 0; color: var(--dim, #9ca3af); font-size: 0.85rem; line-height: 1.4;" id="autoupdate-sub-status">Initializing the installation sequence...</p>
     
