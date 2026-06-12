@@ -3738,6 +3738,7 @@ function shouldToastUpdate(latest) {
 
 /* ── Auto-Update Configuration & State ────────────────────────────────────── */
 const GITHUB_REPO = 'bagl3y/Nextube-Remaster';
+const CORS_PROXY_URL = 'https://nextube-updater.bagl3y.com/?url='; // Custom secure Cloudflare Worker CORS proxy
 let _latestUpdateZipUrl = null;
 
 /* Tracks the latest available release version (null = up to date / not yet checked).
@@ -3956,8 +3957,8 @@ async function startAutoUpdate(version, releaseZipUrl) {
     }
     
     let fetchUrl = releaseZipUrl;
-    if (!fetchUrl.startsWith('http://localhost') && !fetchUrl.startsWith('http://127.0.0.1')) {
-      fetchUrl = 'https://corsproxy.io/?url=' + encodeURIComponent(fetchUrl);
+    if (!fetchUrl.startsWith('http://localhost') && !fetchUrl.startsWith('http://127.0.0.1') && CORS_PROXY_URL) {
+      fetchUrl = CORS_PROXY_URL + encodeURIComponent(fetchUrl);
     }
     const response = await fetch(fetchUrl);
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
