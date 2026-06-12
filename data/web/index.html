@@ -3768,41 +3768,16 @@ function onNotifyUpdateChange() {
   setClockFaceUpdateIndicator(enabled && !!_latestUpdate && toastVisible);
 }
 
-/* Scans release payload name and body for typical breaking change keywords
- * indicating a full USB re-flash is mandatory. */
+/* Determines if an update is breaking (returning 'warn', 'usb', or 'none')
+ * based strictly on CI-driven programmatic flag assets. */
 function getBreakingUpdateType(releaseData) {
-  if (!releaseData) return 'none';
+  if (!releaseData || !releaseData.assets || !Array.isArray(releaseData.assets)) return 'none';
   
-  // 1. Programmatic Check (CI-driven flag in assets)
-  if (releaseData.assets && Array.isArray(releaseData.assets)) {
-    const hasUsbFlag = releaseData.assets.some(asset => asset.name === 'usb_only.flag');
-    if (hasUsbFlag) return 'usb';
-    
-    const hasWarnFlag = releaseData.assets.some(asset => asset.name === 'breaking_warning.flag');
-    if (hasWarnFlag) return 'warn';
-  }
+  const hasUsbFlag = releaseData.assets.some(asset => asset.name === 'usb_only.flag');
+  if (hasUsbFlag) return 'usb';
   
-  // 2. Natural Language Fallback (for backwards-compatibility / legacy releases)
-  const name = (releaseData.name || '').toLowerCase();
-  const body = (releaseData.body || '').toLowerCase();
-  
-  const breakingKeywords = [
-    'breaking change',
-    'breaking changes',
-    'must full flash',
-    'usb re-flash',
-    'usb flash',
-    're-flash via usb',
-    'partition table',
-    'spiffs to littlefs',
-    'spiffs vs littlefs',
-    '[breaking]',
-    'breaking=true',
-    'breaking: true'
-  ];
-  
-  const isLegacyBreaking = breakingKeywords.some(keyword => name.includes(keyword) || body.includes(keyword));
-  if (isLegacyBreaking) return 'usb'; // legacy matches were full USB re-flashes
+  const hasWarnFlag = releaseData.assets.some(asset => asset.name === 'breaking_warning.flag');
+  if (hasWarnFlag) return 'warn';
   
   return 'none';
 }
@@ -3861,6 +3836,19 @@ function injectFflate() {
     document.head.appendChild(s);
   });
 }
+
+/* Inject marked Markdown library dynamically from CDN only when needed */
+function injectMarked() {
+  return new Promise((resolve, reject) => {
+    if (window.marked) return resolve();
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/marked@4/marked.min.js';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load markdown library from CDN. Please check your internet connection.'));
+    document.head.appendChild(s);
+  });
+}
+
 
 /* Update visual step state with appropriate classes and status icons */
 function updateStepState(stepId, state) {
@@ -3989,58 +3977,77 @@ async function startAutoUpdate(version, releaseZipUrl, force = false) {
   if (!force && _latestUpdateData) {
     const breakingType = getBreakingUpdateType(_latestUpdateData);
     
-    if (breakingType === 'usb') {
-      $('autoupdate-title-icon').textContent = '⚠️';
-      $('autoupdate-title-text').textContent = 'Breaking Update';
-      $('autoupdate-sub-status').textContent = 'Manual action required. Automatic update blocked.';
-      $('autoupdate-sub-status').style.color = '#f87171';
+    if (breakingType === 'usb' || breakingType === 'warn') {
+      try {
+        await injectMarked();
+      } catch (err) {
+        console.warn('Failed to load markdown parser:', err);
+      }
       
-      $('autoupdate-steps').style.display = 'none';
-      $('autoupdate-progress-container').style.display = 'none';
-      $('autoupdate-warning').style.display = 'none';
-      
-      // Show breaking notes
-      $('autoupdate-release-notes').textContent = _latestUpdateData.body || 'No release notes provided.';
-      $('autoupdate-breaking-alert-usb').style.display = 'block';
-      $('autoupdate-breaking-container').style.display = 'flex';
-      
-      // Show actions footer with Manual Update button
-      $('autoupdate-manual-btn').style.display = 'block';
-      $('autoupdate-retry-btn').style.display = 'none';
-      $('autoupdate-actions').style.display = 'flex';
-      
-      $('autoupdate-modal').classList.add('show');
-      
-      _otaInProgress = false;
-      return;
-    } else if (breakingType === 'warn') {
-      $('autoupdate-title-icon').textContent = '⚠️';
-      $('autoupdate-title-text').textContent = 'Compatibility Warning';
-      $('autoupdate-sub-status').textContent = 'This update has breaking changes. Review notes below before proceeding.';
-      $('autoupdate-sub-status').style.color = '#e67e22';
-      
-      $('autoupdate-steps').style.display = 'none';
-      $('autoupdate-progress-container').style.display = 'none';
-      $('autoupdate-warning').style.display = 'none';
-      
-      // Show breaking notes
-      $('autoupdate-release-notes').textContent = _latestUpdateData.body || 'No release notes provided.';
-      $('autoupdate-breaking-alert-warn').style.display = 'block';
-      $('autoupdate-breaking-container').style.display = 'flex';
-      
-      // Config confirm button click to run startAutoUpdate with force = true
-      const confirmBtn = $('autoupdate-confirm-btn');
-      confirmBtn.onclick = () => startAutoUpdate(version, releaseZipUrl, true);
-      confirmBtn.style.display = 'block';
-      
-      // Show actions footer with Confirm button
-      $('autoupdate-retry-btn').style.display = 'none';
-      $('autoupdate-actions').style.display = 'flex';
-      
-      $('autoupdate-modal').classList.add('show');
-      
-      _otaInProgress = false;
-      return;
+      const rawNotes = _latestUpdateData.body || 'No release notes provided.';
+      let htmlNotes = rawNotes;
+      if (window.marked && window.marked.parse) {
+        try {
+          htmlNotes = window.marked.parse(rawNotes);
+          $('autoupdate-release-notes').style.whiteSpace = 'normal';
+        } catch (e) {
+          console.error('Failed to parse markdown with marked:', e);
+          $('autoupdate-release-notes').style.whiteSpace = 'pre-wrap';
+        }
+      } else {
+        $('autoupdate-release-notes').style.whiteSpace = 'pre-wrap';
+      }
+      $('autoupdate-release-notes').innerHTML = htmlNotes;
+
+      if (breakingType === 'usb') {
+        $('autoupdate-title-icon').textContent = '⚠️';
+        $('autoupdate-title-text').textContent = 'Breaking Update';
+        $('autoupdate-sub-status').textContent = 'Manual action required. Automatic update blocked.';
+        $('autoupdate-sub-status').style.color = '#f87171';
+        
+        $('autoupdate-steps').style.display = 'none';
+        $('autoupdate-progress-container').style.display = 'none';
+        $('autoupdate-warning').style.display = 'none';
+        
+        $('autoupdate-breaking-alert-usb').style.display = 'block';
+        $('autoupdate-breaking-container').style.display = 'flex';
+        
+        // Show actions footer with Manual Update button
+        $('autoupdate-manual-btn').style.display = 'block';
+        $('autoupdate-retry-btn').style.display = 'none';
+        $('autoupdate-actions').style.display = 'flex';
+        
+        $('autoupdate-modal').classList.add('show');
+        
+        _otaInProgress = false;
+        return;
+      } else if (breakingType === 'warn') {
+        $('autoupdate-title-icon').textContent = '⚠️';
+        $('autoupdate-title-text').textContent = 'Compatibility Warning';
+        $('autoupdate-sub-status').textContent = 'This update has breaking changes. Review notes below before proceeding.';
+        $('autoupdate-sub-status').style.color = '#e67e22';
+        
+        $('autoupdate-steps').style.display = 'none';
+        $('autoupdate-progress-container').style.display = 'none';
+        $('autoupdate-warning').style.display = 'none';
+        
+        $('autoupdate-breaking-alert-warn').style.display = 'block';
+        $('autoupdate-breaking-container').style.display = 'flex';
+        
+        // Config confirm button click to run startAutoUpdate with force = true
+        const confirmBtn = $('autoupdate-confirm-btn');
+        confirmBtn.onclick = () => startAutoUpdate(version, releaseZipUrl, true);
+        confirmBtn.style.display = 'block';
+        
+        // Show actions footer with Confirm button
+        $('autoupdate-retry-btn').style.display = 'none';
+        $('autoupdate-actions').style.display = 'flex';
+        
+        $('autoupdate-modal').classList.add('show');
+        
+        _otaInProgress = false;
+        return;
+      }
     }
   }
   
@@ -4543,6 +4550,80 @@ function onAuthSucceeded() {
     justify-content: center;
     align-items: center;
     flex-shrink: 0;
+  }
+
+  /* Rich Markdown Release Notes Styles */
+  #autoupdate-release-notes h1,
+  #autoupdate-release-notes h2,
+  #autoupdate-release-notes h3,
+  #autoupdate-release-notes h4 {
+    margin: 0.8rem 0 0.4rem 0;
+    color: var(--accent, #4ecca3);
+    font-weight: 600;
+  }
+  #autoupdate-release-notes h1 { font-size: 1.15rem; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: 0.2rem; }
+  #autoupdate-release-notes h2 { font-size: 1.05rem; }
+  #autoupdate-release-notes h3 { font-size: 0.95rem; }
+  #autoupdate-release-notes h4 { font-size: 0.85rem; }
+  #autoupdate-release-notes p {
+    margin: 0 0 0.6rem 0;
+    line-height: 1.5;
+  }
+  #autoupdate-release-notes ul,
+  #autoupdate-release-notes ol {
+    margin: 0 0 0.6rem 1.2rem;
+    padding: 0;
+  }
+  #autoupdate-release-notes li {
+    margin-bottom: 0.25rem;
+    line-height: 1.4;
+  }
+  #autoupdate-release-notes code {
+    background: rgba(255, 255, 255, 0.12);
+    padding: 0.15rem 0.35rem;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.75rem;
+  }
+  #autoupdate-release-notes pre {
+    background: rgba(0, 0, 0, 0.4);
+    padding: 0.6rem 0.8rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.6rem 0;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+  #autoupdate-release-notes pre code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: 0.72rem;
+  }
+  #autoupdate-release-notes table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.8rem 0;
+    font-size: 0.72rem;
+  }
+  #autoupdate-release-notes th,
+  #autoupdate-release-notes td {
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+  }
+  #autoupdate-release-notes th {
+    background: rgba(255, 255, 255, 0.06);
+    font-weight: bold;
+    color: var(--fg, #f5f5f5);
+  }
+  #autoupdate-release-notes blockquote {
+    margin: 0.6rem 0;
+    padding: 0.4rem 0.8rem;
+    border-left: 3px solid var(--accent, #4ecca3);
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 0 4px 4px 0;
+    font-style: italic;
+    color: var(--dim, #9ca3af);
   }
 </style>
 
