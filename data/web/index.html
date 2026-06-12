@@ -3769,6 +3769,13 @@ function semverCmp(a, b) {
   return 0;
 }
 
+/* Compute the SHA-256 hash of a buffer using browser's native Web Crypto API */
+async function computeBufferSHA256(buffer) {
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 function shouldToastUpdate(latest) {
   try {
     const d = JSON.parse(localStorage.getItem('update_dismissed') || 'null');
@@ -3783,6 +3790,7 @@ function shouldToastUpdate(latest) {
 const GITHUB_REPO = 'MrToast99/Nextube-Remaster';
 const CORS_PROXY_URL = 'https://nextube-updater.bagl3y.com/?url='; // Custom secure Cloudflare Worker CORS proxy
 let _latestUpdateZipUrl = null;
+let _latestUpdateDigest = null;
 
 /* Tracks the latest available release version (null = up to date / not yet checked).
  * Read by onNotifyUpdateChange() and saveSettings() to sync the tube-6 indicator. */
@@ -3879,26 +3887,26 @@ function triggerAutoUpdate() {
   startAutoUpdate(_latestUpdate, _latestUpdateZipUrl);
 }
 
-/* Inject fflate unzipping library dynamically from CDN only when needed */
+/* Inject fflate unzipping library dynamically from local storage only when needed */
 function injectFflate() {
   return new Promise((resolve, reject) => {
     if (window.fflate) return resolve();
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/fflate@0.8/umd/index.min.js';
+    s.src = '/fflate.min.js';
     s.onload = resolve;
-    s.onerror = () => reject(new Error('Failed to load unzip library (fflate) from CDN. Please check your internet connection.'));
+    s.onerror = () => reject(new Error('Failed to load unzip library (fflate) from device storage. Please ensure the file is present in LittleFS.'));
     document.head.appendChild(s);
   });
 }
 
-/* Inject marked Markdown library dynamically from CDN only when needed */
+/* Inject marked Markdown library dynamically from local storage only when needed */
 function injectMarked() {
   return new Promise((resolve, reject) => {
     if (window.marked) return resolve();
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/marked@4/marked.min.js';
+    s.src = '/marked.min.js';
     s.onload = resolve;
-    s.onerror = () => reject(new Error('Failed to load markdown library from CDN. Please check your internet connection.'));
+    s.onerror = () => reject(new Error('Failed to load markdown library from device storage. Please ensure the file is present in LittleFS.'));
     document.head.appendChild(s);
   });
 }
@@ -4169,6 +4177,17 @@ async function startAutoUpdate(version, releaseZipUrl, force = false) {
     updateStepState('download', 'complete');
     updateTotalProgress(15);
     
+    // ---- Phase 1.5: Security Integrity Check (Zero-Trust Validation) ----
+    if (_latestUpdateDigest) {
+      $('autoupdate-sub-status').textContent = 'Verifying update package integrity (SHA-256)...';
+      const computedHash = await computeBufferSHA256(buf);
+      if (computedHash !== _latestUpdateDigest) {
+        throw new Error(`Security Alert: Downloaded package SHA-256 integrity check failed!\n\nExpected: ${_latestUpdateDigest}\nComputed: ${computedHash}\n\nThe download may have been tampered with or corrupted. Update aborted for your safety.`);
+      }
+    } else {
+      console.warn('No official SHA-256 digest found in release metadata; skipping integrity check.');
+    }
+    
     // ---- Phase 2: Unpack ----
     updateStepState('unpack', 'active');
     $('autoupdate-sub-status').textContent = 'Extracting and preparing update files...';
@@ -4349,6 +4368,7 @@ async function checkForUpdates(silent = false) {
     // Resolve release package URL ending in .zip
     const asset = data.assets && data.assets.find(a => a.name.endsWith('.zip'));
     _latestUpdateZipUrl = asset ? asset.browser_download_url : null;
+    _latestUpdateDigest = (asset && asset.digest) ? asset.digest.replace(/^sha256:/, '') : null;
     
     /* Skip comparison if device version hasn't loaded yet */
     if (!current || current === '--') return;
@@ -4362,6 +4382,7 @@ async function checkForUpdates(silent = false) {
     } else {
       _latestUpdate = null;
       _latestUpdateZipUrl = null;
+      _latestUpdateDigest = null;
       _latestUpdateData = null;
       $('update-available').style.display = 'none';
       $('update-toast').style.display = 'none';
