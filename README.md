@@ -116,7 +116,7 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 | **RTC** | PCF8563 + CR1220 coin cell | I²C: SCL=22, SDA=23 (addr 0x51) |
 | **Temp/Humidity** | SHT30 | I²C: SCL=22, SDA=23 (addr 0x44) |
 | **Audio** | LTK8002D amplifier | DAC=GPIO25 |
-| **Microphone** | CMC-4015-25T electret capsule + LMV321IDBVR op-amp preamp | ADC=GPIO35 (ADC1_CH7, input-only) |
+| **Microphone** | Unmarked 4 mm SMT electret capsule (≈−42 dBV/Pa, see [Microphone Notes](#microphone-notes)) + LMV321IDBVR op-amp preamp | ADC=GPIO35 (ADC1_CH7, input-only) |
 
 > **RTC battery:** The PCF8563 is backed by a **CR1220** coin cell on the underside of the PCB. Without a charged battery the RTC loses its time on every power-cycle. The firmware detects this condition (seed epoch < 2024-01-01) and blanks the clock tubes until the first NTP sync completes, rather than displaying the incorrect epoch-0 time.
 
@@ -278,14 +278,6 @@ residual and for general efficiency:
 | RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
 | Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
 
-**Historical note — why frequency-shifting the noise sources never helped:**
-the interference was broadband current transients conducted through the GPIO25
-pin driver, not a single tone — so raising any PWM/clock frequency (WS2812
-internal ~400 Hz PWM is fixed in-chip anyway; backlight PWM is already 50 kHz;
-RMT bit clock is a 10 MHz protocol requirement) could never reduce it.  This
-is also why every activity-reduction experiment failed: the fix was removing
-the conduction path (pad isolation), not quieting the chip.
-
 **Optional hardware hardening** (no longer required for quiet idle): a
 **100 µF + 100 nF** decoupling cap close to the ESP32 `VDD3P3_RTC` pin further
 reduces supply transients reaching the DAC's analog domain during playback.
@@ -423,18 +415,6 @@ ST7735S panels are electrically identical to the original ST7735 but have a diff
 
 ---
 
-### Original Firmware Analysis
-
-The stock firmware was built with **ESP-IDF v4.4** + **Arduino framework** via PlatformIO by developer `HERRY0812`. It uses:
-- **AutoConnect** library for WiFi provisioning
-- **FreeRTOS** tasks: `TaskDisplay`, `TaskWifiServer`, `TaskNtp`, `TaskWeather`, `TaskYoutubeAndBili`, `TaskIIC`, `TaskLed`, `TaskAudio`, `TaskConfigs`
-- **SPIFFS** for theme images and config.json
-- **cJSON** for configuration
-- Theme images stored under `/images/themes/`
-- Weather icons under `/MutiInfo/Weather/`
-
-> **This project has migrated from SPIFFS to LittleFS.** The original firmware used SPIFFS (partition subtype `0x82`). Nextube-Remaster uses LittleFS (`joltwallet/littlefs`, subtype `0x83`) to gain real directory support, power-loss resilience (copy-on-write), and removal of the 64-character filename limit. The VFS mount point is kept as `/spiffs` so all existing path strings in the firmware, config, and web UI are unchanged. A one-time full USB re-flash is required when upgrading from any SPIFFS-based build because the partition table subtype must change.
-
 ### Flash Layout (16MB)
 
 | Offset | Size | Partition |
@@ -547,6 +527,8 @@ The web UI provides two separate OTA upload paths under **System**:
 
 > **Do not** upload `nextube-fw-full.bin` via OTA — it is the merged USB-flash image, not a valid OTA app image.
 
+> **Spectrum mode:** if the device is in Spectrum visualiser mode when an OTA starts, the firmware automatically switches to Clock mode and waits briefly for the microphone to release the I²S peripheral before proceeding — this is expected and takes less than a second.
+
 #### Version mismatch detection
 
 After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web UI version doesn't match the new firmware's expected version. Follow the prompt to upload the matching `littlefs.bin` via **System → Web UI Update**.
@@ -647,11 +629,29 @@ After setup, access the management interface via:
 
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
-- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, auto theme rotation (cycle all or selected themes on a timer), Spectrum LED source (custom amplitude-modulated glow colour **or** follow configured accent mode), Spectrum LCD bar colour (fixed colour **or** follow the live WLED primary colour when WLED Sync is enabled — falls back to the fixed colour when no WLED data is arriving), Spectrum noise floor threshold, **Advanced Display** (see below)
-- **Network** — WiFi SSID/password (shown as plain text on first entry so you can verify before saving; masked once a password has been saved), hostname, timezone (UTC offset in hours), NTP server. Only reconnects when credentials actually change, preserving the live connection for all other saves.
-- **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable (including animated Panel 3 Sunrise & Sunset); **Social Media Counters** (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters)); **WLED Sync** (see [WLED Sync](#wled-sync)); **Home Assistant MQTT** (see [Home Assistant MQTT](#home-assistant-mqtt)); countdown duration, Pomodoro work and break durations
-- **Audio** — volume, sound file selection
-- **System** — firmware OTA, web UI / LittleFS OTA, LittleFS file browser (browse/upload/delete/new folder/**rename file or folder**), device log viewer, firmware update check (automatic on page load and every 24 h; compares against latest GitHub release with dismissable toast notification), **Lock Webui** (enable/disable password protection, change password, sign out), WiFi Setup AP PIN management (show/regenerate), factory reset (settings-only or full), about (shows firmware + web UI versions independently)
+- **Display**
+  - Theme — populated dynamically from LittleFS; add a folder to `/images/themes/` and it appears in the dropdown automatically
+  - Brightness; LED accent lighting (Static / Breath / Rainbow / Off) with per-tube colour pickers
+  - Enabled mode toggles; auto mode rotation; auto theme rotation (cycle all or selected themes on a timer)
+  - Spectrum settings — LED source (amplitude-modulated glow colour **or** follow accent mode), LCD bar colour (fixed **or** follow live WLED primary), Noise Floor threshold
+  - **Advanced Display** — per-tube gamma, VCOM, panel profile, brightness trim, colour inversion, window offsets, anti-burn-in (see below)
+- **Network** — WiFi SSID/password, hostname, timezone, NTP server. Only reconnects when credentials actually change, preserving the live connection for all other saves.
+- **Services**
+  - Weather (source, city, units, panel rotation interval, per-panel enable/disable)
+  - Social Media Counters (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters))
+  - WLED Sync (see [WLED Sync](#wled-sync))
+  - Home Assistant MQTT (broker, port, credentials, optional telemetry groups — see [Home Assistant MQTT](#home-assistant-mqtt))
+  - Countdown and Pomodoro durations
+- **Audio** — volume, ticker notification sound file
+- **System**
+  - OTA firmware update and web UI / LittleFS update
+  - LittleFS file browser (browse / upload / delete / new folder / rename)
+  - Device log viewer
+  - Firmware update check (automatic on page load and every 24 h; dismissable toast; compares against latest GitHub release)
+  - Lock Webui (enable/disable password protection, change password, sign out)
+  - WiFi Setup AP PIN management (show / regenerate)
+  - Factory reset (settings-only or full)
+  - About (shows firmware + web UI versions independently)
 
 ### Advanced Display (LCD Calibration)
 
@@ -717,7 +717,7 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 | **Mastodon** | Live follower count. Fetched directly from the configured Mastodon instance API — no relay required. |
 | **Weather** | Up to three panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon; **Panel 3** — animated sunrise/sunset (rising/setting sun + mountain silhouettes at 20 Hz, solar times in HH:MM). Any combination of panels can be enabled; at least one must remain on. Temperatures rounded to whole degrees; leading zeros suppressed; minus sign shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
-| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard CMC-4015-25T capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
+| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard electret capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
 
 ### Mode Rotation
 
@@ -1063,8 +1063,8 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 | **Nextube Ticker** | `text` | Always | Scrolling message ticker — type any text and press Enter to display it across all 6 tubes |
 | **Nextube Ticker Speed** | `number` | Always | Marquee scroll speed slider, 1–20 px per tick (higher = faster). RAM-only; resets to 4 on reboot |
 | **Nextube Ticker Sound** | `switch` | Always | Enable/disable the chime played on each incoming ticker message |
-| **Nextube XTAL Drift** | `sensor` | Clock telemetry *(default on)* | Signed ms the ESP32 crystal would have drifted without NTP discipline; retained, updated each NTP sync |
-| **Nextube RTC Max Error** | `sensor` | Clock telemetry *(default on)* | Worst single-minute clock error (ms) the PCF8563 discipline saw since the last sync; PCF slave mode only |
+| **Nextube XTAL Drift** | `sensor` | Clock telemetry *(default off)* | Signed ms the ESP32 crystal would have drifted without NTP discipline; retained, updated each NTP sync |
+| **Nextube RTC Max Error** | `sensor` | Clock telemetry *(default off)* | Worst single-minute clock error (ms) the PCF8563 discipline saw since the last sync; PCF slave mode only |
 | **Nextube RSSI** | `sensor` | Device health *(default off)* | WiFi signal strength in dBm; updated every 60 s |
 | **Nextube Free Heap** | `sensor` | Device health *(default off)* | Free heap bytes; updated every 60 s |
 | **Nextube Uptime** | `sensor` | Device health *(default off)* | Device uptime in minutes; updated every 60 s |
@@ -1079,7 +1079,7 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 5. Set **Port** (default `1883`).
 6. Fill in **Username** and **Password** if your broker requires authentication; leave blank for anonymous access.
 7. Leave **Publish HA auto-discovery payloads** checked (recommended).
-8. Optionally enable extra publishing groups: **Clock telemetry** (NTP sync drift sensors — on by default), **Device health** (RSSI / heap / uptime sensors, 60 s interval — off by default), **Button presses** (touch events as HA device-automation triggers — off by default). New entity groups appear after the next broker reconnect or reboot.
+8. Optionally enable extra publishing groups: **Clock telemetry** (NTP sync drift sensors — off by default), **Device health** (RSSI / heap / uptime sensors, 60 s interval — off by default), **Button presses** (touch events as HA device-automation triggers — off by default). New entity groups appear after the next broker reconnect or reboot.
 9. Click **Save**, then reboot the device (**System → Reboot**).
 
 After reboot HA will show a new **Nextube** device under **Settings → Devices & Services → MQTT** within a few seconds of the device connecting.
@@ -1124,7 +1124,7 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 ### Notes
 
 - **Boot-time gate** — MQTT is only started if both **Enable** is checked *and* a broker address is set. Disabling MQTT frees the task stack and stops all polling — useful if you don't use Home Assistant.
-- **Optional publishing groups** — three checkboxes under **Services → MQTT** control extra telemetry: **Clock telemetry** (XTAL drift + RTC max error per NTP sync; default on), **Device health** (WiFi RSSI / free heap / uptime sensors every 60 s; default off), and **Button presses** (touch events as HA device triggers, usable in automations — e.g. "left button → toggle the bedroom lights"; default off). Publishing toggles take effect immediately; HA *entities* for a newly enabled group appear after the next broker reconnect or reboot.
+- **Optional publishing groups** — three checkboxes under **Services → MQTT** control extra telemetry: **Clock telemetry** (XTAL drift + RTC max error per NTP sync; default off), **Device health** (WiFi RSSI / free heap / uptime sensors every 60 s; default off), and **Button presses** (touch events as HA device triggers, usable in automations — e.g. "left button → toggle the bedroom lights"; default off). Publishing toggles take effect immediately; HA *entities* for a newly enabled group appear after the next broker reconnect or reboot.
 - **Restart required** — changes to MQTT settings take effect after a reboot (same behaviour as weather and social counter toggles).
 - **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
 - **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
@@ -1151,7 +1151,7 @@ mosquitto_pub -h <broker> -t "nextube/nextube-remaster/ticker/set" -m "Good morn
 | **Notification sound** | Optional (off by default): when **Ticker Sound** is enabled, each non-empty `ticker/set` plays the configured sound file (default `/spiffs/audio/bell.wav`, changeable under **Hardware → Ticker Notification Sound**). Toggle via the HA **Nextube Ticker Sound** switch, `ticker_sound/set`, or the web UI; persists across reboots. Requires **audio output** enabled in device settings. |
 | **Requires MQTT** | Ticker is only available when Home Assistant MQTT integration is enabled. |
 
-In Home Assistant, the **Nextube Ticker** appears as a `text` entity on the Nextube device card — type your message and press Enter. The **Nextube Ticker Sound** switch toggles the notification chime, and two telemetry sensors — **Nextube XTAL Drift** and **Nextube RTC Max Error** — update after every NTP sync, giving graphable long-term history of the crystal's drift and the RTC discipline's hold accuracy.
+In Home Assistant, the **Nextube Ticker** appears as a `text` entity on the Nextube device card — type your message and press Enter. The **Nextube XTAL Drift** and **Nextube RTC Max Error** telemetry sensors update after every NTP sync, giving graphable long-term history of the crystal's drift and the RTC discipline's hold accuracy.
 
 ## WLED Sync
 
@@ -1364,6 +1364,11 @@ POST /api/debug/loglevel     → runtime per-tag log verbosity: {"tag":"ntp","le
                                (0=none … 5=verbose) or {"tag":"…","enabled":false}; resets on reboot
 POST /api/debug/burnin       → trigger the burn-in / colour-cycle routine (see Advanced Display)
 POST /api/debug/snow         → trigger the static-snow routine (see Advanced Display)
+GET  /api/debug/micframe     → atomic snapshot of one DMA capture: {"samples":[512 raw ADC values],
+                               "dec":[128 decimated values]} — both arrays come from the same frame
+GET  /api/debug/micbands     → per-band spectrum state for all 24 Goertzel bands:
+                               raw energy, noise floor, post-floor power, and display value;
+                               updated even on silence-gated frames
 ```
 
 ## Project Structure
@@ -1389,8 +1394,9 @@ nextube-fw/
 │   ├── wifi_manager/              # AP+STA WiFi (WPA2 setup AP; on-demand via LEFT+RIGHT hotkey; NVS-backed per-device PIN)
 │   ├── web_server/                # HTTP server + REST API + OTA handlers + log viewer
 │   ├── ntp_time/                  # NTP synchronisation
+│   ├── ha_mqtt/                   # Home Assistant MQTT auto-discovery + optional telemetry groups
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
-│   └── subscribers/               # Subscriber/follower counter (YouTube, Bilibili, Instagram, TikTok)
+│   └── subscribers/               # Subscriber/follower counter (YouTube, Bilibili, Instagram, TikTok, Mastodon)
 ├── data/web/                      # Web UI source (bundled into LittleFS)
 │   ├── index.html                 # Self-contained SPA (English inline; i18n engine built-in)
 │   ├── lang/                      # Lazy-loaded translation files (de fr es it pt nl sv no da fi)
