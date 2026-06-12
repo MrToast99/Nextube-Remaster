@@ -45,6 +45,15 @@ static bool       s_boot_synced    = false; /* set after first post-boot NTP syn
 static time_t     s_last_ntp_sec   = 0;     /* NTP epoch at last successful sync    */
 static int64_t    s_last_ntp_us    = 0;     /* esp_timer_get_time() µs at last sync */
 
+/* External sync-stats listener (see ntp_register_sync_listener).  Called from
+ * the SNTP callback context after each steady-state sync. */
+static ntp_sync_listener_t s_sync_listener = NULL;
+
+void ntp_register_sync_listener(ntp_sync_listener_t cb)
+{
+    s_sync_listener = cb;
+}
+
 /* ── Between-sync time disciplining ─────────────────────────────────────────
  * cfg->time_discipline_mode:
  *   0 = off — reactive NTP only; XTAL drift uncorrected between syncs.
@@ -107,19 +116,23 @@ static void time_sync_cb(struct timeval *tv)
 
         } else if (discipline_mode() == 2) {
             /* PCF slave active: hard-set stays; PCF edge-sync holds the
-             * clock each minute.  Report worst-case error seen this hour. */
+             * clock each minute.  Report worst-case error seen this hour.
+             * offset_ms is reconstructed from the free-running esp_timer
+             * (XTAL) timebase, so it is what the error WOULD have been
+             * without discipline — the actual clock was held by the PCF. */
             if (s_pcf_n > 0) {
-                ESP_LOGI(TAG, "NTP sync: XTAL was %+lld ms — PCF kept <=%.0f ms between syncs",
+                ESP_LOGI(TAG, "NTP sync: XTAL (ESP) would have been %+lld ms — PCF (RTC) kept <=%.0f ms between syncs",
                          (long long)offset_ms, s_pcf_max_abs);
             } else {
-                ESP_LOGI(TAG, "NTP sync: XTAL was %+lld ms — PCF slave active",
+                ESP_LOGI(TAG, "NTP sync: XTAL (ESP) would have been %+lld ms — PCF (RTC) slave active, no corrections recorded",
                          (long long)offset_ms);
             }
 
         } else if (discipline_mode() == 1) {
             /* ESP rate discipline active: hard-set stays; rate nudge each
-             * minute.  Show raw XTAL drift for reference.                 */
-            ESP_LOGI(TAG, "NTP sync: XTAL was %+lld ms — ESP rate discipline active",
+             * minute.  Show raw XTAL drift for reference (same counterfactual
+             * as mode 2: the disciplined clock drifted less than this).    */
+            ESP_LOGI(TAG, "NTP sync: XTAL (ESP) would have been %+lld ms — rate discipline active",
                      (long long)offset_ms);
 
         } else if (abs_offset <= NTP_SMOOTH_MAX_S) {
@@ -138,6 +151,16 @@ static void time_sync_cb(struct timeval *tv)
         } else {
             /* Mode 0, large drift: hard-set stays.                        */
             ESP_LOGI(TAG, "NTP sync: %+lld ms corrected", (long long)offset_ms);
+        }
+
+        /* Notify the external sync-stats listener (ha_mqtt publishes these
+         * to Home Assistant as sensors) BEFORE the accumulators reset below.
+         * Boot-window duplicates are excluded — their short elapsed time
+         * makes the offset meaningless as a drift measure. */
+        if (elapsed_s >= NTP_BOOT_WINDOW_S && s_sync_listener) {
+            float pcf_max = (discipline_mode() == 2 && s_pcf_n > 0)
+                          ? (float)s_pcf_max_abs : -1.0f;
+            s_sync_listener((int32_t)offset_ms, pcf_max, discipline_mode());
         }
 
         /* Update XTAL drift EMA (silent — used by mode-1 discipline) and

@@ -282,6 +282,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "STA IP: %s", s_ip_str);
+        esp_wifi_set_ps(WIFI_PS_NONE);
         /* If the AP is currently up (either because we never had STA
          * credentials and started in APSTA, or because the user summoned it
          * via the LEFT+RIGHT touch hotkey), schedule a graceful 60 s shutdown so the

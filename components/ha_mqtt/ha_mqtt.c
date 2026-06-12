@@ -14,6 +14,13 @@
  *   nextube/<host>/rotation/state            "ON" or "OFF"
  *   nextube/<host>/ticker/state              current ticker text, or "" when cleared
  *   nextube/<host>/ticker_speed/state        ticker scroll speed (px per 200 ms tick)
+ *   nextube/<host>/ticker_sound/state        "ON" or "OFF" — chime on ticker text
+ *   nextube/<host>/ntp/xtal_drift/state      signed ms; per NTP sync (retained)
+ *   nextube/<host>/ntp/rtc_err/state         ms; PCF worst hold error (retained)
+ *   nextube/<host>/health/state              {"rssi","heap","uptime_min"} / 60 s
+ *                                            (optional group: mqtt_pub_health)
+ *   nextube/<host>/button/state              "left"/"middle"/"right" per press
+ *                                            (optional group: mqtt_pub_buttons)
  *
  * Subscribed:
  *   nextube/<host>/mode/set                  "Weather"
@@ -23,6 +30,7 @@
  *   nextube/<host>/rotation/set              "ON" or "OFF"
  *   nextube/<host>/ticker/set                UTF-8 string ≤ 255 chars; empty = cancel
  *   nextube/<host>/ticker_speed/set          ticker scroll speed 1–20 (px per 200 ms tick)
+ *   nextube/<host>/ticker_sound/set          "ON"/"OFF" — play cfg->ticker_file on ticker text
  *
  * HA auto-discovery:
  *   homeassistant/sensor/<host>_temp/config
@@ -35,6 +43,9 @@
  *   homeassistant/number/<host>_brightness/config
  *   homeassistant/text/<host>_ticker/config
  *   homeassistant/number/<host>_ticker_speed/config
+ *   homeassistant/switch/<host>_ticker_sound/config
+ *   homeassistant/sensor/<host>_xtal_drift/config
+ *   homeassistant/sensor/<host>_rtc_err/config
  *
  * Firmware version:
  *   nextube/<host>/firmware/state              "1.10.0"  (retained)
@@ -46,6 +57,11 @@
 #include "sht30.h"
 #include "wifi_manager.h"
 #include "display.h"
+#include "audio.h"       /* ticker notification chime (audio_play_file) */
+#include "ntp_time.h"    /* NTP sync-stats listener → HA sensors        */
+#include "esp_wifi.h"    /* RSSI for the optional health sensors        */
+#include "esp_system.h"  /* esp_get_free_heap_size                      */
+#include "esp_timer.h"   /* uptime for the health sensors               */
 
 #include <string.h>
 #include <stdio.h>
@@ -317,6 +333,90 @@ static void publish_ticker_speed(int px)
     publish(topic, buf, 0);
 }
 
+static void publish_ticker_sound(bool enabled)
+{
+    char topic[TOPIC_MAXLEN];
+    make_topic(topic, sizeof(topic), "ticker_sound/state");
+    publish(topic, enabled ? "ON" : "OFF", 0);
+}
+
+/* ── NTP sync-stats → HA sensors ─────────────────────────────────────
+ * The listener runs in the SNTP callback context — which is lwIP's tcpip
+ * thread (tiT).  It MUST NOT take any lock or call esp_mqtt_client_publish:
+ * the publish acquires the MQTT client mutex, and if the MQTT task holds it
+ * while blocked in a socket call that needs tiT to make progress, the two
+ * deadlock and ALL networking freezes silently (observed: web UI, weather
+ * and MQTT all dead from the first steady-state sync, no errors, while
+ * non-network tasks kept running).  So the listener only stashes the values;
+ * the MQTT task's 60 s loop publishes them from a safe context. */
+static volatile int32_t s_ntp_pend_drift = 0;
+static volatile float   s_ntp_pend_pcf   = -1.0f;
+static volatile bool    s_ntp_pend       = false;
+
+static void on_ntp_sync_stats(int32_t xtal_drift_ms, float pcf_max_err_ms,
+                              int discipline_mode)
+{
+    (void)discipline_mode;
+    s_ntp_pend_drift = xtal_drift_ms;
+    s_ntp_pend_pcf   = pcf_max_err_ms;
+    s_ntp_pend       = true;        /* written last — flag publishes the pair */
+}
+
+/* Called from the MQTT task's publish loop.  Retained messages so HA shows
+ * the last sync even after a broker restart. */
+static void publish_ntp_stats(void)
+{
+    char topic[TOPIC_MAXLEN];
+    char val[16];
+
+    make_topic(topic, sizeof(topic), "ntp/xtal_drift/state");
+    snprintf(val, sizeof(val), "%d", (int)s_ntp_pend_drift);
+    esp_mqtt_client_publish(s_client, topic, val, 0, 0, /*retain=*/1);
+
+    float pcf = s_ntp_pend_pcf;
+    if (pcf >= 0.0f) {
+        make_topic(topic, sizeof(topic), "ntp/rtc_err/state");
+        snprintf(val, sizeof(val), "%.1f", (double)pcf);
+        esp_mqtt_client_publish(s_client, topic, val, 0, 0, /*retain=*/1);
+    }
+}
+
+/* ── Optional health sensors: WiFi RSSI / free heap / uptime ─────────
+ * One JSON payload on health/state, split into HA sensors by
+ * value_template in the discovery configs.  Published from the 60 s
+ * loop when cfg->mqtt_pub_health is set. */
+static void publish_health(void)
+{
+    wifi_ap_record_t ap;
+    int rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : 0;
+
+    char topic[TOPIC_MAXLEN];
+    char payload[96];
+    make_topic(topic, sizeof(topic), "health/state");
+    snprintf(payload, sizeof(payload),
+             "{\"rssi\":%d,\"heap\":%u,\"uptime_min\":%llu}",
+             rssi,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned long long)(esp_timer_get_time() / 60000000LL));
+    publish(topic, payload, 0);
+}
+
+/* ── Optional button events: touch presses as HA device triggers ─────
+ * Called from the touch handler (main.c).  Safe before MQTT is up and
+ * when the group is disabled — both no-op. */
+void ha_mqtt_publish_button(const char *btn)
+{
+    if (!s_connected || !s_client || !btn) return;
+    config_lock();
+    bool en = config_get()->mqtt_pub_buttons;
+    config_unlock();
+    if (!en) return;
+
+    char topic[TOPIC_MAXLEN];
+    make_topic(topic, sizeof(topic), "button/state");
+    esp_mqtt_client_publish(s_client, topic, btn, 0, 0, 0);
+}
+
 static void publish_sensors(void)
 {
     const sht30_reading_t *s = sht30_get();
@@ -381,6 +481,128 @@ static void publish_ticker_discovery(void)
              "}",
              s_hostname, ts_state, ts_cmd, dev);
     publish(topic, payload, 1);
+
+    /* ── Ticker sound switch (chime when ticker text arrives) ──
+     * Plays cfg->ticker_file through the speaker on every non-empty
+     * ticker/set.  Requires audio output to be enabled in device settings —
+     * audio_play_file() is a no-op otherwise. */
+    char sn_state[TOPIC_MAXLEN], sn_cmd[TOPIC_MAXLEN];
+    make_topic(sn_state, sizeof(sn_state), "ticker_sound/state");
+    make_topic(sn_cmd,   sizeof(sn_cmd),   "ticker_sound/set");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/switch/%s_ticker_sound/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Ticker Sound\","
+             "\"unique_id\":\"%s_ticker_sound\","
+             "\"state_topic\":\"%s\","
+             "\"command_topic\":\"%s\","
+             "\"icon\":\"mdi:bell-ring\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, sn_state, sn_cmd, dev);
+    publish(topic, payload, 1);
+
+    /* ── NTP timekeeping sensors (clock-discipline telemetry) ──
+     * Published after every steady-state NTP sync (see on_ntp_sync_stats).
+     * state_class "measurement" makes HA record long-term statistics, so
+     * crystal drift and RTC hold accuracy become graphable history. */
+    char nx_state[TOPIC_MAXLEN], nr_state[TOPIC_MAXLEN];
+    make_topic(nx_state, sizeof(nx_state), "ntp/xtal_drift/state");
+    make_topic(nr_state, sizeof(nr_state), "ntp/rtc_err/state");
+
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/%s_xtal_drift/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube XTAL Drift\","
+             "\"unique_id\":\"%s_xtal_drift\","
+             "\"state_topic\":\"%s\","
+             "\"unit_of_measurement\":\"ms\","
+             "\"state_class\":\"measurement\","
+             "\"icon\":\"mdi:sine-wave\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, nx_state, dev);
+    publish(topic, payload, 1);
+
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/%s_rtc_err/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube RTC Max Error\","
+             "\"unique_id\":\"%s_rtc_err\","
+             "\"state_topic\":\"%s\","
+             "\"unit_of_measurement\":\"ms\","
+             "\"state_class\":\"measurement\","
+             "\"icon\":\"mdi:clock-check-outline\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, nr_state, dev);
+    publish(topic, payload, 1);
+
+    /* ── Optional groups (web-UI checkboxes) ──
+     * Discovery for these is published only when their group is enabled at
+     * (re)connect time; enabling a checkbox takes effect for HA entities on
+     * the next broker reconnect or reboot. */
+    config_lock();
+    bool pub_health  = config_get()->mqtt_pub_health;
+    bool pub_buttons = config_get()->mqtt_pub_buttons;
+    config_unlock();
+
+    if (pub_health) {
+        char h_state[TOPIC_MAXLEN];
+        make_topic(h_state, sizeof(h_state), "health/state");
+        static const struct { const char *id, *name, *tmpl, *unit, *icon, *devclass; } k_h[] = {
+            { "rssi",   "Nextube WiFi RSSI", "{{ value_json.rssi }}",
+              "dBm", "mdi:wifi",        ",\"device_class\":\"signal_strength\"" },
+            { "heap",   "Nextube Free Heap", "{{ value_json.heap }}",
+              "B",   "mdi:memory",      "" },
+            { "uptime", "Nextube Uptime",    "{{ value_json.uptime_min }}",
+              "min", "mdi:timer-outline", "" },
+        };
+        for (size_t i = 0; i < sizeof(k_h)/sizeof(k_h[0]); i++) {
+            snprintf(topic, sizeof(topic),
+                     "homeassistant/sensor/%s_%s/config", s_hostname, k_h[i].id);
+            snprintf(payload, sizeof(payload),
+                     "{"
+                     "\"name\":\"%s\","
+                     "\"unique_id\":\"%s_%s\","
+                     "\"state_topic\":\"%s\","
+                     "\"value_template\":\"%s\","
+                     "\"unit_of_measurement\":\"%s\","
+                     "\"state_class\":\"measurement\","
+                     "\"icon\":\"%s\""
+                     "%s,"
+                     "\"device\":{%s}"
+                     "}",
+                     k_h[i].name, s_hostname, k_h[i].id, h_state, k_h[i].tmpl,
+                     k_h[i].unit, k_h[i].icon, k_h[i].devclass, dev);
+            publish(topic, payload, 1);
+        }
+    }
+
+    if (pub_buttons) {
+        char b_state[TOPIC_MAXLEN];
+        make_topic(b_state, sizeof(b_state), "button/state");
+        static const char *const k_btns[] = { "left", "middle", "right" };
+        for (size_t i = 0; i < 3; i++) {
+            snprintf(topic, sizeof(topic),
+                     "homeassistant/device_automation/%s_btn_%s/config",
+                     s_hostname, k_btns[i]);
+            snprintf(payload, sizeof(payload),
+                     "{"
+                     "\"automation_type\":\"trigger\","
+                     "\"type\":\"button_short_press\","
+                     "\"subtype\":\"%s\","
+                     "\"topic\":\"%s\","
+                     "\"payload\":\"%s\","
+                     "\"device\":{%s}"
+                     "}",
+                     k_btns[i], b_state, k_btns[i], dev);
+            publish(topic, payload, 1);
+        }
+    }
 }
 
 /* ── Ticker public API ────────────────────────────────────────────── */
@@ -573,6 +795,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             esp_mqtt_client_subscribe(s_client, topic, 1);
             make_topic(topic, sizeof(topic), "ticker_speed/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            make_topic(topic, sizeof(topic), "ticker_sound/set");
+            esp_mqtt_client_subscribe(s_client, topic, 1);
             esp_mqtt_client_subscribe(s_client, s_topic_ticker_set, 1);
         }
 
@@ -589,6 +813,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             bool        cur_on       = cfg->backlight_on;
             uint8_t     cur_br       = cfg->lcd_brightness;
             bool        cur_rot      = cfg->rotation_enabled;
+            bool        cur_tsnd     = cfg->ticker_sound;
             char        cur_theme[32];
             strncpy(cur_theme, cfg->theme, sizeof(cur_theme) - 1);
             cur_theme[sizeof(cur_theme) - 1] = '\0';
@@ -600,6 +825,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             publish_theme(cur_theme);
             publish_rotation(cur_rot);
             publish_ticker_speed(display_get_ticker_speed());
+            publish_ticker_sound(cur_tsnd);
             if (sht30_is_present()) publish_sensors();
 
             /* Firmware version — retained so HA has it after broker restart */
@@ -708,6 +934,21 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             break;
         }
 
+        /* ── ticker_sound/set ── */
+        char tsnd_cmd_topic[TOPIC_MAXLEN];
+        make_topic(tsnd_cmd_topic, sizeof(tsnd_cmd_topic), "ticker_sound/set");
+        if (strcmp(t, tsnd_cmd_topic) == 0) {
+            bool on = (strcmp(p, "ON") == 0);
+            if (on || strcmp(p, "OFF") == 0) {
+                const char *json = on ? "{\"ticker_sound\":true}"
+                                      : "{\"ticker_sound\":false}";
+                config_set_json(json, strlen(json));
+                publish_ticker_sound(on);
+                ESP_LOGI(TAG, "Ticker sound %s via MQTT", on ? "ON" : "OFF");
+            }
+            break;
+        }
+
         /* ── ticker/set ── */
         if (strcmp(t, s_topic_ticker_set) == 0) {
             /* Use event->data directly — up to TICKER_MAX_LEN chars, bypassing
@@ -724,6 +965,19 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 xSemaphoreGive(s_ticker_mutex);
                 publish(s_topic_ticker_state, s_ticker_text, 0);
                 ESP_LOGI(TAG, "Ticker set: \"%.*s\"", ticker_n, event->data);
+
+                /* Optional notification chime.  audio_play_file() returns
+                 * immediately (playback runs in its own task) and is a no-op
+                 * when audio output is disabled in settings. */
+                bool snd_en;
+                char snd_file[64];
+                config_lock();
+                snd_en = config_get()->ticker_sound;
+                strncpy(snd_file, config_get()->ticker_file, sizeof(snd_file) - 1);
+                snd_file[sizeof(snd_file) - 1] = '\0';
+                config_unlock();
+                if (snd_en && snd_file[0] != '\0')
+                    audio_play_file(snd_file);
             }
             break;
         }
@@ -826,6 +1080,19 @@ static void ha_mqtt_task(void *arg)
             publish_sensors();
         }
 
+        /* Optional health telemetry (RSSI / heap / uptime) + deferred NTP
+         * sync stats (stashed by the SNTP-context listener — see
+         * on_ntp_sync_stats for why it cannot publish directly). */
+        config_lock();
+        bool pub_health = config_get()->mqtt_pub_health;
+        bool pub_ntp    = config_get()->mqtt_pub_ntp;
+        config_unlock();
+        if (pub_health) publish_health();
+        if (s_ntp_pend) {
+            if (pub_ntp) publish_ntp_stats();
+            s_ntp_pend = false;
+        }
+
         /* Mode — publish when changed */
         if (cur_mode != last_mode) {
             publish_mode(cur_mode);
@@ -880,6 +1147,10 @@ void ha_mqtt_start(void)
     /* Create ticker mutex — must be done before the MQTT task starts so any
      * early ha_mqtt_ticker_* calls from other tasks are safe. */
     if (!s_ticker_mutex) s_ticker_mutex = xSemaphoreCreateMutex();
+
+    /* Publish clock-discipline telemetry to HA after each NTP sync.  The
+     * handler no-ops until the broker connection is up. */
+    ntp_register_sync_listener(on_ntp_sync_stats);
 
     xTaskCreatePinnedToCore(ha_mqtt_task, "ha_mqtt",
                             4096, NULL, 3, NULL, 0);

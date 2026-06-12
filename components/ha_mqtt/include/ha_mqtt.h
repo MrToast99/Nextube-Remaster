@@ -41,6 +41,15 @@ bool ha_mqtt_ticker_active(char *out, size_t len);
  */
 void ha_mqtt_ticker_clear(void);
 
+/**
+ * Publish a touch-button press ("left" / "middle" / "right") to
+ * nextube/<host>/button/state — surfaced in HA as device triggers for
+ * automations.  No-ops unless MQTT is connected AND the optional
+ * "button events" publishing group (cfg->mqtt_pub_buttons) is enabled.
+ * Safe to call from the touch handler at any time.
+ */
+void ha_mqtt_publish_button(const char *btn);
+
 #ifdef __cplusplus
 }
 #endif

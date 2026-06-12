@@ -859,6 +859,31 @@ static esp_err_t api_status(httpd_req_t *r)
  * ensures the SPI bus is free before the first flash write. */
 static void ota_suspend_tasks(void)
 {
+    /* ── Spectrum-mode flash guard ──────────────────────────────────────
+     * In Spectrum mode the mic runs hardware capture (adc_continuous on
+     * I2S0 DMA, 8 kHz stream) plus a 20 Hz analysis/render pipeline —
+     * continuous bus + interrupt traffic that is exactly the concurrency
+     * this PCB tolerates worst during flash erase/write windows (see the
+     * mic/SPIFFS IWDT note in main.c).  Suspending the mic task below is
+     * NOT enough: vTaskSuspend freezes the task mid-whatever while the DMA
+     * and I2S peripheral keep running.
+     *
+     * Instead, force the device to Clock mode (RAM-only change) and let
+     * mic_task shut its own capture down through the mode gate — it polls
+     * the mode every ≤100 ms and tears down the adc_continuous handle
+     * cleanly (acq_stop).  After that, suspending the task is safe. */
+    config_lock();
+    bool in_spectrum = (config_get()->current_mode == APP_MODE_SPECTRUM);
+    config_unlock();
+    if (in_spectrum) {
+        ESP_LOGI(TAG, "OTA guard: Spectrum active — switching to Clock before flash");
+        config_set_mode(APP_MODE_CLOCK);
+        /* Gate poll (≤100 ms) + capture teardown + margin.  The display
+         * switches on its next tick; display_show_wait() repaints it with
+         * the wait screen moments later anyway. */
+        vTaskDelay(pdMS_TO_TICKS(400));
+    }
+
     static const char *const k_tasks[] = {
         "weather",    /* HTTPS polling — competes with OTA TCP stream + heap */
         "subscribers", /* HTTPS polling — competes with OTA TCP stream + heap */
@@ -2129,6 +2154,141 @@ static esp_err_t api_debug_loglevel(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* GET /api/debug/micbands — per-band pipeline snapshot: raw band energy,
+ * noise floor, post-tilt power and final normalised display value for all
+ * 24 bands.  Shows which processing stage eats a missing signal.  Capture
+ * must be running (Spectrum mode on screen). */
+static esp_err_t api_debug_micbands(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+
+    float raw[MIC_BAND_COUNT], floor_[MIC_BAND_COUNT];
+    float power[MIC_BAND_COUNT], bands[MIC_BAND_COUNT];
+    mic_get_band_debug(raw, floor_, power, bands);
+
+    size_t cap = MIC_BAND_COUNT * 96 + 96;
+    char  *out = malloc(cap);
+    if (!out) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+
+    size_t off = (size_t)snprintf(out, cap, "{\"bands\":[");
+    for (int b = 0; b < MIC_BAND_COUNT; b++)
+        off += (size_t)snprintf(out + off, cap - off,
+            "%s{\"i\":%d,\"raw\":%.3f,\"floor\":%.3f,\"power\":%.3f,\"disp\":%.3f}",
+            b ? "," : "", b, raw[b], floor_[b], power[b], bands[b]);
+    off += (size_t)snprintf(out + off, cap - off, "]}");
+
+    httpd_resp_set_type(r, "application/json");
+    esp_err_t err = httpd_resp_send(r, out, (ssize_t)off);
+    free(out);
+    return err;
+}
+
+/* GET /api/debug/micframe — export one raw 32 kHz mic capture frame
+ * (512 samples, pre-decimation) for offline waveform/spectrum analysis.
+ * Requires Spectrum mode to be on screen (capture must be running). */
+static esp_err_t api_debug_micframe(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+
+    uint16_t *frame = malloc(MIC_RAW_FRAME_SAMPLES * sizeof(uint16_t));
+    float    *dec   = malloc(MIC_FRAME_SAMPLES * sizeof(float));
+    if (!frame || !dec) {
+        free(frame); free(dec);
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    }
+
+    if (!mic_capture_frame_pair(frame, dec, 1500)) {
+        free(frame); free(dec);
+        httpd_resp_set_status(r, "503 Service Unavailable");
+        return httpd_resp_sendstr(r,
+            "{\"error\":\"capture not running - switch to Spectrum mode (mic enabled, no audio playing)\"}");
+    }
+
+    /* raw ~6 chars/sample + decimated ~10 chars/sample + wrapper */
+    size_t cap = MIC_RAW_FRAME_SAMPLES * 6 + MIC_FRAME_SAMPLES * 12 + 96;
+    char  *out = malloc(cap);
+    if (!out) { free(frame); free(dec); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
+
+    size_t off = (size_t)snprintf(out, cap, "{\"rate_hz\":32000,\"n\":%d,\"samples\":[",
+                                  MIC_RAW_FRAME_SAMPLES);
+    for (int i = 0; i < MIC_RAW_FRAME_SAMPLES && off < cap - 8; i++)
+        off += (size_t)snprintf(out + off, cap - off, "%s%u", i ? "," : "",
+                                (unsigned)frame[i]);
+    /* Decimated/DC-removed values from the SAME frame — the exact Goertzel
+     * input (pre-window).  Lets offline analysis compare both views of one
+     * frame and isolate the decimation stage. */
+    off += (size_t)snprintf(out + off, cap - off, "],\"dec_rate_hz\":8000,\"dec\":[");
+    for (int i = 0; i < MIC_FRAME_SAMPLES && off < cap - 8; i++)
+        off += (size_t)snprintf(out + off, cap - off, "%s%.2f", i ? "," : "",
+                                (double)dec[i]);
+    off += (size_t)snprintf(out + off, cap - off, "]}");
+    free(frame); free(dec);
+
+    httpd_resp_set_type(r, "application/json");
+    esp_err_t err = httpd_resp_send(r, out, (ssize_t)off);
+    free(out);
+    return err;
+}
+
+/* GET /api/debug/tasks — per-task CPU accounting (FreeRTOS runtime stats).
+ *
+ * Returns every task's priority, core, stack high-water mark, total runtime
+ * and lifetime CPU share.  Built to diagnose IDLE-starvation task-WDT
+ * warnings: reboot, reproduce the load for ~60 s, then call this — the task
+ * whose pct dwarfs its expected share is the hog.  pct is per-chip (two
+ * cores = 200 percentage points total; IDLE0+IDLE1 absorb the slack). */
+static esp_err_t api_debug_tasks(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+
+    UBaseType_t   n  = uxTaskGetNumberOfTasks();
+    TaskStatus_t *ts = malloc(n * sizeof(TaskStatus_t));
+    if (!ts) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+
+    uint32_t total_rt = 0;
+    n = uxTaskGetSystemState(ts, n, &total_rt);
+    if (n == 0 || total_rt == 0) {
+        free(ts);
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "runtime stats unavailable"), ESP_FAIL;
+    }
+
+    /* ~110 B per task worst case + wrapper */
+    size_t cap = (size_t)n * 120 + 64;
+    char  *out = malloc(cap);
+    if (!out) { free(ts); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
+
+    static const char *k_state[] = { "run", "ready", "blocked", "suspended", "deleted", "invalid" };
+    size_t off = (size_t)snprintf(out, cap, "{\"total_runtime_us\":%u,\"tasks\":[",
+                                  (unsigned)total_rt);
+    for (UBaseType_t i = 0; i < n && off < cap - 2; i++) {
+        /* Lifetime CPU share in percent ×10 (one decimal, integer math).
+         * total_rt is single-core time base; both cores accrue against it,
+         * so the sum across all tasks approaches 200.0. */
+        uint32_t pct10 = (uint32_t)(((uint64_t)ts[i].ulRunTimeCounter * 1000) / total_rt);
+        int state = (int)ts[i].eCurrentState;
+        if (state < 0 || state > 5) state = 5;
+        off += (size_t)snprintf(out + off, cap - off,
+            "%s{\"name\":\"%s\",\"prio\":%u,\"core\":%d,\"state\":\"%s\","
+            "\"stack_hwm\":%u,\"run_us\":%u,\"pct\":%u.%u}",
+            i ? "," : "",
+            ts[i].pcTaskName,
+            (unsigned)ts[i].uxCurrentPriority,
+            (int)ts[i].xCoreID == INT32_MAX ? -1 : (int)ts[i].xCoreID,
+            k_state[state],
+            (unsigned)ts[i].usStackHighWaterMark,
+            (unsigned)ts[i].ulRunTimeCounter,
+            (unsigned)(pct10 / 10), (unsigned)(pct10 % 10));
+    }
+    off += (size_t)snprintf(out + off, cap - off, "]}");
+    free(ts);
+
+    httpd_resp_set_type(r, "application/json");
+    esp_err_t err = httpd_resp_send(r, out, (ssize_t)off);
+    free(out);
+    return err;
+}
+
 /* ── Log ring API ──────────────────────────────────────────────────── */
 /* GET /api/logs  → {"lines":["I (12) tag: msg", ...]}  chronological  */
 static esp_err_t api_get_logs(httpd_req_t *r)
@@ -2303,6 +2463,9 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/debug/dac",       api_debug_dac),
     R(HTTP_POST, "/api/debug/pwm",       api_debug_pwm),
     R(HTTP_POST, "/api/debug/loglevel",  api_debug_loglevel),
+    R(HTTP_GET,  "/api/debug/tasks",     api_debug_tasks),
+    R(HTTP_GET,  "/api/debug/micframe",  api_debug_micframe),
+    R(HTTP_GET,  "/api/debug/micbands",  api_debug_micbands),
     R(HTTP_POST, "/api/mic/calibrate",          api_mic_calibrate),
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
@@ -2357,7 +2520,12 @@ void web_server_start(void)
     if (s_server) return;   /* already running */
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 48;                /* current handlers + headroom for future routes */
+    /* Route count + headroom.  MUST exceed the uris[] table size + 1 for the
+     * static wildcard registered after it: when this cap is hit, the excess
+     * registrations fail and — because the wildcard registers LAST — the
+     * symptom is "Nothing matches the given URI" on every web UI page while
+     * the APIs still work.  The loop below now logs any failure loudly. */
+    cfg.max_uri_handlers = 64;
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     cfg.stack_size       = 8192;
     /* Bump the open-socket cap so concurrent OTA + page reload + status polls
@@ -2369,18 +2537,34 @@ void web_server_start(void)
      * setsockopt — that override remains in api_ota(). */
     cfg.recv_wait_timeout = 10;
     cfg.send_wait_timeout = 10;
+    /* Pin httpd to Core 1.  By default the task has no affinity and lands on
+     * a random core per boot.  Core 0 runs WiFi/lwIP plus — during Spectrum
+     * mode — the 8 kHz mic ADC sampling in the esp_timer task, which alone
+     * measures ~78% of the core (see /api/debug/tasks).  When httpd happened
+     * to land on Core 0, active web-UI use (30–50% CPU serving the 278 KB
+     * index.html + API calls) pushed the core past 100%, starving IDLE0 and
+     * firing the task WDT.  Core 1 carries only the display task (~20%), so
+     * httpd always fits there. */
+    cfg.core_id = 1;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
         return;
     }
 
-    for (int i = 0; i < sizeof(uris)/sizeof(uris[0]); i++)
-        httpd_register_uri_handler(s_server, &uris[i]);
+    for (int i = 0; i < sizeof(uris)/sizeof(uris[0]); i++) {
+        esp_err_t rerr = httpd_register_uri_handler(s_server, &uris[i]);
+        if (rerr != ESP_OK)
+            ESP_LOGE(TAG, "route %d (%s) registration FAILED: %s — bump max_uri_handlers!",
+                     i, uris[i].uri, esp_err_to_name(rerr));
+    }
 
     /* Wildcard static handler (must be last) */
     httpd_uri_t wildcard = R(HTTP_GET, "/*", serve_static);
-    httpd_register_uri_handler(s_server, &wildcard);
+    esp_err_t werr = httpd_register_uri_handler(s_server, &wildcard);
+    if (werr != ESP_OK)
+        ESP_LOGE(TAG, "static wildcard registration FAILED: %s — web UI will 404; bump max_uri_handlers!",
+                 esp_err_to_name(werr));
 
     /* Log the direct IP so users can reach the UI before mDNS propagates.
      * mDNS (nextube.local) takes 10–30 s to register after boot; this

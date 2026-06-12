@@ -1,10 +1,31 @@
 #pragma once
 #include <time.h>
 #include <stdbool.h>
+#include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
 void ntp_time_start(void);
+
+/**
+ * Sync-stats listener: called after each steady-state NTP sync (boot and
+ * boot-window syncs excluded) with the values the "NTP sync:" log line shows:
+ *   xtal_drift_ms  - what the free-running ESP crystal's error WOULD have
+ *                    been since the last sync without discipline (signed).
+ *   pcf_max_err_ms - worst single-minute clock error the PCF8563 slave
+ *                    discipline allowed since the last sync; -1 when not
+ *                    available (discipline mode != 2 or no ticks recorded).
+ *   discipline_mode- 0 off, 1 ESP rate discipline, 2 PCF slave.
+ * Runs in SNTP callback context — i.e. lwIP's tcpip thread (tiT).  The
+ * handler MUST NOT block or take any mutex that a network-using task can
+ * hold (config_lock, esp_mqtt_client_publish, sockets): blocking tiT
+ * deadlocks the entire network stack.  Stash the values and defer all work
+ * to your own task.  One listener slot.
+ */
+typedef void (*ntp_sync_listener_t)(int32_t xtal_drift_ms,
+                                    float pcf_max_err_ms,
+                                    int discipline_mode);
+void ntp_register_sync_listener(ntp_sync_listener_t cb);
 bool ntp_time_synced(void);      /* true once SNTP has completed at least one sync */
 bool ntp_has_valid_time(void);   /* true once any valid time source is available
                                   * (RTC seed that passed the epoch sanity check, or

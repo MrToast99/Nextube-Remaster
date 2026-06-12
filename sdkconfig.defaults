@@ -52,6 +52,12 @@ CONFIG_BT_ENABLED=n
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+# Per-task CPU accounting for GET /api/debug/tasks — names the CPU hog when
+# IDLE-starvation task-WDT warnings appear (negligible overhead: one esp_timer
+# read per context switch).
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
 # Allow heap-allocated task stacks to be placed in SPIRAM so that tasks
 # created with xTaskCreate / xTaskCreatePinnedToCore can have their stacks
 # served from PSRAM when the SPIRAM-aware malloc decides so (i.e. for stack
@@ -257,16 +263,11 @@ CONFIG_SPI_MASTER_ISR_IN_IRAM=n
 CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
 CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
 
-# ── Microphone sampling ───────────────────────────────────────────────
-# The mic driver uses ESP_TIMER_TASK dispatch + adc_oneshot_read().
-# No ISR-safe ADC variant is needed (adc_oneshot_read_isr is not available
-# on the original ESP32 in IDF 5.x), and no IRAM placement is required.
-# ESP_TIMER_TASK callbacks run in the esp_timer service task (priority 22),
-# where the normal mutex-based adc_oneshot_read() is perfectly safe.
-# The esp_timer service task stack is bumped to 8 KB (default 4 KB) because
-# adc_oneshot_read() → ADC HAL → ADC LL → hardware-access helpers adds ~3 KB
-# of call-chain depth on top of the task's own frame; the default 4 KB was
-# occasionally tight under production conditions when both WiFi events and
-# the timer callback fire concurrently on Core 0.
+# ── esp_timer service task stack ─────────────────────────────────────
+# Bumped to 8 KB (default 4 KB) while the mic sampled via esp_timer
+# callbacks (since replaced by adc_continuous DMA — see microphone.c).
+# Kept at 8 KB: other periodic callbacks (LEDC fades, WiFi internals)
+# share this task and the headroom is cheap insurance against the
+# stack-overflow class of bug this project has hit twice.
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192
 

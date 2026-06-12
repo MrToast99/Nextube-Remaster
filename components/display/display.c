@@ -12,6 +12,7 @@
 #include "weather.h"
 #include "sht30.h"              /* sht30_get() — indoor H/T for 24H_CX panel */
 #include "wifi_manager.h"       /* AP PIN visibility (S1) */
+#include "wled_sync.h"          /* Spectrum LCD bars can follow WLED primary */
 #include "ha_mqtt.h"            /* ticker overlay (ha_mqtt_ticker_active / _clear) */
 #include "jpeg_decoder.h"       /* espressif/esp_jpeg v1.x managed component */
 #include "esp_random.h"         /* esp_fill_random — static-snow burn-in */
@@ -34,6 +35,12 @@ static spi_device_handle_t spi_dev;
  * the init code exclusive ownership of the SPI bus and CS lines.
  * NULL until display_task_start() is called; checked before use. */
 static TaskHandle_t s_display_task_handle = NULL;
+
+/* Cooperative park handshake for OTA (see display_show_wait): the display
+ * task checks s_park_req at its loop boundary — never mid-render, never with
+ * an SPI transaction in flight — sets s_parked, and suspends itself. */
+static volatile bool s_park_req = false;
+static volatile bool s_parked   = false;
 
 /* ── U8g2 virtual display for 24H-CX H/T panel text rendering ────────────────
  * We configure U8g2 for a 128×64 "nodisp" (no hardware) display.  The 128-px
@@ -666,7 +673,7 @@ void display_fill(int tube, uint16_t color)
     for (int x = 0; x < LCD_WIDTH; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
     for (int y = 0; y < LCD_HEIGHT; y++) {
         spi_transaction_t t = { .length = sizeof(line)*8, .tx_buffer = line };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -719,7 +726,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
             }
         }
         spi_transaction_t t = { .length = (size_t)(rows * w * 2) * 8, .tx_buffer = chunk };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
 
     /* ── Update indicator overlay ──────────────────────────────────────── */
@@ -741,7 +748,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
         for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
         for (int row = 0; row < 4; row++) {
             spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
-            spi_device_transmit(spi_dev, &tr);
+            spi_device_polling_transmit(spi_dev, &tr);
         }
     }
 
@@ -792,7 +799,7 @@ static void display_fill_snow(int tube)
     for (int y = 0; y < LCD_HEIGHT; y++) {
         esp_fill_random(line, sizeof(line));
         spi_transaction_t t = {.length = sizeof(line) * 8, .tx_buffer = line};
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -1058,7 +1065,7 @@ static void display_show_image_region(int tube, const char *path,
             int rows = (y + DISP_CHUNK_ROWS <= src_h) ? DISP_CHUNK_ROWS : src_h - y;
             spi_transaction_t tr = { .length = (size_t)(rows * src_w * 2) * 8,
                                      .tx_buffer = chunk };
-            spi_device_transmit(spi_dev, &tr);
+            spi_device_polling_transmit(spi_dev, &tr);
         }
         deselect_all();
         return;
@@ -1117,7 +1124,7 @@ static void display_show_image_region(int tube, const char *path,
             .length    = (size_t)(rows * src_w * 2) * 8,
             .tx_buffer = chunk,
         };
-        spi_device_transmit(spi_dev, &tr);
+        spi_device_polling_transmit(spi_dev, &tr);
     }
     deselect_all();
 }
@@ -1435,7 +1442,7 @@ static void display_show_colon_blink(int tube, const char *theme, bool show_colo
             memcpy(line, src, (size_t)s_colon_bw * 2);
         }
         spi_transaction_t t = { .length = (size_t)(s_colon_bw * 2) * 8, .tx_buffer = line };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -1566,7 +1573,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
         int rows = (r + DISP_CHUNK_ROWS <= MARGIN) ? DISP_CHUNK_ROWS : MARGIN - r;
         spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
                                  .tx_buffer = chunk };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
 
     /* ── Text region: 2× pixel-scaled blit (128 output rows) ──────────
@@ -1593,7 +1600,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
         }
         spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
                                  .tx_buffer = chunk };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
 
     /* ── Bottom black margin (16 rows) ── */
@@ -1603,7 +1610,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
         int rows = (r + DISP_CHUNK_ROWS <= bot) ? DISP_CHUNK_ROWS : bot - r;
         spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
                                  .tx_buffer = chunk };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
 
     deselect_all();
@@ -1829,7 +1836,7 @@ static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
             line[col * 2 + 1] = lit ? fg_lo : 0x00;
         }
         spi_transaction_t t = { .length = sizeof(line) * 8, .tx_buffer = line };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -1898,7 +1905,7 @@ static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
             }
         }
         spi_transaction_t t = { .length = sizeof(line) * 8, .tx_buffer = line };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -2197,7 +2204,7 @@ static void cx6_stamp_update_indicator(int tube)
     for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
     for (int row = 0; row < 4; row++) {
         spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
-        spi_device_transmit(spi_dev, &tr);
+        spi_device_polling_transmit(spi_dev, &tr);
     }
     deselect_all();
 }
@@ -2774,11 +2781,33 @@ static void render_spectrum(const nextube_config_t *cfg)
     float bands[LCD_COUNT * SPEC_BARS_PER_TUBE];
     mic_get_bands(bands);
 
-    const uint8_t br = cfg->spectrum_lcd_rgb[0];
-    const uint8_t bg = cfg->spectrum_lcd_rgb[1];
-    const uint8_t bb = cfg->spectrum_lcd_rgb[2];
+    uint8_t br = cfg->spectrum_lcd_rgb[0];
+    uint8_t bg = cfg->spectrum_lcd_rgb[1];
+    uint8_t bb = cfg->spectrum_lcd_rgb[2];
 
-    /* Update peak-hold and precompute lit segment count + peak dot for every band. */
+    /* Optional: follow the WLED primary colour (live).  Falls back to the
+     * configured colour when WLED Sync isn't running / hasn't received a
+     * packet, when the strip is off, or when the received colour is
+     * near-black — palette effects (Rainbow, Fire, …) don't use col[0] and
+     * WLED may leave it at (0,0,0), which would render invisible bars (the
+     * same caveat the LED task handles via the fx field). */
+    if (cfg->spectrum_lcd_wled) {
+        wled_sync_state_t ws;
+        if (wled_sync_get(&ws) && ws.on &&
+            ((int)ws.r + (int)ws.g + (int)ws.b) >= 24) {
+            br = ws.r; bg = ws.g; bb = ws.b;
+        }
+    }
+
+    /* Update peak-hold and precompute lit segment count + peak dot for every band.
+     * When mic_task has gated all bands to zero, decay the peak dots 5× faster
+     * than normal so any "echo" (lingering peak dots from a suppressed noise blip)
+     * clears in ~160 ms instead of ~700 ms. */
+    bool bands_all_zero = true;
+    for (int i = 0; i < LCD_COUNT * SPEC_BARS_PER_TUBE; i++)
+        if (bands[i] > 0.0f) { bands_all_zero = false; break; }
+    float peak_decay_step = bands_all_zero ? 0.25f : 0.05f;
+
     int  lit_count[LCD_COUNT * SPEC_BARS_PER_TUBE];
     int  peak_dot [LCD_COUNT * SPEC_BARS_PER_TUBE];
     bool peak_vis [LCD_COUNT * SPEC_BARS_PER_TUBE];
@@ -2788,7 +2817,7 @@ static void render_spectrum(const nextube_config_t *cfg)
         if (e >= s_spec_peak[i]) {
             s_spec_peak[i] = e;
         } else {
-            s_spec_peak[i] -= 0.05f;
+            s_spec_peak[i] -= peak_decay_step;
             if (s_spec_peak[i] < 0.0f) s_spec_peak[i] = 0.0f;
         }
         lit_count[i] = (int)(e              * (float)SPEC_SEGS       + 0.5f);
@@ -2876,7 +2905,7 @@ static void render_spectrum(const nextube_config_t *cfg)
                 .length    = LCD_WIDTH * 2 * 8,
                 .tx_buffer = line,
             };
-            spi_device_transmit(spi_dev, &t);
+            spi_device_polling_transmit(spi_dev, &t);
         }
         deselect_all();
     }
@@ -3545,7 +3574,7 @@ static void ht_blit_ticker_2x(int tube, const uint8_t *tile_buf, uint16_t fg)
         }
         spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
                                  .tx_buffer = chunk };
-        spi_device_transmit(spi_dev, &t);
+        spi_device_polling_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -3682,6 +3711,14 @@ static void display_task(void *arg)
      * single-instance and single-threaded, so a static local is safe. */
     static nextube_config_t cfg_snap;
     while (1) {
+        /* OTA park request — honour it here, at the loop boundary, where no
+         * SPI transaction is open and no buffers are mid-render.  The task
+         * stays suspended until reboot (OTA always restarts). */
+        if (s_park_req) {
+            s_parked = true;
+            vTaskSuspend(NULL);
+        }
+
         config_lock();
         cfg_snap = *config_get();
         config_unlock();
@@ -4117,13 +4154,22 @@ static void display_task(void *arg)
                 ESP_LOGI(TAG, "Boot NTP sync detected — display clamp reset");
             }
 
-            /* Dual-panel 24H Custom shows no seconds and no blinking colon, so
+            /* Any no-seconds mode (24H_CX and 24H_NS) shows no seconds and —
+             * when FlipClock is active — has no blinking colon either, so
              * nothing re-renders between minute boundaries to advance
              * last_display_epoch.  The per-tick clamp below would then pin the
              * time at +1 s and the minute would never roll over (clock appears
-             * frozen) — so skip clamping in that mode and track real time. */
-            bool dual_cx = (strcmp(cfg->time_type, "24H_CX") == 0) && cfg->cx_dual_panel;
-            if (last_display_epoch > 0 && !first && !mode_changed && !theme_changed && !dual_cx) {
+             * frozen) — so skip clamping for those combinations.
+             *
+             * dual_cx (24H_CX dual-panel) also has no colon blink regardless of
+             * theme, and was the first case fixed; the nosec_flip path covers the
+             * remaining no-seconds + FlipClock combinations. */
+            bool dual_cx    = (strcmp(cfg->time_type, "24H_CX") == 0) && cfg->cx_dual_panel;
+            bool nosec_flip = (strcmp(cfg->theme, "FlipClock") == 0) &&
+                              (strcmp(cfg->time_type, "24H_CX") == 0 ||
+                               strcmp(cfg->time_type, "24H_NS") == 0);
+            if (last_display_epoch > 0 && !first && !mode_changed && !theme_changed &&
+                !dual_cx && !nosec_flip) {
                 time_t delta = now_epoch - last_display_epoch;
                 if (delta > CLOCK_MAX_STEP_S) {
                     now_epoch = last_display_epoch + CLOCK_MAX_STEP_S; /* fast-forward */
@@ -4524,11 +4570,10 @@ static void display_task(void *arg)
 
         /* Re-sync wake timer when we've fallen behind the current tick budget.
          *
-         * Background: pixel blits use spi_device_transmit() (interrupt/DMA path)
-         * which yields the CPU while the DMA engine clocks out each chunk.
-         * In Spectrum mode (tick = 50 ms) a full frame is 6 tubes ×
-         * 160 row-transactions; even with CPU-yielding transfers the total
-         * render time can occasionally exceed the tick budget.
+         * Background: pixel blits use spi_device_polling_transmit() (CPU busy-
+         * wait, no DMA ISR dependency).  In Spectrum mode (tick = 50 ms) a full
+         * frame is 6 tubes × 160 row-transactions; the total render time can
+         * occasionally exceed the tick budget.
          * When that happens vTaskDelayUntil's target is already in the past —
          * it returns immediately without sleeping, so IDLE1 on CPU 1 never runs
          * and the Task Watchdog fires after 5 s.
@@ -4559,15 +4604,30 @@ void display_task_start(void)
 
 void display_show_wait(void)
 {
-    /* Suspend the display task first so it cannot issue SPI transactions
-     * while we write, and so it does not overwrite the wait screen after
-     * we return.  Flash operations (OTA / LittleFS) always end in
-     * esp_restart() so the task is never resumed. */
+    /* COOPERATIVE park, not vTaskSuspend-from-outside: an asynchronous
+     * suspend can land between spi_device_queue_trans() and its matching
+     * get_trans_result inside spi_device_transmit() — the wait-screen draw
+     * below (from the CALLER's task) then collects the display task's
+     * orphaned transaction and trips the spi_master assert
+     * "ret_trans == trans_desc" (observed during OTA with a clock render in
+     * flight).  Instead, request a park and let the display task suspend
+     * ITSELF at its loop boundary, where no SPI transaction can be open.
+     * Flash operations always end in esp_restart(), so it never resumes. */
     if (s_display_task_handle) {
-        vTaskSuspend(s_display_task_handle);
+        s_park_req = true;
+        /* Worst case: a full cold-cache clock render (6 JPEG decodes) is in
+         * progress — allow several seconds before falling back. */
+        for (int i = 0; i < 500 && !s_parked; i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+        if (!s_parked) {
+            /* Task wedged mid-iteration — fall back to the hard suspend
+             * (the pre-existing behaviour) rather than racing it forever. */
+            ESP_LOGW(TAG, "display task did not park in 5 s — hard suspend");
+            vTaskSuspend(s_display_task_handle);
+        }
     }
     for (int i = 0; i < LCD_COUNT; i++) {
         display_show_image(i, "/images/system/wait.jpg");
     }
-    ESP_LOGI(TAG, "Wait screen shown on all tubes — display task suspended");
+    ESP_LOGI(TAG, "Wait screen shown on all tubes — display task parked");
 }

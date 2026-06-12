@@ -31,6 +31,7 @@
 
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"   /* esp_timer_get_time — uptime in heap telemetry */
 
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"   /* rtc_gpio_isolate — GPIO25 idle state */
@@ -79,8 +80,13 @@ static void heap_telemetry_task(void *arg)
     /* Wait one cycle before the first log so boot-time peaks settle. */
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
+        /* Uptime in minutes from the monotonic µs timer.  With log timestamps
+         * on wall-clock time (CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM) this is the
+         * one periodic line that still anchors "how long has it been up" —
+         * wall-clock stamps jump on NTP corrections; this counter never does. */
         ESP_LOGI("heap",
-                 "internal: free=%u largest=%u  psram: free=%u largest=%u  (lifetime min total: %u)",
+                 "uptime=%llum  internal: free=%u largest=%u  psram: free=%u largest=%u  (lifetime min total: %u)",
+                 (unsigned long long)(esp_timer_get_time() / 60000000LL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
@@ -167,6 +173,11 @@ static void on_touch(touch_pad_id_t pad)
      * sound plays until the user configures a click file. */
     if (button_sound && click_file[0] != '\0')
         audio_play_file(click_file);
+
+    /* Optional MQTT button events (HA device triggers) — no-ops unless the
+     * "button events" publishing group is enabled and MQTT is connected. */
+    ha_mqtt_publish_button(pad == TOUCH_LEFT   ? "left"
+                         : pad == TOUCH_MIDDLE ? "middle" : "right");
 }
 
 /* ── LittleFS mount ────────────────────────────────────────────────── */
