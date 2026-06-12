@@ -66,6 +66,9 @@ typedef struct {
     uint8_t          led_effect_speed;  /* Breath / Rainbow animation speed 1 (slow) – 10 (fast); default 5 */
     uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
     uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
+    bool             spectrum_lcd_wled;     /* true = LCD bars follow the WLED primary colour
+                                               (live, when WLED Sync is receiving packets);
+                                               falls back to spectrum_lcd_rgb otherwise */
     uint8_t          spectrum_led_source;   /* 0 = custom glow colour (amplitude-modulated),
                                                1 = follow configured accent mode (Static/Breath/Rainbow/Off) */
     bool             notify_update_on_display; /* true = draw red indicator on tube 6 when a
@@ -117,15 +120,21 @@ typedef struct {
     char             timer_file[64];
     char             click_file[64];     /* sound played on physical button press */
     bool             button_sound;       /* enable/disable button click sound */
+    char             ticker_file[64];    /* sound played when MQTT/HA ticker text arrives */
+    bool             ticker_sound;       /* play ticker_file when ticker text is set */
     bool             audio_enabled;      /* false = DAC off, complete silence  */
     uint8_t          volume;             /* 0-100 */
     bool             mic_enabled;        /* false = mic task idles; Spectrum mode shows silence */
     uint8_t          mic_adc_channel;    /* ADC1 channel 0-7 (0=GPIO36, 1=GPIO37, 2=GPIO38, 3=GPIO39,
                                            4=GPIO32, 5=GPIO33, 6=GPIO34, 7=GPIO35). Runtime-changeable
                                            via the debug panel without a rebuild. */
-    float            mic_silence_gate;   /* Frame RMS² silence threshold (0–4096²).
-                                           Frames below this value publish all-zero bands.
-                                           Runtime-tuneable via the debug panel. Default 250. */
+    float            mic_silence_gate;   /* Spectral silence gate: display blanks when
+                                            the SUM of post-floor band power falls below
+                                            this (silence <10, quiet audio >50; 0 = off).
+                                            Frames below it publish all-zero bands.
+                                            Runtime-tuneable via the debug panel.
+                                            Default 25 (semantics changed from the old
+                                            RMS² gate whose default was 250). */
     float            mic_noise_floor[CFG_MIC_BAND_COUNT]; /* Saved per-band noise baseline
                                            captured via "Capture Baseline" in the web UI.
                                            Applied at boot when mic_calibration_saved is true,
@@ -166,6 +175,15 @@ typedef struct {
     char             mqtt_user[32];      /* broker username (empty = anonymous) */
     char             mqtt_password[64];  /* broker password */
     bool             mqtt_ha_discovery;  /* publish HA auto-discovery payloads */
+    /* Optional MQTT publishing groups (web UI checkboxes).  Publishing is
+     * gated live; discovery payloads for newly enabled groups appear on the
+     * next broker (re)connect or reboot. */
+    bool             mqtt_pub_ntp;       /* NTP sync telemetry sensors (XTAL drift,
+                                            RTC max error) — default off */
+    bool             mqtt_pub_health;    /* WiFi RSSI / free heap / uptime sensors,
+                                            published every 60 s — default off */
+    bool             mqtt_pub_buttons;   /* touch presses as HA device triggers
+                                            (left/middle/right) — default off */
 
     /* WLED Sync (receive) — listen for WLED UDP Notifier v2 broadcasts
      * and apply the primary colour + brightness to the local accent LEDs.

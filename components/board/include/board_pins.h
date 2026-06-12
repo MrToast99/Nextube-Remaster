@@ -42,7 +42,7 @@
 /* ── Audio (DAC → LTK8002D amplifier) ──────────────────────────────── */
 #define PIN_AUDIO_DAC     25   /* DAC_CHANNEL_1 */
 
-/* ── Microphone (CMEJ-0413-42-SMT-TR electret, Spectrum mode input) ─── */
+/* ── Microphone (unmarked 4 mm SMT electret — see README; Spectrum input) ── */
 #define PIN_MIC_ADC      35   /* ADC1_CH7 (GPIO35) – confirmed via debug panel */
 #define PIN_MIC_ADC_CHAN ADC_CHANNEL_7
 

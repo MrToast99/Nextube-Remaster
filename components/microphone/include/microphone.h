@@ -1,6 +1,6 @@
 /**
  * @file microphone.h
- * @brief CMEJ-0413-42-SMT-TR electret condenser microphone – public API
+ * @brief Electret condenser microphone (unmarked 4 mm SMT capsule) – public API
  *
  * The ADC1 channel used for sampling is runtime-configurable via
  * cfg->mic_adc_channel (0-7), allowing GPIO selection without a rebuild.
@@ -20,9 +20,10 @@
 void mic_init(void);
 
 /**
- * Create and pin the microphone sampling task on core 1.
- * Samples at 8 kHz, computes Goertzel energy for MIC_BAND_COUNT logarithmic
- * bands, applies peak-hold with exponential decay, and publishes normalised
+ * Create and pin the microphone analysis task on core 0.
+ * Capture is hardware-clocked (adc_continuous / I²S0 DMA, 32 kHz ÷4 → 8 kHz);
+ * the task computes Goertzel energy for MIC_BAND_COUNT logarithmic bands,
+ * applies peak-hold with exponential decay, and publishes normalised
  * 0.0–1.0 band values readable via mic_get_bands().
  */
 void mic_task_start(void);
@@ -56,6 +57,16 @@ int mic_gpio_num(void);
 #define MIC_CAL_FRAMES 20
 
 /**
+ * Audio playback ↔ microphone I2S0 arbitration (ESP32: dac_continuous and
+ * adc_continuous both ride the I2S0 peripheral and cannot coexist).
+ * The audio component calls (true) before bringing the DAC up — this blocks
+ * spectrum capture and waits (bounded, ≤400 ms) for the mic to release the
+ * peripheral — and (false) after DAC teardown so capture resumes.
+ * Safe to call when the mic is disabled / never initialised.
+ */
+void mic_set_audio_active(bool active);
+
+/**
  * Capture a noise baseline: averages MIC_CAL_FRAMES raw Goertzel frames and
  * writes the result into the active noise floor.  Blocks the caller for up to
  * timeout_ms milliseconds.  Returns true on success, false on timeout (mic
@@ -64,6 +75,41 @@ int mic_gpio_num(void);
  * Works from any mode — bypasses the Spectrum-mode gate automatically.
  */
 bool mic_calibrate(float out[MIC_BAND_COUNT], uint32_t timeout_ms);
+
+/** Raw samples per exported debug frame (one 16 ms DMA frame at 32 kHz,
+ *  before the ×4 decimation to the 8 kHz analysis rate). */
+#define MIC_RAW_FRAME_SAMPLES 512
+
+/** Decimated (analysis-rate) samples per frame. */
+#define MIC_FRAME_SAMPLES 128
+
+/**
+ * Atomic debug capture of ONE DMA frame in both views: raw 32 kHz samples
+ * and the decimated/DC-removed 8 kHz values actually fed to the Goertzel.
+ * Either pointer may be NULL.  Requires capture running; see
+ * mic_capture_raw_frame for timeout semantics.
+ */
+bool mic_capture_frame_pair(uint16_t raw[MIC_RAW_FRAME_SAMPLES],
+                            float dec[MIC_FRAME_SAMPLES], uint32_t timeout_ms);
+
+/**
+ * Per-band pipeline snapshot for /api/debug/micbands (diagnostics).
+ * raw   = band energy before noise-floor subtraction
+ * floor = current adaptive/saved noise floor
+ * power = post-floor, post-tilt power feeding peak-hold
+ * bands = final normalised 0..1 display values
+ * Any pointer may be NULL to skip that array.  Thread-safe.
+ */
+void mic_get_band_debug(float raw[MIC_BAND_COUNT], float floor[MIC_BAND_COUNT],
+                        float power[MIC_BAND_COUNT], float bands[MIC_BAND_COUNT]);
+
+/**
+ * Copy the next raw 32 kHz capture frame (pre-decimation) into out[].
+ * Diagnostic for /api/debug/micframe — requires capture to be running
+ * (Spectrum mode on screen).  Blocks up to timeout_ms; returns false on
+ * timeout (capture gated, audio holding I2S0, or mic disabled).
+ */
+bool mic_capture_raw_frame(uint16_t out[MIC_RAW_FRAME_SAMPLES], uint32_t timeout_ms);
 
 /**
  * Reset the noise floor to zero and restart the Phase 1 auto-calibration

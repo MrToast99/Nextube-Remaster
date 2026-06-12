@@ -436,6 +436,10 @@ select option{background:var(--accent);color:var(--text)}
       <input type="color" id="f-spec-lcd-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
       <span style="color:var(--dim);font-size:.82rem" data-i18n="spec.lcd_color_hint">Bar colour for the LCD spectrum display</span>
     </div>
+    <div class="field" style="display:flex;align-items:center;gap:8px;margin-top:.4rem">
+      <input type="checkbox" id="f-spec-lcd-wled" style="width:16px;height:16px;cursor:pointer">
+      <label for="f-spec-lcd-wled" style="margin:0;cursor:pointer;font-weight:normal" data-i18n="spec.lcd_wled">Follow WLED primary colour (requires WLED Sync service; falls back to the colour above when no WLED data)</label>
+    </div>
     <div class="field" style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-top:.4rem">
       <button onclick="micCalibrate()" style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem" data-i18n="spec.capture_baseline_btn">📸 Capture Baseline</button>
       <button onclick="micResetCal()"  style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem" data-i18n="spec.reset_auto_btn">↺ Reset to Auto</button>
@@ -450,13 +454,13 @@ select option{background:var(--accent);color:var(--text)}
         </span>
       </label>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <input type="range" id="f-gate-slider" min="0" max="1000" step="10" value="250"
+        <input type="range" id="f-gate-slider" min="0" max="100" step="1" value="25"
                style="flex:1;min-width:160px" oninput="specGateSync()">
-        <input type="number" id="f-gate-num" min="0" max="16777216" step="10" value="250"
+        <input type="number" id="f-gate-num" min="0" max="16777216" step="1" value="25"
                style="width:90px" oninput="specGateSync(true)">
       </div>
       <p style="font-size:.75rem;color:var(--dim);margin:.3rem 0 0" data-i18n="spec.gate_help">
-        0 = gate off (always display). Default 250. Slider caps at 1000; type directly for higher values.
+        0 = gate off (always display). Default 25. Slider caps at 100; type directly for higher values.
       </p>
     </div>
   </div>
@@ -905,6 +909,18 @@ select option{background:var(--accent);color:var(--text)}
         <input type="checkbox" id="f-mqtt-disc" style="width:15px;height:15px" onchange="markDirty()" checked>
         <span data-i18n="svc.mqtt_discovery">Publish Home Assistant auto-discovery payloads</span>
       </label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;cursor:pointer;margin-top:.35rem">
+        <input type="checkbox" id="f-mqtt-pub-ntp" style="width:15px;height:15px" onchange="markDirty()" checked>
+        <span data-i18n="svc.mqtt_pub_ntp">Publish clock telemetry (XTAL drift + RTC error per NTP sync)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;cursor:pointer;margin-top:.35rem">
+        <input type="checkbox" id="f-mqtt-pub-health" style="width:15px;height:15px" onchange="markDirty()">
+        <span data-i18n="svc.mqtt_pub_health">Publish device health (WiFi RSSI, free heap, uptime — every 60 s)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;cursor:pointer;margin-top:.35rem">
+        <input type="checkbox" id="f-mqtt-pub-buttons" style="width:15px;height:15px" onchange="markDirty()">
+        <span data-i18n="svc.mqtt_pub_buttons">Publish button presses (HA device triggers for automations)</span>
+      </label>
       <p style="color:var(--dim);font-size:.78rem;margin:.6rem 0 0" data-i18n-html="svc.mqtt_help">
         Exposes temperature, humidity (SHT30), display mode, backlight on/off, and brightness as HA entities.
         Uses MQTT auto-discovery — no manual HA configuration required.
@@ -1041,6 +1057,16 @@ select option{background:var(--accent);color:var(--text)}
       <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="f-btn-sound" style="width:16px;height:16px;cursor:pointer">
         <label for="f-btn-sound" style="margin:0;cursor:pointer;font-weight:normal" data-i18n="hw.enable_click">Enable click sound on button press</label>
+      </div>
+    </div>
+    <div class="field"><label data-i18n="hw.ticker_sound">Ticker Notification Sound (MQTT / Home Assistant)</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="f-ticker-snd" type="text" style="flex:1" placeholder="/spiffs/audio/bell.wav">
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-ticker-snd')">▶ <span data-i18n="hw.test">Test</span></button>
+      </div>
+      <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-ticker-snd-en" style="width:16px;height:16px;cursor:pointer">
+        <label for="f-ticker-snd-en" style="margin:0;cursor:pointer;font-weight:normal" data-i18n="hw.enable_ticker_sound">Play sound when ticker text arrives via MQTT/HA</label>
       </div>
     </div>
   </div>
@@ -1251,14 +1277,14 @@ select option{background:var(--accent);color:var(--text)}
           </span>
         </label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <input type="range" id="dbg-gate-slider" min="0" max="2000" step="10" value="250"
+          <input type="range" id="dbg-gate-slider" min="0" max="200" step="1" value="25"
                  style="flex:1;min-width:160px" oninput="dbgGateSync()">
-          <input type="number" id="dbg-gate-num" min="0" max="16777216" step="10" value="250"
+          <input type="number" id="dbg-gate-num" min="0" max="16777216" step="1" value="25"
                  style="width:90px" oninput="dbgGateSync(true)">
         </div>
         <p style="font-size:.75rem;color:var(--dim);margin:.3rem 0 0">
-          0 = gate disabled (always run). Default 250 (~16 counts RMS). Typical range 50–1000.
-          Slider caps at 2000 for convenience; type a value directly for anything higher.
+          0 = gate disabled (always run). Default 25. Typical range 5–100.
+          Slider caps at 200 for convenience; type a value directly for anything higher.
         </p>
       </div>
 
@@ -1512,6 +1538,9 @@ Object.assign(I18N.en, {
   "svc.broker":"Broker","svc.broker_ph":"192.168.1.x or hostname","svc.port":"Port",
   "svc.username":"Username","svc.username_anon":"(leave blank for anonymous)",
   "svc.mqtt_discovery":"Publish Home Assistant auto-discovery payloads",
+  "svc.mqtt_pub_ntp":"Publish clock telemetry (XTAL drift + RTC error per NTP sync)",
+  "svc.mqtt_pub_health":"Publish device health (WiFi RSSI, free heap, uptime — every 60 s)",
+  "svc.mqtt_pub_buttons":"Publish button presses (HA device triggers for automations)",
   "svc.mqtt_help":"Exposes temperature, humidity (SHT30), display mode, backlight on/off, and brightness as HA entities. Uses MQTT auto-discovery — no manual HA configuration required. Uses plain <code>mqtt://</code> (no TLS).",
   "svc.wled":"WLED Sync","svc.wled_enable":"Enable listener task","svc.udp_port":"UDP Port","svc.udp_port_hint":"(default 21324)",
   "svc.wled_help":"Listens for <strong>WLED UDP Notifier v2</strong> broadcasts on your LAN and mirrors the primary colour & brightness to Nextube's accent LEDs. Requires <strong>WLED Controller</strong> to be selected as the LED Accent Lighting mode (Display tab).<br>On each WLED device: <strong>Config → Sync Interfaces → UDP Sync → Send on direct change ✓</strong> — no target IP needed, WLED broadcasts to the whole subnet.",
@@ -1560,7 +1589,9 @@ Object.assign(I18N.en, {
   "hw.audio":"Audio Settings","hw.enable_audio":"Enable audio output","hw.volume":"Volume",
   "hw.music_file":"Clock Music File","hw.bell":"Bell Sound","hw.tone":"Tone Sound (Pomodoro/Countdown)",
   "hw.timer_sound":"Timer Sound","hw.click_sound":"Button Click Sound","hw.test":"Test",
-  "hw.enable_click":"Enable click sound on button press","hw.save":"Save Hardware"
+  "hw.enable_click":"Enable click sound on button press","hw.save":"Save Hardware",
+  "hw.ticker_sound":"Ticker Notification Sound (MQTT / Home Assistant)",
+  "hw.enable_ticker_sound":"Play sound when ticker text arrives via MQTT/HA"
 });
 /* ── Translation batch: System tab (main cards; hidden debug panel left EN) ── */
 Object.assign(I18N.en, {
@@ -1614,12 +1645,13 @@ Object.assign(I18N.en, {
   "spec.led_src_follow":"Follow accent mode (Static / Breath / Rainbow / Off)",
   "spec.led_color_label":"LED Glow Colour","spec.led_color_hint":"Amplitude-modulated LED ring colour in Spectrum mode",
   "spec.lcd_color_label":"LCD Bar Colour","spec.lcd_color_hint":"Bar colour for the LCD spectrum display",
+  "spec.lcd_wled":"Follow WLED primary colour (requires WLED Sync service; falls back to the colour above when no WLED data)",
   "spec.capture_baseline_btn":"📸 Capture Baseline","spec.reset_auto_btn":"↺ Reset to Auto",
   "spec.capture_help":"While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.",
   "spec.capture_warn":"⚠️ <strong>Switch away from Spectrum mode before capturing.</strong> In Spectrum mode the mic is continuously processing live audio — this interferes with baseline capture and will cause a timeout error. Switch to Clock or any other mode first, then capture.",
   "spec.noise_floor":"Noise Floor",
   "spec.noise_floor_hint":"— raise to ignore board noise and room hum; lower to catch quieter sounds",
-  "spec.gate_help":"0 = gate off (always display). Default 250. Slider caps at 1000; type directly for higher values."
+  "spec.gate_help":"0 = gate off (always display). Default 25. Slider caps at 100; type directly for higher values."
 });
 /* ── Translation batch: WLED hint + Mode Rotation weight + Burn-in scheduled ── */
 Object.assign(I18N.en, {
@@ -2065,6 +2097,9 @@ async function loadSettings() {
   $('f-mqtt-user').value    = cfg.mqtt_user       || '';
   $('f-mqtt-pass').value    = cfg.mqtt_password   || '';
   $('f-mqtt-disc').checked  = cfg.mqtt_ha_discovery !== false;
+  $('f-mqtt-pub-ntp').checked     = cfg.mqtt_pub_ntp !== false;       /* default on  */
+  $('f-mqtt-pub-health').checked  = cfg.mqtt_pub_health === true;     /* default off */
+  $('f-mqtt-pub-buttons').checked = cfg.mqtt_pub_buttons === true;    /* default off */
   $('f-wled-sync-en').checked = cfg.wled_sync_enabled === true;
   $('f-wled-sync-port').value = cfg.wled_sync_port    || 21324;
   const tzStr = cfg.timezone || 'UTC0';
@@ -2095,6 +2130,8 @@ async function loadSettings() {
   $('f-timer').value = cfg.timer_file || '';
   $('f-click').value = cfg.click_file || '';
   $('f-btn-sound').checked = cfg.button_sound !== false;
+  $('f-ticker-snd').value = cfg.ticker_file || '';
+  $('f-ticker-snd-en').checked = cfg.ticker_sound === true;  /* opt-in, default off */
   $('f-audio-en').checked  = cfg.audio_enabled !== false;
   /* mic_enabled is derived from Spectrum mode — no separate checkbox */
   if (cfg.mic_adc_channel != null && $('dbg-adc-ch'))
@@ -2149,6 +2186,7 @@ async function loadSettings() {
   $('f-spec-color').value = '#' + sc.map(v => v.toString(16).padStart(2,'0')).join('');
   const slc = cfg.spectrum_lcd_RGB || [30, 220, 30];
   $('f-spec-lcd-color').value = '#' + slc.map(v => v.toString(16).padStart(2,'0')).join('');
+  $('f-spec-lcd-wled').checked = cfg.spectrum_lcd_wled === true;  /* opt-in, default off */
   $('f-spec-led-src').value = String(cfg.spectrum_led_source || 0);
   specLedSrcChange();  /* show/hide custom colour row to match loaded value */
 
@@ -2589,6 +2627,7 @@ async function saveSettings() {
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     spectrum_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-color').value.replace('#','')),
     spectrum_lcd_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-lcd-color').value.replace('#','')),
+    spectrum_lcd_wled: $('f-spec-lcd-wled').checked,
     spectrum_led_source: +$('f-spec-led-src').value,
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,
@@ -2615,6 +2654,7 @@ async function saveSettings() {
     bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: !!$('m-spectrum').checked,
+    ticker_file: $('f-ticker-snd').value, ticker_sound: $('f-ticker-snd-en').checked,
     weather_enabled: $('f-weather-en').checked,
     sht30_temp_offset: (() => {
       const v = parseFloat($('f-sht30-offset').value) || 0;
@@ -2640,6 +2680,9 @@ async function saveSettings() {
     mqtt_user:         $('f-mqtt-user').value.trim(),
     mqtt_password:     $('f-mqtt-pass').value,
     mqtt_ha_discovery: $('f-mqtt-disc').checked,
+    mqtt_pub_ntp:      $('f-mqtt-pub-ntp').checked,
+    mqtt_pub_health:   $('f-mqtt-pub-health').checked,
+    mqtt_pub_buttons:  $('f-mqtt-pub-buttons').checked,
     wled_sync_enabled: $('f-wled-sync-en').checked,
     wled_sync_port:    +$('f-wled-sync-port').value || 21324,
     mic_silence_gate: parseFloat($('f-gate-num').value) || 0,
@@ -3212,9 +3255,9 @@ function dbgChannelChange() { /* visual only — saved on button press */ }
 /* Set all gate controls (debug + user-facing Spectrum card) to value v */
 function dbgSetGate(v) {
   const val = parseFloat(v) || 0;
-  $('dbg-gate-slider').value = Math.min(val, 2000);
+  $('dbg-gate-slider').value = Math.min(val, 200);
   $('dbg-gate-num').value    = val;
-  if ($('f-gate-slider')) $('f-gate-slider').value = Math.min(val, 1000);
+  if ($('f-gate-slider')) $('f-gate-slider').value = Math.min(val, 100);
   if ($('f-gate-num'))    $('f-gate-num').value    = val;
 }
 /* Called when debug slider or number input changes — keep all controls in sync */
@@ -3222,9 +3265,9 @@ function dbgGateSync(fromNum) {
   const val = fromNum
     ? (parseFloat($('dbg-gate-num').value) || 0)
     : (parseFloat($('dbg-gate-slider').value) || 0);
-  $('dbg-gate-slider').value = Math.min(val, 2000);
+  $('dbg-gate-slider').value = Math.min(val, 200);
   $('dbg-gate-num').value    = val;
-  if ($('f-gate-slider')) $('f-gate-slider').value = Math.min(val, 1000);
+  if ($('f-gate-slider')) $('f-gate-slider').value = Math.min(val, 100);
   if ($('f-gate-num'))    $('f-gate-num').value    = val;
 }
 /* Toggle visibility of the custom LED glow colour row based on LED source selection.
@@ -3243,9 +3286,9 @@ function specGateSync(fromNum) {
   const val = fromNum
     ? (parseFloat($('f-gate-num').value) || 0)
     : (parseFloat($('f-gate-slider').value) || 0);
-  $('f-gate-slider').value = Math.min(val, 1000);
+  $('f-gate-slider').value = Math.min(val, 100);
   $('f-gate-num').value    = val;
-  if ($('dbg-gate-slider')) $('dbg-gate-slider').value = Math.min(val, 2000);
+  if ($('dbg-gate-slider')) $('dbg-gate-slider').value = Math.min(val, 200);
   if ($('dbg-gate-num'))    $('dbg-gate-num').value    = val;
 }
 

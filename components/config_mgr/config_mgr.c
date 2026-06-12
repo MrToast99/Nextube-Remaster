@@ -52,6 +52,7 @@ static void set_defaults(void)
     s_cfg.spectrum_lcd_rgb[0] = 30;
     s_cfg.spectrum_lcd_rgb[1] = 220;
     s_cfg.spectrum_lcd_rgb[2] = 30;
+    s_cfg.spectrum_lcd_wled   = false;  /* opt-in: bars follow WLED primary colour */
 
     /* Spectrum LED source — 0 = custom glow colour (amplitude-modulated),
      * 1 = follow configured accent mode. Default 0 for backward compatibility. */
@@ -118,12 +119,19 @@ static void set_defaults(void)
     strncpy(s_cfg.timer_file, "/spiffs/audio/timer.wav", sizeof(s_cfg.timer_file) - 1);
     strncpy(s_cfg.click_file, "/spiffs/audio/click.wav", sizeof(s_cfg.click_file) - 1);
     s_cfg.button_sound  = true;
+    strncpy(s_cfg.ticker_file, "/spiffs/audio/bell.wav", sizeof(s_cfg.ticker_file) - 1);
+    s_cfg.ticker_sound  = false;   /* opt-in: chime when MQTT/HA ticker text arrives */
     s_cfg.audio_enabled = false;   /* off by default — amp is always powered,
                                     * user opts in via Settings > Audio */
     s_cfg.volume = 20;
     s_cfg.mic_enabled      = true;
     s_cfg.mic_adc_channel  = 7;      /* ADC1_CH7 = GPIO35 — confirmed via hardware debug */
-    s_cfg.mic_silence_gate = 250.0f; /* ~16 counts RMS — above ADC noise, below real audio */
+    s_cfg.mic_silence_gate = 25.0f; /* SPECTRAL gate (sum of post-floor band
+                                     * power): silence ≈ <10, quiet real audio
+                                     * >50.  NOTE: semantics changed from the
+                                     * old time-domain RMS² gate (default 250)
+                                     * — users upgrading should re-tune the
+                                     * noise-floor slider, starting at ~25. */
     memset(s_cfg.mic_noise_floor, 0, sizeof(s_cfg.mic_noise_floor));
     s_cfg.mic_calibration_saved = false;
     s_cfg.sht30_temp_offset = 0.0f;    /* no correction by default */
@@ -153,6 +161,9 @@ static void set_defaults(void)
     s_cfg.mqtt_user[0]      = '\0';
     s_cfg.mqtt_password[0]  = '\0';
     s_cfg.mqtt_ha_discovery = true;
+    s_cfg.mqtt_pub_ntp      = false;  /* clock telemetry — opt-in              */
+    s_cfg.mqtt_pub_health   = false;  /* RSSI/heap/uptime each 60 s — opt-in   */
+    s_cfg.mqtt_pub_buttons  = false;  /* touch presses as HA triggers — opt-in */
 
     /* WLED Sync */
     s_cfg.wled_sync_enabled = false;
@@ -332,10 +343,15 @@ static void parse_json(const char *json, size_t len)
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
     json_read_str(root, "timer_file",       s_cfg.timer_file,      sizeof(s_cfg.timer_file));
     json_read_str(root, "click_file",       s_cfg.click_file,      sizeof(s_cfg.click_file));
+    json_read_str(root, "ticker_file",      s_cfg.ticker_file,     sizeof(s_cfg.ticker_file));
     json_read_str(root, "hostname",        s_cfg.hostname,        sizeof(s_cfg.hostname));
     {
         cJSON *bs = cJSON_GetObjectItem(root, "button_sound");
         if (cJSON_IsBool(bs)) s_cfg.button_sound = cJSON_IsTrue(bs);
+    }
+    {
+        cJSON *ts = cJSON_GetObjectItem(root, "ticker_sound");
+        if (cJSON_IsBool(ts)) s_cfg.ticker_sound = cJSON_IsTrue(ts);
     }
     {
         cJSON *ae = cJSON_GetObjectItem(root, "audio_enabled");
@@ -393,6 +409,12 @@ static void parse_json(const char *json, size_t len)
         json_read_str(root, "mqtt_password", s_cfg.mqtt_password, sizeof(s_cfg.mqtt_password));
         v = cJSON_GetObjectItem(root, "mqtt_ha_discovery");
         if (cJSON_IsBool(v)) s_cfg.mqtt_ha_discovery = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "mqtt_pub_ntp");
+        if (cJSON_IsBool(v)) s_cfg.mqtt_pub_ntp = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "mqtt_pub_health");
+        if (cJSON_IsBool(v)) s_cfg.mqtt_pub_health = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "mqtt_pub_buttons");
+        if (cJSON_IsBool(v)) s_cfg.mqtt_pub_buttons = cJSON_IsTrue(v);
     }
     {
         cJSON *v = cJSON_GetObjectItem(root, "wled_sync_enabled");
@@ -717,6 +739,12 @@ static void parse_json(const char *json, size_t len)
     json_read_u8(root, "spectrum_led_source", &s_cfg.spectrum_led_source);
     if (s_cfg.spectrum_led_source > 1) s_cfg.spectrum_led_source = 0;
 
+    /* spectrum_lcd_wled — LCD bars follow the WLED primary colour */
+    {
+        cJSON *sw = cJSON_GetObjectItem(root, "spectrum_lcd_wled");
+        if (cJSON_IsBool(sw)) s_cfg.spectrum_lcd_wled = cJSON_IsTrue(sw);
+    }
+
     /* notify_update_on_display — opt-in clock-face update indicator */
     {
         cJSON *nu = cJSON_GetObjectItem(root, "notify_update_on_display");
@@ -987,6 +1015,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "tone_file",        s_cfg.tone_file);
     cJSON_AddStringToObject(root, "timer_file",       s_cfg.timer_file);
     cJSON_AddStringToObject(root, "click_file",       s_cfg.click_file);
+    cJSON_AddStringToObject(root, "ticker_file",      s_cfg.ticker_file);
     cJSON_AddStringToObject(root, "hostname",        s_cfg.hostname);
     cJSON_AddStringToObject(root, "timezone",        s_cfg.timezone);
     {
@@ -996,6 +1025,7 @@ char *config_to_json(void)
     }
     cJSON_AddNumberToObject(root, "time_discipline_mode", s_cfg.time_discipline_mode);
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
+    cJSON_AddBoolToObject  (root, "ticker_sound",     s_cfg.ticker_sound);
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);
     cJSON_AddBoolToObject  (root, "weather_enabled",   s_cfg.weather_enabled);
@@ -1019,6 +1049,9 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "mqtt_user",         s_cfg.mqtt_user);
     cJSON_AddStringToObject(root, "mqtt_password",     s_cfg.mqtt_password);
     cJSON_AddBoolToObject  (root, "mqtt_ha_discovery", s_cfg.mqtt_ha_discovery);
+    cJSON_AddBoolToObject  (root, "mqtt_pub_ntp",      s_cfg.mqtt_pub_ntp);
+    cJSON_AddBoolToObject  (root, "mqtt_pub_health",   s_cfg.mqtt_pub_health);
+    cJSON_AddBoolToObject  (root, "mqtt_pub_buttons",  s_cfg.mqtt_pub_buttons);
     cJSON_AddNumberToObject(root, "mic_adc_channel",   s_cfg.mic_adc_channel);
     cJSON_AddNumberToObject(root, "mic_silence_gate",  (double)s_cfg.mic_silence_gate);
     {
@@ -1112,6 +1145,7 @@ char *config_to_json(void)
     }
 
     cJSON_AddNumberToObject(root, "spectrum_led_source", s_cfg.spectrum_led_source);
+    cJSON_AddBoolToObject(root, "spectrum_lcd_wled",   s_cfg.spectrum_lcd_wled);
 
     cJSON_AddBoolToObject(root, "notify_update_on_display", s_cfg.notify_update_on_display);
     cJSON_AddNumberToObject(root, "lcd_invert_mask", s_cfg.lcd_invert_mask);

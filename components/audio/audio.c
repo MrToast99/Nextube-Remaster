@@ -34,6 +34,7 @@
 
 #include "audio.h"
 #include "leds.h"
+#include "microphone.h"   /* I2S0 arbitration: mic releases it during playback */
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
@@ -124,6 +125,10 @@ static void dac_restart(int fade_ms)
         .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
         .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
     };
+    /* The spectrum mic's adc_continuous capture also rides I2S0 — make it
+     * release the peripheral before we claim it (bounded wait inside). */
+    mic_set_audio_active(true);
+
     /* Retry up to 3 times with 100 ms gaps.
      * The I2S0 DMA controller can take >50 ms to fully release its internal
      * state after dac_continuous_del_channels(); without a gap,
@@ -150,12 +155,14 @@ static void dac_restart(int fade_ms)
             ESP_LOGE(TAG, "dac_restart: all attempts failed — audio silenced");
             s_last_err_us = now;
         }
+        mic_set_audio_active(false);   /* no DAC came up — let capture resume */
         return;
     }
     if (dac_continuous_enable(s_dac_cont) != ESP_OK) {
         ESP_LOGE(TAG, "dac_restart: enable failed");
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
+        mic_set_audio_active(false);   /* no DAC came up — let capture resume */
         return;
     }
 
@@ -206,6 +213,9 @@ static void dac_teardown(void)
      * (constant static floor + activity hiss).  rtc_gpio_isolate() disconnects
      * the pad from the digital domain entirely; measured near-silent. */
     rtc_gpio_isolate(PIN_AUDIO_DAC);
+
+    /* I2S0 free again — spectrum capture may resume. */
+    mic_set_audio_active(false);
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
@@ -568,7 +578,9 @@ void audio_stop(void)
  *   for both enabled and disabled audio — a clip brings the DAC up on demand.
  */
 
-/* Helper: release the continuous DAC channel so a test mode can claim it. */
+/* Helper: release the continuous DAC channel so a test mode can claim it.
+ * Also releases the I2S0 claim — a following test mode that needs the DAC
+ * re-claims it before creating its own channel. */
 static void dac_test_teardown(void)
 {
     if (s_dac_cont) {
@@ -576,6 +588,7 @@ static void dac_test_teardown(void)
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
     }
+    mic_set_audio_active(false);
 }
 
 void audio_dac_test_set(const char *mode, int param_a, int param_b)
@@ -626,8 +639,9 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         if (level > 255) level = 255;
 
         /* Use a fresh dac_continuous channel (same pattern as "tone").
-         * A fresh empty ring has all 8 descriptors immediately available so
+         * A fresh empty ring has all descriptors immediately available so
          * filling with a constant level completes without blocking. */
+        mic_set_audio_active(true);   /* claim I2S0 from spectrum capture */
         dac_continuous_config_t dcfg = {
             .chan_mask = DAC_CHANNEL_MASK_CH0,
             .desc_num  = DAC_DESC_NUM,
@@ -640,6 +654,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             dac_continuous_enable(s_dac_cont) != ESP_OK) {
             ESP_LOGE(TAG, "DAC test: %s — DMA init failed", mode);
             if (s_dac_cont) { dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL; }
+            mic_set_audio_active(false);
             return;
         }
         uint8_t *buf = (uint8_t *)malloc(DAC_DMA_BUF_SIZE);
@@ -660,6 +675,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         int freq = (param_a > 0 && param_a <= 4000) ? param_a : 1000;
         int amp  = (param_b >= 0 && param_b <= 127) ? param_b : 64;
 
+        mic_set_audio_active(true);   /* claim I2S0 from spectrum capture */
         dac_continuous_config_t dcfg = {
             .chan_mask = DAC_CHANNEL_MASK_CH0,
             .desc_num  = DAC_DESC_NUM,
@@ -672,6 +688,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             dac_continuous_enable(s_dac_cont) != ESP_OK) {
             ESP_LOGE(TAG, "DAC test: tone — DMA init failed");
             if (s_dac_cont) { dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL; }
+            mic_set_audio_active(false);
             return;
         }
 

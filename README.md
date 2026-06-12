@@ -314,32 +314,35 @@ For complete silence a hardware modification is required:
 #### Signal chain
 
 ```
-CMC-4015-25T electret capsule (top-port SMT, −25 dBV/Pa)
+4 mm SMT electret capsule (unmarked — see candidates below)
     → LMV321IDBVR single op-amp (SOT-23-5) — hardware preamp / bias stage
     → GPIO35 (ADC1_CH7, input-only)
     → ESP32 ADC1, 12-bit, 12 dB attenuation (0–3.3 V full scale)
 ```
 
-The **CMC-4015-25T** is a CUI Devices SMT electret capsule confirmed on PCB Rev 1.31 near the top edge of the board. The **LMV321IDBVR** op-amp (marked `RC1F` on the PCB, located adjacent to the mic) provides the preamp stage between capsule and ADC. Both are analog-only components — no I²S or PDM interface. The correct ADC input is **GPIO35 / ADC1_CH7** (input-only pin). GPIO36 / ADC1_CH0 (`SENSOR_VP`) is **not** connected to the microphone on this hardware revision.
+The capsule on PCB Rev 1.31 (near the top edge of the board) carries **no markings**; identification is by package size/style only. Visual candidates: **CUI CMC-4015-25T**, **CUI CMC-4013-02S-423**, or **MIC-4013-6-G00** — dimensionally similar 4 mm SMT electrets. Measured ADC signal levels (raw-frame captures: ~±20 counts ≈ 16 mV for moderate room-level tones after the LMV321 stage) are more consistent with a standard **≈ −42 dBV/Pa** capsule than the −25 dBV/Pa the 4015-25T datasheet specifies, slightly favouring the 4013-class candidates. Functionally it does not matter: the firmware's analysis is fully relative (per-frame normalisation + adaptive noise floor), so capsule sensitivity only shifts where the floor settles. The **LMV321IDBVR** op-amp (marked `RC1F` on the PCB, located adjacent to the mic) provides the preamp stage between capsule and ADC. Both are analog-only components — no I²S or PDM interface. The correct ADC input is **GPIO35 / ADC1_CH7** (input-only pin). GPIO36 / ADC1_CH0 (`SENSOR_VP`) is **not** connected to the microphone on this hardware revision.
 
-#### Sampling driver — `esp_timer` + `adc_oneshot`
+#### Sampling driver — `adc_continuous` (I²S0 DMA, hardware-clocked)
 
-`adc_continuous` is unavailable on the original ESP32 (LX6): on this target the driver uses I²S0 in DMA mode — the same peripheral occupied by `dac_continuous` for audio output. They cannot coexist, producing an `i2s controller 0 has been occupied by dac_dma` abort at boot.
+Capture is driven by the ESP32's **digital ADC controller via I²S0 DMA** (`adc_continuous`): the SAR is clocked in hardware at **32 kHz** (the digital controller's minimum is 20 kHz) and DMA delivers complete frames; the mic task averages every 4 samples down to the **8 kHz** analysis rate (the averaging doubles as an anti-alias filter and adds ~1 bit of effective resolution). Exact sample spacing, near-zero CPU per sample.
 
-A simple `esp_timer_get_time()` busy-wait at 125 µs intervals holds Core 1 at 100%, starving `IDLE1` and triggering the task watchdog within seconds.
+**Why hardware clocking is non-negotiable** (every software-timed approach was tried and failed):
+- `esp_timer` + `adc_oneshot_read()` at 125 µs: each read costs **300–600 µs** (driver mutex, per-read reconfiguration), so the timer ran in permanent catch-up — the *real* sample rate was ~1.7 kHz, making every band above the true ~850 Hz Nyquist **aliased noise** (measured ~78 % of Core 0 for the privilege).
+- Register-level SAR reads fixed the rate and cut CPU to ~16 %, but RTOS preemption produced **sampling jitter** (esp_timer catch-up clusters samples back-to-back, then they're treated as uniform) — a swept-tone test showed high-frequency energy smeared into the low bands and nothing detected above ~450 Hz.
 
-The firmware uses an **`esp_timer` periodic timer** (125 µs period, `ESP_TIMER_TASK` dispatch) that fires the sample callback in the `esp_timer` service task (priority 22). The callback calls `adc_oneshot_read()` — safe in task context — and stores each sample into a **ping-pong `int16_t` buffer**. After `FRAME_SIZE = 128` samples (16 ms) the write buffer is flipped and a binary semaphore wakes the analysis task. Core 1 is idle between frames; no watchdog involvement.
+**I²S0 sharing with audio:** `dac_continuous` (audio playback) uses the same peripheral. Audio claims it via `mic_set_audio_active(true)` before each clip and releases it after teardown — the spectrum freezes for the duration of a button click or alarm and resumes automatically (same pattern as the LED pause during playback).
 
 | Parameter | Value |
 |---|---|
-| Sample rate | 8 000 Hz |
-| Frame size | 128 samples (16 ms per Goertzel frame) |
+| Hardware rate | 32 000 Hz (I²S0-clocked, DMA) ÷ 4 → 8 000 Hz effective |
+| Frame size | 128 samples (16 ms per Goertzel frame, ~62 fps) |
 | Bit depth | 12-bit, ADC_ATTEN_DB_12 |
-| Timer overhead | ~3–8 µs per 125 µs tick ≈ 4–6 % of core time |
+| Window | Hann (suppresses off-band leakage — a loud bass note no longer splatters across all bands) |
+| CPU cost | Near-zero acquisition (DMA); ~4–5 % of Core 0 for Goertzel analysis.  Capture is gated to Spectrum mode (all other modes pay zero) and httpd is pinned to Core 1 (task-WDT history).  **Note:** noise baselines captured on firmware ≤ v1.13.x were measured under the old aliased sampling — re-capture (or Reset to Auto) after updating. |
 
 #### Frequency bands
 
-**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Bands are logarithmically spaced across 280 Hz–3800 Hz (safely below the 4 kHz Nyquist limit), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. This avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
+**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Each band is the **sum of all 62.5 Hz analysis bins inside its frequency range** (~60 bins across 250–3937 Hz, mapped to bands by geometric band edges), not a single bin at the band centre — a single bin only hears ±125 Hz, and the log-spaced centres above ~1 kHz sit 200–400 Hz apart, so tones between centres would fall into spectral cracks and vanish (a tone-sweep test measured literal zero at 3.2 kHz before this fix). Bands are logarithmically spaced across 280 Hz–3800 Hz (safely below the 4 kHz Nyquist limit), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. The table below lists the band centres. This layout avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
 
 | Tube | Bar 0 | Bar 1 | Bar 2 | Bar 3 | Range |
 |---|---|---|---|---|---|
@@ -359,9 +362,9 @@ Because the LMV321 preamp amplifies broadband electrical noise alongside audio, 
 - **Phase 1 (first ~4 s, 250 frames):** fast convergence (α = 0.02, no signal guard) locks the per-band noise floor from zero.
 - **Phase 2 (steady state):** slow drift tracking (α = 0.002) only when the current bin is below 4× the estimated floor — prevents audio signals from biasing the floor upward.
 
-Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** threshold (`mic_silence_gate` in config, adjustable under **Display → Spectrum Mode → Noise Floor**) blanks all bands if the frame RMS² falls below a set level — useful for immediate suppression of board noise rather than waiting for the adaptive envelope to converge. The default of 250 (≈16 counts RMS) sits above ADC noise but below real audio; raise it to squelch persistent interference, lower it to catch very quiet sounds.
+Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** threshold (`mic_silence_gate` in config, adjustable under **Display → Spectrum Mode → Noise Floor**) blanks all bands when the **sum of post-floor band power** falls below the set value — a *spectral* gate, self-calibrating because the adaptive floor has already absorbed electrical noise. Silence sums to <10; even quiet real audio exceeds 50. **Default 25; 0 disables.** *(Semantics changed: the old gate compared time-domain RMS² with a default of 250 — it was volume-calibrated rather than correctness-calibrated, blanking clearly-detected mid-frequency tones at listening level while letting loud sub-bass open the display onto nothing but speaker-distortion hash. Users upgrading should re-tune the slider, starting at 25.)*
 
-Peak-hold: instant attack, exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
+Display dynamics: band power is smoothed with a short EMA (τ ≈ 45 ms) so tones near a band boundary hold a steady bar instead of flickering between neighbours, then peak-hold applies instant attack with exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
 
 #### Spectrum LED Control
 
@@ -644,7 +647,7 @@ After setup, access the management interface via:
 
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
-- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, auto theme rotation (cycle all or selected themes on a timer), Spectrum LED source (custom amplitude-modulated glow colour **or** follow configured accent mode), Spectrum LCD bar colour, Spectrum noise floor threshold, **Advanced Display** (see below)
+- **Display** — theme (populated dynamically from LittleFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation, auto theme rotation (cycle all or selected themes on a timer), Spectrum LED source (custom amplitude-modulated glow colour **or** follow configured accent mode), Spectrum LCD bar colour (fixed colour **or** follow the live WLED primary colour when WLED Sync is enabled — falls back to the fixed colour when no WLED data is arriving), Spectrum noise floor threshold, **Advanced Display** (see below)
 - **Network** — WiFi SSID/password (shown as plain text on first entry so you can verify before saving; masked once a password has been saved), hostname, timezone (UTC offset in hours), NTP server. Only reconnects when credentials actually change, preserving the live connection for all other saves.
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable (including animated Panel 3 Sunrise & Sunset); **Social Media Counters** (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters)); **WLED Sync** (see [WLED Sync](#wled-sync)); **Home Assistant MQTT** (see [Home Assistant MQTT](#home-assistant-mqtt)); countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
@@ -917,10 +920,10 @@ At each NTP sync a single line is emitted at `INFO` level on the `ntp` tag:
 
 **Mode 2 — PCF slave (default):**
 ```
-ntp: NTP sync: XTAL was +1048 ms — PCF kept <=4 ms between syncs
+ntp: NTP sync: XTAL (ESP) would have been +1048 ms — PCF (RTC) kept <=4 ms between syncs
 ```
 
-The XTAL offset shows how far the ESP32 crystal drifted since the last sync — this is what the clock *would* have been without discipline. The number after the dash is the worst single-minute error the PCF slave saw over the past hour.
+The first number is how far the ESP32 crystal's free-running timebase drifted since the last sync — what the clock *would have been* without discipline (the actual clock was held by the PCF every minute). The number after the dash is the worst single-minute error the PCF slave saw over the past hour.
 
 **Mode 0 — off, small drift (gradual slew):**
 ```
@@ -1091,6 +1094,12 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | **Subscribe** | `nextube/<hostname>/ticker/set` | UTF-8 string ≤ 255 chars; empty payload = cancel |
 | Publish | `nextube/<hostname>/ticker_speed/state` | `4` (integer 1–20, px per tick) |
 | **Subscribe** | `nextube/<hostname>/ticker_speed/set` | `4` (integer 1–20; clamped, echoed back) |
+| Publish | `nextube/<hostname>/ticker_sound/state` | `ON` / `OFF` — chime on ticker text |
+| **Subscribe** | `nextube/<hostname>/ticker_sound/set` | `ON` / `OFF` — persisted to config |
+| Publish | `nextube/<hostname>/ntp/xtal_drift/state` | Signed ms the free-running ESP crystal drifted since the previous NTP sync (retained; updated per sync) |
+| Publish | `nextube/<hostname>/ntp/rtc_err/state` | Worst single-minute clock error (ms) the PCF8563 discipline allowed since the previous sync (retained; PCF-slave mode only) |
+| Publish | `nextube/<hostname>/health/state` | *(optional group)* `{"rssi":-53,"heap":51234,"uptime_min":185}` every 60 s |
+| Publish | `nextube/<hostname>/button/state` | *(optional group)* `left` / `middle` / `right` on each touch press |
 | Publish | `homeassistant/sensor/<hostname>_temp/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/sensor/<hostname>_hum/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/select/<hostname>_mode/config` | HA discovery JSON (retained) |
@@ -1098,10 +1107,16 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | Publish | `homeassistant/number/<hostname>_brightness/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/text/<hostname>_ticker/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/number/<hostname>_ticker_speed/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/switch/<hostname>_ticker_sound/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/sensor/<hostname>_xtal_drift/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/sensor/<hostname>_rtc_err/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/sensor/<hostname>_{rssi,heap,uptime}/config` | HA discovery JSON (retained; health group only) |
+| Publish | `homeassistant/device_automation/<hostname>_btn_{left,middle,right}/config` | HA device-trigger discovery (retained; buttons group only) |
 
 ### Notes
 
 - **Boot-time gate** — MQTT is only started if both **Enable** is checked *and* a broker address is set. Disabling MQTT frees the task stack and stops all polling — useful if you don't use Home Assistant.
+- **Optional publishing groups** — three checkboxes under **Services → MQTT** control extra telemetry: **Clock telemetry** (XTAL drift + RTC max error per NTP sync; default on), **Device health** (WiFi RSSI / free heap / uptime sensors every 60 s; default off), and **Button presses** (touch events as HA device triggers, usable in automations — e.g. "left button → toggle the bedroom lights"; default off). Publishing toggles take effect immediately; HA *entities* for a newly enabled group appear after the next broker reconnect or reboot.
 - **Restart required** — changes to MQTT settings take effect after a reboot (same behaviour as weather and social counter toggles).
 - **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
 - **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
@@ -1125,13 +1140,16 @@ mosquitto_pub -h <broker> -t "nextube/nextube-remaster/ticker/set" -m "Good morn
 | **Colour** | Matches the currently loaded theme's digit colour. |
 | **Mode rotation** | Paused for the duration of the ticker; resumes when the text finishes scrolling. |
 | **Not persistent** | Ticker text is RAM-only; clears on device reboot. |
+| **Notification sound** | Optional (off by default): when **Ticker Sound** is enabled, each non-empty `ticker/set` plays the configured sound file (default `/spiffs/audio/bell.wav`, changeable under **Hardware → Ticker Notification Sound**). Toggle via the HA **Nextube Ticker Sound** switch, `ticker_sound/set`, or the web UI; persists across reboots. Requires **audio output** enabled in device settings. |
 | **Requires MQTT** | Ticker is only available when Home Assistant MQTT integration is enabled. |
 
-In Home Assistant, the **Nextube Ticker** appears as a `text` entity on the Nextube device card — type your message and press Enter.
+In Home Assistant, the **Nextube Ticker** appears as a `text` entity on the Nextube device card — type your message and press Enter. The **Nextube Ticker Sound** switch toggles the notification chime, and two telemetry sensors — **Nextube XTAL Drift** and **Nextube RTC Max Error** — update after every NTP sync, giving graphable long-term history of the crystal's drift and the RTC discipline's hold accuracy.
 
 ## WLED Sync
 
 The accent LEDs can mirror a WLED-controlled LED strip on your LAN in real time. When enabled, Nextube listens on the WLED UDP Notifier broadcast port and applies the primary colour + brightness to all 6 WS2812B accent LEDs whenever WLED changes state — no target IP or extra configuration on the WLED side.
+
+The **Spectrum mode LCD bars** can also follow the WLED primary colour: enable **Follow WLED primary colour** next to the LCD Bar Colour picker in Spectrum settings. The bars track WLED live (changing the WLED colour recolours the bars within a second) and fall back to the configured fixed colour whenever no WLED data is available — sync disabled, no packet received yet, the strip turned off, or a palette effect that leaves WLED's primary colour black.
 
 ### Setup (Nextube side)
 
@@ -1317,6 +1335,27 @@ GET  /api/wifi/scan          → scan results
 GET  /api/logs               → in-RAM device log (last 64 lines)
 POST /api/logs/clear         → clear in-RAM log buffer
 POST /api/update_notify      → {"active":true/false} — activate or clear the 4-row red update indicator on tube 6
+```
+
+**Debug / diagnostics** (all require auth when enabled; intended for troubleshooting, not automation):
+
+```
+GET  /api/debug/tasks        → per-task CPU accounting (FreeRTOS runtime stats): name, priority,
+                               core, state, stack high-water mark, runtime, lifetime CPU share.
+                               The go-to tool for diagnosing IDLE-starvation task-WDT warnings —
+                               sample twice and diff run_us for instantaneous load (counters are
+                               32-bit µs and wrap every ~71 min, so lifetime pct is only valid
+                               on short uptimes).
+GET  /api/debug/adc          → single raw mic ADC reading: {"channel","gpio","raw","voltage_mv"}
+POST /api/debug/dac          → inject a test signal on the audio DAC (GPIO25):
+                               {"mode":"tone","freq_hz":1000,"amplitude":64} | {"mode":"dc","level":200}
+                               | {"mode":"silence"} | {"mode":"hiz"} | {"mode":"normal"}
+POST /api/debug/pwm          → override backlight PWM: {"freq_hz":10000,"brightness_pct":80}
+                               or {"restore":true}
+POST /api/debug/loglevel     → runtime per-tag log verbosity: {"tag":"ntp","level":4}
+                               (0=none … 5=verbose) or {"tag":"…","enabled":false}; resets on reboot
+POST /api/debug/burnin       → trigger the burn-in / colour-cycle routine (see Advanced Display)
+POST /api/debug/snow         → trigger the static-snow routine (see Advanced Display)
 ```
 
 ## Project Structure

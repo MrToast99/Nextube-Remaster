@@ -6,5 +6,7 @@ idf_component_register(
         display
         sht30
         wifi_manager
+        audio
+        ntp_time
         mqtt
 )
