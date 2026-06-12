@@ -3966,6 +3966,7 @@ async function startAutoUpdate(version, releaseZipUrl, force = false) {
   _otaInProgress = true;
   
   // Set up modal UI
+  if ($('autoupdate-card')) $('autoupdate-card').style.maxWidth = '480px';
   $('autoupdate-target-ver').textContent = 'v' + version;
   $('autoupdate-title-icon').textContent = '🚀';
   $('autoupdate-title-text').textContent = 'Auto-Update';
@@ -3989,6 +3990,7 @@ async function startAutoUpdate(version, releaseZipUrl, force = false) {
     const breakingType = await getBreakingUpdateType(_latestUpdateData);
     
     if (breakingType === 'usb' || breakingType === 'warn') {
+      if ($('autoupdate-card')) $('autoupdate-card').style.maxWidth = '760px';
       try {
         await injectMarked();
       } catch (err) {
@@ -4651,7 +4653,7 @@ function onAuthSucceeded() {
 </div>
 
 <div id="autoupdate-modal" class="auth-overlay">
-  <div class="auth-card" style="max-width: 480px; backdrop-filter: blur(10px); background: rgba(24, 24, 27, 0.92); border: 1px solid rgba(255,255,255,0.15);">
+  <div id="autoupdate-card" class="auth-card" style="width: 90%; max-width: 480px; backdrop-filter: blur(10px); background: rgba(24, 24, 27, 0.92); border: 1px solid rgba(255,255,255,0.15); transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);">
     <h3 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
       <span id="autoupdate-title-icon">🚀</span> 
       <span id="autoupdate-title-text">Auto-Update</span> 
@@ -4748,7 +4750,7 @@ function onAuthSucceeded() {
         <span>This update contains major changes. Please read the release notes and instructions carefully before confirming the automatic browser installation:</span>
       </div>
       <div style="font-size: 0.85rem; color: var(--dim, #9ca3af); font-weight: 600; margin-top: 0.4rem;">Release Notes / Instructions:</div>
-      <div id="autoupdate-release-notes" style="background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 0.8rem 1rem; max-height: 180px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; line-height: 1.4; color: var(--fg, #f5f5f5); white-space: pre-wrap; word-break: break-word;"></div>
+      <div id="autoupdate-release-notes" style="background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 1.1rem 1.4rem; max-height: 400px; overflow-y: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 0.86rem; line-height: 1.5; color: var(--fg, #f5f5f5); white-space: pre-wrap; word-break: break-word;"></div>
     </div>
     
     <!-- Warning notice -->
