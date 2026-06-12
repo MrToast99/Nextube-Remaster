@@ -3744,6 +3744,7 @@ let _latestUpdateZipUrl = null;
 /* Tracks the latest available release version (null = up to date / not yet checked).
  * Read by onNotifyUpdateChange() and saveSettings() to sync the tube-6 indicator. */
 let _latestUpdate = null;
+let _latestUpdateData = null;
 
 /* Fire-and-forget helper: tells the firmware to activate or clear the red
  * clock-face update indicator on tube 6.  Network errors are silently ignored
@@ -3765,6 +3766,45 @@ function onNotifyUpdateChange() {
   const enabled = $('f-notify-update').checked;
   const toastVisible = $('update-toast').style.display !== 'none';
   setClockFaceUpdateIndicator(enabled && !!_latestUpdate && toastVisible);
+}
+
+/* Scans release payload name and body for typical breaking change keywords
+ * indicating a full USB re-flash is mandatory. */
+function getBreakingUpdateType(releaseData) {
+  if (!releaseData) return 'none';
+  
+  // 1. Programmatic Check (CI-driven flag in assets)
+  if (releaseData.assets && Array.isArray(releaseData.assets)) {
+    const hasUsbFlag = releaseData.assets.some(asset => asset.name === 'usb_only.flag');
+    if (hasUsbFlag) return 'usb';
+    
+    const hasWarnFlag = releaseData.assets.some(asset => asset.name === 'breaking_warning.flag');
+    if (hasWarnFlag) return 'warn';
+  }
+  
+  // 2. Natural Language Fallback (for backwards-compatibility / legacy releases)
+  const name = (releaseData.name || '').toLowerCase();
+  const body = (releaseData.body || '').toLowerCase();
+  
+  const breakingKeywords = [
+    'breaking change',
+    'breaking changes',
+    'must full flash',
+    'usb re-flash',
+    'usb flash',
+    're-flash via usb',
+    'partition table',
+    'spiffs to littlefs',
+    'spiffs vs littlefs',
+    '[breaking]',
+    'breaking=true',
+    'breaking: true'
+  ];
+  
+  const isLegacyBreaking = breakingKeywords.some(keyword => name.includes(keyword) || body.includes(keyword));
+  if (isLegacyBreaking) return 'usb'; // legacy matches were full USB re-flashes
+  
+  return 'none';
 }
 
 function showUpdateToast(version, url) {
@@ -3834,6 +3874,16 @@ function updateStepState(stepId, state) {
     } else if (state === 'complete') {
       iconEl.textContent = '✓';
       iconEl.style.color = 'var(--ok, #4ecca3)';
+      
+      // Dynamically turn the step's progress bar green on completion
+      const bar = $(stepId + '-progress-bar');
+      if (bar) {
+        bar.style.background = 'var(--ok, #4ecca3)';
+      }
+      // Hide reboot timer text on completion
+      if (stepId === 'reboot') {
+        $('reboot-timer-text').style.display = 'none';
+      }
     } else if (state === 'failed') {
       iconEl.textContent = '❌';
       iconEl.style.color = '#f87171';
@@ -3912,8 +3962,8 @@ function flashWebUI(uiBlob) {
 }
 
 /* Core sequential updater engine */
-async function startAutoUpdate(version, releaseZipUrl) {
-  if (_otaInProgress) return toast('An update is already in progress.', true);
+async function startAutoUpdate(version, releaseZipUrl, force = false) {
+  if (_otaInProgress && !force) return toast('An update is already in progress.', true);
   _otaInProgress = true;
   
   // Set up modal UI
@@ -3924,6 +3974,75 @@ async function startAutoUpdate(version, releaseZipUrl) {
   $('autoupdate-sub-status').style.color = '';
   $('autoupdate-warning').style.display = 'flex';
   $('autoupdate-actions').style.display = 'none';
+  
+  // Hide breaking warning & restore default view states
+  $('autoupdate-breaking-container').style.display = 'none';
+  $('autoupdate-breaking-alert-usb').style.display = 'none';
+  $('autoupdate-breaking-alert-warn').style.display = 'none';
+  $('autoupdate-steps').style.display = 'flex';
+  $('autoupdate-progress-container').style.display = 'block';
+  $('autoupdate-manual-btn').style.display = 'none';
+  $('autoupdate-confirm-btn').style.display = 'none';
+  $('autoupdate-retry-btn').style.display = 'block';
+
+  // Check for breaking changes before starting
+  if (!force && _latestUpdateData) {
+    const breakingType = getBreakingUpdateType(_latestUpdateData);
+    
+    if (breakingType === 'usb') {
+      $('autoupdate-title-icon').textContent = '⚠️';
+      $('autoupdate-title-text').textContent = 'Breaking Update';
+      $('autoupdate-sub-status').textContent = 'Manual action required. Automatic update blocked.';
+      $('autoupdate-sub-status').style.color = '#f87171';
+      
+      $('autoupdate-steps').style.display = 'none';
+      $('autoupdate-progress-container').style.display = 'none';
+      $('autoupdate-warning').style.display = 'none';
+      
+      // Show breaking notes
+      $('autoupdate-release-notes').textContent = _latestUpdateData.body || 'No release notes provided.';
+      $('autoupdate-breaking-alert-usb').style.display = 'block';
+      $('autoupdate-breaking-container').style.display = 'flex';
+      
+      // Show actions footer with Manual Update button
+      $('autoupdate-manual-btn').style.display = 'block';
+      $('autoupdate-retry-btn').style.display = 'none';
+      $('autoupdate-actions').style.display = 'flex';
+      
+      $('autoupdate-modal').classList.add('show');
+      
+      _otaInProgress = false;
+      return;
+    } else if (breakingType === 'warn') {
+      $('autoupdate-title-icon').textContent = '⚠️';
+      $('autoupdate-title-text').textContent = 'Compatibility Warning';
+      $('autoupdate-sub-status').textContent = 'This update has breaking changes. Review notes below before proceeding.';
+      $('autoupdate-sub-status').style.color = '#e67e22';
+      
+      $('autoupdate-steps').style.display = 'none';
+      $('autoupdate-progress-container').style.display = 'none';
+      $('autoupdate-warning').style.display = 'none';
+      
+      // Show breaking notes
+      $('autoupdate-release-notes').textContent = _latestUpdateData.body || 'No release notes provided.';
+      $('autoupdate-breaking-alert-warn').style.display = 'block';
+      $('autoupdate-breaking-container').style.display = 'flex';
+      
+      // Config confirm button click to run startAutoUpdate with force = true
+      const confirmBtn = $('autoupdate-confirm-btn');
+      confirmBtn.onclick = () => startAutoUpdate(version, releaseZipUrl, true);
+      confirmBtn.style.display = 'block';
+      
+      // Show actions footer with Confirm button
+      $('autoupdate-retry-btn').style.display = 'none';
+      $('autoupdate-actions').style.display = 'flex';
+      
+      $('autoupdate-modal').classList.add('show');
+      
+      _otaInProgress = false;
+      return;
+    }
+  }
   
   // Reset all steps to pending
   const steps = ['download', 'unpack', 'fw', 'reboot', 'ui'];
@@ -4154,6 +4273,7 @@ async function checkForUpdates(silent = false) {
     );
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
+    _latestUpdateData = data;
     const latest = (data.tag_name || '').replace(/^v/, '');
     const fwVer  = ($('s-fwver').textContent || '').replace(/^v/, '').trim();
     const fsVer  = ($('s-spver') ? $('s-spver').textContent : '').replace(/^v/, '').trim();
@@ -4179,6 +4299,7 @@ async function checkForUpdates(silent = false) {
     } else {
       _latestUpdate = null;
       _latestUpdateZipUrl = null;
+      _latestUpdateData = null;
       $('update-available').style.display = 'none';
       $('update-toast').style.display = 'none';
       setClockFaceUpdateIndicator(false);
@@ -4510,7 +4631,7 @@ function onAuthSucceeded() {
     </div>
     
     <!-- Main Big Progress Bar -->
-    <div style="margin: 1.2rem 0 0.5rem 0;">
+    <div id="autoupdate-progress-container" style="margin: 1.2rem 0 0.5rem 0;">
       <div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--dim); margin-bottom: 0.4rem;">
         <span>Total Progress</span>
         <span id="total-progress-text">0%</span>
@@ -4518,6 +4639,24 @@ function onAuthSucceeded() {
       <div style="width: 100%; height: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden;">
         <div id="total-progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #4ecca3, #e67e22); transition: width 0.3s ease-out;"></div>
       </div>
+    </div>
+
+    <!-- Breaking Change Notice & Release Notes -->
+    <div id="autoupdate-breaking-container" style="display: none; flex-direction: column; gap: 0.8rem; margin: 1.2rem 0;">
+      <div id="autoupdate-breaking-alert-usb" style="background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.3); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.82rem; color: #f87171; line-height: 1.4; display: flex; flex-direction: column; gap: 0.4rem;">
+        <span style="font-weight: bold; font-size: 0.88rem; display: flex; align-items: center; gap: 0.4rem;">
+          ⚠️ Critical Breaking Update Detected
+        </span>
+        <span>This release contains breaking changes and requires manual USB flashing (due to partition/filesystem changes) and cannot be installed safely via browser OTA. Please read the release instructions below:</span>
+      </div>
+      <div id="autoupdate-breaking-alert-warn" style="background: rgba(230, 126, 34, 0.1); border: 1px solid rgba(230, 126, 34, 0.3); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.82rem; color: #e67e22; line-height: 1.4; display: flex; flex-direction: column; gap: 0.4rem;">
+        <span style="font-weight: bold; font-size: 0.88rem; display: flex; align-items: center; gap: 0.4rem;">
+          ⚠️ Compatibility Warning
+        </span>
+        <span>This update contains major changes. Please read the release notes and instructions carefully before confirming the automatic browser installation:</span>
+      </div>
+      <div style="font-size: 0.85rem; color: var(--dim, #9ca3af); font-weight: 600; margin-top: 0.4rem;">Release Notes / Instructions:</div>
+      <div id="autoupdate-release-notes" style="background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 0.8rem 1rem; max-height: 180px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; line-height: 1.4; color: var(--fg, #f5f5f5); white-space: pre-wrap; word-break: break-word;"></div>
     </div>
     
     <!-- Warning notice -->
@@ -4529,6 +4668,8 @@ function onAuthSucceeded() {
     <!-- Action Footer / Error buttons -->
     <div id="autoupdate-actions" style="margin-top: 1.2rem; display: none; gap: 0.5rem;">
       <button id="autoupdate-close-btn" onclick="document.getElementById('autoupdate-modal').classList.remove('show')" style="background: rgba(255,255,255,0.1); color: var(--fg); margin: 0; width: auto; flex: 1; padding: 0.55rem; font-size: 0.88rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); cursor: pointer;">Close Window</button>
+      <button id="autoupdate-manual-btn" style="display: none; background: #e67e22; color: #000; margin: 0; width: auto; flex: 1.5; padding: 0.55rem; font-size: 0.88rem; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; text-align: center; text-decoration: none;" onclick="window.open(_latestUpdateData ? _latestUpdateData.html_url : '#', '_blank')">How to update manually ↗</button>
+      <button id="autoupdate-confirm-btn" style="display: none; background: var(--ok, #4ecca3); color: #000; margin: 0; width: auto; flex: 1.5; padding: 0.55rem; font-size: 0.88rem; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; text-align: center; text-decoration: none;">I understand, proceed 🚀</button>
       <button id="autoupdate-retry-btn" onclick="triggerAutoUpdate()" style="background: var(--ok, #4ecca3); color: #000; margin: 0; width: auto; flex: 1; padding: 0.55rem; font-size: 0.88rem; font-weight: bold; border-radius: 6px; border: none; cursor: pointer;">Retry Update</button>
     </div>
   </div>
