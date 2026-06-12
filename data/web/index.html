@@ -3769,15 +3769,26 @@ function onNotifyUpdateChange() {
 }
 
 /* Determines if an update is breaking (returning 'warn', 'usb', or 'none')
- * based strictly on CI-driven programmatic flag assets. */
-function getBreakingUpdateType(releaseData) {
-  if (!releaseData || !releaseData.assets || !Array.isArray(releaseData.assets)) return 'none';
+ * based strictly on the raw version.json file of the release tag. */
+async function getBreakingUpdateType(releaseData) {
+  if (!releaseData) return 'none';
   
-  const hasUsbFlag = releaseData.assets.some(asset => asset.name === 'usb_only.flag');
-  if (hasUsbFlag) return 'usb';
-  
-  const hasWarnFlag = releaseData.assets.some(asset => asset.name === 'breaking_warning.flag');
-  if (hasWarnFlag) return 'warn';
+  if (releaseData.tag_name) {
+    try {
+      let url = `https://raw.githubusercontent.com/${GITHUB_REPO}/${releaseData.tag_name}/version.json`;
+      if (CORS_PROXY_URL) {
+        url = CORS_PROXY_URL + encodeURIComponent(url);
+      }
+      const res = await fetch(url);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.breaking === 'usb') return 'usb';
+        if (json.breaking === true || json.breaking === 'true') return 'warn';
+      }
+    } catch (e) {
+      console.warn('Failed to fetch raw version.json:', e);
+    }
+  }
   
   return 'none';
 }
@@ -3975,7 +3986,7 @@ async function startAutoUpdate(version, releaseZipUrl, force = false) {
 
   // Check for breaking changes before starting
   if (!force && _latestUpdateData) {
-    const breakingType = getBreakingUpdateType(_latestUpdateData);
+    const breakingType = await getBreakingUpdateType(_latestUpdateData);
     
     if (breakingType === 'usb' || breakingType === 'warn') {
       try {

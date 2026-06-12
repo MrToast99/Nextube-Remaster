@@ -23,7 +23,6 @@ jobs:
       fs_version:    ${{ steps.version.outputs.fs_version }}
       build_version: ${{ steps.version.outputs.build_version }}
       update_type:   ${{ steps.updatetype.outputs.update_type }}
-      breaking:      ${{ steps.version.outputs.breaking }}
 
     steps:
       - name: Checkout
@@ -40,12 +39,10 @@ jobs:
           # semverCmp logic in index.html so the release tag always matches the
           # version the update-check compares against).
           BUILD_VER=$(python3 -c "import json; d=json.load(open('version.json')); fw=tuple(int(x) for x in d['firmware_version'].split('.')); fs=tuple(int(x) for x in d['fs_version'].split('.')); print(d['firmware_version'] if fw>=fs else d['fs_version'])")
-          BREAKING=$(python3 -c "import json; d=json.load(open('version.json')); print(str(d.get('breaking', False)).lower())")
           echo "fw_version=$FW_VER"       >> $GITHUB_OUTPUT
           echo "fs_version=$SP_VER"       >> $GITHUB_OUTPUT
           echo "build_version=$BUILD_VER" >> $GITHUB_OUTPUT
-          echo "breaking=$BREAKING"       >> $GITHUB_OUTPUT
-          echo "Firmware: $FW_VER   LittleFS: $SP_VER   Build: $BUILD_VER   Breaking: $BREAKING"
+          echo "Firmware: $FW_VER   LittleFS: $SP_VER   Build: $BUILD_VER"
 
       - name: Determine update type
         id: updatetype
@@ -102,16 +99,7 @@ jobs:
           FW_VER=${{ steps.version.outputs.fw_version }}
           SP_VER=${{ steps.version.outputs.fs_version }}
           TYPE=${{ steps.updatetype.outputs.update_type }}
-          BREAKING=${{ steps.version.outputs.breaking }}
           mkdir -p artifacts
-
-          # Create programmatic flag files based on the "breaking" property in version.json
-          if [ "$BREAKING" = "true" ]; then
-            touch artifacts/breaking_warning.flag
-          elif [ "$BREAKING" = "usb" ]; then
-            touch artifacts/usb_only.flag
-          fi
-
 
           # OTA firmware binary (use firmware version in name)
           cp build/nextube-fw.bin           artifacts/nextube-fw-v${FW_VER}-ota.bin
@@ -236,8 +224,6 @@ jobs:
           body_path: release_notes.md
           files: |
             Nextube-Remaster v${{ needs.build.outputs.build_version }}.zip
-            artifacts/usb_only.flag
-            artifacts/breaking_warning.flag
           fail_on_unmatched_files: false
           draft: false
           prerelease: false
