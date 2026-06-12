@@ -1053,15 +1053,22 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 
 ### What gets exposed
 
-| Entity | HA domain | What it does |
-|---|---|---|
-| **Nextube Temperature** | `sensor` | SHT30 temperature in °C, updated every 60 s |
-| **Nextube Humidity** | `sensor` | SHT30 relative humidity %, updated every 60 s |
-| **Nextube Mode** | `select` | Read and set the active display mode (Clock, Weather, YouTube, …) |
-| **Nextube Display** | `switch` | Turn the backlight ON or OFF (same as the middle touch button) |
-| **Nextube Brightness** | `number` | LCD brightness 0–100 slider |
-| **Nextube Ticker** | `text` | Scrolling message ticker — type any text and press Enter to display it across all 6 tubes |
-| **Nextube Ticker Speed** | `number` | Marquee scroll speed slider, 1–20 px per tick (higher = faster). RAM-only; resets to 4 on reboot |
+| Entity | HA domain | Group | What it does |
+|---|---|---|---|
+| **Nextube Temperature** | `sensor` | Always | SHT30 temperature in °C, updated every 60 s |
+| **Nextube Humidity** | `sensor` | Always | SHT30 relative humidity %, updated every 60 s |
+| **Nextube Mode** | `select` | Always | Read and set the active display mode (Clock, Weather, YouTube, …) |
+| **Nextube Display** | `switch` | Always | Turn the backlight ON or OFF (same as the middle touch button) |
+| **Nextube Brightness** | `number` | Always | LCD brightness 0–100 slider |
+| **Nextube Ticker** | `text` | Always | Scrolling message ticker — type any text and press Enter to display it across all 6 tubes |
+| **Nextube Ticker Speed** | `number` | Always | Marquee scroll speed slider, 1–20 px per tick (higher = faster). RAM-only; resets to 4 on reboot |
+| **Nextube Ticker Sound** | `switch` | Always | Enable/disable the chime played on each incoming ticker message |
+| **Nextube XTAL Drift** | `sensor` | Clock telemetry *(default on)* | Signed ms the ESP32 crystal would have drifted without NTP discipline; retained, updated each NTP sync |
+| **Nextube RTC Max Error** | `sensor` | Clock telemetry *(default on)* | Worst single-minute clock error (ms) the PCF8563 discipline saw since the last sync; PCF slave mode only |
+| **Nextube RSSI** | `sensor` | Device health *(default off)* | WiFi signal strength in dBm; updated every 60 s |
+| **Nextube Free Heap** | `sensor` | Device health *(default off)* | Free heap bytes; updated every 60 s |
+| **Nextube Uptime** | `sensor` | Device health *(default off)* | Device uptime in minutes; updated every 60 s |
+| **Button press** (left / middle / right) | `device_automation` | Button presses *(default off)* | HA device-trigger fired on each capacitive touch press; usable in HA automations (e.g. "left button → toggle bedroom lights") |
 
 ### Setup
 
@@ -1072,7 +1079,8 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 5. Set **Port** (default `1883`).
 6. Fill in **Username** and **Password** if your broker requires authentication; leave blank for anonymous access.
 7. Leave **Publish HA auto-discovery payloads** checked (recommended).
-8. Click **Save**, then reboot the device (**System → Reboot**).
+8. Optionally enable extra publishing groups: **Clock telemetry** (NTP sync drift sensors — on by default), **Device health** (RSSI / heap / uptime sensors, 60 s interval — off by default), **Button presses** (touch events as HA device-automation triggers — off by default). New entity groups appear after the next broker reconnect or reboot.
+9. Click **Save**, then reboot the device (**System → Reboot**).
 
 After reboot HA will show a new **Nextube** device under **Settings → Devices & Services → MQTT** within a few seconds of the device connecting.
 
