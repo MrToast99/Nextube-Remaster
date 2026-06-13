@@ -801,7 +801,8 @@
                 <b>Profile</b> selects the hardware gamma curve. <b>VCOM</b> (0–63) sets the AC driving voltage — higher
                 values increase contrast and colour depth. For ST7735S replacement panels (e.g. LH096NT-IF09W) start
                 with Profile <b>Vivid</b> + VCOM <b>40</b>, then tune: raise toward 60 if still washed, lower toward 25
-                if over-saturated. Changes take effect after Save.</div>
+                if over-saturated. Changes take effect after Save.
+              </div>
               <div style="padding:0 2.5rem">
                 <table style="border-collapse:collapse;font-size:.82rem;width:100%">
                   <thead>
@@ -1287,14 +1288,16 @@
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Clock</span><input type="number"
                 class="rot-weight-in" data-bit="0" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="1" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Countdown</span><input type="number"
                 class="rot-weight-in" data-bit="1" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
 
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
@@ -1302,63 +1305,72 @@
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Pomodoro</span><input type="number"
                 class="rot-weight-in" data-bit="3" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="4" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Date</span><input type="number"
                 class="rot-weight-in" data-bit="4" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="5" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Album</span><input type="number"
                 class="rot-weight-in" data-bit="5" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="6" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Weather</span><input type="number"
                 class="rot-weight-in" data-bit="6" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="7" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Spectrum</span><input type="number"
                 class="rot-weight-in" data-bit="7" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="8" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">YouTube</span><input type="number"
                 class="rot-weight-in" data-bit="8" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="9" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Instagram</span><input type="number"
                 class="rot-weight-in" data-bit="9" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="10" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">TikTok</span><input type="number"
                 class="rot-weight-in" data-bit="10" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
             <div
               style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)">
               <input type="checkbox" class="rot-mode-cb" data-bit="11" checked onchange="markDirty()"
                 style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Mastodon</span><input type="number"
                 class="rot-weight-in" data-bit="11" value="1" min="1" max="99" oninput="markDirty()"
                 style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span
-                style="font-size:1.5rem;color:var(--dim)">×</span></div>
+                style="font-size:1.5rem;color:var(--dim)">×</span>
+            </div>
           </div>
           <p style="color:var(--dim);font-size:.76rem;margin-top:.5rem" data-i18n-html="disp.rot_weight_help">
             The <strong style="color:var(--text)">×</strong> value is a dwell multiplier applied to the base interval
@@ -2051,7 +2063,8 @@
         <h2 data-i18n="sys.ota">Firmware Update (OTA)</h2>
         <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem" data-i18n-html="sys.ota_help">Upload
           <strong>nextube-fw-ota.bin</strong> for over-the-air updates. Do <strong>not</strong> upload
-          <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.</p>
+          <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.
+        </p>
         <input type="file" id="ota-file" accept=".bin" style="margin-bottom:.5rem">
         <div class="progress ota" id="ota-progress" style="display:none">
           <div class="progress-bar" id="ota-bar"></div>
@@ -2064,7 +2077,8 @@
         <h2 data-i18n="sys.webui_update">Web UI Update</h2>
         <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.webui_help">Upload
           <strong>nextube-WebUI-v*.zip</strong> to apply only the changed web UI files. Your config, album images, and
-          audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
+          audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.
+        </p>
         <input type="file" id="hotpatch-file" accept=".zip" style="margin-bottom:.5rem">
         <div class="progress ota" id="hotpatch-progress" style="display:none">
           <div class="progress-bar" id="hotpatch-bar"></div>
@@ -4868,7 +4882,7 @@
       words[wordLen - 2] = (uint8.length / 0x20000000) | 0;
 
       let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a,
-          h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+        h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
 
       const k = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -4939,7 +4953,7 @@
     }
 
     /* ── Auto-Update Configuration & State ────────────────────────────────────── */
-    const GITHUB_REPO = 'bagl3y/Nextube-Remaster';
+    const GITHUB_REPO = 'MrToast99/Nextube-Remaster';
     const CORS_PROXY_URL = 'https://nextube-updater.bagl3y.com/?url='; // Custom secure Cloudflare Worker CORS proxy
     let _latestUpdateZipUrl = null;
     let _latestUpdateDigest = null;
