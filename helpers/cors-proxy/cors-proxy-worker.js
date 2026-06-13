@@ -3,7 +3,6 @@ export default {
     const url = new URL(request.url);
     const targetUrl = url.searchParams.get('url');
 
-    // Récupérer les infos de l'appelant (fournies par Cloudflare)
     const ip = request.headers.get('cf-connecting-ip') || 'Unknown IP';
     const country = request.headers.get('cf-ipcountry') || 'Unknown Country';
 
@@ -12,7 +11,6 @@ export default {
       return new Response('Missing "url" query parameter', { status: 400 });
     }
 
-    // --- SÉCURITÉ : Liste blanche des dépôts autorisés ---
     const lowerTarget = targetUrl.toLowerCase();
     const allowedPrefixes = [
       'https://github.com/mrtoast99/nextube-remaster/',
@@ -31,7 +29,6 @@ export default {
 
     console.log(`[AUTHORIZED] IP: ${ip} (${country}) downloading: ${targetUrl}`);
 
-    // --- Gérer la requête de pré-vérification CORS (Preflight) ---
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
