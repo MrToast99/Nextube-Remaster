@@ -164,6 +164,29 @@ done:
     return result;
 }
 
+/* Percent-encode a query-string / path value (RFC 3986 unreserved set kept
+ * literal; everything else — spaces and UTF-8 bytes included — escaped as %XX).
+ * Every provider embeds the configured city in a URL, and a raw space breaks
+ * the HTTP request line, so multi-word names like "Thousand Oaks" failed to
+ * resolve on all of them without this. */
+static void url_encode_query(const char *in, char *out, size_t out_sz)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o + 4 < out_sz; p++) {
+        unsigned char c = *p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out[o++] = (char)c;
+        } else {
+            out[o++] = '%';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 0x0F];
+        }
+    }
+    out[o] = '\0';
+}
+
 /* ── wttr.in  (no API key required) ────────────────────────────────── */
 /*
  * URL:  https://wttr.in/{city}?format=j1
@@ -178,8 +201,10 @@ static void fetch_wttr(const wx_cfg_snap_t *cfg)
 {
     if (cfg->city[0] == '\0') return;
 
+    char enc_city[192];
+    url_encode_query(cfg->city, enc_city, sizeof(enc_city));
     char url[256];
-    snprintf(url, sizeof(url), "https://wttr.in/%s?format=j1", cfg->city);
+    snprintf(url, sizeof(url), "https://wttr.in/%s?format=j1", enc_city);
 
     char *body = http_get(url);
     if (!body) return;
@@ -279,11 +304,13 @@ static void fetch_openweather(const wx_cfg_snap_t *cfg)
         return;
     }
 
-    char url[256];
+    char enc_city[192];
+    url_encode_query(cfg->city, enc_city, sizeof(enc_city));
+    char url[384];   /* encoded city (≤189) + key + base URL can exceed 256 */
     snprintf(url, sizeof(url),
              "https://api.openweathermap.org/data/2.5/weather"
              "?q=%s&appid=%s&units=metric",
-             cfg->city, cfg->api_key);
+             enc_city, cfg->api_key);
 
     char *body = http_get(url);
     if (!body) return;
@@ -412,11 +439,13 @@ static const char *wmo_condition(int code)
  * wttr.in.  "CC" is a two-letter ISO 3166-1 alpha-2 country code (CA=Canada,
  * GB=United Kingdom, US=United States, etc.).
  *
- * We split on the first comma to get the plain city name, then append
- * &countrycode=CC to the geocoding request so that "Airdrie,CA" resolves to
- * Airdrie, Alberta, Canada (lat≈51.3) rather than Airdrie, Scotland (lat≈55.9).
- * We also request count=5 results and pick the first whose country_code field
- * matches, falling back to the first result if none match.
+ * We split on the first comma to get the plain city name, request count=5
+ * results, and pick the first whose country_code field matches the requested
+ * CC (falling back to the first result if none match) — so "Airdrie,CA"
+ * resolves to Airdrie, Alberta, Canada rather than Airdrie, Scotland.  The
+ * Open-Meteo geocoder has no server-side country filter, so this match is done
+ * client-side here.  The city name is percent-encoded so multi-word names
+ * ("Thousand Oaks") resolve correctly.
  *
  * alt_m may be NULL if the caller doesn't need elevation. */
 static bool geocode_open_meteo(const char *city, float *lat, float *lon, int *alt_m)
@@ -437,19 +466,15 @@ static bool geocode_open_meteo(const char *city, float *lat, float *lon, int *al
         memmove(countrycode, p, strlen(p) + 1);
     }
 
-    /* Build URL: include countrycode filter when available; request 5 candidates
-     * so we can verify the match even if the API returns mixed results. */
+    /* Build URL: request 5 candidates so the country_code match below can pick
+     * the right one even when the API returns cities of the same name in
+     * different countries.  The name MUST be percent-encoded (spaces/UTF-8). */
+    char enc_name[192];
+    url_encode_query(cityname, enc_name, sizeof(enc_name));
     char url[320];
-    if (countrycode[0]) {
-        snprintf(url, sizeof(url),
-                 "https://geocoding-api.open-meteo.com/v1/search"
-                 "?name=%s&count=5&countrycode=%s&format=json",
-                 cityname, countrycode);
-    } else {
-        snprintf(url, sizeof(url),
-                 "https://geocoding-api.open-meteo.com/v1/search"
-                 "?name=%s&count=5&format=json", cityname);
-    }
+    snprintf(url, sizeof(url),
+             "https://geocoding-api.open-meteo.com/v1/search"
+             "?name=%s&count=5&language=en&format=json", enc_name);
 
     char *body = http_get(url);
     if (!body) return false;
@@ -462,14 +487,18 @@ static bool geocode_open_meteo(const char *city, float *lat, float *lon, int *al
     cJSON *results = cJSON_GetObjectItem(root, "results");
     int    n_res   = cJSON_GetArraySize(results);
 
-    /* Prefer the first result whose country_code matches; fall back to r[0]. */
+    /* Prefer the first result whose country matches the requested "CC" segment,
+     * accepting either the 2-letter code ("US") or the full name ("Canada") so
+     * both forms the City field suggests resolve the same way the web UI's
+     * validation does.  Fall back to r[0] when nothing matches. */
     cJSON *best = cJSON_GetArrayItem(results, 0);
     if (countrycode[0] && n_res > 1) {
         for (int i = 0; i < n_res; i++) {
             cJSON *r  = cJSON_GetArrayItem(results, i);
             cJSON *cc = cJSON_GetObjectItem(r, "country_code");
-            if (cc && cc->valuestring &&
-                strcasecmp(cc->valuestring, countrycode) == 0) {
+            cJSON *cn = cJSON_GetObjectItem(r, "country");
+            if ((cc && cc->valuestring && strcasecmp(cc->valuestring, countrycode) == 0) ||
+                (cn && cn->valuestring && strcasecmp(cn->valuestring, countrycode) == 0)) {
                 best = r;
                 break;
             }

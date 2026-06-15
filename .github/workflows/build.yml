@@ -28,7 +28,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0    # full history needed for git describe / diff
+          fetch-depth: 0    # full history needed for git describe (version tags)
 
       - name: Extract versions
         id: version
@@ -210,11 +210,18 @@ jobs:
 
           echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
 
-      - name: Zip artifacts
+      - name: Zip full-flash package
         run: |
           BUILD_VER=${{ needs.build.outputs.build_version }}
+          FW_VER=${{ needs.build.outputs.fw_version }}
+          SP_VER=${{ needs.build.outputs.fs_version }}
           cd artifacts
-          zip "../Nextube-Remaster v${BUILD_VER}.zip" ./*
+          zip "../Nextube-Remaster.v${BUILD_VER}.zip" \
+            nextube-fw-v${FW_VER}-full.bin \
+            bootloader.bin \
+            partition-table.bin \
+            nextube-littlefs-v${SP_VER}.bin \
+            build_info.txt
           cd ..
 
       - name: Create GitHub Release
@@ -223,6 +230,8 @@ jobs:
           name: Nextube-Remaster v${{ needs.build.outputs.build_version }}
           body_path: release_notes.md
           files: |
-            Nextube-Remaster v${{ needs.build.outputs.build_version }}.zip
+            Nextube-Remaster.v${{ needs.build.outputs.build_version }}.zip
+            artifacts/nextube-fw-v${{ needs.build.outputs.fw_version }}-ota.bin
+            artifacts/nextube-WebUI-v${{ needs.build.outputs.build_version }}.zip
           draft: false
           prerelease: false

@@ -692,7 +692,9 @@ select option{background:var(--accent);color:var(--text)}
     </p>
     <div class="field" id="f-wkey-row" style="display:none"><label data-i18n="svc.api_key">API Key</label><input id="f-wkey" type="text"></div>
     <div class="row">
-      <div class="field"><label data-i18n="svc.city">City</label><input id="f-city" type="text" placeholder="City name" data-i18n-ph="svc.city_ph"></div>
+      <div class="field"><label data-i18n="svc.city">City</label><input id="f-city" type="text" placeholder="City name" data-i18n-ph="svc.city_ph" autocomplete="off" oninput="onCityInput()">
+        <div id="f-city-status" style="font-size:.75rem;margin-top:.25rem;min-height:1.1em;color:var(--dim)"></div>
+      </div>
       <div class="field"><label data-i18n="svc.units">Units</label>
         <select id="f-tempfmt" onchange="onTempFmtChange()"><option value="Celsius" data-i18n="opt.celsius">Celsius</option><option value="Fahrenheit" data-i18n="opt.fahrenheit">Fahrenheit</option></select>
       </div>
@@ -1188,7 +1190,7 @@ select option{background:var(--accent);color:var(--text)}
       <span data-i18n="sys.about_webui">Web UI</span> &nbsp;&nbsp;&nbsp;v<span id="s-spver">--</span><br>
       <span data-i18n="sys.about_hw_rev">Hardware Rev</span> <span id="s-hwver">1.31</span><br>
       <span data-i18n="sys.about_hw_spec">ESP32-WROVER-E · 16MB Flash · 8MB PSRAM</span><br>
-      <a href="https://github.com/MrToast99/Nextube-Remaster" target="_blank" style="color:var(--hi)" data-i18n="sys.github">GitHub Repository</a>
+      <a id="github-repo-link" href="https://github.com/MrToast99/Nextube-Remaster" target="_blank" style="color:var(--hi)" data-i18n="sys.github">GitHub Repository</a>
     </p>
     <div id="update-available" style="display:none;background:rgba(80,200,80,.12);border:1px solid rgba(80,200,80,.4);border-radius:6px;padding:.6rem .9rem;margin:.6rem 0;font-size:.83rem">
       <span data-i18n="sys.update_available">New release available:</span> <strong>v<span id="update-version"></span></strong> —
@@ -1427,6 +1429,16 @@ select option{background:var(--accent);color:var(--text)}
 const $ = id => document.getElementById(id);
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 let cfg = {};
+
+/* ── Update source ──────────────────────────────────────────────────────
+ * Single source of truth for where firmware / web-UI updates come from.
+ * Flip UPDATE_REPO between the private test repo and the public production
+ * repo — that one line drives the release-check API URL, the asset download
+ * URLs (returned by that API), and the "GitHub Repository" link, so there is
+ * nothing else to change. */
+const UPDATE_REPO = 'MrToast99/Nextube-Remaster';
+const UPDATE_API_URL  = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+const UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
 
 /* ── Web UI internationalisation (i18n) ──────────────────────────────────
  * Per-browser UI language, stored in localStorage — independent of the
@@ -1777,6 +1789,11 @@ function initUiLang() {
   setUiLang(lang || "en");   /* async — fire-and-forget on boot */
 }
 document.addEventListener("DOMContentLoaded", initUiLang);
+/* Point the "GitHub Repository" link at the configured update source. */
+document.addEventListener("DOMContentLoaded", () => {
+  const a = $('github-repo-link');
+  if (a) a.href = UPDATE_REPO_URL;
+});
 
 /* ── Toast ─────────────────────────────────────────── */
 /* action = optional {label:'…', fn: async fn} — adds a button and keeps the
@@ -1842,6 +1859,93 @@ function toggleWeatherKey() {
     $('f-city').placeholder = (src === 'openweather')
       ? 'e.g. London or London,GB'
       : 'e.g. Ottawa or Ottawa,Canada';
+  }
+  validateCity();   /* re-check the entered city against the new source */
+}
+
+/* ── Weather location validation ──────────────────────────────────────────
+ * Gives immediate "is this a valid location?" feedback by resolving the typed
+ * city against the same service the firmware uses:
+ *   • openmeteo / metno (and wttr as a close proxy) → keyless Open-Meteo
+ *     geocoder, splitting "City,CC" exactly like the firmware does.
+ *   • openweather → OWM's own geocoder with the entered key, which also
+ *     surfaces a bad or missing key.
+ * Runs in the browser against HTTPS APIs (allowed from the device's HTTP page).
+ * If the lookup can't run (offline / CORS), it falls back to a light format
+ * check instead of reporting a false failure. */
+let _cityCheckTimer = null, _cityCheckSeq = 0;
+
+function onCityInput() {
+  markDirty();
+  clearTimeout(_cityCheckTimer);
+  _cityCheckTimer = setTimeout(validateCity, 600);
+}
+
+function setCityStatus(state, msg) {
+  const el = $('f-city-status'); if (!el) return;
+  el.style.color = state === 'ok'  ? 'var(--ok,#4eccab)'
+                 : state === 'bad' ? '#f88'
+                 : 'var(--dim)';
+  el.textContent = msg;
+}
+
+async function validateCity() {
+  const src = $('f-wsrc') ? $('f-wsrc').value : 'wttr';
+  if (src === 'external') { setCityStatus('hint', ''); return; }
+  const city = ($('f-city') ? $('f-city').value : '').trim();
+  if (!city) {
+    setCityStatus('hint', 'Enter a city — e.g. ' + (src === 'openweather' ? 'London,GB' : 'Ottawa,Canada'));
+    return;
+  }
+  const seq = ++_cityCheckSeq;
+  setCityStatus('busy', 'Checking…');
+  try {
+    let resolved = null;
+    if (src === 'openweather') {
+      const key = ($('f-wkey') ? $('f-wkey').value : '').trim();
+      if (!key) { setCityStatus('hint', 'Enter your API key to verify the city'); return; }
+      const r = await fetch('https://api.openweathermap.org/geo/1.0/direct?q=' +
+        encodeURIComponent(city) + '&limit=1&appid=' + encodeURIComponent(key));
+      if (seq !== _cityCheckSeq) return;
+      if (r.status === 401) { setCityStatus('bad', '✗ API key rejected by OpenWeatherMap'); return; }
+      if (!r.ok) throw new Error('http ' + r.status);
+      const a = await r.json();
+      if (Array.isArray(a) && a.length) {
+        const m = a[0];
+        resolved = [m.name, m.state, m.country].filter(Boolean).join(', ') +
+                   ' (' + m.lat.toFixed(2) + ', ' + m.lon.toFixed(2) + ')';
+      }
+    } else {
+      /* Split "City,CC" → name + optional country filter, like the firmware. */
+      let name = city, country = '';
+      const comma = city.indexOf(',');
+      if (comma >= 0) { name = city.slice(0, comma).trim(); country = city.slice(comma + 1).trim(); }
+      const r = await fetch('https://geocoding-api.open-meteo.com/v1/search?name=' +
+        encodeURIComponent(name) + '&count=5&language=en&format=json');
+      if (seq !== _cityCheckSeq) return;
+      if (!r.ok) throw new Error('http ' + r.status);
+      const d = await r.json();
+      let list = (d && d.results) || [];
+      if (country) {
+        const cc = country.toLowerCase();
+        const f = list.filter(m => (m.country_code || '').toLowerCase() === cc ||
+                                    (m.country || '').toLowerCase() === cc);
+        if (f.length) list = f;
+      }
+      if (list.length) {
+        const m = list[0];
+        resolved = [m.name, m.admin1, m.country].filter(Boolean).join(', ') +
+                   ' (' + m.latitude.toFixed(2) + ', ' + m.longitude.toFixed(2) + ')';
+      }
+    }
+    if (seq !== _cityCheckSeq) return;
+    if (resolved) setCityStatus('ok', '✓ ' + resolved);
+    else setCityStatus('bad', '✗ Not found — try "City,CountryCode" (e.g. Ottawa,CA)');
+  } catch (e) {
+    if (seq !== _cityCheckSeq) return;
+    /* Couldn't reach the geocoder — don't report a false failure, just guide. */
+    const looksOk = /^[\p{L}\p{M}.\-' ]+(,\s*[\p{L} ]{2,})?$/u.test(city);
+    setCityStatus('hint', 'Couldn’t verify online; format looks ' + (looksOk ? 'OK' : 'unusual — try "City,CountryCode"'));
   }
 }
 
@@ -2109,9 +2213,9 @@ async function loadSettings() {
   const ntpArr = cfg.ntp_servers || [cfg.ntp_server || ntpDef[0]];
   for (let i = 0; i < 4; i++)
     $('f-ntp' + i).value = (ntpArr[i] !== undefined && ntpArr[i] !== null) ? ntpArr[i] : (i < 2 ? ntpDef[i] : '');
-  $('f-wsrc').value = cfg.weather_source || 'wttr'; toggleWeatherKey();
   $('f-wkey').value = cfg.weather_api_key || '';
   $('f-city').value = cfg.City || '';
+  $('f-wsrc').value = cfg.weather_source || 'wttr'; toggleWeatherKey();  /* also validates the loaded city */
   $('f-tempfmt').value = cfg.temperature_format || 'Celsius';
   $('f-datefmt').value = cfg.date_format || 'DD/MM/YY';
   $('f-language').value = cfg.language || 'en';
@@ -3851,7 +3955,7 @@ async function checkForUpdates(silent = false) {
   if (!silent && btn) btn.textContent = 'Checking…';
   try {
     const r = await fetch(
-      'https://api.github.com/repos/MrToast99/Nextube-Remaster/releases/latest',
+      UPDATE_API_URL,
       { headers: { 'Accept': 'application/vnd.github+json' } }
     );
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -3867,6 +3971,7 @@ async function checkForUpdates(silent = false) {
     /* Skip comparison if device version hasn't loaded yet */
     if (!current || current === '--') return;
     if (semverCmp(latest, current) > 0) {
+      _latestReleaseData = data;
       $('update-available').style.display = 'block';
       $('update-version').textContent = latest;
       $('update-url').href = data.html_url || '#';
@@ -3875,6 +3980,7 @@ async function checkForUpdates(silent = false) {
         showUpdateToast(latest, data.html_url);
     } else {
       _latestUpdate = null;
+      _latestReleaseData = null;
       $('update-available').style.display = 'none';
       $('update-toast').style.display = 'none';
       setClockFaceUpdateIndicator(false);
@@ -4004,6 +4110,429 @@ function onAuthSucceeded() {
   setInterval(() => checkForUpdates(true), 86400000);  /* re-check every 24 h */
 }
 </script>
+<script src="marked.min.js"></script>
+
+<!-- ── Online Updater modal ───────────────────────────────────────────── -->
+<style>
+#au-overlay {
+  display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);
+  z-index:1100;align-items:center;justify-content:center;padding:1rem;
+}
+#au-overlay.open { display:flex; }
+#au-box {
+  background:var(--bg2,#1e1e1e);color:var(--fg,#eee);border-radius:12px;
+  padding:1.5rem;max-width:480px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.6);
+}
+#au-box h3 { margin:0 0 .75rem;font-size:1.1rem; }
+.au-step {
+  display:flex;align-items:center;gap:.6rem;padding:.35rem 0;
+  font-size:.88rem;opacity:.45;transition:opacity .2s;
+}
+.au-step.active  { opacity:1; }
+.au-step.done    { opacity:.7; }
+.au-step.error   { opacity:1;color:#f66; }
+.au-icon { font-size:1rem;width:1.2rem;text-align:center; }
+.au-bar-wrap { background:rgba(255,255,255,.1);border-radius:4px;height:6px;margin:.6rem 0 .3rem;overflow:hidden; }
+.au-bar      { height:100%;background:var(--hi,#4eccab);width:0%;transition:width .4s; border-radius:4px; }
+#au-notes { margin-top:.8rem;max-height:160px;overflow-y:auto;font-size:.78rem;
+  opacity:.8;border-top:1px solid rgba(255,255,255,.1);padding-top:.6rem; }
+#au-notes h1,#au-notes h2,#au-notes h3 { font-size:.9rem;margin:.4rem 0 .2rem; }
+#au-notes p  { margin:.2rem 0; }
+#au-notes ul { margin:.2rem 0;padding-left:1.2rem; }
+#au-footer { margin-top:1rem;display:flex;gap:.5rem;justify-content:flex-end;flex-wrap:wrap; }
+#au-detail  { font-size:.78rem;color:rgba(255,255,255,.6);text-align:center;min-height:1.2em;
+              margin:.15rem 0 .3rem;letter-spacing:.01em; }
+</style>
+
+<div id="au-overlay">
+  <div id="au-box">
+    <h3>Online Updater</h3>
+    <div id="au-steps" style="display:none">
+      <div class="au-step" id="au-s1"><span class="au-icon" id="au-i1">⏳</span><span id="au-t1">Downloading firmware…</span></div>
+      <div class="au-step" id="au-s2"><span class="au-icon" id="au-i2">⏸</span><span id="au-t2">Flashing firmware…</span></div>
+      <div class="au-step" id="au-s3"><span class="au-icon" id="au-i3">⏸</span><span id="au-t3">Rebooting device…</span></div>
+      <div class="au-step" id="au-s4"><span class="au-icon" id="au-i4">⏸</span><span id="au-t4">Updating web UI…</span></div>
+      <div class="au-bar-wrap"><div class="au-bar" id="au-bar"></div></div>
+      <div id="au-detail"></div>
+    </div>
+    <div id="au-notes"></div>
+    <div id="au-footer">
+      <button id="au-cancel-btn" onclick="auClose()" style="background:rgba(255,255,255,.1);
+        border:none;cursor:pointer;padding:.35rem .9rem;border-radius:6px;color:inherit;font-size:.85rem">
+        Cancel
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ── Online Updater orchestration ───────────────────────────────────────── */
+let _latestReleaseData = null;   /* full GitHub API release object, set by checkForUpdates */
+let _auRunning = false;
+let _auProceed = null;           /* resolves the notes-preview gate; null when not waiting */
+
+function fmtB(b) {
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+  if (b >= 1024)    return Math.round(b / 1024) + ' KB';
+  return b + ' B';
+}
+
+function auStep(idx, state, text) {
+  const s = $('au-s' + idx), i = $('au-i' + idx), t = $('au-t' + idx);
+  if (!s) return;
+  s.className = 'au-step ' + state;
+  if (text) t.textContent = text;
+  i.textContent = state === 'active' ? '⏳' : state === 'done' ? '✓' : state === 'error' ? '✗' : '⏸';
+}
+
+function auProgress(pct) {
+  const b = $('au-bar');
+  if (b) b.style.width = Math.min(100, pct) + '%';
+}
+
+function auDetail(text) {
+  const d = $('au-detail');
+  if (d) d.textContent = text || '';
+}
+
+function auClose() {
+  if (_auRunning) return;
+  if (_auProceed) { _auProceed(false); _auProceed = null; }
+  $('au-overlay').classList.remove('open');
+}
+
+async function startAutoUpdate() {
+  if (_auRunning) return;
+  if (!_latestReleaseData) { toast('No release data — check for updates first', true); return; }
+
+  const assets  = _latestReleaseData.assets || [];
+  const fwAsset = assets.find(a => /nextube-fw-.*-ota\.bin$/i.test(a.name));
+  const uiAsset = assets.find(a => /nextube-WebUI-.*\.zip$/i.test(a.name));
+
+  if (!fwAsset) {
+    toast('No OTA firmware asset in this release — update build.yml first', true);
+    return;
+  }
+
+  /* ── Notes preview — user must click Proceed before update starts ─── */
+  const notes = $('au-notes');
+  notes.style.display = '';
+  if (_latestReleaseData.body && typeof marked !== 'undefined') {
+    notes.innerHTML = marked.parse(_latestReleaseData.body);
+  } else {
+    notes.innerHTML = '<p style="opacity:.6;font-size:.85rem">No release notes available.</p>';
+  }
+  /* Asset checklist — visible before user clicks Proceed */
+  const fwOk = `<span style="color:#4eccab">✓</span> Firmware`;
+  const uiOk = uiAsset ? `<span style="color:#4eccab">✓</span> Web UI`
+                        : `<span style="color:#f99">✗ Web UI ZIP not found in release — Phase 4 will be skipped</span>`;
+  notes.innerHTML +=
+    `<div style="margin-top:.6rem;padding:.4rem .6rem;background:rgba(255,255,255,.06);` +
+    `border-radius:6px;font-size:.8rem;display:flex;gap:1.2rem">` +
+    `<b>Assets:</b> ${fwOk} &nbsp; ${uiOk}</div>`;
+  $('au-steps').style.display = 'none';
+  $('au-footer').innerHTML =
+    '<button onclick="auClose()" style="background:rgba(255,255,255,.1);border:none;cursor:pointer;' +
+    'padding:.35rem .9rem;border-radius:6px;color:inherit;font-size:.85rem">Cancel</button>' +
+    '<button id="au-proceed-btn" style="background:var(--hi,#4eccab);border:none;cursor:pointer;' +
+    'padding:.35rem .9rem;border-radius:6px;color:#000;font-size:.85rem;font-weight:600">' +
+    'Proceed ↓</button>';
+  $('au-overlay').classList.add('open');
+
+  const didProceed = await new Promise(res => {
+    _auProceed = res;
+    $('au-proceed-btn').addEventListener('click', () => res(true), { once: true });
+  });
+  _auProceed = null;
+  if (!didProceed) return;   /* user clicked Cancel */
+
+  /* ── Begin update ───────────────────────────────────────────────────── */
+  _auRunning = true;
+  notes.style.display = 'none';
+  $('au-steps').style.display = '';
+  $('au-footer').innerHTML = '';
+
+  auStep(1,'active'); auStep(2,''); auStep(3,''); auStep(4,'');
+  auProgress(0); auDetail('');
+
+  try {
+    /* GitHub API asset objects include a digest field: "sha256:<64 hex chars>"
+     * Strip the prefix so the ESP receives just the 64-char hex string. */
+    const fwSha256  = (fwAsset.digest  || '').replace(/^sha256:/, '');
+    const uiSha256_ = (uiAsset?.digest || '').replace(/^sha256:/, '');
+    if (!fwSha256) console.warn('No SHA-256 digest for firmware asset — integrity check skipped');
+
+    /* ── Phase 1: trigger firmware pull on ESP ───────────────────────── */
+    const r1 = await secureFetch('/api/ota_pull', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        url:          fwAsset.browser_download_url,
+        sha256:       fwSha256,
+        webui_url:    uiAsset?.browser_download_url || '',
+        webui_sha256: uiSha256_
+      })
+    });
+    if (!r1 || !r1.ok) throw new Error('Failed to start OTA pull');
+
+    /* ── Phase 2: poll status until done or error ───────────────────── */
+
+    const POLL_GAP_MS = 700, POLL_TIMEOUT_MS = 1000;
+    const DL_MAX = 40, FL_BASE = 40, FL_MAX = 70, FLASH_EST_MS = 30000;
+    let lastPollBytes = 0, lastPollTime = 0, seenActive = false;
+    let p2mode = 'done';        /* how Phase 2 exited: 'done' | 'idle' | 'streak' */
+    let failSince = 0;          /* ms timestamp the current poll-failure streak began */
+    let enteredFlash = false;   /* set once a real state=flashing status is seen    */
+    let flashAnchorPct = 0, flashAnchorTime = 0;   /* for the flash-blackout crawl */
+    for (;;) {
+      await new Promise(res => setTimeout(res, POLL_GAP_MS));
+      let st = null;
+      try {
+        const rs = await secureFetch('/api/ota_pull_status', {signal: AbortSignal.timeout(POLL_TIMEOUT_MS)});
+        if (rs && rs.ok) st = await rs.json();
+      } catch { /* timeout / network — handled below */ }
+
+      if (!st) {
+        /* Poll failed.  Only treat it as the flash blackout once a real
+         * state=flashing status has been seen — otherwise a transient timeout
+         * mid-download would wrongly flip the UI to "Flashing" and then back to
+         * "Downloading" on the next good poll.  The device stays responsive for
+         * ~1.5 s after entering FLASHING (before the SPI write blocks httpd), so
+         * a genuine flashing status is reliably caught first. */
+        if (seenActive) {
+          if (!failSince) failSince = Date.now();
+          if (enteredFlash) {
+            if (!flashAnchorTime) { flashAnchorPct = FL_BASE; flashAnchorTime = Date.now(); }
+            const frac = Math.min(1, (Date.now() - flashAnchorTime) / FLASH_EST_MS);
+            auStep(1,'done'); auStep(2,'active','Flashing firmware…');
+            auProgress(flashAnchorPct + frac * (FL_MAX - 2 - flashAnchorPct));
+            auDetail('Writing to flash… (device busy)');
+          }
+          /* else: a transient hiccup mid-download — hold the current UI. */
+          /* Survive the full flash window (~27 s) + reboot before giving up. */
+          if (Date.now() - failSince >= 40000) {
+            p2mode = 'streak';
+            auStep(1,'done'); auStep(2,'done');
+            auProgress(FL_MAX); auDetail(''); break;
+          }
+        }
+        continue;
+      }
+      failSince = 0;
+
+      /* idle after we saw downloading/flashing = device rebooted into new firmware */
+      if (st.state === 'idle' && seenActive) {
+        p2mode = 'idle';
+        auStep(1,'done'); auStep(2,'done');
+        auProgress(FL_MAX); auDetail('');
+        break;
+      }
+
+      const now = Date.now();
+      if (st.state === 'downloading') {
+        seenActive = true;
+        auStep(1, 'active', 'Downloading firmware…');
+        const rx  = st.bytes_received || 0;
+        const tot = st.bytes_total    || 0;
+        if (tot > 0) {
+          auProgress((rx / tot) * DL_MAX);
+          let detail = fmtB(rx) + ' / ' + fmtB(tot);
+          if (lastPollTime > 0) {
+            const dt = (now - lastPollTime) / 1000;
+            const db = rx - lastPollBytes;
+            if (dt > 0.1 && db > 0) {
+              const speed = db / dt;
+              const eta   = (tot - rx) / speed;
+              detail += ' · ' + fmtB(speed) + '/s';
+              if (eta > 2) detail += ' · ~' + Math.round(eta) + 's';
+            }
+          }
+          auDetail(detail);
+          lastPollBytes = rx; lastPollTime = now;
+        } else {
+          auProgress(st.progress * (DL_MAX / 100));
+          auDetail(st.progress + '%');
+        }
+      } else if (st.state === 'flashing') {
+        seenActive = true; enteredFlash = true;
+        auStep(1, 'done'); auStep(2, 'active', 'Flashing firmware…');
+        const fl  = st.bytes_flashed || 0;
+        const tot = st.bytes_total   || 0;
+        let pct;
+        if (tot > 0 && fl > 0) {
+          pct = FL_BASE + (fl / tot) * (FL_MAX - FL_BASE);
+          auDetail('Writing ' + fmtB(fl) + ' / ' + fmtB(tot));
+        } else {
+          pct = Math.max(FL_BASE, FL_BASE + (st.progress / 100) * (FL_MAX - FL_BASE));
+          auDetail('Writing to flash…');
+        }
+        auProgress(pct);
+        flashAnchorPct = pct; flashAnchorTime = now;   /* anchor for the blackout crawl */
+      } else if (st.state === 'done' || st.state === 'error') {
+        if (st.state === 'error') throw new Error(st.error || 'OTA failed');
+        auStep(1,'done'); auStep(2,'done');
+        auProgress(FL_MAX); auDetail('');
+        break;
+      }
+    }
+
+    /* ── Phase 3: wait for reboot ───────────────────────────────────── */
+    auStep(3, 'active', 'Rebooting device…');
+    const rebootStart = Date.now();
+    const rebootTick  = setInterval(() => {
+      auDetail('Waiting for device… ' + Math.round((Date.now() - rebootStart) / 1000) + 's');
+    }, 1000);
+    auDetail('Waiting for device… 0s');
+
+    if (p2mode === 'idle') {
+      /* Phase 2 already confirmed the reboot (saw idle after active).
+       * Device is back online — skip ping loops, just let connections settle. */
+      await new Promise(res => setTimeout(res, 2000));
+    } else {
+      /* Phase 2 exited via state=done or failStreak.  The device may still be
+       * running its 1.5 s shutdown countdown or still writing flash.  Wait for
+       * it to go offline first so Phase 4 never fires against the old firmware. */
+      await new Promise(res => setTimeout(res, 3000));   /* head-start for reboot */
+      for (let tries = 0; tries < 25; tries++) {
+        await new Promise(res => setTimeout(res, 2000));
+        try {
+          const rp = await fetch('/api/ping', {signal: AbortSignal.timeout(1500)});
+          if (!rp.ok) break;   /* non-ok = going down */
+        } catch { break; }     /* exception = device offline */
+      }
+      /* Now wait for the new firmware to come back online. */
+      for (let tries = 0; tries < 30; tries++) {
+        await new Promise(res => setTimeout(res, 2000));
+        try {
+          const rp = await fetch('/api/ping', {signal: AbortSignal.timeout(2000)});
+          if (rp.ok) break;
+        } catch { /* expected while rebooting */ }
+      }
+    }
+    clearInterval(rebootTick);
+    /* Let stale keep-alive connections drain before Phase 4 fires. */
+    auDetail('Stabilising connection…');
+    await new Promise(res => setTimeout(res, 4000));
+    auStep(3,'done'); auProgress(80); auDetail('');
+
+    /* ── Phase 4: update web UI ─────────────────────────────────────── */
+    if (uiAsset) {
+      auStep(4, 'active', 'Updating web UI…');
+      auDetail('Waiting for device to start web UI update…');
+
+      /* Fire a single trigger for firmware that doesn't self-start. */
+      const triggerWebuiPull = async () => {
+        try {
+          const ra = await secureFetch('/api/webui_pull_auto',
+                                       {signal: AbortSignal.timeout(6000)});
+          if (ra && (ra.ok || ra.status === 409)) return;   /* started or already running */
+        } catch(e) { if (e?.message === 'unauthorized') throw e; }
+        try {
+          await secureFetch('/api/webui_pull', {
+            method:  'POST',
+            headers: {'Content-Type': 'application/json'},
+            body:    JSON.stringify({url: uiAsset.browser_download_url, sha256: uiSha256_ || ''}),
+            signal:  AbortSignal.timeout(12000)
+          });
+        } catch(e) { if (e?.message === 'unauthorized') throw e; }
+      };
+
+      /* Fire the trigger up front and keep retrying through the post-reboot
+       * network churn.  On firmware that self-starts (≥ v1.14.2) this hits the
+       * 409 guard and is harmless; on older firmware it both starts the pull
+       * AND consumes the post_ota flag so webui_pull_status stops requiring a
+       * (now-wiped) session.
+       *
+       * Patience is TIME-based, not count-based: the LittleFS extraction
+       * starves the flash SPI bus and blocks httpd for 30-60 s, during which
+       * status polls fail.  We must outlast that window — give up only after a
+       * long unresponsive stretch, and once running treat extraction silence
+       * as expected.  The device keeps state=DONE after finishing, so a late
+       * poll always catches completion. */
+      const QUIET_GIVEUP_MS = 150000;   /* no readable status this long ⇒ fail */
+      const IDLE_GIVEUP_MS  = 60000;    /* reachable but never starts ⇒ fail   */
+      let started     = false;          /* have we seen state=running yet?      */
+      let triggers    = 0;              /* trigger attempts sent                */
+      let lastOk      = Date.now();     /* last readable status poll            */
+      let idleSince   = null;           /* first reachable-but-idle timestamp   */
+      let lastTrigger = 0;              /* timestamp of last trigger sent       */
+
+      const maybeTrigger = async (label) => {
+        if (started || triggers >= 6) return;
+        if (Date.now() - lastTrigger < 3000) return;
+        auDetail(label + ' (' + (triggers + 1) + ')');
+        lastTrigger = Date.now();
+        triggers++;
+        await triggerWebuiPull();
+      };
+
+      await maybeTrigger('Starting web UI update…');
+
+      for (;;) {
+        await new Promise(res => setTimeout(res, 700));
+
+        let ws = null;
+        try {
+          const rs = await secureFetch('/api/webui_pull_status', {signal: AbortSignal.timeout(5000)});
+          if (rs && rs.ok) { lastOk = Date.now(); ws = await rs.json(); }
+        } catch(e) {
+          if (e?.message === 'unauthorized') throw e;
+        }
+
+        if (!ws) {
+          /* Status unreadable — device settling, or busy extracting (httpd
+           * blocked), or 401 until a trigger lands.  Stay patient. */
+          if (Date.now() - lastOk > QUIET_GIVEUP_MS)
+            throw new Error('Web UI update: device unreachable');
+          if (!started) await maybeTrigger('Starting web UI update…');
+          else auDetail('Applying update to filesystem… (this can take ~1 min)');
+          continue;
+        }
+
+        if (ws.state === 'running') {
+          started = true; idleSince = null;
+          auDetail('Applying update to filesystem… (this can take ~1 min)');
+        } else if (ws.state === 'done') {
+          auStep(4,'done'); auProgress(100); auDetail('');
+          break;
+        } else if (ws.state === 'error') {
+          throw new Error('Web UI update failed: ' + (ws.error || 'unknown'));
+        } else {   /* idle but reachable */
+          if (started) continue;   /* odd, but keep polling for the DONE state */
+          if (idleSince === null) idleSince = Date.now();
+          await maybeTrigger('Starting web UI update…');
+          if (Date.now() - idleSince > IDLE_GIVEUP_MS)
+            throw new Error('Web UI update task did not start');
+        }
+      }
+    } else {
+      auStep(4,'done','No web UI asset — skipped'); auProgress(100); auDetail('');
+    }
+
+    auProgress(100);
+    auDetail('Update complete — reload the page to load the new version.');
+    $('au-footer').innerHTML =
+      '<span style="font-size:.85rem;color:var(--hi,#4eccab);font-weight:600;flex:1">' +
+      '✓ Update finished</span>' +
+      '<button onclick="location.reload()" style="background:var(--hi,#4eccab);border:none;' +
+      'cursor:pointer;padding:.35rem .9rem;border-radius:6px;color:#000;font-size:.85rem;font-weight:600">' +
+      'Reload page ↺</button>';
+
+  } catch(e) {
+    for (let i = 1; i <= 4; i++) {
+      if (document.getElementById('au-s'+i)?.classList.contains('active'))
+        auStep(i, 'error');
+    }
+    auDetail('');
+    $('au-footer').innerHTML =
+      '<span style="font-size:.8rem;color:#f66;flex:1">' + (e.message||'Unknown error') + '</span>' +
+      '<button onclick="auClose()" style="background:rgba(255,255,255,.1);border:none;cursor:pointer;' +
+      'padding:.35rem .9rem;border-radius:6px;color:inherit;font-size:.85rem">Close</button>';
+  } finally {
+    _auRunning = false;
+  }
+}
+</script>
 
 <!-- ── Dismissable update toast (persistent, not auto-close) ─────── -->
 <!-- Toast stack — both toasts share a single fixed anchor so they stack rather than overlap.
@@ -4030,6 +4559,9 @@ function onAuthSucceeded() {
     <span>🆕 Update available: <strong>v<span id="ut-version"></span></strong></span>
     <a id="ut-url" href="#" target="_blank"
        style="color:#000;font-weight:600;white-space:nowrap;text-decoration:underline">See what's new ↗</a>
+    <button onclick="startAutoUpdate()"
+       style="background:rgba(0,0,0,.25);border:none;cursor:pointer;padding:.2rem .6rem;
+              border-radius:4px;font-size:.8rem;color:#000;white-space:nowrap;font-weight:600">Online Updater</button>
     <button onclick="dismissUpdateToast()"
        style="background:rgba(0,0,0,.15);border:none;cursor:pointer;padding:.2rem .6rem;
               border-radius:4px;font-size:.8rem;color:#000;white-space:nowrap">Dismiss once</button>

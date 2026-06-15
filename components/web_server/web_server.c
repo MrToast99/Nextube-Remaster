@@ -21,18 +21,24 @@
 #include "esp_event.h"
 #include "lwip/ip_addr.h"
 #include "cJSON.h"
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
+#include "mbedtls/sha256.h"
 
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <inttypes.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <errno.h>
 #include "esp_heap_caps.h"
 #include "lwip/sockets.h"
 #include "auth.h"
+#include "nvs.h"
 
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
@@ -925,7 +931,34 @@ static void ota_suspend_tasks(void)
  *     from a one-shot timer ~1.5 s later — by which time the browser has its
  *     answer and has no reason to retry.  (The esp_timer task is not suspended
  *     by ota_suspend_tasks(), so this callback still runs.) */
-static volatile bool s_ota_active = false;
+static volatile bool s_ota_active    = false;
+/* Set by ota_pull_task in NVS before reboot; consumed on the first api_webui_pull
+ * call after that reboot.  Allows the browser to complete the webui half of an
+ * online-updater without a valid session (sessions are RAM-only and are cleared by
+ * the OTA reboot). */
+static bool          s_post_ota_auth = false;
+/* true when this boot has the NVS post_ota flag set — cleared when the flag
+ * is consumed by api_webui_pull_auto.  While set, api_ota_pull_status returns
+ * 503 so the old Phase-2 poll loop detects the reboot via !rs.ok and
+ * advances to Phase 3/4 even when no admin password is configured. */
+static bool          s_post_ota_boot_pending = false;
+
+/* Returns true (and clears the NVS flag) if a post-OTA bypass is pending.
+ * Result is cached in s_post_ota_auth so only one NVS read is needed. */
+static bool consume_post_ota_flag(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("nextube_sec", NVS_READWRITE, &h) != ESP_OK) return false;
+    uint8_t flag = 0;
+    bool had = (nvs_get_u8(h, "post_ota", &flag) == ESP_OK && flag);
+    if (had) {
+        nvs_set_u8(h, "post_ota", 0);
+        nvs_commit(h);
+        s_post_ota_boot_pending = false;
+    }
+    nvs_close(h);
+    return had;
+}
 
 static void ota_reboot_timer_cb(void *arg) { esp_restart(); }
 
@@ -1314,6 +1347,24 @@ static void hp_mkdir_p(const char *path)
     }
 }
 
+/* After a WebUI patch, drop a stale uncompressed index.html if the new
+ * gzip-only shell (index.html.gz) is now present.  serve_static prefers the
+ * .gz, so a leftover plain index.html from a pre-gzip build is never served —
+ * it just wastes ~308 KB of LittleFS.  Called by both extraction paths. */
+static void hp_drop_stale_index(void)
+{
+    FILE *gz = fopen("/spiffs/web/index.html.gz", "rb");
+    if (!gz) return;                 /* no gzip shell present — nothing to do */
+    fclose(gz);
+    FILE *pl = fopen("/spiffs/web/index.html", "rb");
+    if (!pl) return;                 /* no stale plain copy */
+    fclose(pl);
+    if (remove("/spiffs/web/index.html") == 0)
+        ESP_LOGI(TAG, "[webui] removed stale uncompressed index.html (superseded by .gz)");
+    else
+        ESP_LOGW(TAG, "[webui] could not remove stale index.html: %s", strerror(errno));
+}
+
 static esp_err_t api_fs_hotpatch(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
@@ -1422,6 +1473,7 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
     }
 
     free(zip);
+    hp_drop_stale_index();
     ESP_LOGI(TAG, "hotpatch complete: %d written, %d skipped, %d failed",
              ok, skipped, failed);
 
@@ -1438,6 +1490,766 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
                   : ESP_FAIL;
     free(js);
     return ret;
+}
+
+/* ── ESP-pull OTA ──────────────────────────────────────────────────────────
+ *
+ * The browser fetches release metadata from api.github.com, extracts the
+ * direct asset URLs, then asks the ESP to pull the binaries itself.  This
+ * avoids the CORS problem (release assets redirect to Azure Blob Storage
+ * which does not send Access-Control-Allow-Origin) and removes any proxy
+ * dependency.
+ *
+ * Endpoints:
+ *   POST /api/ota_pull        {"url":"https://...nextube-fw-vX-ota.bin"}
+ *   GET  /api/ota_pull_status → {"state":"idle|downloading|flashing|done|error","progress":0-100}
+ *   POST /api/webui_pull      {"url":"https://...nextube-WebUI-vX.zip"}
+ */
+
+typedef enum {
+    OTA_PULL_IDLE        = 0,
+    OTA_PULL_DOWNLOADING = 1,
+    OTA_PULL_FLASHING    = 2,
+    OTA_PULL_DONE        = 3,
+    OTA_PULL_ERROR       = 4,
+} ota_pull_state_t;
+
+static struct {
+    ota_pull_state_t state;
+    int  progress;
+    char error[128];
+    char url[512];
+    char sha256[65];        /* expected SHA-256 hex (64 chars + NUL), empty = skip */
+    char webui_url[512];    /* WebUI ZIP URL to apply after firmware reboot */
+    char webui_sha256[65];  /* SHA-256 of WebUI ZIP, empty = skip */
+    int  bytes_received;
+    int  bytes_total;
+    int  bytes_flashed;
+} s_pull;
+
+/* Compute SHA-256 over buf and compare against a 64-char lowercase hex string.
+ * Returns true if hashes match or expected_hex is empty (verification skipped).
+ * Returns false on mismatch or if expected_hex is malformed. */
+static bool sha256_verify(const uint8_t *buf, size_t len, const char *expected_hex)
+{
+    if (!expected_hex || expected_hex[0] == '\0') return true;
+
+    /* Validate: must be exactly 64 lowercase hex chars */
+    if (strlen(expected_hex) != 64) return false;
+    for (int i = 0; i < 64; i++) {
+        char c = expected_hex[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+
+    /* Compute digest */
+    uint8_t digest[32];
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);   /* 0 = SHA-256, not SHA-224 */
+    mbedtls_sha256_update(&ctx, buf, len);
+    mbedtls_sha256_finish(&ctx, digest);
+    mbedtls_sha256_free(&ctx);
+
+    /* Convert expected hex to bytes and compare */
+    for (int i = 0; i < 32; i++) {
+        int hi = expected_hex[i * 2];
+        int lo = expected_hex[i * 2 + 1];
+        hi = (hi <= '9') ? hi - '0' : hi - 'a' + 10;
+        lo = (lo <= '9') ? lo - '0' : lo - 'a' + 10;
+        if (digest[i] != (uint8_t)((hi << 4) | lo)) return false;
+    }
+    return true;
+}
+
+#define OTA_PULL_TIMEOUT_MS 120000
+#define HTTP_UA "NextubeRemaster/" FW_VERSION_STR " github.com/MrToast99/Nextube-Remaster-Private"
+
+static void ota_pull_task(void *arg)
+{
+    ESP_LOGI(TAG, "[ota] task started on core %d", xPortGetCoreID());
+    ESP_LOGI(TAG, "[ota] url: %.120s", s_pull.url);
+    if (s_pull.sha256[0])
+        ESP_LOGD(TAG, "[ota] sha256: %.16s…", s_pull.sha256);
+    if (s_pull.webui_url[0])
+        ESP_LOGI(TAG, "[ota] webui_url: %.120s", s_pull.webui_url);
+
+    s_pull.state    = OTA_PULL_DOWNLOADING;
+    s_pull.progress = 0;
+
+    /* Wait for a valid wall-clock before opening any TLS connection. */
+    if (!ntp_has_valid_time()) {
+        ESP_LOGW(TAG, "[ota] time not valid — waiting up to 30 s for NTP/RTC…");
+        for (int i = 0; i < 30 && !ntp_has_valid_time(); i++) {
+            ESP_LOGD(TAG, "[ota] time sync wait %d/30", i + 1);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    if (!ntp_has_valid_time()) {
+        snprintf(s_pull.error, sizeof(s_pull.error),
+                 "No valid time after 30 s — NTP/RTC unavailable");
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        goto pull_err;
+    }
+    ESP_LOGI(TAG, "[ota] time valid — heap free %lu B", (unsigned long)esp_get_free_heap_size());
+
+    ESP_LOGD(TAG, "[ota] waiting for TLS semaphore…");
+    tls_sem_take();
+    ESP_LOGD(TAG, "[ota] TLS semaphore acquired");
+
+    esp_http_client_config_t hcfg = {
+        .url                   = s_pull.url,
+        .timeout_ms            = OTA_PULL_TIMEOUT_MS,
+        .user_agent            = HTTP_UA,
+        .crt_bundle_attach     = esp_crt_bundle_attach,
+        .max_redirection_count = 3,
+        .buffer_size           = 16384,   /* Azure Blob returns many x-ms-* headers */
+        .buffer_size_tx        = 1024,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&hcfg);
+    if (!client) {
+        snprintf(s_pull.error, sizeof(s_pull.error), "HTTP client init failed");
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        goto pull_err_notls;
+    }
+    ESP_LOGD(TAG, "[ota] HTTP client created");
+
+    /* Open + follow redirects: each hop needs a fresh open() to the new host. */
+    int content_len = -1, status_code = -1;
+    for (int rd = 0; rd <= 5; rd++) {
+        ESP_LOGD(TAG, "[ota] HTTP open hop %d…", rd);
+        if (esp_http_client_open(client, 0) != ESP_OK) {
+            snprintf(s_pull.error, sizeof(s_pull.error), "HTTP connect failed (hop %d)", rd);
+            ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+            esp_http_client_cleanup(client);
+            goto pull_err_notls;
+        }
+        content_len = esp_http_client_fetch_headers(client);
+        status_code = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "[ota] hop %d → HTTP %d, content-length=%d", rd, status_code, content_len);
+        if (status_code == 200) break;
+        if (status_code != 301 && status_code != 302 &&
+            status_code != 307 && status_code != 308) break;
+        ESP_LOGD(TAG, "[ota] following redirect…");
+        esp_http_client_set_redirection(client);
+    }
+
+    if (status_code != 200 || content_len <= 0) {
+        snprintf(s_pull.error, sizeof(s_pull.error),
+                 "HTTP %d (content-length=%d)", status_code, content_len);
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        goto pull_err_notls;
+    }
+    ESP_LOGI(TAG, "[ota] download starting: %d B, heap free %lu B",
+             content_len, (unsigned long)esp_get_free_heap_size());
+
+    s_pull.bytes_total    = content_len;
+    s_pull.bytes_received = 0;
+    s_pull.bytes_flashed  = 0;
+
+    uint8_t *img = (uint8_t *)heap_caps_malloc((size_t)content_len, MALLOC_CAP_SPIRAM);
+    if (!img) img = (uint8_t *)malloc((size_t)content_len);
+    if (!img) {
+        snprintf(s_pull.error, sizeof(s_pull.error),
+                 "OOM: can't buffer %d B", content_len);
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        goto pull_err_notls;
+    }
+    ESP_LOGD(TAG, "[ota] buffer allocated (%s), reading…",
+             heap_caps_check_integrity_all(false) ? "PSRAM" : "DRAM");
+
+    int received = 0;
+    int last_pct = -1;
+    while (received < content_len) {
+        int want = content_len - received;
+        if (want > 4096) want = 4096;
+        int n = esp_http_client_read(client, (char *)img + received, want);
+        if (n < 0) {
+            snprintf(s_pull.error, sizeof(s_pull.error),
+                     "Download error at %d/%d B", received, content_len);
+            ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+            free(img);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            goto pull_err_notls;
+        }
+        if (n == 0) break;
+        received += n;
+        s_pull.bytes_received = received;
+        s_pull.progress = (received * 60) / content_len;
+        int pct = (received * 100) / content_len;
+        if (pct / 10 != last_pct / 10) {
+            last_pct = pct;
+            ESP_LOGI(TAG, "[ota] download %d%% (%d/%d B)", pct, received, content_len);
+        }
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    tls_sem_give();
+    ESP_LOGI(TAG, "[ota] download complete: %d/%d B", received, content_len);
+
+    if (received != content_len) {
+        snprintf(s_pull.error, sizeof(s_pull.error),
+                 "Short download: %d/%d B", received, content_len);
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        free(img);
+        goto pull_err;
+    }
+
+    ESP_LOGD(TAG, "[ota] magic byte: 0x%02X (expect 0xE9)", img[0]);
+    if (img[0] != 0xE9) {
+        snprintf(s_pull.error, sizeof(s_pull.error),
+                 "Bad magic 0x%02X — wrong file?", img[0]);
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        free(img);
+        goto pull_err;
+    }
+
+    ESP_LOGI(TAG, "[ota] verifying SHA-256…");
+    if (!sha256_verify(img, (size_t)received, s_pull.sha256)) {
+        snprintf(s_pull.error, sizeof(s_pull.error),
+                 "SHA-256 mismatch — download may be corrupt or tampered");
+        ESP_LOGE(TAG, "[ota] SHA-256 verification FAILED");
+        free(img);
+        goto pull_err;
+    }
+    ESP_LOGI(TAG, "[ota] SHA-256 OK%s", s_pull.sha256[0] ? "" : " (no hash provided, skipped)");
+
+    s_pull.state    = OTA_PULL_FLASHING;
+    s_pull.progress = 60;
+    ESP_LOGI(TAG, "[ota] state → FLASHING");
+
+    display_show_wait();
+    ota_suspend_tasks();
+    ESP_LOGI(TAG, "[ota] background tasks suspended");
+
+    const esp_partition_t *upd = esp_ota_get_next_update_partition(NULL);
+    if (!upd) {
+        snprintf(s_pull.error, sizeof(s_pull.error), "No OTA partition");
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        free(img);
+        goto pull_err;
+    }
+    ESP_LOGI(TAG, "[ota] writing to partition '%s' at 0x%08" PRIx32 " (%lu B)",
+             upd->label, upd->address, (unsigned long)upd->size);
+
+    esp_ota_handle_t h;
+    if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK) {
+        snprintf(s_pull.error, sizeof(s_pull.error), "OTA begin failed");
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        free(img);
+        goto pull_err;
+    }
+    ESP_LOGD(TAG, "[ota] esp_ota_begin OK — flashing %d B…", received);
+
+    const uint8_t *p = img;
+    int rem = received;
+    last_pct = -1;
+    while (rem > 0) {
+        int chunk = rem > 4096 ? 4096 : rem;
+        if (esp_ota_write(h, p, chunk) != ESP_OK) {
+            snprintf(s_pull.error, sizeof(s_pull.error), "OTA write failed");
+            ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+            esp_ota_abort(h);
+            free(img);
+            goto pull_err;
+        }
+        p   += chunk;
+        rem -= chunk;
+        s_pull.bytes_flashed  = received - rem;
+        s_pull.progress = 60 + ((received - rem) * 35) / received;
+        int pct = ((received - rem) * 100) / received;
+        if (pct / 10 != last_pct / 10) {
+            last_pct = pct;
+            ESP_LOGI(TAG, "[ota] flash %d%% (%d/%d B)", pct, received - rem, received);
+        }
+    }
+    free(img);
+    ESP_LOGI(TAG, "[ota] flash write done");
+
+    if (esp_ota_end(h) != ESP_OK) {
+        snprintf(s_pull.error, sizeof(s_pull.error), "OTA finalise failed");
+        ESP_LOGE(TAG, "[ota] esp_ota_end FAILED");
+        goto pull_err;
+    }
+    ESP_LOGD(TAG, "[ota] esp_ota_end OK");
+
+    if (esp_ota_set_boot_partition(upd) != ESP_OK) {
+        snprintf(s_pull.error, sizeof(s_pull.error), "OTA finalise failed");
+        ESP_LOGE(TAG, "[ota] esp_ota_set_boot_partition FAILED");
+        goto pull_err;
+    }
+    ESP_LOGI(TAG, "[ota] boot partition set to '%s'", upd->label);
+
+    s_pull.state    = OTA_PULL_DONE;
+    s_pull.progress = 100;
+
+    /* Flag that the next webui_pull call may bypass session auth — the reboot
+     * will clear RAM sessions so the browser can't re-authenticate mid-flow. */
+    {
+        nvs_handle_t nvs_h;
+        if (nvs_open("nextube_sec", NVS_READWRITE, &nvs_h) == ESP_OK) {
+            esp_err_t e1 = nvs_set_u8(nvs_h, "post_ota", 1);
+            ESP_LOGI(TAG, "[ota] NVS: post_ota=1 (%s)", esp_err_to_name(e1));
+            if (s_pull.webui_url[0]) {
+                esp_err_t e2 = nvs_set_str(nvs_h, "webui_url", s_pull.webui_url);
+                ESP_LOGI(TAG, "[ota] NVS: webui_url %s (%s)",
+                         e2 == ESP_OK ? "saved" : "FAILED", esp_err_to_name(e2));
+            }
+            if (s_pull.webui_sha256[0]) {
+                esp_err_t e3 = nvs_set_str(nvs_h, "webui_sha256", s_pull.webui_sha256);
+                ESP_LOGI(TAG, "[ota] NVS: webui_sha256 %s (%s)",
+                         e3 == ESP_OK ? "saved" : "FAILED", esp_err_to_name(e3));
+            }
+            esp_err_t ec = nvs_commit(nvs_h);
+            nvs_close(nvs_h);
+            ESP_LOGI(TAG, "[ota] NVS committed (%s)", esp_err_to_name(ec));
+        } else {
+            ESP_LOGE(TAG, "[ota] NVS open failed — post_ota flag NOT set");
+        }
+    }
+    ESP_LOGI(TAG, "[ota] complete — rebooting in 1.5 s");
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
+    return;
+
+pull_err_notls:
+    tls_sem_give();
+pull_err:
+    ESP_LOGE(TAG, "[ota] FAILED: %s", s_pull.error);
+    s_pull.state = OTA_PULL_ERROR;
+    s_ota_active = false;
+    vTaskDelete(NULL);
+}
+
+static esp_err_t api_ota_pull_status(httpd_req_t *r)
+{
+    /* Post-OTA firmware reboot: the NVS post_ota flag is still set, meaning
+     * the webui update (Phase 4) hasn't fired yet.  Return 503 so the
+     * Phase-2 poll loop (old or new HTML) sees !rs.ok, increments failStreak,
+     * and after 8 consecutive 503s exits to Phase 3/4 — even when no admin
+     * password is configured (REQUIRE_AUTH would be a no-op in that case and
+     * the normal 200+idle response would trap Phase 2 forever). */
+    if (s_post_ota_boot_pending && s_pull.state == OTA_PULL_IDLE) {
+        httpd_resp_set_status(r, "503 Service Unavailable");
+        return httpd_resp_sendstr(r, "");
+    }
+    REQUIRE_AUTH(r);
+    static const char *const names[] = { "idle","downloading","flashing","done","error" };
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+             "{\"state\":\"%s\",\"progress\":%d,"
+             "\"bytes_received\":%d,\"bytes_total\":%d,\"bytes_flashed\":%d,"
+             "\"error\":\"%s\"}",
+             names[s_pull.state], s_pull.progress,
+             s_pull.bytes_received, s_pull.bytes_total, s_pull.bytes_flashed,
+             s_pull.error);
+    return send_json(r, buf);
+}
+
+static esp_err_t api_ota_pull(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    if (s_ota_active) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"ota_in_progress\"}");
+    }
+
+    int len = r->content_len;
+    if (len <= 0 || len > 1024)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body"), ESP_FAIL;
+
+    char *body = malloc(len + 1);
+    if (!body) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+
+    int rx = 0;
+    while (rx < len) {
+        int n = httpd_req_recv(r, body + rx, len - rx);
+        if (n <= 0) { free(body); return ESP_FAIL; }
+        rx += n;
+    }
+    body[len] = '\0';
+
+    cJSON *j = cJSON_Parse(body);
+    free(body);
+    if (!j) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
+
+    cJSON *url_j = cJSON_GetObjectItem(j, "url");
+    if (!cJSON_IsString(url_j) || !url_j->valuestring || !url_j->valuestring[0]) {
+        cJSON_Delete(j);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing url"), ESP_FAIL;
+    }
+    strncpy(s_pull.url, url_j->valuestring, sizeof(s_pull.url) - 1);
+    s_pull.url[sizeof(s_pull.url) - 1] = '\0';
+
+    cJSON *hash_j = cJSON_GetObjectItem(j, "sha256");
+    if (cJSON_IsString(hash_j) && hash_j->valuestring && strlen(hash_j->valuestring) == 64)
+        strncpy(s_pull.sha256, hash_j->valuestring, 64);
+    else
+        s_pull.sha256[0] = '\0';
+
+    /* Optional: webui ZIP URL + hash to apply after firmware reboot.
+     * Stored in NVS so the post-reboot handler can start the pull without
+     * receiving a POST body (which fails on some connections after a reboot). */
+    s_pull.webui_url[0] = s_pull.webui_sha256[0] = '\0';
+    cJSON *wurl_j = cJSON_GetObjectItem(j, "webui_url");
+    if (cJSON_IsString(wurl_j) && wurl_j->valuestring && wurl_j->valuestring[0])
+        strncpy(s_pull.webui_url, wurl_j->valuestring, sizeof(s_pull.webui_url) - 1);
+    cJSON *wsha_j = cJSON_GetObjectItem(j, "webui_sha256");
+    if (cJSON_IsString(wsha_j) && wsha_j->valuestring && strlen(wsha_j->valuestring) == 64)
+        strncpy(s_pull.webui_sha256, wsha_j->valuestring, 64);
+    cJSON_Delete(j);
+
+    if (s_pull.sha256[0])
+        ESP_LOGI(TAG, "OTA pull: will verify SHA-256 after download");
+    else
+        ESP_LOGW(TAG, "OTA pull: no SHA-256 provided — integrity check skipped");
+
+    s_pull.state          = OTA_PULL_IDLE;
+    s_pull.progress       = 0;
+    s_pull.bytes_received = 0;
+    s_pull.bytes_total    = 0;
+    s_pull.bytes_flashed  = 0;
+    s_pull.error[0]       = '\0';
+    s_ota_active          = true;
+
+    if (xTaskCreatePinnedToCore(ota_pull_task, "ota_pull", 8192, NULL, 5, NULL, 0) != pdPASS) {
+        s_ota_active = false;
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Task create failed"), ESP_FAIL;
+    }
+    return send_json(r, "{\"status\":\"started\"}");
+}
+
+/* ── WebUI pull background task ─────────────────────────────────────────── */
+
+typedef enum { WEBUI_IDLE=0, WEBUI_RUNNING, WEBUI_DONE, WEBUI_ERROR } webui_pull_state_t;
+
+static struct {
+    webui_pull_state_t state;
+    char error[128];
+    char url[512];
+    char sha256[65];
+} s_webui;
+
+static void webui_pull_task(void *arg)
+{
+    ESP_LOGI(TAG, "[webui] task started on core %d", xPortGetCoreID());
+    ESP_LOGI(TAG, "[webui] url: %.120s", s_webui.url);
+    if (s_webui.sha256[0])
+        ESP_LOGD(TAG, "[webui] sha256: %.16s…", s_webui.sha256);
+
+    s_webui.state = WEBUI_RUNNING;
+
+    /* TLS certificate validation requires a correct wall-clock.  After an OTA
+     * reboot the device may not have synced yet (dead RTC battery).  Wait up
+     * to 30 s for either an RTC seed or a first NTP response. */
+    if (!ntp_has_valid_time()) {
+        ESP_LOGW(TAG, "[webui] time not valid — waiting up to 30 s for NTP/RTC…");
+        for (int i = 0; i < 30 && !ntp_has_valid_time(); i++) {
+            ESP_LOGD(TAG, "[webui] time sync wait %d/30", i + 1);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    if (!ntp_has_valid_time()) {
+        snprintf(s_webui.error, sizeof(s_webui.error),
+                 "No valid time after 30 s — NTP/RTC unavailable");
+        ESP_LOGE(TAG, "[webui] %s", s_webui.error);
+        goto webui_err;
+    }
+    ESP_LOGI(TAG, "[webui] time valid — heap free %lu B", (unsigned long)esp_get_free_heap_size());
+
+    ESP_LOGD(TAG, "[webui] waiting for TLS semaphore…");
+    tls_sem_take();
+    ESP_LOGD(TAG, "[webui] TLS semaphore acquired");
+
+    esp_http_client_config_t hcfg = {
+        .url                   = s_webui.url,
+        .timeout_ms            = OTA_PULL_TIMEOUT_MS,
+        .user_agent            = HTTP_UA,
+        .crt_bundle_attach     = esp_crt_bundle_attach,
+        .max_redirection_count = 3,
+        .buffer_size           = 16384,
+        .buffer_size_tx        = 1024,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&hcfg);
+    if (!client) {
+        snprintf(s_webui.error, sizeof(s_webui.error), "HTTP client init failed");
+        ESP_LOGE(TAG, "[webui] %s", s_webui.error);
+        goto webui_err_notls;
+    }
+    ESP_LOGD(TAG, "[webui] HTTP client created");
+
+    int content_len = -1, status_code = -1;
+    for (int rd = 0; rd <= 5; rd++) {
+        ESP_LOGD(TAG, "[webui] HTTP open hop %d…", rd);
+        if (esp_http_client_open(client, 0) != ESP_OK) {
+            snprintf(s_webui.error, sizeof(s_webui.error), "HTTP connect failed (hop %d)", rd);
+            ESP_LOGE(TAG, "[webui] %s", s_webui.error);
+            esp_http_client_cleanup(client);
+            goto webui_err_notls;
+        }
+        content_len = esp_http_client_fetch_headers(client);
+        status_code = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "[webui] hop %d → HTTP %d, content-length=%d", rd, status_code, content_len);
+        if (status_code == 200) break;
+        if (status_code != 301 && status_code != 302 &&
+            status_code != 307 && status_code != 308) break;
+        ESP_LOGD(TAG, "[webui] following redirect…");
+        esp_http_client_set_redirection(client);
+    }
+
+    if (status_code != 200 || content_len <= 0 || content_len > HP_MAX_ZIP) {
+        snprintf(s_webui.error, sizeof(s_webui.error),
+                 "HTTP %d (content-length=%d)", status_code, content_len);
+        ESP_LOGE(TAG, "[webui] %s", s_webui.error);
+        esp_http_client_close(client); esp_http_client_cleanup(client);
+        goto webui_err_notls;
+    }
+    ESP_LOGI(TAG, "[webui] download starting: %d B, heap free %lu B",
+             content_len, (unsigned long)esp_get_free_heap_size());
+
+    uint8_t *zip = (uint8_t *)heap_caps_malloc((size_t)content_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!zip) {
+        snprintf(s_webui.error, sizeof(s_webui.error), "OOM: can't buffer %d B", content_len);
+        ESP_LOGE(TAG, "[webui] %s", s_webui.error);
+        esp_http_client_close(client); esp_http_client_cleanup(client);
+        goto webui_err_notls;
+    }
+    ESP_LOGD(TAG, "[webui] buffer allocated, reading…");
+
+    int received = 0;
+    int last_pct = -1;
+    while (received < content_len) {
+        int n = esp_http_client_read(client, (char *)zip + received, content_len - received);
+        if (n < 0) {
+            snprintf(s_webui.error, sizeof(s_webui.error),
+                     "Download error at %d/%d B", received, content_len);
+            ESP_LOGE(TAG, "[webui] %s", s_webui.error);
+            free(zip);
+            esp_http_client_close(client); esp_http_client_cleanup(client);
+            goto webui_err_notls;
+        }
+        if (n == 0) break;
+        received += n;
+        int pct = (received * 100) / content_len;
+        if (pct / 10 != last_pct / 10) {
+            last_pct = pct;
+            ESP_LOGI(TAG, "[webui] download %d%% (%d/%d B)", pct, received, content_len);
+        }
+    }
+    esp_http_client_close(client); esp_http_client_cleanup(client);
+    tls_sem_give();
+    ESP_LOGI(TAG, "[webui] download complete: %d/%d B", received, content_len);
+
+    if (received != content_len) {
+        snprintf(s_webui.error, sizeof(s_webui.error),
+                 "Short download: %d/%d B", received, content_len);
+        ESP_LOGE(TAG, "[webui] %s", s_webui.error);
+        free(zip); goto webui_err;
+    }
+
+    ESP_LOGI(TAG, "[webui] verifying SHA-256…");
+    if (!sha256_verify(zip, (size_t)received, s_webui.sha256)) {
+        snprintf(s_webui.error, sizeof(s_webui.error), "SHA-256 mismatch");
+        ESP_LOGE(TAG, "[webui] SHA-256 FAILED");
+        free(zip); goto webui_err;
+    }
+    ESP_LOGI(TAG, "[webui] SHA-256 OK%s", s_webui.sha256[0] ? "" : " (skipped — no hash)");
+
+    {
+        uint32_t sig0 = (uint32_t)(zip[0]|zip[1]<<8|zip[2]<<16|zip[3]<<24);
+        ESP_LOGD(TAG, "[webui] ZIP magic: 0x%08" PRIx32 " (expect 0x%08" PRIx32 ")",
+                 sig0, (uint32_t)ZIP_LFH_SIG);
+    }
+    if (received < 4 || (uint32_t)(zip[0]|zip[1]<<8|zip[2]<<16|zip[3]<<24) != ZIP_LFH_SIG) {
+        snprintf(s_webui.error, sizeof(s_webui.error), "Not a valid ZIP");
+        ESP_LOGE(TAG, "[webui] %s", s_webui.error);
+        free(zip); goto webui_err;
+    }
+    ESP_LOGI(TAG, "[webui] ZIP valid — extracting to LittleFS…");
+
+    {
+        int ok = 0, skipped = 0, failed = 0;
+        const uint8_t *p = zip, *end = zip + received;
+        while (p + (int)sizeof(zip_lfh_t) <= end) {
+            uint32_t sig = (uint32_t)(p[0]|p[1]<<8|p[2]<<16|p[3]<<24);
+            if (sig == ZIP_CDH_SIG || sig == ZIP_EOCD_SIG) break;
+            if (sig != ZIP_LFH_SIG) { p++; continue; }
+            const zip_lfh_t *h = (const zip_lfh_t *)p;
+            p += sizeof(zip_lfh_t);
+            if (p + h->fname_len + h->extra_len > end) break;
+            char fname[256] = {0};
+            int fnl = h->fname_len < 255 ? h->fname_len : 255;
+            memcpy(fname, p, fnl);
+            p += h->fname_len + h->extra_len;
+            if (p + h->comp_sz > end) break;
+            const uint8_t *data = p;
+            p += h->comp_sz;
+            if (fnl > 0 && fname[fnl-1] == '/') { ESP_LOGD(TAG, "[webui]  dir  %s", fname); continue; }
+            if (strstr(fname, "..") || strstr(fname, "//")) {
+                ESP_LOGW(TAG, "[webui]  SKIP (path traversal) %s", fname);
+                failed++; continue;
+            }
+            if (strcmp(fname, "config.json") == 0) {
+                ESP_LOGI(TAG, "[webui]  skip (config.json protected)");
+                skipped++; continue;
+            }
+            if (h->method != 0) {
+                ESP_LOGW(TAG, "[webui]  skip (compressed method=%u) %s", h->method, fname);
+                skipped++; continue;
+            }
+            char vpath[320];
+            snprintf(vpath, sizeof(vpath), "/spiffs/%s", fname);
+            hp_mkdir_p(vpath);
+            FILE *f = fopen(vpath, "wb");
+            if (!f) {
+                ESP_LOGE(TAG, "[webui]  FAIL fopen %s", vpath);
+                failed++; continue;
+            }
+            size_t wr = fwrite(data, 1, h->comp_sz, f);
+            fclose(f);
+            if (wr != h->comp_sz) {
+                ESP_LOGE(TAG, "[webui]  FAIL write %s (%u/%u B)", fname, (unsigned)wr, (unsigned)h->comp_sz);
+                failed++;
+            } else {
+                ESP_LOGD(TAG, "[webui]  ok   %s (%u B)", fname, (unsigned)h->comp_sz);
+                ok++;
+            }
+            vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs, starves IDLE */
+        }
+        free(zip);
+        hp_drop_stale_index();
+        ESP_LOGI(TAG, "[webui] extraction done: %d written, %d skipped, %d failed", ok, skipped, failed);
+        if (failed > 0)
+            snprintf(s_webui.error, sizeof(s_webui.error), "%d file(s) failed to write", failed);
+    }
+
+    s_webui.state = WEBUI_DONE;
+    s_ota_active  = false;
+    ESP_LOGI(TAG, "[webui] state → DONE");
+    vTaskDelete(NULL);
+    return;
+
+webui_err_notls:
+    tls_sem_give();
+webui_err:
+    ESP_LOGE(TAG, "[webui] FAILED: %s", s_webui.error);
+    s_webui.state = WEBUI_ERROR;
+    s_ota_active  = false;
+    vTaskDelete(NULL);
+}
+
+static esp_err_t api_webui_pull_status(httpd_req_t *r)
+{
+    if (!s_post_ota_auth) { REQUIRE_AUTH(r); }
+    static const char *const names[] = { "idle","running","done","error" };
+    char buf[192];
+    snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"error\":\"%s\"}",
+             names[s_webui.state], s_webui.error);
+    return send_json(r, buf);
+}
+
+/* GET /api/webui_pull_auto — no request body.
+ * Reads the webui URL + sha256 written to NVS by ota_pull_task before the
+ * firmware reboot and starts webui_pull_task.  Used by the online-updater
+ * Phase 4 so the browser never has to POST a body after the OTA reboot
+ * (httpd_req_recv fails on some connections right after the device reboots). */
+static esp_err_t api_webui_pull_auto(httpd_req_t *r)
+{
+    ESP_LOGD(TAG, "[webui_auto] handler called — post_ota_auth=%d", (int)s_post_ota_auth);
+    /* Check OTA-in-progress BEFORE consuming the one-time NVS bypass flag.
+     * If Phase 4 fires pre-reboot (while the firmware OTA task is still
+     * running), returning 409 without consuming the flag lets the post-reboot
+     * call use it correctly for auth bypass. */
+    if (s_ota_active) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"ota_in_progress\"}");
+    }
+    if (!s_post_ota_auth) s_post_ota_auth = consume_post_ota_flag();
+    if (!s_post_ota_auth) { REQUIRE_AUTH(r); }
+
+    nvs_handle_t h;
+    if (nvs_open("nextube_sec", NVS_READWRITE, &h) != ESP_OK)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS open failed"), ESP_FAIL;
+
+    size_t url_sz = sizeof(s_webui.url);
+    esp_err_t ue = nvs_get_str(h, "webui_url", s_webui.url, &url_sz);
+    s_webui.sha256[0] = '\0';
+    size_t sha_sz = sizeof(s_webui.sha256);
+    nvs_get_str(h, "webui_sha256", s_webui.sha256, &sha_sz);
+    nvs_close(h);
+
+    if (ue != ESP_OK || !s_webui.url[0])
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "No webui URL stored — send webui_url in the ota_pull request"), ESP_FAIL;
+
+    s_webui.state    = WEBUI_IDLE;
+    s_webui.error[0] = '\0';
+    s_ota_active     = true;
+
+    if (xTaskCreatePinnedToCore(webui_pull_task, "webui_pull", 16384, NULL, 5, NULL, 0) != pdPASS) {
+        s_ota_active = false;
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Task create failed"), ESP_FAIL;
+    }
+    return send_json(r, "{\"status\":\"started\"}");
+}
+
+static esp_err_t api_webui_pull(httpd_req_t *r)
+{
+    /* Consume the one-time NVS bypass flag set before OTA reboot. */
+    if (!s_post_ota_auth) s_post_ota_auth = consume_post_ota_flag();
+    if (!s_post_ota_auth) { REQUIRE_AUTH(r); }
+    if (s_ota_active) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"ota_in_progress\"}");
+    }
+
+    int len = r->content_len;
+    if (len <= 0 || len > 1024)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body"), ESP_FAIL;
+
+    char *body = malloc(len + 1);
+    if (!body) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+
+    int rx = 0;
+    while (rx < len) {
+        int n = httpd_req_recv(r, body + rx, len - rx);
+        if (n <= 0) { free(body); return ESP_FAIL; }
+        rx += n;
+    }
+    body[len] = '\0';
+
+    cJSON *j = cJSON_Parse(body);
+    free(body);
+    if (!j) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
+
+    cJSON *url_j = cJSON_GetObjectItem(j, "url");
+    if (!cJSON_IsString(url_j) || !url_j->valuestring || !url_j->valuestring[0]) {
+        cJSON_Delete(j);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing url"), ESP_FAIL;
+    }
+    strncpy(s_webui.url, url_j->valuestring, sizeof(s_webui.url) - 1);
+    s_webui.url[sizeof(s_webui.url) - 1] = '\0';
+
+    s_webui.sha256[0] = '\0';
+    cJSON *hash_j = cJSON_GetObjectItem(j, "sha256");
+    if (cJSON_IsString(hash_j) && hash_j->valuestring && strlen(hash_j->valuestring) == 64)
+        strncpy(s_webui.sha256, hash_j->valuestring, 64);
+    cJSON_Delete(j);
+
+    s_webui.state   = WEBUI_IDLE;
+    s_webui.error[0] = '\0';
+    s_ota_active     = true;
+
+    if (xTaskCreatePinnedToCore(webui_pull_task, "webui_pull", 16384, NULL, 5, NULL, 0) != pdPASS) {
+        s_ota_active = false;
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Task create failed"), ESP_FAIL;
+    }
+    return send_json(r, "{\"status\":\"started\"}");
 }
 
 /* URL-decode a query-string parameter value in-place.
@@ -2388,6 +3200,23 @@ static const char *content_type(const char *p)
     return "application/octet-stream";
 }
 
+/* Open a pre-compressed sibling "<path>.gz" if present (sets *gz=true), else
+ * the plain "<path>".  index.html ships gzip-only (~308 KB → ~73 KB): the .gz
+ * is served verbatim with Content-Encoding: gzip and the browser inflates it,
+ * so the ESP never compresses/decompresses — it just reads fewer bytes from
+ * flash and pushes fewer bytes through the socket.  Preferring .gz also makes
+ * the migration safe: a stale plain index.html left over from an older build
+ * is ignored in favour of the new index.html.gz. */
+static FILE *open_gz_or_plain(const char *path, bool *gz)
+{
+    char gzp[608];
+    snprintf(gzp, sizeof(gzp), "%s.gz", path);
+    FILE *f = fopen(gzp, "rb");
+    if (f) { *gz = true; return f; }
+    *gz = false;
+    return fopen(path, "rb");
+}
+
 static esp_err_t serve_static(httpd_req_t *r)
 {
     const char *uri = r->uri;
@@ -2396,11 +3225,20 @@ static esp_err_t serve_static(httpd_req_t *r)
     else snprintf(fp,sizeof(fp),"/spiffs/web%s",uri);
     if (strstr(fp,"..")) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad path"), ESP_FAIL;
 
-    FILE *f = fopen(fp, "rb");
-    if (!f) { f = fopen("/spiffs/web/index.html","rb"); }
+    /* Content-Type comes from the logical name, never the .gz suffix. */
+    const char *ctype = content_type(fp);
+
+    bool gz = false;
+    FILE *f = open_gz_or_plain(fp, &gz);
+    if (!f) {
+        /* SPA fallback to the app shell (also gzip-aware). */
+        f = open_gz_or_plain("/spiffs/web/index.html", &gz);
+        ctype = "text/html";
+    }
     if (!f) return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found"), ESP_FAIL;
 
-    httpd_resp_set_type(r, content_type(fp));
+    httpd_resp_set_type(r, ctype);
+    if (gz) httpd_resp_set_hdr(r, "Content-Encoding", "gzip");
     httpd_resp_set_hdr(r, "Cache-Control", "max-age=3600");
 
     /* Use a larger read buffer to cut the number of flash-read iterations —
@@ -2469,6 +3307,11 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/mic/calibrate",          api_mic_calibrate),
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
+    R(HTTP_POST, "/api/ota_pull",              api_ota_pull),
+    R(HTTP_GET,  "/api/ota_pull_status",       api_ota_pull_status),
+    R(HTTP_POST, "/api/webui_pull",            api_webui_pull),
+    R(HTTP_GET,  "/api/webui_pull_auto",       api_webui_pull_auto),
+    R(HTTP_GET,  "/api/webui_pull_status",     api_webui_pull_status),
     R(HTTP_POST, "/api/social/refresh",         api_social_refresh),
     R(HTTP_POST, "/api/debug/burnin",           api_debug_burnin),
     R(HTTP_POST, "/api/debug/snow",             api_debug_snow),
@@ -2486,6 +3329,84 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/factory_reset_full",     api_factory_reset_full),
     R(HTTP_OPTIONS, "/api/*",            api_cors),
 };
+
+/* Device-driven WebUI pull after a firmware OTA reboot.
+ *
+ * Background: the WebUI ZIP is applied AFTER the firmware reboot.  The old
+ * design relied on the browser re-connecting through the post-reboot network
+ * churn (mDNS re-registration + httpd connection resets) to call
+ * api_webui_pull_auto.  In practice that trigger lands during the unstable
+ * window right after boot and gets reset (errno 104) before the handler runs,
+ * so webui_pull_task never starts and the update silently stalls.
+ *
+ * Fix: the device starts the pull itself.  ota_pull_task already stored
+ * webui_url + webui_sha256 in NVS before rebooting, so everything needed is on
+ * hand.  This task waits for connectivity, then spawns webui_pull_task exactly
+ * as api_webui_pull_auto would.  The browser's Phase 4 only has to poll
+ * /api/webui_pull_status for progress — it no longer has to TRIGGER anything.
+ *
+ * s_ota_active is set before spawning, so a stray browser trigger that does
+ * arrive hits the 409 guard in api_webui_pull_auto/api_webui_pull and cannot
+ * double-spawn. */
+static void post_ota_autostart_task(void *arg)
+{
+    ESP_LOGI(TAG, "[post_ota] auto-WebUI task started — waiting for network…");
+
+    /* webui_pull_task needs a live connection for the TLS download.  Wait up to
+     * 60 s for STA to obtain an IP (it normally arrives within ~10 s). */
+    for (int i = 0; i < 60; i++) {
+        const char *ip = wifi_manager_get_ip();
+        if (ip && strcmp(ip, "0.0.0.0") != 0) {
+            ESP_LOGI(TAG, "[post_ota] network up (%s) after %d s", ip, i);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    /* Read the stored WebUI URL + hash written by ota_pull_task pre-reboot. */
+    nvs_handle_t h;
+    if (nvs_open("nextube_sec", NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGE(TAG, "[post_ota] NVS open failed — cannot auto-pull WebUI");
+        vTaskDelete(NULL);
+        return;
+    }
+    size_t url_sz = sizeof(s_webui.url);
+    esp_err_t ue = nvs_get_str(h, "webui_url", s_webui.url, &url_sz);
+    s_webui.sha256[0] = '\0';
+    size_t sha_sz = sizeof(s_webui.sha256);
+    nvs_get_str(h, "webui_sha256", s_webui.sha256, &sha_sz);
+    nvs_close(h);
+
+    if (ue != ESP_OK || !s_webui.url[0]) {
+        ESP_LOGW(TAG, "[post_ota] no webui_url stored — clearing flag, nothing to do");
+        consume_post_ota_flag();
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* Consume the one-time post_ota flag: clears it in NVS and lets
+     * api_ota_pull_status stop returning 503.  Also marks this boot as
+     * post-OTA-authorised so a manual browser poll/trigger bypasses auth. */
+    consume_post_ota_flag();
+    s_post_ota_auth = true;
+
+    if (s_ota_active) {
+        ESP_LOGW(TAG, "[post_ota] OTA already active — skipping auto-pull (browser beat us to it)");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    s_webui.state    = WEBUI_IDLE;
+    s_webui.error[0] = '\0';
+    s_ota_active     = true;
+
+    ESP_LOGI(TAG, "[post_ota] starting device-driven WebUI pull: %.80s", s_webui.url);
+    if (xTaskCreatePinnedToCore(webui_pull_task, "webui_pull", 16384, NULL, 5, NULL, 0) != pdPASS) {
+        s_ota_active = false;
+        ESP_LOGE(TAG, "[post_ota] webui_pull task create failed");
+    }
+    vTaskDelete(NULL);
+}
 
 /* Refresh the HTTP server when STA obtains a new IP after a credential change.
  * Stop first so httpd gets fresh sockets bound to the new interface;
@@ -2515,6 +3436,26 @@ void web_server_start(void)
         /* Initialise admin auth state (in-RAM session table, lockout counters).
          * NVS is already initialised by main.c::init_nvs() before web_server_start. */
         auth_init();
+
+        /* Peek the NVS post_ota flag (without consuming it) to detect a
+         * post-OTA-firmware reboot.  api_ota_pull_status will return 503
+         * until the flag is consumed by api_webui_pull_auto. */
+        {
+            nvs_handle_t ph;
+            uint8_t pflag = 0;
+            if (nvs_open("nextube_sec", NVS_READONLY, &ph) == ESP_OK) {
+                nvs_get_u8(ph, "post_ota", &pflag);
+                nvs_close(ph);
+            }
+            s_post_ota_boot_pending = (pflag != 0);
+            if (s_post_ota_boot_pending) {
+                ESP_LOGI(TAG, "[boot] post-OTA boot — device will auto-pull WebUI; ota_pull_status → 503 until it fires");
+                /* Drive the WebUI pull ourselves rather than waiting for the
+                 * browser to reach us through the post-reboot network churn. */
+                xTaskCreatePinnedToCore(post_ota_autostart_task, "post_ota_auto",
+                                        4096, NULL, 4, NULL, 0);
+            }
+        }
     }
 
     if (s_server) return;   /* already running */
