@@ -28,12 +28,13 @@ Like the work? Help keep me Caffeinated! <br>
   - [Option B — esptool full flash](#option-b--first-time--full-flash-esptool-cli)
   - [Option C — Individual partitions](#option-c--individual-partitions-esptool-cli)
   - [Over-the-Air (OTA)](#over-the-air-ota)
+    - [Online Updater (one click)](#online-updater-recommended--one-click-no-downloads)
     - [Automatic Update Checks](#automatic-update-checks)
     - [Returning to factory firmware](#returning-to-the-original-factory-firmware)
 - [Web Management UI](#web-management-ui)
   - [Admin Authentication](#admin-authentication-optional)
   - [Web UI Language](#web-ui-language)
-  - [Setup AP (WiFi Provisioning)](#setup-ap-wifi-provisioning)
+  - [Setup AP (WiFi Provisioning and First Setup)](#setup-ap-wifi-provisioning)
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
 - [Modes](#modes)
 - [Weather](#weather)
@@ -72,6 +73,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | mDNS (`http://nextube-remaster.local`) | ✅ Working |
 | OTA firmware updates via web UI | ✅ Working |
 | OTA web UI / LittleFS updates via web UI | ✅ Working |
+| One-click Online Updater | ✅ Working |
 | Firmware + LittleFS version mismatch detection | ✅ Working |
 | Weather display (temp, humidity, condition icon) | ✅ Working |
 | wttr.in weather (free, no key) | ✅ Working |
@@ -79,6 +81,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | OpenWeatherMap weather (free-tier API key) | ✅ Working |
 | Met.no weather (free, no key, elevation-aware) | ✅ Working |
 | External weather (push your own data via `POST /api/weather`) | ✅ Working |
+| Live weather city verification in web UI | ✅ Working |
 | YouTube subscriber counter (direct + relay) | ✅ Working |
 | Bilibili follower counter (direct) | ✅ Working |
 | Instagram follower counter (direct unofficial API) | ✅ Working |
@@ -518,12 +521,24 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
 
 ### Over-the-Air (OTA)
 
-The web UI provides two separate OTA upload paths under **System**:
+#### Online Updater (recommended — one click, no downloads)
+
+When the update check finds a newer GitHub release (see [Automatic Update Checks](#automatic-update-checks)), the toast includes an **Online Updater** button. Click it to install everything in one step — no manual downloads, no file picking. **The device pulls the release directly from GitHub itself:**
+
+1. **Review** — a panel shows the release notes and confirms both assets (firmware + web UI) are present, then you click **Proceed**.
+2. **Firmware** — the device downloads the new firmware from GitHub over HTTPS, **verifies it by SHA-256**, and flashes itself, with live download and flash progress.
+3. **Reboot** — into the new firmware.
+4. **Web UI** — the device then pulls and applies the matching web UI on its own; the browser tracks progress and finishes with **✓ Update finished** and a **Reload page** button.
+
+
+#### Manual upload
+
+The web UI also provides two separate OTA upload paths under **System** (use these for sideloading a build, or when the device can't reach GitHub):
 
 | Update type | File | When to use |
 |---|---|---|
 | **Firmware Update** | `nextube-fw-v{ver}-ota.bin` | New firmware, bug fixes |
-| **Web UI Update** | `nextube-littlefs-v{ver}.bin` | New web interface, weather sources, theme changes |
+| **Web UI Update** | `nextube-WebUI-v{ver}.zip` (config-safe) or `nextube-littlefs-v{ver}.bin` | New web interface, weather sources, theme changes |
 
 > **Do not** upload `nextube-fw-full.bin` via OTA — it is the merged USB-flash image, not a valid OTA app image.
 
@@ -541,7 +556,7 @@ After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web
 
 The web UI automatically checks for new GitHub releases and shows a **dismissable toast notification** in the bottom-right corner if a newer version is available. The check runs once when the page loads and repeats every 24 hours while the page is open. No data leaves your network beyond the GitHub API query (`api.github.com/repos/MrToast99/Nextube-Remaster/releases/latest`).
 
-The notification tells you which partitions changed (firmware-only, LittleFS-only, or both) so you know which files to download. Dismiss it by clicking **✕** — it won't reappear until the next page load or 24-hour interval.
+The notification tells you which partitions changed (firmware-only, LittleFS-only, or both). Click **Online Updater** on the toast to install it automatically (see [Online Updater](#online-updater-recommended--one-click-no-downloads)), or note which files to download for a manual update. Dismiss it by clicking **✕** — it won't reappear until the next page load or 24-hour interval.
 
 **Clock-face indicator (tube 6):** when the update toast appears, the firmware can also paint a **4-row solid red bar at the physical bottom of tube 6** (the rightmost tube) on every render frame so you know an update is waiting without having the web UI open. This is opt-in — enable it under **Display → Enable clock face update notification**. The bar appears as soon as an update is detected and clears automatically when the toast is dismissed or the option is unchecked. The indicator state is RAM-only and resets on reboot (the update check re-runs on next page load).
 
@@ -772,17 +787,21 @@ Springfield,US
 London,GB
 Sydney,AU
 ```
-`CC` is the two-letter [ISO 3166-1 alpha-2](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2) country code.  
-Open-Meteo and Met.no: the country code is sent as `&countrycode=CC` to the geocoding API, which fetches up to five candidates and picks the first whose `country_code` field matches.  
+`CC` is the two-letter [ISO 3166-1 alpha-2](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2) country code — or the full country name (e.g. `Canada`); both are accepted.  
+Open-Meteo and Met.no: the geocoder fetches up to five candidates by name, and the firmware picks the first whose country matches the `CC` segment — comparing it against both the result's `country_code` **and** its full `country` name.  
 wttr.in and OpenWeatherMap pass the whole string to their own resolvers.
 
-**Multi-word city names:**
+**Multi-word city names** (e.g. *New York*, *Los Angeles*) work as-is on every provider — the firmware percent-encodes the city before each request, so a plain space is fine: `New York,US`.
 
-| Provider | Recommended format |
-|---|---|
-| wttr.in | Use `+` for spaces: `New+York,US`, `Los+Angeles,US` |
-| Open-Meteo, Met.no | Spaces work as-is: `New York,US` |
-| OpenWeatherMap | Spaces work as-is: `New York,US` |
+### Live city verification
+
+The web UI checks your **City** entry **as you type** (and on load / when you change the source), so you know whether it will actually resolve *before* saving:
+
+- **✓ valid** — shows the resolved place and coordinates, e.g. `✓ Ottawa, Ontario, Canada (45.42, -75.70)`.
+- **✗ not found** — prompts you to try the `City,CountryCode` form.
+- **OpenWeatherMap** — verified through OWM's own geocoder using the API key you entered, so a missing or rejected key is reported here too.
+
+It resolves against the same service the firmware uses (the keyless Open-Meteo geocoder for Open-Meteo/Met.no, which also closely matches wttr.in), so "valid here" means "will resolve on the device". The lookup runs in your browser against the providers' public APIs; if it can't reach them it falls back to a basic format check rather than reporting a false failure. Verification is advisory — it never blocks saving.
 
 **OpenWeatherMap extras** (OWM only, not recognised by other providers):
 ```
