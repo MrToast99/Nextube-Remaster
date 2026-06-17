@@ -111,7 +111,7 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 
 | Component | Part | Pins |
 |---|---|---|
-| **MCU** | ESP32-WROVER-E (ESP32-D0WD-V3) | 16MB Flash, 8MB PSRAM |
+| **MCU** | ESP32-WROVER-E (ESP32-D0WD-V3) | 16MB Flash, 8MB PSRAM (only 4MB assignable) |
 | **Displays** | 6× ST7735 80×160 IPS | SPI: SCK=12, MOSI=13, DC=14, RST=27, BL=19(PWM) |
 | | | CS: 33, 26, 21, 0, 5, 18 (left→right) |
 | **LEDs** | 6× WS2812B RGB | Data=GPIO32 |
