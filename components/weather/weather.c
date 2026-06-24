@@ -881,6 +881,58 @@ static bool weather_source_is_external(void)
     return strcmp(src, "external") == 0;
 }
 
+/* Fetch today's forecast high/low from the keyless Open-Meteo daily endpoint,
+ * using the location the active provider just geocoded (weather_get_location).
+ * Provider-agnostic, so the WeatherLive tube-6 panel gets a real daily range no
+ * matter which current-conditions source is selected.  No-op until a location
+ * is known. */
+static void fetch_daily_range(void)
+{
+    float lat, lon;
+    if (!weather_get_location(&lat, &lon)) return;
+
+    char url[256];
+    snprintf(url, sizeof(url),
+             "https://api.open-meteo.com/v1/forecast"
+             "?latitude=%.4f&longitude=%.4f"
+             "&daily=temperature_2m_max,temperature_2m_min"
+             "&current_weather=true"
+             "&forecast_days=1&timezone=auto",
+             (double)lat, (double)lon);
+
+    char *body = http_get(url);
+    if (!body) return;
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root) return;
+
+    cJSON *daily = cJSON_GetObjectItem(root, "daily");
+    cJSON *maxa  = daily ? cJSON_GetObjectItem(daily, "temperature_2m_max") : NULL;
+    cJSON *mina  = daily ? cJSON_GetObjectItem(daily, "temperature_2m_min") : NULL;
+    cJSON *mx    = (maxa && cJSON_IsArray(maxa)) ? cJSON_GetArrayItem(maxa, 0) : NULL;
+    cJSON *mn    = (mina && cJSON_IsArray(mina)) ? cJSON_GetArrayItem(mina, 0) : NULL;
+    if (cJSON_IsNumber(mx) && cJSON_IsNumber(mn)) {
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        s_weather.day_max_c       = (float)mx->valuedouble;
+        s_weather.day_min_c       = (float)mn->valuedouble;
+        s_weather.day_range_valid = true;
+        xSemaphoreGive(s_wx_mutex);
+        ESP_LOGI(TAG, "daily range: %.0f…%.0f °C",
+                 (double)mn->valuedouble, (double)mx->valuedouble);
+    }
+
+    /* Current wind speed (km/h) for the WeatherLive wind animation. */
+    cJSON *cw = cJSON_GetObjectItem(root, "current_weather");
+    cJSON *ws = cw ? cJSON_GetObjectItem(cw, "windspeed") : NULL;
+    if (cJSON_IsNumber(ws)) {
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        s_weather.wind_kph = (float)ws->valuedouble;
+        xSemaphoreGive(s_wx_mutex);
+        ESP_LOGI(TAG, "wind: %.0f km/h", (double)ws->valuedouble);
+    }
+    cJSON_Delete(root);
+}
+
 /* ── Task ───────────────────────────────────────────────────────────── */
 static void fetch_weather(void)
 {
@@ -903,6 +955,10 @@ static void fetch_weather(void)
     } else {
         fetch_wttr(&snap);   /* default: wttr.in, no key needed */
     }
+
+    /* Today's high/low for the WeatherLive tube-6 panel — keyless Open-Meteo,
+     * uses the location the provider above just geocoded. */
+    fetch_daily_range();
 }
 
 static void weather_task(void *arg)

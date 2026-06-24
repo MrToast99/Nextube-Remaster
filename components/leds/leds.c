@@ -131,6 +131,16 @@ void leds_set_brightness(uint8_t pct)
 
 void leds_update(void) { ws2812_write(); }
 
+/* Weather lightning override (see header).  s_leds_dirty forces the static
+ * accent mode to repaint once the flash ends (it otherwise caches its frame). */
+static volatile uint8_t s_weather_flash = 0;
+static volatile bool    s_leds_dirty    = false;
+void leds_weather_flash(uint8_t level)
+{
+    if (level == 0 && s_weather_flash > 0) s_leds_dirty = true;
+    s_weather_flash = level;
+}
+
 void leds_off(void)
 {
     memset(led_data, 0, sizeof(led_data));
@@ -177,6 +187,20 @@ void leds_effect_rainbow(void)
 static void led_task(void *arg)
 {
     while (1) {
+        /* ── Weather lightning override ─────────────────────────────────────
+         * A thunderstorm flash pre-empts every accent mode with a yellow-white
+         * pulse.  Skipped during audio playback (RMT paused for noise). */
+        {
+            uint8_t lv = s_weather_flash;
+            if (lv > 0 && !s_audio_active) {
+                leds_set_brightness(100);
+                leds_set_all(lv, (uint8_t)(248 * lv / 255), (uint8_t)(205 * lv / 255));
+                leds_update();
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+        }
+
         /* ── WLED Sync override ─────────────────────────────────────────────
          * When backlight_mode == BL_MODE_WLED and a UDP Notifier packet has
          * been received, skip local effects and mirror the WLED primary colour.
@@ -286,7 +310,7 @@ static void led_task(void *arg)
              * bursts reduces periodic noise spikes on the 3.3 V rail. */
             static uint8_t last_rgb[LED_COUNT][3];
             static uint8_t last_brt = 0xFF;
-            bool changed = (led_brightness != last_brt);
+            bool changed = (led_brightness != last_brt) || s_leds_dirty;
             if (!changed) {
                 for (int i = 0; i < LED_COUNT && !changed; i++)
                     changed = memcmp(last_rgb[i], backlight_rgb[i], 3) != 0;
@@ -300,6 +324,7 @@ static void led_task(void *arg)
                     memcpy(last_rgb[i], backlight_rgb[i], 3);
                 }
                 last_brt = led_brightness;
+                s_leds_dirty = false;   /* repaint after a weather-flash override */
                 leds_update();
             }
             vTaskDelay(pdMS_TO_TICKS(100));

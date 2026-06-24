@@ -225,26 +225,21 @@ static esp_err_t api_post_weather(httpd_req_t *r)
 static esp_err_t api_get_settings(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char *j = config_to_json();
-    if (!j) return send_json(r, "{}");
-    /* Strip WiFi password — it must never travel over the wire on a GET.
-     * POST /api/settings accepts a new password only when the caller supplies
-     * an explicit non-empty value, so the UI never needs to read it back. */
-    cJSON *root = cJSON_Parse(j);
-    free(j);
-    if (root) {
-        /* Replace the plaintext password with a boolean indicator so the UI
-         * can show a masked placeholder without exposing the actual value. */
-        const cJSON *pw = cJSON_GetObjectItem(root, "password");
-        bool has_pw = cJSON_IsString(pw) && pw->valuestring && pw->valuestring[0] != '\0';
-        cJSON_DeleteItemFromObject(root, "password");
-        cJSON_AddBoolToObject(root, "has_password", has_pw);
-        j = cJSON_PrintUnformatted(root);
-        cJSON_Delete(root);
-    } else {
-        j = NULL;
+    /* config_to_json(false) omits the WiFi password and adds "has_password"
+     * itself — no second cJSON_Parse/Print pass, which both halves the internal-
+     * heap pressure and removes a silent failure mode that used to serve "{}"
+     * (an empty config → the whole UI shows no data) when the re-parse failed
+     * under heap fragmentation. */
+    char *j = config_to_json(false);
+    if (!j) {
+        ESP_LOGE(TAG, "/api/settings: config_to_json FAILED — internal heap free=%u largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "config serialize failed"), ESP_FAIL;
     }
-    esp_err_t ret = send_json(r, j ? j : "{}");
+    ESP_LOGI(TAG, "/api/settings: serving %u B", (unsigned)strlen(j));
+    esp_err_t ret = send_json(r, j);
     free(j);
     return ret;
 }
@@ -255,7 +250,7 @@ static esp_err_t api_get_settings(httpd_req_t *r)
 static esp_err_t api_backup(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char *j = config_to_json();
+    char *j = config_to_json(true);   /* backup includes the WiFi password */
     esp_err_t ret = send_json(r, j ? j : "{}");
     free(j);
     return ret;
@@ -300,10 +295,22 @@ static void schedule_wifi_reconnect(void)
 static esp_err_t api_post_settings(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
+    /* Back the WeatherLive realtime animation off for the duration of this
+     * save: config_set_json() writes NVS (flash) and this handler runs on the
+     * httpd task, which shares core 1 with the higher-priority display task.
+     * Without this, WeatherLive's every-tick render starves the save and it can
+     * time out.  Self-expiring, so a crash/early-return can't wedge the clock. */
+    display_busy_hint(3000);
     /* Validate on the signed content_len first (catches negative/absent header),
-     * then widen to size_t so all subsequent arithmetic is unsigned. */
-    if (r->content_len <= 0 || r->content_len > 4096)
+     * then widen to size_t so all subsequent arithmetic is unsigned.  The cap is
+     * 8192 (matches the NVS backup-blob limit) — the full settings payload has
+     * grown well past 4 KB as panels/fields were added, and a too-low cap here
+     * silently 400s every save (config never persists). */
+    if (r->content_len <= 0 || r->content_len > 8192) {
+        ESP_LOGE(TAG, "/api/settings POST rejected: content_len=%d (limit 8192)",
+                 (int)r->content_len);
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad length"), ESP_FAIL;
+    }
     size_t len = (size_t)r->content_len;
     char *buf = malloc((size_t)len + 1);
     if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
@@ -352,6 +359,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
 
     bool ok = config_set_json(buf, len);
     free(buf);
+    display_config_changed();  /* NVS write done — lift busy backoff + force re-render of live config changes */
 
     uint8_t new_brightness;
     bool    new_audio_enabled;
@@ -913,6 +921,20 @@ static void ota_suspend_tasks(void)
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
+static void webui_resume_tasks(void)
+{
+    static const char *const k_tasks[] = {
+        "weather", "subscribers", "ntp", "sht30", "leds", "mic", "audio_play", NULL,
+    };
+    for (int i = 0; k_tasks[i]; i++) {
+        TaskHandle_t h = xTaskGetHandle(k_tasks[i]);
+        if (h) {
+            vTaskResume(h);
+            ESP_LOGI(TAG, "[webui] resumed '%s'", k_tasks[i]);
+        }
+    }
+}
+
 /* ── OTA double-flash guard + clean deferred reboot ────────────────────────
  * Two protections against an OTA being applied twice (observed when the
  * browser tab is backgrounded during a flash):
@@ -1347,12 +1369,34 @@ static void hp_mkdir_p(const char *path)
     }
 }
 
+/* ── Cached gzipped app shell (index.html.gz) in PSRAM ──────────────────────
+ * The shell is the largest, most-requested asset; reading it from LittleFS on
+ * every request is the dominant httpd CPU cost.  Load it once into a PSRAM blob
+ * (shell_cache_load(), lazily in serve_static) and serve it from memory with a
+ * fixed Content-Length — no chunked encoding, no per-chunk yield, no repeat
+ * flash reads.  shell_cache_flush() drops the blob so the next request re-reads
+ * the file; it is called by hp_drop_stale_index() after every WebUI patch /
+ * pull so a freshly-installed shell is picked up without a reboot. */
+static uint8_t      *s_shell_buf   = NULL;
+static size_t        s_shell_len   = 0;
+static bool          s_shell_gz    = false;
+/* Set from any task (e.g. webui_pull_task) to invalidate the cache.  The actual
+ * free()+reload is DEFERRED to the next serve_static() call so it always happens
+ * on the httpd task — never freeing a buffer another task might be sending. */
+static volatile bool s_shell_stale = false;
+
+static void shell_cache_flush(void) { s_shell_stale = true; }
+
 /* After a WebUI patch, drop a stale uncompressed index.html if the new
  * gzip-only shell (index.html.gz) is now present.  serve_static prefers the
  * .gz, so a leftover plain index.html from a pre-gzip build is never served —
  * it just wastes ~308 KB of LittleFS.  Called by both extraction paths. */
 static void hp_drop_stale_index(void)
 {
+    /* A new shell was just written to LittleFS — invalidate the PSRAM copy so
+     * the next page load serves the updated shell instead of the old cached one. */
+    shell_cache_flush();
+
     FILE *gz = fopen("/spiffs/web/index.html.gz", "rb");
     if (!gz) return;                 /* no gzip shell present — nothing to do */
     fclose(gz);
@@ -1562,7 +1606,8 @@ static bool sha256_verify(const uint8_t *buf, size_t len, const char *expected_h
 }
 
 #define OTA_PULL_TIMEOUT_MS 120000
-#define HTTP_UA "NextubeRemaster/" FW_VERSION_STR " github.com/MrToast99/Nextube-Remaster-Private"
+#define HTTP_UA_BASE "NextubeRemaster/" FW_VERSION_STR " github.com/"
+#define HTTP_UA_REPO_DEFAULT "MrToast99/Nextube-Remaster"
 
 static void ota_pull_task(void *arg)
 {
@@ -1596,10 +1641,13 @@ static void ota_pull_task(void *arg)
     tls_sem_take();
     ESP_LOGD(TAG, "[ota] TLS semaphore acquired");
 
+    char s_ota_ua[128];
+    { const char *r = config_get()->update_repo;
+      snprintf(s_ota_ua, sizeof(s_ota_ua), HTTP_UA_BASE "%s", r[0] ? r : HTTP_UA_REPO_DEFAULT); }
     esp_http_client_config_t hcfg = {
         .url                   = s_pull.url,
         .timeout_ms            = OTA_PULL_TIMEOUT_MS,
-        .user_agent            = HTTP_UA,
+        .user_agent            = s_ota_ua,
         .crt_bundle_attach     = esp_crt_bundle_attach,
         .max_redirection_count = 3,
         .buffer_size           = 16384,   /* Azure Blob returns many x-ms-* headers */
@@ -1720,9 +1768,17 @@ static void ota_pull_task(void *arg)
     }
     ESP_LOGI(TAG, "[ota] SHA-256 OK%s", s_pull.sha256[0] ? "" : " (no hash provided, skipped)");
 
+    /* Hold the DOWNLOADING state at 100% so the UI has at least two poll
+     * cycles to show the download bar full before the phase transition.  */
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
     s_pull.state    = OTA_PULL_FLASHING;
     s_pull.progress = 60;
     ESP_LOGI(TAG, "[ota] state → FLASHING");
+
+    /* Let the UI catch the FLASHING state and flip its step indicator
+     * before httpd load increases during flash erase/write cycles.      */
+    vTaskDelay(pdMS_TO_TICKS(1500));
 
     display_show_wait();
     ota_suspend_tasks();
@@ -1944,6 +2000,7 @@ static void webui_pull_task(void *arg)
         ESP_LOGD(TAG, "[webui] sha256: %.16s…", s_webui.sha256);
 
     s_webui.state = WEBUI_RUNNING;
+    bool tasks_suspended = false;
 
     /* TLS certificate validation requires a correct wall-clock.  After an OTA
      * reboot the device may not have synced yet (dead RTC battery).  Wait up
@@ -1963,14 +2020,23 @@ static void webui_pull_task(void *arg)
     }
     ESP_LOGI(TAG, "[webui] time valid — heap free %lu B", (unsigned long)esp_get_free_heap_size());
 
+    /* Suspend competing background tasks for the duration of the download and
+     * extraction — reduces network/flash contention and prevents WDT triggers
+     * during the long LittleFS write phase.  Resumed at all exit points.    */
+    ota_suspend_tasks();
+    tasks_suspended = true;
+
     ESP_LOGD(TAG, "[webui] waiting for TLS semaphore…");
     tls_sem_take();
     ESP_LOGD(TAG, "[webui] TLS semaphore acquired");
 
+    char s_webui_ua[128];
+    { const char *r = config_get()->update_repo;
+      snprintf(s_webui_ua, sizeof(s_webui_ua), HTTP_UA_BASE "%s", r[0] ? r : HTTP_UA_REPO_DEFAULT); }
     esp_http_client_config_t hcfg = {
         .url                   = s_webui.url,
         .timeout_ms            = OTA_PULL_TIMEOUT_MS,
-        .user_agent            = HTTP_UA,
+        .user_agent            = s_webui_ua,
         .crt_bundle_attach     = esp_crt_bundle_attach,
         .max_redirection_count = 3,
         .buffer_size           = 16384,
@@ -2129,6 +2195,19 @@ static void webui_pull_task(void *arg)
             snprintf(s_webui.error, sizeof(s_webui.error), "%d file(s) failed to write", failed);
     }
 
+    /* Erase the stored URL from NVS so neither a future reboot nor a stray
+     * browser call to api_webui_pull_auto re-downloads an already-applied
+     * WebUI patch.                                                          */
+    {
+        nvs_handle_t nvs_h;
+        if (nvs_open("nextube_sec", NVS_READWRITE, &nvs_h) == ESP_OK) {
+            nvs_erase_key(nvs_h, "webui_url");
+            nvs_erase_key(nvs_h, "webui_sha256");
+            nvs_commit(nvs_h);
+            nvs_close(nvs_h);
+        }
+    }
+    if (tasks_suspended) webui_resume_tasks();
     s_webui.state = WEBUI_DONE;
     s_ota_active  = false;
     ESP_LOGI(TAG, "[webui] state → DONE");
@@ -2139,6 +2218,7 @@ webui_err_notls:
     tls_sem_give();
 webui_err:
     ESP_LOGE(TAG, "[webui] FAILED: %s", s_webui.error);
+    if (tasks_suspended) webui_resume_tasks();
     s_webui.state = WEBUI_ERROR;
     s_ota_active  = false;
     vTaskDelete(NULL);
@@ -2170,6 +2250,11 @@ static esp_err_t api_webui_pull_auto(httpd_req_t *r)
         httpd_resp_set_status(r, "409 Conflict");
         return send_json(r, "{\"error\":\"ota_in_progress\"}");
     }
+    /* Device-driven pull already finished this boot — confirm done without
+     * re-spawning the task (NVS webui_url may still be present).           */
+    if (s_webui.state == WEBUI_DONE)
+        return send_json(r, "{\"status\":\"done\"}");
+
     if (!s_post_ota_auth) s_post_ota_auth = consume_post_ota_flag();
     if (!s_post_ota_auth) { REQUIRE_AUTH(r); }
 
@@ -2356,14 +2441,16 @@ static esp_err_t api_file_ls(httpd_req_t *r)
                          "%s{\"name\":\"%s\",\"type\":\"dir\"}",
                          first ? "" : ",", ename);
         } else {
-            /* stat() the file for its size — use full SPIFFS path. */
+            /* stat() the file for size + mtime.  mtime requires
+             * CONFIG_LITTLEFS_MTIME=y; returns 0 for pre-existing files. */
             char fp[384];
             snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
             struct stat st;
-            long sz = (stat(fp, &st) == 0) ? (long)st.st_size : 0;
+            long sz = 0, mt = 0;
+            if (stat(fp, &st) == 0) { sz = (long)st.st_size; mt = (long)st.st_mtime; }
             n = snprintf(chunk, sizeof(chunk),
-                         "%s{\"name\":\"%s\",\"type\":\"file\",\"size\":%ld}",
-                         first ? "" : ",", ename, sz);
+                         "%s{\"name\":\"%s\",\"type\":\"file\",\"size\":%ld,\"mtime\":%ld}",
+                         first ? "" : ",", ename, sz, mt);
         }
 
         if (n > 0 && n < (int)sizeof(chunk))
@@ -2387,6 +2474,13 @@ static esp_err_t api_themes(httpd_req_t *r)
 #define THEME_NAME_MAX  64
     char names[MAX_THEMES][THEME_NAME_MAX];
     int  count = 0;
+
+    /* Built-in procedural themes — drawn from primitives in the firmware, so
+     * they have no /images/themes/ asset folder and must be injected here.
+     * "WeatherLive Demo" runs an accelerated day/night + auto-cycles every
+     * weather condition for showcasing. */
+    strlcpy(names[count++], "WeatherLive", THEME_NAME_MAX);
+    strlcpy(names[count++], "WeatherLive Demo", THEME_NAME_MAX);
 
     DIR *dp = opendir("/spiffs/images/themes");
     if (dp) {
@@ -2810,6 +2904,52 @@ static esp_err_t api_update_notify(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/cx_image?tube=5|6  — body = a JPG, exactly 80×160 px.
+ * Pushes the image to the 24H_CX tube-5/6 "Pushed image" info panel so an
+ * external script can drive that tube (asset/base themes only — WeatherLive
+ * renders its own panels procedurally).  The image shows whenever that tube's
+ * Pushed-image panel is the active rotation slot; it persists until the next
+ * push or reboot.  tube=6 = rightmost (LCD 5); tube=5 = 2nd-from-right (LCD 4,
+ * only visible in dual-panel mode). */
+#define CX_IMAGE_MAX_BYTES  (96 * 1024)   /* generous cap for an 80×160 JPG */
+static esp_err_t api_cx_image(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+
+    /* Resolve target tube from ?tube=5|6 → which (0 = tube5/LCD4, 1 = tube6/LCD5). */
+    int which = -1;
+    char q[32], v[8];
+    if (httpd_req_get_url_query_str(r, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "tube", v, sizeof(v)) == ESP_OK) {
+        if      (strcmp(v, "6") == 0) which = 1;
+        else if (strcmp(v, "5") == 0) which = 0;
+    }
+    if (which < 0)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "tube=5 or tube=6 required"), ESP_FAIL;
+
+    int len = (int)r->content_len;
+    if (len <= 0 || len > CX_IMAGE_MAX_BYTES)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "JPG body required (1..98304 B)"), ESP_FAIL;
+
+    uint8_t *buf = (uint8_t *)heap_caps_malloc((size_t)len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    int rx = 0;
+    while (rx < len) {
+        int n = httpd_req_recv(r, (char *)buf + rx, (size_t)(len - rx));
+        if (n <= 0) { heap_caps_free(buf); return ESP_FAIL; }
+        rx += n;
+    }
+
+    bool ok = display_cx_push_image(which, buf, (size_t)len);
+    heap_caps_free(buf);
+    if (!ok)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "decode failed — image must be an 80x160 JPEG"), ESP_FAIL;
+    ESP_LOGI(TAG, "cx_image: pushed %d B to tube %d", len, which ? 6 : 5);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* ── Hardware debug API ────────────────────────────────────────────── */
 /* GET /api/debug/adc
  * Reads one raw 12-bit ADC sample from the currently configured mic channel.
@@ -3044,56 +3184,69 @@ static esp_err_t api_debug_micframe(httpd_req_t *r)
 
 /* GET /api/debug/tasks — per-task CPU accounting (FreeRTOS runtime stats).
  *
- * Returns every task's priority, core, stack high-water mark, total runtime
- * and lifetime CPU share.  Built to diagnose IDLE-starvation task-WDT
- * warnings: reboot, reproduce the load for ~60 s, then call this — the task
- * whose pct dwarfs its expected share is the hog.  pct is per-chip (two
- * cores = 200 percentage points total; IDLE0+IDLE1 absorb the slack). */
+ * `pct` is an **instantaneous** share measured over a short window inside the
+ * handler: two uxTaskGetSystemState() snapshots ~250 ms apart, diffed per task
+ * (matched by handle) against the wall-clock window.  This is robust to the
+ * 32-bit runtime-counter wrap (~71 min) — an earlier "lifetime" pct (run/total)
+ * produced garbage >100% once the counters wrapped.  pct is per-chip: both
+ * cores accrue, so the sum across all tasks ≈ 200% (IDLE0+IDLE1 absorb slack).
+ * `run_us` is still the raw 32-bit lifetime counter (µs) for manual diffing. */
 static esp_err_t api_debug_tasks(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
 
-    UBaseType_t   n  = uxTaskGetNumberOfTasks();
-    TaskStatus_t *ts = malloc(n * sizeof(TaskStatus_t));
-    if (!ts) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    UBaseType_t cap_n = uxTaskGetNumberOfTasks() + 8;   /* +headroom for spawns */
+    TaskStatus_t *ts1 = malloc(cap_n * sizeof(TaskStatus_t));
+    TaskStatus_t *ts2 = malloc(cap_n * sizeof(TaskStatus_t));
+    if (!ts1 || !ts2) { free(ts1); free(ts2);
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
 
-    uint32_t total_rt = 0;
-    n = uxTaskGetSystemState(ts, n, &total_rt);
-    if (n == 0 || total_rt == 0) {
-        free(ts);
+    /* Snapshot, wait a fixed window, snapshot again. */
+    int64_t     t1 = esp_timer_get_time();
+    UBaseType_t n1 = uxTaskGetSystemState(ts1, cap_n, NULL);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    int64_t     t2 = esp_timer_get_time();
+    UBaseType_t n2 = uxTaskGetSystemState(ts2, cap_n, NULL);
+    int64_t     wall = t2 - t1;
+    if (n2 == 0 || wall <= 0) { free(ts1); free(ts2);
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "runtime stats unavailable"), ESP_FAIL;
-    }
+                                   "runtime stats unavailable"), ESP_FAIL; }
 
     /* ~110 B per task worst case + wrapper */
-    size_t cap = (size_t)n * 120 + 64;
+    size_t cap = (size_t)n2 * 120 + 96;
     char  *out = malloc(cap);
-    if (!out) { free(ts); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
+    if (!out) { free(ts1); free(ts2);
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
 
     static const char *k_state[] = { "run", "ready", "blocked", "suspended", "deleted", "invalid" };
-    size_t off = (size_t)snprintf(out, cap, "{\"total_runtime_us\":%u,\"tasks\":[",
-                                  (unsigned)total_rt);
-    for (UBaseType_t i = 0; i < n && off < cap - 2; i++) {
-        /* Lifetime CPU share in percent ×10 (one decimal, integer math).
-         * total_rt is single-core time base; both cores accrue against it,
-         * so the sum across all tasks approaches 200.0. */
-        uint32_t pct10 = (uint32_t)(((uint64_t)ts[i].ulRunTimeCounter * 1000) / total_rt);
-        int state = (int)ts[i].eCurrentState;
+    size_t off = (size_t)snprintf(out, cap, "{\"window_us\":%lld,\"tasks\":[",
+                                  (long long)wall);
+    for (UBaseType_t i = 0; i < n2 && off < cap - 2; i++) {
+        /* Match this task's previous counter by handle (robust to reordering /
+         * task set changes), then diff.  Unsigned 32-bit subtraction is correct
+         * across a single counter wrap; a 250 ms window can never itself wrap. */
+        uint32_t prev = 0; bool found = false;
+        for (UBaseType_t j = 0; j < n1; j++) {
+            if (ts1[j].xHandle == ts2[i].xHandle) { prev = ts1[j].ulRunTimeCounter; found = true; break; }
+        }
+        uint32_t delta = found ? (ts2[i].ulRunTimeCounter - prev) : 0u;
+        uint32_t pct10 = (uint32_t)(((uint64_t)delta * 1000) / (uint64_t)wall);
+        int state = (int)ts2[i].eCurrentState;
         if (state < 0 || state > 5) state = 5;
         off += (size_t)snprintf(out + off, cap - off,
             "%s{\"name\":\"%s\",\"prio\":%u,\"core\":%d,\"state\":\"%s\","
             "\"stack_hwm\":%u,\"run_us\":%u,\"pct\":%u.%u}",
             i ? "," : "",
-            ts[i].pcTaskName,
-            (unsigned)ts[i].uxCurrentPriority,
-            (int)ts[i].xCoreID == INT32_MAX ? -1 : (int)ts[i].xCoreID,
+            ts2[i].pcTaskName,
+            (unsigned)ts2[i].uxCurrentPriority,
+            (int)ts2[i].xCoreID == INT32_MAX ? -1 : (int)ts2[i].xCoreID,
             k_state[state],
-            (unsigned)ts[i].usStackHighWaterMark,
-            (unsigned)ts[i].ulRunTimeCounter,
+            (unsigned)ts2[i].usStackHighWaterMark,
+            (unsigned)ts2[i].ulRunTimeCounter,
             (unsigned)(pct10 / 10), (unsigned)(pct10 % 10));
     }
     off += (size_t)snprintf(out + off, cap - off, "]}");
-    free(ts);
+    free(ts1); free(ts2);
 
     httpd_resp_set_type(r, "application/json");
     esp_err_t err = httpd_resp_send(r, out, (ssize_t)off);
@@ -3217,22 +3370,93 @@ static FILE *open_gz_or_plain(const char *path, bool *gz)
     return fopen(path, "rb");
 }
 
+/* Lazily load the app shell (index.html.gz, else index.html) into a PSRAM blob.
+ * Returns true when the cache is populated (already-loaded counts).  On any
+ * failure the cache stays empty and serve_static streams from flash instead.
+ * Invalidated by shell_cache_flush() after a WebUI update (hp_drop_stale_index). */
+static bool shell_cache_load(void)
+{
+    if (s_shell_buf) return true;
+    bool gz = false;
+    FILE *f = open_gz_or_plain("/spiffs/web/index.html", &gz);
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 512 * 1024) { fclose(f); return false; }   /* sanity cap */
+    uint8_t *buf = heap_caps_malloc((size_t)sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) { fclose(f); return false; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (rd != (size_t)sz) { free(buf); return false; }
+    s_shell_buf = buf;
+    s_shell_len = (size_t)sz;
+    s_shell_gz  = gz;
+    ESP_LOGI(TAG, "[shell] cached %s index shell in PSRAM: %u B",
+             gz ? "gzip" : "plain", (unsigned)s_shell_len);
+    return true;
+}
+
 static esp_err_t serve_static(httpd_req_t *r)
 {
     const char *uri = r->uri;
+
+    /* The root path resolves to the app shell. */
+    bool want_shell = (strcmp(uri, "/") == 0);
+
     char fp[600];
-    if (strcmp(uri,"/")==0) snprintf(fp,sizeof(fp),"/spiffs/web/index.html");
-    else snprintf(fp,sizeof(fp),"/spiffs/web%s",uri);
-    if (strstr(fp,"..")) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad path"), ESP_FAIL;
+    snprintf(fp, sizeof(fp), "/spiffs/web%s", want_shell ? "/index.html" : uri);
+    if (strstr(fp, "..")) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad path"), ESP_FAIL;
 
     /* Content-Type comes from the logical name, never the .gz suffix. */
     const char *ctype = content_type(fp);
+    bool  gz = false;
+    FILE *f  = NULL;
 
-    bool gz = false;
-    FILE *f = open_gz_or_plain(fp, &gz);
-    if (!f) {
-        /* SPA fallback to the app shell (also gzip-aware). */
-        f = open_gz_or_plain("/spiffs/web/index.html", &gz);
+    if (!want_shell) {
+        f = open_gz_or_plain(fp, &gz);
+        if (!f) {
+            /* The file doesn't exist.  Only fall back to the SPA app shell for
+             * route-like paths (no file extension, e.g. "/settings").  Anything
+             * that looks like a missing ASSET (has an extension — favicon.ico,
+             * *.png/js/css/map/json …) gets a real 404 so the browser caches the
+             * miss.  Without this, /favicon.ico — requested on essentially every
+             * navigation — fell through to serving the entire shell each time,
+             * dominating httpd CPU even with no real page load. */
+            const char *base = strrchr(uri, '/');
+            base = base ? base + 1 : uri;
+            if (strchr(base, '.') != NULL) {
+                /* TEMP diagnostic: log every missing asset (favicon.ico, stray
+                 * *.png/js/css/map …) so we can add the file or stop the request.
+                 * Remove once the 404s are cleaned up. */
+                ESP_LOGW(TAG, "serve_static: missing asset → 404: '%s'", uri);
+                return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found"), ESP_FAIL;
+            }
+            /* TEMP diagnostic: extension-less path with no file → SPA shell. */
+            ESP_LOGW(TAG, "serve_static: missing route → shell fallback: '%s'", uri);
+            want_shell = true;          /* extension-less route → shell */
+        }
+    }
+
+    /* App shell: serve from the PSRAM cache in a single send (Content-Length set
+     * by httpd, no chunked encoding, no per-chunk yield, no flash reads). */
+    if (want_shell) {
+        /* Honour a deferred invalidation here, on the httpd task, so the free()
+         * never races a send in flight (shell_cache_flush() only flips the flag). */
+        if (s_shell_stale) {
+            s_shell_stale = false;
+            if (s_shell_buf) { free(s_shell_buf); s_shell_buf = NULL; }
+            s_shell_len = 0;
+            s_shell_gz  = false;
+        }
+        if (shell_cache_load()) {
+            httpd_resp_set_type(r, "text/html");
+            if (s_shell_gz) httpd_resp_set_hdr(r, "Content-Encoding", "gzip");
+            httpd_resp_set_hdr(r, "Cache-Control", "max-age=3600");
+            return httpd_resp_send(r, (const char *)s_shell_buf, (ssize_t)s_shell_len);
+        }
+        /* Cache load failed (OOM / file missing) — stream from flash as below. */
+        if (!f) f = open_gz_or_plain("/spiffs/web/index.html", &gz);
         ctype = "text/html";
     }
     if (!f) return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found"), ESP_FAIL;
@@ -3241,20 +3465,12 @@ static esp_err_t serve_static(httpd_req_t *r)
     if (gz) httpd_resp_set_hdr(r, "Content-Encoding", "gzip");
     httpd_resp_set_hdr(r, "Cache-Control", "max-age=3600");
 
-    /* Use a larger read buffer to cut the number of flash-read iterations —
-     * fread() on LittleFS is a synchronous SPI operation that never yields to
-     * FreeRTOS, and httpd_resp_send_chunk() returns without blocking as long as
-     * the lwIP TCP send buffer has room.  With a 1 KB buffer and a 300+ KB file
-     * like index.html the tight fread→send loop holds CPU 0 for ~30 s, starving
-     * IDLE0 and triggering the task WDT.
-     *
-     * Two-pronged fix:
-     *   1. 8 KB buffer — reduces loop iterations ~8× vs 1 KB.
-     *   2. vTaskDelay(1) after each chunk — blocks httpd for 1 tick so the
-     *      scheduler can run IDLE0.  taskYIELD() is insufficient: it re-queues
-     *      the caller at the back of its own priority level; IDLE (pri-0) only
-     *      runs when NO task of priority ≥ 1 is ready, which never happens
-     *      while httpd (pri-5) is continuously re-entering its ready queue. */
+    /* Stream non-shell files (and the rare cache-miss shell fallback) from flash.
+     * fread() on LittleFS is a synchronous SPI op that never yields, so an 8 KB
+     * buffer + a 1-tick yield per chunk keeps httpd from starving IDLE and
+     * tripping the task WDT on larger files.  taskYIELD() is insufficient: IDLE
+     * (pri-0) only runs when no pri-≥1 task is ready, which never happens while
+     * httpd (pri-5) keeps re-entering its own ready queue. */
     char *buf = malloc(8192);
     if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
     size_t rd;
@@ -3282,6 +3498,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/reboot",          api_reboot),
     R(HTTP_POST, "/api/audio/play",      api_audio_play),
     R(HTTP_POST, "/api/weather",         api_post_weather),
+    R(HTTP_POST, "/api/cx_image",        api_cx_image),
     R(HTTP_GET,  "/api/status",          api_status),
     R(HTTP_POST, "/api/update_firmware", api_ota),
     R(HTTP_POST, "/api/update_fs",          api_fs_ota),
@@ -3478,15 +3695,15 @@ void web_server_start(void)
      * setsockopt — that override remains in api_ota(). */
     cfg.recv_wait_timeout = 10;
     cfg.send_wait_timeout = 10;
-    /* Pin httpd to Core 1.  By default the task has no affinity and lands on
-     * a random core per boot.  Core 0 runs WiFi/lwIP plus — during Spectrum
-     * mode — the 8 kHz mic ADC sampling in the esp_timer task, which alone
-     * measures ~78% of the core (see /api/debug/tasks).  When httpd happened
-     * to land on Core 0, active web-UI use (30–50% CPU serving the 278 KB
-     * index.html + API calls) pushed the core past 100%, starving IDLE0 and
-     * firing the task WDT.  Core 1 carries only the display task (~20%), so
-     * httpd always fits there. */
-    cfg.core_id = 1;
+    /* Pin httpd to Core 0, off the display task.  Core 1 carries the display
+     * task, which the WeatherLive realtime theme keeps hot every tick (~full
+     * core while animating) — sharing that core starved httpd (the original
+     * 61%-with-stutter symptom).  Core 0 runs WiFi/lwIP (and, only in Spectrum
+     * mode, the mic ADC), so httpd has headroom there for normal web use.
+     * The PSRAM-cached shell + favicon 404 fix cut httpd's per-request cost, and
+     * the cooperative park / display_busy_hint backoff cover the moments both
+     * cores are loaded, so Core 0 is the right home in the common case. */
+    cfg.core_id = 0;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");

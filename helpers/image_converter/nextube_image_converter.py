@@ -301,7 +301,7 @@ input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--
     <div class="logo">Nextube<br>Remaster</div>
     <div>
       <h1>IMAGE <span>CONVERTER</span></h1>
-      <div class="subtitle">// JPEG OUTPUT · INTERACTIVE CROP · BULK · .ZIPPER IMPORT</div>
+      <div class="subtitle">// JPEG · PNG OUTPUT · INTERACTIVE CROP · BULK · .ZIPPER IMPORT</div>
     </div>
   </header>
 
@@ -322,6 +322,12 @@ input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--
         <div class="radio-btn"><input type="radio" name="cropmode" id="cm-manual" value="manual" checked><label for="cm-manual">Manual<br><span style="color:var(--dim);font-size:.55rem">drag box</span></label></div>
         <div class="radio-btn"><input type="radio" name="cropmode" id="cm-auto"   value="auto"><label for="cm-auto">Auto<br><span style="color:var(--dim);font-size:.55rem">center</span></label></div>
         <div class="radio-btn"><input type="radio" name="cropmode" id="cm-stretch" value="stretch"><label for="cm-stretch">Stretch<br><span style="color:var(--dim);font-size:.55rem">fill</span></label></div>
+      </div>
+
+      <lbl>Output Format</lbl>
+      <div class="radio-group">
+        <div class="radio-btn"><input type="radio" name="outfmt" id="fmt-jpeg" value="jpeg" checked><label for="fmt-jpeg">JPEG<br><span style="color:var(--dim);font-size:.55rem">themes</span></label></div>
+        <div class="radio-btn"><input type="radio" name="outfmt" id="fmt-png"  value="png"><label for="fmt-png">PNG<br><span style="color:var(--dim);font-size:.55rem">system icons</span></label></div>
       </div>
 
       <input type="file" id="folder-input" webkitdirectory accept="image/*" style="display:none">
@@ -496,7 +502,7 @@ const zipperPanel  = document.getElementById('zipper-panel');
 function getMode()    { return document.querySelector('input[name=cropmode]:checked').value; }
 function getOutW()    { return parseInt(document.getElementById('width').value)||80; }
 function getOutH()    { return parseInt(document.getElementById('height').value)||160; }
-function getFmt()     { return 'jpeg'; }
+function getFmt()     { return document.querySelector('input[name=outfmt]:checked').value; }
 function formatBytes(b){ return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'; }
 
 // ═══════════════════════════════════════════════════════════════

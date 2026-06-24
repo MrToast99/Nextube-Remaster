@@ -64,6 +64,17 @@ typedef struct {
     bool             backlight_on;
     uint8_t          backlight_rgb[6][3];
     uint8_t          led_effect_speed;  /* Breath / Rainbow animation speed 1 (slow) – 10 (fast); default 5 */
+    bool             led_weather_override; /* let weather events (e.g. thunderstorm lightning) flash the accent LEDs */
+    bool             wlive_animate;        /* WeatherLive: true = realtime animation, false = static (redraw only on clock change) */
+    /* Custom clock face — active when clock_face == "custom".  Ignored for
+     * asset-theme clock faces (clock_face == "").                          */
+    char             clock_face[16];      /* "" = use theme, "custom" = Custom clock face */
+    char             custom_bg[32];       /* background: "WeatherLive" = animated sky, else theme name */
+    uint8_t          custom_font_color[3];   /* info-panel / label text RGB */
+    uint8_t          custom_glyph_color[3];  /* clock digit glyph RGB */
+    bool             custom_shadow;          /* shadow on/off for glyphs and text */
+    uint8_t          custom_shadow_color[3]; /* shadow RGB (used when custom_shadow=true) */
+    char             custom_font[64];        /* TTF filename in /spiffs/fonts/; "" = logisoso (u8g2 fallback) */
     uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
     uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
     bool             spectrum_lcd_wled;     /* true = LCD bars follow the WLED primary colour
@@ -106,6 +117,7 @@ typedef struct {
     float            weather_ext_lon;
     bool             weather_ext_loc_valid;
     char             temp_format[12];    /* "Celsius" or "Fahrenheit" */
+    char             wind_unit[8];       /* "km/h", "mph", or "m/s" */
 
     /* YouTube / Bilibili */
     char             video_site[16];     /* "youtube" or "bilibili" */
@@ -206,6 +218,8 @@ typedef struct {
     bool             weather_panel0_en;  /* true = show temperature panel    */
     bool             weather_panel1_en;  /* true = show humidity panel       */
     bool             weather_panel2_en;  /* true = show sunrise/sunset panel */
+    bool             weather_panel3_en;  /* true = show wind speed panel     */
+    bool             weather_panel4_en;  /* true = show daily Hi/Lo panel    */
 
     /* Mode Rotation – auto-cycle through enabled modes on a timer.
      * When rotation_enabled is false the mode never changes automatically;
@@ -256,8 +270,11 @@ typedef struct {
     bool             tube6_panel_weather;    /* Weather icon — shows current condition as full-tube JPEG */
     bool             tube6_panel_weekdate;   /* Day name (top half) + MMDD date (bottom half) */
     bool             tube6_panel_ht;         /* SHT30 temp (top half) + humidity (bottom half) */
-    bool             tube6_panel_temp;       /* Outdoor temperature and humidity (OpenWeatherMap) */
+    bool             tube6_panel_temp;       /* Outdoor temperature + today's forecast Hi/Lo */
     bool             tube6_panel_sunrise;    /* Sunrise & sunset times (U8g2 icon + local time) */
+    bool             tube6_panel_push;       /* Externally-pushed JPG (POST /api/cx_image?tube=6) */
+    bool             tube6_panel_humidity;   /* Outdoor humidity (drop symbol + value) */
+    bool             tube6_panel_wind;        /* Wind speed (wind symbol + km/h value) */
     uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
     /* Dual info-panel mode (24H Custom): when true the colon is dropped and an
      * INDEPENDENT info panel is shown on BOTH tube 5 (2nd-from-right, LCD index
@@ -271,6 +288,10 @@ typedef struct {
     bool             tube5_panel_ht;
     bool             tube5_panel_temp;
     bool             tube5_panel_sunrise;
+    bool             tube5_panel_push;       /* Externally-pushed JPG (POST /api/cx_image?tube=5) */
+    bool             tube5_panel_humidity;   /* Outdoor humidity (drop symbol + value) */
+    bool             tube5_panel_wind;        /* Wind speed (wind symbol + km/h value) */
+    char             update_repo[64];
 } nextube_config_t;
 
 /** Initialise config module – loads from flash or sets defaults. */
@@ -302,8 +323,12 @@ const nextube_config_t *config_get(void);
 /** Update config from a JSON string, save to flash, and broadcast. */
 bool config_set_json(const char *json, size_t len);
 
-/** Serialise current config to a heap-allocated JSON string (caller frees). */
-char *config_to_json(void);
+/** Serialise current config to a heap-allocated JSON string (caller frees).
+ *  include_password: true  → includes the WiFi password (for flash save / backup).
+ *                    false → omits it and adds a "has_password" bool instead
+ *                            (for GET /api/settings, so the secret never leaves
+ *                            the device and no second parse is needed). */
+char *config_to_json(bool include_password);
 
 /** Reset to factory defaults and save. */
 void config_reset(void);

@@ -181,6 +181,36 @@ void display_task_start(void);
  *  Safe to call from any task after display_task_start(). */
 void display_show_wait(void);
 
+/** Push an externally-supplied JPG to a 24H_CX info-panel tube (asset themes).
+ *  Decodes the JPG (which must be exactly LCD_WIDTH×LCD_HEIGHT = 80×160) to
+ *  RGB565 in a per-tube PSRAM buffer; render_cx_panel() blits it whenever that
+ *  tube's "Pushed image" panel is the active rotation slot.
+ *  which: 0 = tube 5 (LCD 4, dual mode), 1 = tube 6 (LCD 5, rightmost).
+ *  Returns true on a successful decode.  Safe to call from the httpd task. */
+bool display_cx_push_image(int which, const uint8_t *jpg, size_t len);
+
+/** Hint that a CPU/flash-bound operation is running for the next `ms`
+ *  milliseconds (e.g. a config save).  While active, the WeatherLive realtime
+ *  animation — the only theme that re-renders every tick — skips its frames so
+ *  the higher-priority display task doesn't starve the httpd task on the same
+ *  core.  Self-expiring; calls extend (never shorten) the window.  No effect on
+ *  other themes (they render only on change).  Safe to call from any task. */
+void display_busy_hint(uint32_t ms);
+
+/** Cancel a pending busy hint immediately.  Call after the CPU/flash-bound
+ *  operation finishes so the display re-renders at the next tick rather than
+ *  waiting for the hint's original timeout to expire.  Safe to call from any
+ *  task. */
+void display_busy_clear(void);
+
+/** Signal that a settings save just completed.  Clears any busy backoff,
+ *  forces a full re-render on the very next display tick (same effect as a
+ *  mode change but without blanking the tubes), and wakes the display task
+ *  immediately.  Ensures live config edits — shadow colour, glyph colour,
+ *  custom font, etc. — appear within one tick regardless of change-detection
+ *  cursor state.  Safe to call from any task. */
+void display_config_changed(void);
+
 /** Reset the countdown / pomodoro internal timer (call on mode entry). */
 void display_timer_reset(void);
 
@@ -201,11 +231,17 @@ void display_set_ticker_speed(int px);
 /** Get the current ticker scroll speed (px per 200 ms tick). */
 int  display_get_ticker_speed(void);
 
+/** Wake the display task immediately, aborting its current sleep.
+ *  Use after any RAM-only config change (e.g. config_set_mode) so the new
+ *  state is rendered on the very next tick rather than after up to 200 ms.
+ *  Thread-safe: safe to call from any task. */
+void display_wake(void);
+
 /** Force a full repaint of all six tubes on the next display-task tick.
  *  Use after changing display-config properties at runtime (e.g. col/row
  *  offsets, gamma, brightness) so the new settings are visible immediately
  *  rather than waiting for each tube's content to change naturally.
- *  Called automatically by display_apply_tube_offsets().
+ *  Called automatically by display_apply_tube_offsets(). Calls display_wake().
  *  Thread-safe: safe to call from any task. */
 void display_invalidate(void);
 

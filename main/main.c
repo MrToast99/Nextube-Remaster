@@ -141,6 +141,7 @@ static void on_touch(touch_pad_id_t pad)
             if (enabled_modes & (1 << m)) break;
         }
         config_set_mode((app_mode_t)m);
+        display_wake();
         break;
     }
     case TOUCH_RIGHT: {
@@ -151,6 +152,7 @@ static void on_touch(touch_pad_id_t pad)
             if (enabled_modes & (1 << m)) break;
         }
         config_set_mode((app_mode_t)m);
+        display_wake();
         break;
     }
     case TOUCH_MIDDLE: {

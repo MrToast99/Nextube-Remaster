@@ -18,6 +18,11 @@ void leds_off(void);
  * nothing changes.  Pausing stops RMT 10 MHz bursts and the resulting
  * current spikes on the 3.3 V rail from coupling into the DAC output. */
 void leds_set_audio_active(bool active);
+/* Weather lightning override: level 0 = none, 1–255 = flash a yellow-white
+ * pulse at that intensity across all LEDs, pre-empting the accent mode.  Driven
+ * by the WeatherLive thunderstorm effect when the "weather override" option is
+ * enabled.  Setting 0 after a flash restores the configured accent. */
+void leds_weather_flash(uint8_t level);
 #ifdef __cplusplus
 }
 #endif

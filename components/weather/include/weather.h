@@ -9,6 +9,15 @@ typedef struct {
     char  condition[32];
     char  icon[16];
     bool  valid;
+    /* Today's forecast high/low (°C) from the keyless Open-Meteo daily endpoint,
+     * fetched independently of the current-conditions source.  day_range_valid
+     * stays false until the first successful daily fetch. */
+    float day_min_c;
+    float day_max_c;
+    bool  day_range_valid;
+    /* Current wind speed (km/h) from the Open-Meteo current_weather block,
+     * fetched alongside the daily range.  0 until first fetch / when calm. */
+    float wind_kph;
 } weather_data_t;
 void weather_start(void);
 const weather_data_t *weather_get(void);

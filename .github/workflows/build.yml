@@ -217,6 +217,8 @@ jobs:
           SP_VER=${{ needs.build.outputs.fs_version }}
           cd artifacts
           zip "../Nextube-Remaster.v${BUILD_VER}.zip" \
+            nextube-fw-v${FW_VER}-ota.bin \
+            nextube-WebUI-v${BUILD_VER}.zip \
             nextube-fw-v${FW_VER}-full.bin \
             bootloader.bin \
             partition-table.bin \

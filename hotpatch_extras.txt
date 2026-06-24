@@ -17,3 +17,14 @@
 # flash release — the full flash already delivers every asset, so carrying
 # old entries forward would bloat every subsequent hotpatch unnecessarily.
 
+# System social media icons (PNG with transparency, preferred over .jpg)
+images/system/youtube.png
+images/system/instagram.png
+images/system/tiktok.png
+images/system/mastodon.png
+fonts/Audiowide-Regular-subset.ttf
+fonts/Comfortaa-Regular-subset.ttf
+fonts/JimNightshade-Regular-subset.ttf
+fonts/Roboto-Regular-subset.ttf
+fonts/Kings-Regular-subset.ttf
+fonts/IBMPlexSans-Regular-subset.ttf

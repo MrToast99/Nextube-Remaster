@@ -39,6 +39,16 @@ static void set_defaults(void)
     s_cfg.backlight_mode  = BL_MODE_BREATH;
     s_cfg.backlight_on    = true;
     s_cfg.led_effect_speed = 5;
+    s_cfg.led_weather_override = false;
+    s_cfg.wlive_animate    = true;   /* realtime animation by default */
+    /* Custom clock face defaults: WeatherLive sky, white glyphs/text, shadow on */
+    s_cfg.clock_face[0]         = '\0';
+    strncpy(s_cfg.custom_bg, "WeatherLive", sizeof(s_cfg.custom_bg) - 1);
+    s_cfg.custom_font_color[0]  = 255; s_cfg.custom_font_color[1]  = 255; s_cfg.custom_font_color[2]  = 255;
+    s_cfg.custom_glyph_color[0] = 255; s_cfg.custom_glyph_color[1] = 255; s_cfg.custom_glyph_color[2] = 255;
+    s_cfg.custom_shadow         = true;
+    s_cfg.custom_shadow_color[0]= 0;   s_cfg.custom_shadow_color[1]= 0;   s_cfg.custom_shadow_color[2]= 0;
+    s_cfg.custom_font[0]        = '\0';
     /* All modes enabled by default. Clock and Date are independent — both
      * can be active simultaneously in the touch cycle. */
     s_cfg.enabled_modes   = 0xFFF;   /* all 12 modes (bits 0–11) */
@@ -106,6 +116,7 @@ static void set_defaults(void)
     s_cfg.weather_ext_loc_valid = false;
     strncpy(s_cfg.city, "", sizeof(s_cfg.city) - 1);
     strncpy(s_cfg.temp_format, "Celsius", sizeof(s_cfg.temp_format) - 1);
+    strncpy(s_cfg.wind_unit,   "km/h",    sizeof(s_cfg.wind_unit)   - 1);
     strncpy(s_cfg.date_format, "DD/MM/YY", sizeof(s_cfg.date_format) - 1);
     strncpy(s_cfg.language,    "en",       sizeof(s_cfg.language)    - 1);
 
@@ -178,6 +189,8 @@ static void set_defaults(void)
     s_cfg.weather_panel0_en = true;   /* temperature panel on by default */
     s_cfg.weather_panel1_en = true;   /* humidity panel on by default */
     s_cfg.weather_panel2_en = false;  /* sunrise/sunset panel off by default */
+    s_cfg.weather_panel3_en = false;  /* wind speed panel off by default */
+    s_cfg.weather_panel4_en = false;  /* Hi/Lo panel off by default */
 
     /* 24H Custom — tube 6 panel rotation */
     s_cfg.tube6_panel_weather  = false;
@@ -185,6 +198,9 @@ static void set_defaults(void)
     s_cfg.tube6_panel_ht       = true;
     s_cfg.tube6_panel_temp     = false;
     s_cfg.tube6_panel_sunrise  = false;
+    s_cfg.tube6_panel_push     = false;
+    s_cfg.tube6_panel_humidity = false;
+    s_cfg.tube6_panel_wind     = false;
     s_cfg.tube6_panel_ms       = 5000;
     s_cfg.cx_dual_panel        = false;   /* single panel + colon (original layout) */
     s_cfg.tube5_panel_weather  = false;
@@ -192,6 +208,10 @@ static void set_defaults(void)
     s_cfg.tube5_panel_ht       = true;    /* sensible distinct default vs tube 6 */
     s_cfg.tube5_panel_temp     = false;
     s_cfg.tube5_panel_sunrise  = false;
+    s_cfg.tube5_panel_push     = false;
+    s_cfg.tube5_panel_humidity = false;
+    s_cfg.tube5_panel_wind     = false;
+    s_cfg.update_repo[0]       = '\0';
 
     /* Rotation off by default; user must explicitly enable it */
     s_cfg.rotation_enabled    = false;
@@ -287,9 +307,14 @@ static void parse_json(const char *json, size_t len)
 {
     cJSON *root = cJSON_ParseWithLength(json, len);
     if (!root) {
-        ESP_LOGW(TAG, "JSON parse failed, keeping defaults");
+        const char *errp = cJSON_GetErrorPtr();
+        long offset = (errp && errp >= json) ? (long)(errp - json) : -1L;
+        ESP_LOGE(TAG, "CONFIG PARSE FAILED — keeping defaults. len=%u offset=%ld near: \"%.40s\"",
+                 (unsigned)len, offset,
+                 (offset >= 0 && (size_t)offset < len) ? json + offset : "");
         return;
     }
+    ESP_LOGI(TAG, "config JSON parsed OK (%u B)", (unsigned)len);
 
     /* Mode */
     cJSON *apps = cJSON_GetObjectItem(root, "apps");
@@ -336,6 +361,7 @@ static void parse_json(const char *json, size_t len)
      * new configs with the fixed key take precedence over legacy files. */
     json_read_str(root, "temperature_formate", s_cfg.temp_format, sizeof(s_cfg.temp_format));
     json_read_str(root, "temperature_format",  s_cfg.temp_format, sizeof(s_cfg.temp_format));
+    json_read_str(root, "wind_unit",           s_cfg.wind_unit,   sizeof(s_cfg.wind_unit));
     json_read_str(root, "date_format",         s_cfg.date_format, sizeof(s_cfg.date_format));
     json_read_str(root, "language",            s_cfg.language,    sizeof(s_cfg.language));
     json_read_str(root, "music_file",       s_cfg.music_file,      sizeof(s_cfg.music_file));
@@ -499,6 +525,33 @@ static void parse_json(const char *json, size_t len)
     json_read_u8(root, "led_effect_speed", &s_cfg.led_effect_speed);
     if (s_cfg.led_effect_speed < 1)  s_cfg.led_effect_speed = 1;
     if (s_cfg.led_effect_speed > 10) s_cfg.led_effect_speed = 10;
+    {
+        cJSON *lwo = cJSON_GetObjectItem(root, "led_weather_override");
+        if (cJSON_IsBool(lwo)) s_cfg.led_weather_override = cJSON_IsTrue(lwo);
+        cJSON *wla = cJSON_GetObjectItem(root, "wlive_animate");
+        if (cJSON_IsBool(wla)) s_cfg.wlive_animate = cJSON_IsTrue(wla);
+    }
+    json_read_str(root, "clock_face", s_cfg.clock_face, sizeof(s_cfg.clock_face));
+    json_read_str(root, "custom_bg",  s_cfg.custom_bg,  sizeof(s_cfg.custom_bg));
+    if (s_cfg.custom_bg[0] == '\0') strncpy(s_cfg.custom_bg, "WeatherLive", sizeof(s_cfg.custom_bg) - 1);
+    {
+        cJSON *v = cJSON_GetObjectItem(root, "custom_shadow");
+        if (cJSON_IsBool(v)) s_cfg.custom_shadow = cJSON_IsTrue(v);
+    }
+    json_read_str(root, "custom_font", s_cfg.custom_font, sizeof(s_cfg.custom_font));
+    {
+        static const char *const color_keys[3] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color" };
+        uint8_t *const color_ptrs[3] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color };
+        for (int ci = 0; ci < 3; ci++) {
+            cJSON *arr = cJSON_GetObjectItem(root, color_keys[ci]);
+            if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= 3) {
+                for (int ch = 0; ch < 3; ch++) {
+                    cJSON *c = cJSON_GetArrayItem(arr, ch);
+                    if (cJSON_IsNumber(c)) color_ptrs[ci][ch] = (uint8_t)c->valueint;
+                }
+            }
+        }
+    }
     json_read_u8(root, "lcd_brightness", &s_cfg.lcd_brightness);
     if (s_cfg.lcd_brightness > 100) s_cfg.lcd_brightness = 100;
     {
@@ -528,11 +581,17 @@ static void parse_json(const char *json, size_t len)
         cJSON *p0 = cJSON_GetObjectItem(root, "weather_panel0_en");
         cJSON *p1 = cJSON_GetObjectItem(root, "weather_panel1_en");
         cJSON *p2 = cJSON_GetObjectItem(root, "weather_panel2_en");
+        cJSON *p3 = cJSON_GetObjectItem(root, "weather_panel3_en");
+        cJSON *p4 = cJSON_GetObjectItem(root, "weather_panel4_en");
         if (cJSON_IsBool(p0)) s_cfg.weather_panel0_en = cJSON_IsTrue(p0);
         if (cJSON_IsBool(p1)) s_cfg.weather_panel1_en = cJSON_IsTrue(p1);
         if (cJSON_IsBool(p2)) s_cfg.weather_panel2_en = cJSON_IsTrue(p2);
+        if (cJSON_IsBool(p3)) s_cfg.weather_panel3_en = cJSON_IsTrue(p3);
+        if (cJSON_IsBool(p4)) s_cfg.weather_panel4_en = cJSON_IsTrue(p4);
     }
-    if (!s_cfg.weather_panel0_en && !s_cfg.weather_panel1_en)
+    if (!s_cfg.weather_panel0_en && !s_cfg.weather_panel1_en &&
+        !s_cfg.weather_panel2_en && !s_cfg.weather_panel3_en &&
+        !s_cfg.weather_panel4_en)
         s_cfg.weather_panel0_en = true;
 
     /* 24H Custom — tube 6 panel rotation */
@@ -548,6 +607,12 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_temp = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tube6_panel_sunrise");
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_sunrise = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_push");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_push = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_humidity");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_humidity = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_wind");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_wind = cJSON_IsTrue(v);
 
         /* Dual-panel mode + tube 5's independent panel set */
         v = cJSON_GetObjectItem(root, "cx_dual_panel");
@@ -562,19 +627,27 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.tube5_panel_temp = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tube5_panel_sunrise");
         if (cJSON_IsBool(v)) s_cfg.tube5_panel_sunrise = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_push");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_push = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_humidity");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_humidity = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_wind");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_wind = cJSON_IsTrue(v);
     }
     json_read_u16(root, "tube6_panel_ms", &s_cfg.tube6_panel_ms);
     if (s_cfg.tube6_panel_ms < 1000) s_cfg.tube6_panel_ms = 5000;
     /* Guard: fall back to weekdate if every panel is disabled */
     if (!s_cfg.tube6_panel_weather && !s_cfg.tube6_panel_weekdate &&
         !s_cfg.tube6_panel_ht      && !s_cfg.tube6_panel_temp     &&
-        !s_cfg.tube6_panel_sunrise)
+        !s_cfg.tube6_panel_sunrise && !s_cfg.tube6_panel_push     &&
+        !s_cfg.tube6_panel_humidity && !s_cfg.tube6_panel_wind)
         s_cfg.tube6_panel_weekdate = true;
     /* Tube 5 only matters in dual mode — guarantee ≥1 panel there too. */
     if (s_cfg.cx_dual_panel &&
         !s_cfg.tube5_panel_weather && !s_cfg.tube5_panel_weekdate &&
         !s_cfg.tube5_panel_ht      && !s_cfg.tube5_panel_temp     &&
-        !s_cfg.tube5_panel_sunrise)
+        !s_cfg.tube5_panel_sunrise && !s_cfg.tube5_panel_push     &&
+        !s_cfg.tube5_panel_humidity && !s_cfg.tube5_panel_wind)
         s_cfg.tube5_panel_ht = true;
 
     /* Backlight mode */
@@ -795,6 +868,8 @@ static void parse_json(const char *json, size_t len)
     /* Per-tube software brightness — clamped to 0-100 */
     JSON_READ_TUBE_INT_ARRAY(root, "lcd_tube_brightness", lcd_tube_brightness, 0, 100, uint8_t);
 
+    json_read_str(root, "update_repo", s_cfg.update_repo, sizeof(s_cfg.update_repo));
+
     /* ── Post-parse normalization ──────────────────────────────────────
      * mic_enabled is no longer a user-settable toggle — it is derived
      * entirely from whether Spectrum mode is present in enabled_modes.
@@ -828,24 +903,29 @@ static bool load_from_flash(void)
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 8192) { fclose(f); return false; }
+    if (sz <= 0 || sz > 8192) {
+        ESP_LOGE(TAG, "CONFIG NOT LOADED: %s size=%ld out of range (1..8192) — using defaults",
+                 CONFIG_PATH, sz);
+        fclose(f);
+        return false;
+    }
 
     char *buf = malloc(sz + 1);
-    if (!buf) { fclose(f); return false; }
+    if (!buf) { ESP_LOGE(TAG, "config load: OOM for %ld B", sz); fclose(f); return false; }
     size_t rd = fread(buf, 1, sz, f);
     fclose(f);
-    if (rd != (size_t)sz) { free(buf); return false; }
+    if (rd != (size_t)sz) { ESP_LOGE(TAG, "config load: short read %u/%ld", (unsigned)rd, sz); free(buf); return false; }
     buf[sz] = '\0';
 
     parse_json(buf, (size_t)sz);
     free(buf);
-    ESP_LOGI(TAG, "Config loaded from flash");
+    ESP_LOGI(TAG, "Config loaded from flash (%ld B)", sz);
     return true;
 }
 
 static void save_to_flash(void)
 {
-    char *json = config_to_json();
+    char *json = config_to_json(true);   /* persist the WiFi password */
     if (!json) return;
 
     FILE *f = fopen(CONFIG_PATH, "w");
@@ -908,7 +988,10 @@ static bool config_restore_from_nvs(void)
         return false;
 
     size_t sz = 0;
-    if (nvs_get_blob(h, NVS_CFG_KEY, NULL, &sz) != ESP_OK || sz == 0 || sz > 8192) {
+    esp_err_t pe = nvs_get_blob(h, NVS_CFG_KEY, NULL, &sz);
+    if (pe != ESP_OK || sz == 0 || sz > 8192) {
+        if (pe == ESP_OK && sz > 8192)
+            ESP_LOGE(TAG, "CONFIG NVS backup %u B > 8192 — skipping restore", (unsigned)sz);
         nvs_close(h);
         return false;
     }
@@ -975,7 +1058,7 @@ bool config_set_json(const char *json, size_t len)
     return true;
 }
 
-char *config_to_json(void)
+char *config_to_json(bool include_password)
 {
     xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
 
@@ -994,7 +1077,14 @@ char *config_to_json(void)
     cJSON_AddItemToArray(apps, app0);
 
     cJSON_AddStringToObject(root, "ssid",             s_cfg.ssid);
-    cJSON_AddStringToObject(root, "password",         s_cfg.password);
+    /* WiFi password: included only for flash save / explicit backup.  The
+     * GET /api/settings path passes include_password=false so the secret never
+     * travels over the wire — a "has_password" bool is sent instead so the UI
+     * can show a masked placeholder. */
+    if (include_password)
+        cJSON_AddStringToObject(root, "password",     s_cfg.password);
+    else
+        cJSON_AddBoolToObject  (root, "has_password", s_cfg.password[0] != '\0');
     cJSON_AddStringToObject(root, "video_site",       s_cfg.video_site);
     cJSON_AddStringToObject(root, "youtube_id",       s_cfg.youtube_id);
     cJSON_AddStringToObject(root, "youtube_key",      s_cfg.youtube_key);
@@ -1008,6 +1098,7 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "weather_ext_lon",  s_cfg.weather_ext_lon);
     cJSON_AddBoolToObject(root,   "weather_ext_loc_valid", s_cfg.weather_ext_loc_valid);
     cJSON_AddStringToObject(root, "temperature_format",  s_cfg.temp_format);
+    cJSON_AddStringToObject(root, "wind_unit",           s_cfg.wind_unit);
     cJSON_AddStringToObject(root, "date_format",         s_cfg.date_format);
     cJSON_AddStringToObject(root, "language",            s_cfg.language);
     cJSON_AddStringToObject(root, "music_file",       s_cfg.music_file);
@@ -1065,6 +1156,21 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
     cJSON_AddNumberToObject(root, "led_effect_speed", s_cfg.led_effect_speed);
+    cJSON_AddBoolToObject  (root, "led_weather_override", s_cfg.led_weather_override);
+    cJSON_AddBoolToObject  (root, "wlive_animate",        s_cfg.wlive_animate);
+    cJSON_AddStringToObject(root, "clock_face",           s_cfg.clock_face);
+    cJSON_AddStringToObject(root, "custom_bg",            s_cfg.custom_bg);
+    cJSON_AddBoolToObject  (root, "custom_shadow",        s_cfg.custom_shadow);
+    cJSON_AddStringToObject(root, "custom_font",          s_cfg.custom_font);
+    {
+        const char *const keys[3]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color" };
+        const uint8_t *const ptrs[3] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color };
+        for (int ci = 0; ci < 3; ci++) {
+            cJSON *arr = cJSON_CreateArray();
+            for (int ch = 0; ch < 3; ch++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(ptrs[ci][ch]));
+            cJSON_AddItemToObject(root, keys[ci], arr);
+        }
+    }
     cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);
     cJSON_AddBoolToObject  (root, "auto_brightness",  s_cfg.auto_brightness);
     cJSON_AddNumberToObject(root, "night_brightness", s_cfg.night_brightness);
@@ -1079,11 +1185,16 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "weather_panel0_en",      s_cfg.weather_panel0_en);
     cJSON_AddBoolToObject  (root, "weather_panel1_en",      s_cfg.weather_panel1_en);
     cJSON_AddBoolToObject  (root, "weather_panel2_en",      s_cfg.weather_panel2_en);
+    cJSON_AddBoolToObject  (root, "weather_panel3_en",      s_cfg.weather_panel3_en);
+    cJSON_AddBoolToObject  (root, "weather_panel4_en",      s_cfg.weather_panel4_en);
     cJSON_AddBoolToObject  (root, "tube6_panel_weather",    s_cfg.tube6_panel_weather);
     cJSON_AddBoolToObject  (root, "tube6_panel_weekdate",   s_cfg.tube6_panel_weekdate);
     cJSON_AddBoolToObject  (root, "tube6_panel_ht",         s_cfg.tube6_panel_ht);
     cJSON_AddBoolToObject  (root, "tube6_panel_temp",       s_cfg.tube6_panel_temp);
     cJSON_AddBoolToObject  (root, "tube6_panel_sunrise",    s_cfg.tube6_panel_sunrise);
+    cJSON_AddBoolToObject  (root, "tube6_panel_push",       s_cfg.tube6_panel_push);
+    cJSON_AddBoolToObject  (root, "tube6_panel_humidity",   s_cfg.tube6_panel_humidity);
+    cJSON_AddBoolToObject  (root, "tube6_panel_wind",       s_cfg.tube6_panel_wind);
     cJSON_AddNumberToObject(root, "tube6_panel_ms",         s_cfg.tube6_panel_ms);
     cJSON_AddBoolToObject  (root, "cx_dual_panel",          s_cfg.cx_dual_panel);
     cJSON_AddBoolToObject  (root, "tube5_panel_weather",    s_cfg.tube5_panel_weather);
@@ -1091,6 +1202,9 @@ char *config_to_json(void)
     cJSON_AddBoolToObject  (root, "tube5_panel_ht",         s_cfg.tube5_panel_ht);
     cJSON_AddBoolToObject  (root, "tube5_panel_temp",       s_cfg.tube5_panel_temp);
     cJSON_AddBoolToObject  (root, "tube5_panel_sunrise",    s_cfg.tube5_panel_sunrise);
+    cJSON_AddBoolToObject  (root, "tube5_panel_push",       s_cfg.tube5_panel_push);
+    cJSON_AddBoolToObject  (root, "tube5_panel_humidity",   s_cfg.tube5_panel_humidity);
+    cJSON_AddBoolToObject  (root, "tube5_panel_wind",       s_cfg.tube5_panel_wind);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off","WLED"};
     unsigned bl_idx = (unsigned)s_cfg.backlight_mode;
@@ -1160,9 +1274,16 @@ char *config_to_json(void)
     json_add_tube_i8(root, "lcd_row_offset",      s_cfg.lcd_row_offset);
     json_add_tube_u8(root, "lcd_tube_brightness", s_cfg.lcd_tube_brightness);
 
+    if (s_cfg.update_repo[0])
+        cJSON_AddStringToObject(root, "update_repo", s_cfg.update_repo);
+
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     xSemaphoreGiveRecursive(s_mutex);
+    if (!out)
+        ESP_LOGE(TAG, "config_to_json: serialization FAILED (out of internal heap?)");
+    else
+        ESP_LOGD(TAG, "config_to_json: %u B", (unsigned)strlen(out));
     return out;
 }
 

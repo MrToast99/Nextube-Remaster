@@ -271,3 +271,9 @@ CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
 # stack-overflow class of bug this project has hit twice.
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192
 
+# LittleFS — store mtime as a per-file extended attribute so stat() returns a
+# real modification timestamp.  Each file written after this build gets an
+# accurate upload/write time; files already on the FS show mtime=0 until
+# rewritten.  Costs ~4 bytes of extended-attribute storage per file.
+CONFIG_LITTLEFS_MTIME=y
+

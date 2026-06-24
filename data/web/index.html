@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Nextube-Remaster Manager</title>
+<!-- Inline 🕐 emoji favicon (SVG data-URI). Renders the clock as the tab icon
+     and, because an explicit icon link is present, stops the browser from
+     requesting /favicon.ico (which the device has no asset for → 404). -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text x='0' y='14' font-size='14'>%F0%9F%95%90</text></svg>">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#1a1a2e;--card:#16213e;--accent:#0f3460;--hi:#e94560;--text:#eee;--dim:#999;--ok:#4ecca3}
@@ -164,10 +168,61 @@ select option{background:var(--accent);color:var(--text)}
 <div class="tab-content" id="tab-display">
   <div class="card">
     <h2 data-i18n="disp.settings">Display Settings</h2>
-    <div class="field"><label data-i18n="disp.theme">Theme</label>
+    <div class="field"><label>Clock Face</label>
       <div style="display:flex;gap:8px;align-items:center">
-        <select id="f-theme" style="flex:1"></select>
+        <select id="f-theme" style="flex:1" onchange="onThemeChange()"></select>
         <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadThemes(true)">↺ Refresh</button>
+      </div>
+    </div>
+    <!-- Legacy WeatherLive theme animation toggle -->
+    <div class="field" id="wlive-anim-wrap" style="display:none">
+      <label data-i18n="svc.wlive_anim">WeatherLive scene</label>
+      <select id="f-wlive-anim" onchange="markDirty()">
+        <option value="1" data-i18n="svc.wlive_realtime">Realtime (animated)</option>
+        <option value="0" data-i18n="svc.wlive_static">Static (updates ~10 min)</option>
+      </select>
+    </div>
+    <!-- Color/shadow controls — visible for WeatherLive themes and Custom face -->
+    <div id="custom-face-wrap" style="display:none">
+      <!-- Background selector — Custom face only -->
+      <div id="custom-bg-group">
+        <div class="field">
+          <label>Background</label>
+          <select id="f-custom-bg" onchange="onCustomBgChange()"></select>
+        </div>
+        <div class="field" id="wlive-anim-custom-wrap" style="display:none">
+          <label data-i18n="svc.wlive_anim">WeatherLive scene</label>
+          <select id="f-wlive-anim-custom" onchange="markDirty()">
+            <option value="1" data-i18n="svc.wlive_realtime">Realtime (animated)</option>
+            <option value="0" data-i18n="svc.wlive_static">Static (updates ~10 min)</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Font color <span style="color:var(--dim);font-size:.82rem">(info panels &amp; labels)</span></label>
+        <input type="color" id="f-custom-font-color" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+      </div>
+      <div class="field">
+        <label>Digit color <span style="color:var(--dim);font-size:.82rem">(clock face numerals)</span></label>
+        <input type="color" id="f-custom-glyph-color" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+      </div>
+      <div class="field">
+        <label>Shadow</label>
+        <select id="f-custom-shadow" onchange="onCustomShadowChange()">
+          <option value="1">On</option>
+          <option value="0">Off</option>
+        </select>
+      </div>
+      <div class="field" id="custom-shadow-color-wrap">
+        <label>Shadow color</label>
+        <input type="color" id="f-custom-shadow-color" value="#5c5c5c" onchange="markDirty()" style="height:2rem;cursor:pointer">
+      </div>
+      <div class="field">
+        <label>Digit font <span style="color:var(--dim);font-size:.82rem">(TTF from /spiffs/fonts/)</span></label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="f-custom-font" style="flex:1" onchange="markDirty()"><option value="">Logisoso (built-in)</option></select>
+          <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadFontList(true)" title="Scan for TTF files on device">↺</button>
+        </div>
       </div>
     </div>
     <div class="field"><label data-i18n="disp.time_format">Time Format</label>
@@ -210,9 +265,12 @@ select option{background:var(--accent);color:var(--text)}
       <div style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.7rem">
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weekdate" style="width:14px;height:14px"> Day &amp; Date <span style="color:var(--dim);font-size:.78rem">(day name / MM-DD)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-ht" style="width:14px;height:14px"> Indoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(SHT30 sensor)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem">(Currrent outside conditions)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem">(Currrent outside temperature)</span></label>
+        <label id="f-cx-weather-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem">(Currrent outside conditions)</span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem">(current temp + today's Hi/Lo)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-sunrise" style="width:14px;height:14px"> Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(calculated from weather location)</span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-humidity" style="width:14px;height:14px"> Humidity <span style="color:var(--dim);font-size:.78rem">(outdoor humidity — drop symbol + value)</span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-wind" style="width:14px;height:14px"> Wind <span style="color:var(--dim);font-size:.78rem">(wind speed km/h — wind symbol + value)</span></label>
+        <label id="f-cx-push-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-push" style="width:14px;height:14px"> Pushed Image <span style="color:var(--dim);font-size:.78rem">(JPG via POST /api/cx_image?tube=6)</span></label>
       </div>
       <div style="display:flex;align-items:center;gap:.6rem;font-size:.85rem">
         <label for="f-cx-panel-ms" style="white-space:nowrap;margin:0">Panel duration</label>
@@ -226,9 +284,12 @@ select option{background:var(--accent);color:var(--text)}
         <div style="display:flex;flex-direction:column;gap:.35rem">
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-weekdate" style="width:14px;height:14px"> Day &amp; Date <span style="color:var(--dim);font-size:.78rem">(day name / MM-DD)</span></label>
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-ht" style="width:14px;height:14px"> Indoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(SHT30 sensor)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem">(current outside conditions)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem">(current outside temperature)</span></label>
+          <label id="f-cx5-weather-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem">(current outside conditions)</span></label>
+          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem">(current temp + today's Hi/Lo)</span></label>
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-sunrise" style="width:14px;height:14px"> Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(calculated from weather location)</span></label>
+          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-humidity" style="width:14px;height:14px"> Humidity <span style="color:var(--dim);font-size:.78rem">(outdoor humidity — drop symbol + value)</span></label>
+          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-wind" style="width:14px;height:14px"> Wind <span style="color:var(--dim);font-size:.78rem">(wind speed km/h — wind symbol + value)</span></label>
+          <label id="f-cx5-push-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-push" style="width:14px;height:14px"> Pushed Image <span style="color:var(--dim);font-size:.78rem">(JPG via POST /api/cx_image?tube=5)</span></label>
         </div>
       </div>
     </div>
@@ -419,6 +480,10 @@ select option{background:var(--accent);color:var(--text)}
       then configure your WLED device: <strong>Config → Sync Interfaces → UDP Sync → Send on direct change ✓</strong>.
       No target IP needed — WLED broadcasts to the whole subnet.
     </div>
+    <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;margin-top:.7rem;cursor:pointer">
+      <input type="checkbox" id="f-led-weather" onchange="markDirty()" style="width:16px;height:16px;cursor:pointer">
+      <span data-i18n="disp.led_weather_override">Weather event override — flash LEDs on thunderstorm (WeatherLive theme)</span>
+    </label>
   </div>
   <div class="card">
     <h2 data-i18n="disp.spectrum_mode">Spectrum Mode</h2>
@@ -695,8 +760,13 @@ select option{background:var(--accent);color:var(--text)}
       <div class="field"><label data-i18n="svc.city">City</label><input id="f-city" type="text" placeholder="City name" data-i18n-ph="svc.city_ph" autocomplete="off" oninput="onCityInput()">
         <div id="f-city-status" style="font-size:.75rem;margin-top:.25rem;min-height:1.1em;color:var(--dim)"></div>
       </div>
-      <div class="field"><label data-i18n="svc.units">Units</label>
+	</div>
+	<div class="row">
+      <div class="field"><label data-i18n="svc.temp_units">Temperature units</label>
         <select id="f-tempfmt" onchange="onTempFmtChange()"><option value="Celsius" data-i18n="opt.celsius">Celsius</option><option value="Fahrenheit" data-i18n="opt.fahrenheit">Fahrenheit</option></select>
+      </div>
+      <div class="field"><label data-i18n="svc.wind_units">Wind units</label>
+        <select id="f-windunit" onchange="markDirty()"><option value="km/h">km/h</option><option value="mph">mph</option><option value="m/s">m/s</option></select>
       </div>
     </div>
     <div class="row">
@@ -717,6 +787,14 @@ select option{background:var(--accent);color:var(--text)}
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
           <input type="checkbox" id="f-wx-p2" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p2')">
           <span data-i18n="svc.wx_sunrise">Sunrise &amp; Sunset</span> <span style="color:var(--dim);font-size:.78rem">(panel 2)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
+          <input type="checkbox" id="f-wx-p3" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p3')">
+          <span data-i18n="svc.wx_wind">Wind Speed</span> <span style="color:var(--dim);font-size:.78rem">(panel 3)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
+          <input type="checkbox" id="f-wx-p4" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p4')">
+          <span data-i18n="svc.wx_hilo">Daily Hi / Lo</span> <span style="color:var(--dim);font-size:.78rem">(panel 4 — red ↑ Hi then blue ↓ Lo)</span>
         </label>
       </div>
       <small style="color:var(--dim);margin-top:.3rem;display:block" data-i18n="svc.wx_one_panel">At least one panel must remain enabled.</small>
@@ -1428,6 +1506,12 @@ select option{background:var(--accent);color:var(--text)}
 <script>
 const $ = id => document.getElementById(id);
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function fmtMtime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 let cfg = {};
 
 /* ── Update source ──────────────────────────────────────────────────────
@@ -1436,9 +1520,9 @@ let cfg = {};
  * repo — that one line drives the release-check API URL, the asset download
  * URLs (returned by that API), and the "GitHub Repository" link, so there is
  * nothing else to change. */
-const UPDATE_REPO = 'MrToast99/Nextube-Remaster';
-const UPDATE_API_URL  = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
-const UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
+let UPDATE_REPO     = 'MrToast99/Nextube-Remaster';
+let UPDATE_API_URL  = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+let UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
 
 /* ── Web UI internationalisation (i18n) ──────────────────────────────────
  * Per-browser UI language, stored in localStorage — independent of the
@@ -1504,6 +1588,7 @@ Object.assign(I18N.en, {
   "disp.led_accent":"LED Accent Lighting","disp.mode":"Mode",
   "opt.static":"Static","opt.breath":"Breath","opt.rainbow":"Rainbow","opt.off":"Off","opt.wled":"WLED Controller",
   "disp.effect_speed":"Effect speed","disp.led_colours":"LED Colours (click to change)","disp.set_all_tubes":"Set all tubes:","disp.apply_to_all":"Apply to All",
+  "disp.led_weather_override":"Weather event override — flash LEDs on thunderstorm (WeatherLive theme)",
   "disp.spectrum_mode":"Spectrum Mode",
   "disp.spectrum_desc":"Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left → treble right).",
   "disp.enabled_modes":"Enabled Modes",
@@ -1541,10 +1626,11 @@ Object.assign(I18N.en, {
   "svc.wsrc_metno":"Met.no – free, no key needed","svc.wsrc_openweather":"OpenWeatherMap – free API key required",
   "svc.wsrc_external":"External – push your own via POST /api/weather",
   "svc.wsrc_external_hint":"The clock will not fetch any online service. Push readings from your home-automation system to <code>POST /api/weather</code> with JSON, e.g. <code>{&quot;temp_c&quot;:15.3,&quot;humidity&quot;:65,&quot;condition&quot;:&quot;Cloudy&quot;,&quot;icon&quot;:&quot;overcastClouds&quot;}</code>. Send <code>temp_c</code> or <code>temp_f</code> (only one). Icons: <code>sun, fewClouds, overcastClouds, fog, rain, snow, squalls, thunderstorm</code> (or send a WMO <code>weather_code</code>).",
-  "svc.api_key":"API Key","svc.city":"City","svc.city_ph":"City name","svc.units":"Units",
+  "svc.api_key":"API Key","svc.city":"City","svc.city_ph":"City name","svc.units":"Units","svc.temp_units":"Temperature units","svc.wind_units":"Wind units",
+  "svc.wlive_anim":"WeatherLive scene","svc.wlive_realtime":"Realtime (animated)","svc.wlive_static":"Static (updates ~10 min)",
   "opt.celsius":"Celsius","opt.fahrenheit":"Fahrenheit",
   "svc.panel_rotation":"Panel Rotation (seconds)","svc.display_panels":"Display Panels",
-  "svc.wx_temperature":"Temperature","svc.wx_humidity":"Humidity","svc.wx_sunrise":"Sunrise & Sunset",
+  "svc.wx_temperature":"Temperature","svc.wx_humidity":"Humidity","svc.wx_sunrise":"Sunrise & Sunset","svc.wx_wind":"Wind Speed","svc.wx_hilo":"Daily Hi / Lo",
   "svc.wx_one_panel":"At least one panel must remain enabled.",
   "svc.mqtt":"Home Assistant MQTT","svc.enable":"Enable","svc.restart_required":"(restart required)",
   "svc.broker":"Broker","svc.broker_ph":"192.168.1.x or hostname","svc.port":"Port",
@@ -1839,10 +1925,11 @@ async function saveAndReboot() {
 
 /* ── Weather panel enable guard (at least one must remain on) ── */
 function onWxPanelToggle(changedId) {
-  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked && !$('f-wx-p2').checked) {
+  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked && !$('f-wx-p2').checked && !$('f-wx-p3').checked && !$('f-wx-p4').checked) {
     /* Prevent all being unchecked — restore the one that was just changed */
     $(changedId).checked = true;
   }
+  markDirty();
 }
 
 /* ── Weather source toggle ─────────────────────────── */
@@ -2059,16 +2146,89 @@ const DEFAULT_THEMES = [
 ];
 let s_themes = DEFAULT_THEMES.slice();  /* kept in sync by loadThemes() */
 
+/* Update visibility of clock-face-dependent controls when the Clock Face
+ * dropdown changes or the page loads. */
+function updateClockFaceControls() {
+  const face  = ($('f-theme').value || '');
+  const isCustom = face === 'Custom';
+  const isWl     = !isCustom && face.startsWith('WeatherLive');
+  const isProcedural = isCustom || isWl;
+
+  /* Legacy WeatherLive animation toggle */
+  const wlWrap = $('wlive-anim-wrap');
+  if (wlWrap) wlWrap.style.display = isWl ? '' : 'none';
+
+  /* Color/shadow controls — shown for Custom and any WeatherLive face */
+  const cfWrap = $('custom-face-wrap');
+  const cfWasHidden = !cfWrap || cfWrap.style.display === 'none';
+  if (cfWrap) cfWrap.style.display = (isCustom || isWl) ? '' : 'none';
+  if (cfWasHidden && (isCustom || isWl)) loadFontList();
+
+  /* Background selector — only meaningful for Custom face */
+  const bgGroup = $('custom-bg-group');
+  if (bgGroup) bgGroup.style.display = isCustom ? '' : 'none';
+
+  /* Hide CX weather/push panel options for any procedural mode */
+  ['f-cx-weather-row', 'f-cx5-weather-row',
+   'f-cx-push-row',    'f-cx5-push-row'].forEach(id => {
+    const el = $(id);
+    if (el) el.style.display = isProcedural ? 'none' : '';
+  });
+}
+function updateWliveVisibility() { updateClockFaceControls(); } /* compat alias */
+
+function onCustomBgChange() {
+  markDirty();
+  const bg = ($('f-custom-bg').value || '');
+  const isWl = bg.startsWith('WeatherLive');
+  const w = $('wlive-anim-custom-wrap');
+  if (w) w.style.display = isWl ? '' : 'none';
+}
+function onCustomShadowChange() {
+  markDirty();
+  const on = $('f-custom-shadow').value === '1';
+  const w = $('custom-shadow-color-wrap');
+  if (w) w.style.display = on ? '' : 'none';
+}
+
+function onThemeChange() {
+  markDirty();
+  updateClockFaceControls();
+}
+
 function populateThemes(themes) {
+  /* Clock Face dropdown: "Custom" first, then all themes */
   const sel = $('f-theme');
   const prev = sel.value;
   sel.innerHTML = '';
+  const custom = document.createElement('option');
+  custom.value = 'Custom'; custom.textContent = 'Custom';
+  sel.appendChild(custom);
   themes.forEach(t => {
     const o = document.createElement('option');
     o.value = t; o.textContent = t;
     sel.appendChild(o);
   });
   if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+
+  /* Background dropdown: "WeatherLive" first, then non-WeatherLive themes */
+  const bg = $('f-custom-bg');
+  if (bg) {
+    const prevBg = bg.value;
+    bg.innerHTML = '';
+    const wlOpt = document.createElement('option');
+    wlOpt.value = 'WeatherLive'; wlOpt.textContent = 'WeatherLive (animated sky)';
+    bg.appendChild(wlOpt);
+    const bgExcluded = new Set(['Formula1','glitchGR','lightfuture','notionrain','reddigits']);
+    themes.filter(t => !t.startsWith('WeatherLive') && !bgExcluded.has(t)).forEach(t => {
+      const o = document.createElement('option');
+      o.value = t; o.textContent = t;
+      bg.appendChild(o);
+    });
+    if (prevBg && [...bg.options].some(o => o.value === prevBg)) bg.value = prevBg;
+  }
+
+  updateClockFaceControls();
 }
 
 async function loadThemes(manual) {
@@ -2090,9 +2250,42 @@ async function loadThemes(manual) {
   }
 }
 
+async function loadFontList(manual) {
+  const sel = $('f-custom-font');
+  if (!sel) return;
+  const current = sel.value;
+  try {
+    const data = await api('file/ls?dir=/fonts');
+    if (!Array.isArray(data)) return;
+    const ttfs = data
+      .filter(f => f.type === 'file' && /\.ttf$/i.test(f.name))
+      .map(f => f.name)
+      .sort((a, b) => a.localeCompare(b));
+    sel.innerHTML = '<option value="">Logisoso (built-in)</option>' +
+      ttfs.map(n => `<option value="${n.replace(/"/g,'&quot;')}">${n.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</option>`).join('');
+    if (current && !ttfs.includes(current)) {
+      const opt = document.createElement('option');
+      opt.value = current; opt.textContent = current + ' (?)';
+      sel.appendChild(opt);
+    }
+    sel.value = current;
+    if (manual) toast(ttfs.length
+      ? `${ttfs.length} font${ttfs.length === 1 ? '' : 's'} found`
+      : 'No TTF files in /spiffs/fonts/');
+  } catch(_) {
+    if (manual) toast('Could not scan fonts folder', true);
+  }
+}
+
 /* ── Load settings ─────────────────────────────────── */
 async function loadSettings() {
   loadingSettings = true;
+  /* Resilience: any single bad field/element reference used to throw out of this
+   * function, leaving loadingSettings stuck true — which silently disabled
+   * markDirty() (no save toast) and left the form half-populated.  Wrap the whole
+   * body so loadingSettings is ALWAYS reset, surface the error to the console for
+   * diagnosis, and toast it so the failure is never silent. */
+  try {
   /* Fetch themes and timezone DB in parallel with config to minimise load time.
    * buildTzSelect() must run before the timezone fields are populated below. */
   const [, tzdb] = await Promise.all([
@@ -2103,8 +2296,45 @@ async function loadSettings() {
   buildTzSelect();   /* populate listbox (uses s_tz_db, falls back to TZ_FALLBACK) */
   cfg = await api('settings');
   if (!cfg) return;
+  if (cfg.update_repo) {
+    UPDATE_REPO     = cfg.update_repo;
+    /* Use the list endpoint for a custom repo so pre-releases are visible
+     * (test builds are typically published as pre-releases).
+     * /releases/latest only returns non-draft non-prerelease builds. */
+    UPDATE_API_URL  = `https://api.github.com/repos/${UPDATE_REPO}/releases?per_page=1`;
+    UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
+    const gl = $('github-repo-link'); if (gl) gl.href = UPDATE_REPO_URL;
+  }
   const a = cfg.apps?.[0] || {};
-  $('f-theme').value = a.theme || 'NixieOY';
+  /* Clock Face: show "Custom" if clock_face=="custom", else show theme name */
+  $('f-theme').value = (cfg.clock_face === 'custom') ? 'Custom' : (a.theme || 'NixieOY');
+  /* Custom clock face fields */
+  const rgbHex = arr => arr && arr.length === 3
+    ? '#' + arr.map(v => v.toString(16).padStart(2,'0')).join('')
+    : '#ffffff';
+  if ($('f-custom-bg')) {
+    $('f-custom-bg').value = cfg.custom_bg || 'WeatherLive';
+    onCustomBgChange();
+  }
+  /* Keep both wlive-anim selects in sync */
+  const wlAnimVal = cfg.wlive_animate !== false ? '1' : '0';
+  if ($('f-wlive-anim'))        $('f-wlive-anim').value        = wlAnimVal;
+  if ($('f-wlive-anim-custom')) $('f-wlive-anim-custom').value = wlAnimVal;
+  if ($('f-custom-font-color'))   $('f-custom-font-color').value   = rgbHex(cfg.custom_font_color);
+  if ($('f-custom-glyph-color'))  $('f-custom-glyph-color').value  = rgbHex(cfg.custom_glyph_color);
+  if ($('f-custom-shadow'))       $('f-custom-shadow').value       = cfg.custom_shadow !== false ? '1' : '0';
+  if ($('f-custom-shadow-color')) $('f-custom-shadow-color').value = rgbHex(cfg.custom_shadow_color);
+  if ($('f-custom-font')) {
+    const _fsel = $('f-custom-font'), _fval = cfg.custom_font || '';
+    if (_fval && !Array.from(_fsel.options).find(o => o.value === _fval)) {
+      const _fopt = document.createElement('option');
+      _fopt.value = _fval; _fopt.textContent = _fval;
+      _fsel.appendChild(_fopt);
+    }
+    _fsel.value = _fval;
+  }
+  onCustomShadowChange();
+  updateClockFaceControls();
   $('f-timetype').value = a.type || '24H'; onTimeTypeChange();
   $('f-tube5').value = a.clock_tube5 || 'blank';
   $('f-cx-weekdate').checked = cfg.tube6_panel_weekdate !== false;
@@ -2112,6 +2342,9 @@ async function loadSettings() {
   $('f-cx-weather').checked  = cfg.tube6_panel_weather  === true;
   $('f-cx-temp').checked     = cfg.tube6_panel_temp     === true;
   $('f-cx-sunrise').checked  = cfg.tube6_panel_sunrise  === true;
+  $('f-cx-humidity').checked = cfg.tube6_panel_humidity === true;
+  $('f-cx-wind').checked     = cfg.tube6_panel_wind     === true;
+  $('f-cx-push').checked     = cfg.tube6_panel_push     === true;
   $('f-cx-panel-ms').value   = Math.round((cfg.tube6_panel_ms || 5000) / 1000);
   $('f-cx-dual').checked      = cfg.cx_dual_panel        === true;
   $('f-cx5-weekdate').checked = cfg.tube5_panel_weekdate === true;
@@ -2119,6 +2352,9 @@ async function loadSettings() {
   $('f-cx5-weather').checked  = cfg.tube5_panel_weather  === true;
   $('f-cx5-temp').checked     = cfg.tube5_panel_temp     === true;
   $('f-cx5-sunrise').checked  = cfg.tube5_panel_sunrise  === true;
+  $('f-cx5-humidity').checked = cfg.tube5_panel_humidity === true;
+  $('f-cx5-wind').checked     = cfg.tube5_panel_wind     === true;
+  $('f-cx5-push').checked      = cfg.tube5_panel_push      === true;
   onCxDualChange();
   $('f-leading-zero').checked = cfg.leading_zero === true;
   { const gg = Array.isArray(cfg.lcd_gamma) ? cfg.lcd_gamma : [1,1,1,1,1,1];
@@ -2153,6 +2389,7 @@ async function loadSettings() {
   { const _ledbr = cfg.led_brightness != null ? cfg.led_brightness : 60; $('f-ledbr').value = _ledbr; $('v-ledbr').textContent = _ledbr; }
   $('f-blmode').value = cfg.backlight_mode || 'Breath';
   const spd = cfg.led_effect_speed != null ? cfg.led_effect_speed : 5; $('f-blspeed').value = spd; $('v-blspeed').textContent = spd;
+  $('f-led-weather').checked = !!cfg.led_weather_override;
   onBlModeChange();
   $('f-ssid').value = cfg.ssid || '';
   /* Show password as plain text on first entry (no saved password) so the user
@@ -2217,6 +2454,8 @@ async function loadSettings() {
   $('f-city').value = cfg.City || '';
   $('f-wsrc').value = cfg.weather_source || 'wttr'; toggleWeatherKey();  /* also validates the loaded city */
   $('f-tempfmt').value = cfg.temperature_format || 'Celsius';
+  $('f-windunit').value = cfg.wind_unit || 'km/h';
+  $('f-wlive-anim').value = (cfg.wlive_animate === false) ? '0' : '1';
   $('f-datefmt').value = cfg.date_format || 'DD/MM/YY';
   $('f-language').value = cfg.language || 'en';
   $('f-vsite').value = cfg.video_site || 'youtube';
@@ -2251,6 +2490,8 @@ async function loadSettings() {
   $('f-wx-p0').checked    = cfg.weather_panel0_en !== false;
   $('f-wx-p1').checked    = cfg.weather_panel1_en !== false;
   $('f-wx-p2').checked    = cfg.weather_panel2_en === true;
+  $('f-wx-p3').checked    = cfg.weather_panel3_en === true;
+  $('f-wx-p4').checked    = cfg.weather_panel4_en === true;
 
   /* Enabled modes bitmask.  Default 0xFF = all modes on (Clock and Date are independent). */
   const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
@@ -2378,8 +2619,13 @@ async function loadSettings() {
     col.appendChild(d);
     sw.appendChild(col);
   });
-  loadingSettings = false;
   clearDirty();
+  } catch (e) {
+    console.error('[loadSettings] aborted — some fields may be unpopulated:', e);
+    toast('Settings load error: ' + (e && e.message ? e.message : e), true);
+  } finally {
+    loadingSettings = false;   /* always clear so markDirty()/save toast work */
+  }
 }
 
 /* ── Time format change – show tube-6 option only for 24H (No Sec),
@@ -2719,7 +2965,18 @@ async function saveSettings() {
   });
   const enabledModes = readEnabledModes();
   const body = {
-    apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value, clock_tube5: $('f-tube5').value }],
+    apps: [(() => {
+      const face = $('f-theme').value;
+      const isCustom = face === 'Custom';
+      return {
+        name: 'app1',
+        app: cfg.apps?.[0]?.app || 'Clock',
+        theme: isCustom ? (cfg.apps?.[0]?.theme || 'NixieOY') : face,
+        clock_face: isCustom ? 'custom' : '',
+        type: $('f-timetype').value,
+        clock_tube5: $('f-tube5').value,
+      };
+    })()],
     lcd_brightness: +$('f-lcdbr').value,
     led_brightness: +$('f-ledbr').value,
     auto_brightness: $('f-ab-en').checked,
@@ -2728,6 +2985,17 @@ async function saveSettings() {
     night_end_hour: +$('f-nighteh').value,
     backlight_mode: $('f-blmode').value,
     led_effect_speed: +$('f-blspeed').value,
+    led_weather_override: $('f-led-weather').checked,
+    wlive_animate: ($('f-theme').value === 'Custom'
+      ? $('f-wlive-anim-custom').value === '1'
+      : $('f-wlive-anim').value === '1'),
+    clock_face: $('f-theme').value === 'Custom' ? 'custom' : '',
+    custom_bg: $('f-custom-bg') ? $('f-custom-bg').value : 'WeatherLive',
+    custom_font_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-font-color')?.value || '#ffffff').replace('#','')),
+    custom_glyph_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-glyph-color')?.value || '#ffffff').replace('#','')),
+    custom_shadow: $('f-custom-shadow') ? $('f-custom-shadow').value === '1' : true,
+    custom_shadow_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-shadow-color')?.value || '#000000').replace('#','')),
+    custom_font: $('f-custom-font')?.value || '',
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     spectrum_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-color').value.replace('#','')),
     spectrum_lcd_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-lcd-color').value.replace('#','')),
@@ -2751,7 +3019,7 @@ async function saveSettings() {
     ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
     date_format: $('f-datefmt').value,
     language: $('f-language').value,
-    weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_format: $('f-tempfmt').value,
+    weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_format: $('f-tempfmt').value, wind_unit: $('f-windunit').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value,
     /* Send empty key when relay method selected so firmware uses the relay path */
     youtube_key: ($('yt-method').value === 'relay') ? '' : $('f-ytkey').value,
@@ -2807,11 +3075,16 @@ async function saveSettings() {
     weather_panel0_en: $('f-wx-p0').checked,
     weather_panel1_en: $('f-wx-p1').checked,
     weather_panel2_en: $('f-wx-p2').checked,
+    weather_panel3_en: $('f-wx-p3').checked,
+    weather_panel4_en: $('f-wx-p4').checked,
     tube6_panel_weather:  $('f-cx-weather').checked,
     tube6_panel_weekdate: $('f-cx-weekdate').checked,
     tube6_panel_ht:       $('f-cx-ht').checked,
     tube6_panel_temp:     $('f-cx-temp').checked,
     tube6_panel_sunrise:  $('f-cx-sunrise').checked,
+    tube6_panel_humidity: $('f-cx-humidity').checked,
+    tube6_panel_wind:     $('f-cx-wind').checked,
+    tube6_panel_push:     $('f-cx-push').checked,
     tube6_panel_ms:       Math.max(1, +$('f-cx-panel-ms').value) * 1000,
     cx_dual_panel:        $('f-cx-dual').checked,
     tube5_panel_weather:  $('f-cx5-weather').checked,
@@ -2819,6 +3092,9 @@ async function saveSettings() {
     tube5_panel_ht:       $('f-cx5-ht').checked,
     tube5_panel_temp:     $('f-cx5-temp').checked,
     tube5_panel_sunrise:  $('f-cx5-sunrise').checked,
+    tube5_panel_humidity: $('f-cx5-humidity').checked,
+    tube5_panel_wind:     $('f-cx5-wind').checked,
+    tube5_panel_push:     $('f-cx5-push').checked,
     notify_update_on_display: $('f-notify-update').checked,
     burnin_auto_enabled:    $('bi-sched-en').checked,
     burnin_auto_mask:       biSchedMask(),
@@ -3179,6 +3455,7 @@ async function browseDir(dir) {
       const fullPath = (dir.replace(/\/$/, '') + '/' + f.name);
       const safeName = esc(f.name);
       const encPath = encodeURIComponent(fullPath);
+      const mtimeStr = !isDir ? fmtMtime(f.mtime) : '';
       if (isDir) {
         rows += `<div class="file-row">
           <span onclick="browseDir(decodeURIComponent('${encPath}'))" style="cursor:pointer;flex:1">${icon} ${safeName}</span>
@@ -3192,7 +3469,10 @@ async function browseDir(dir) {
         </div>`;
       } else {
         rows += `<div class="file-row">
-          <span>${icon} ${safeName}</span>
+          <span style="display:flex;flex-direction:column;align-items:flex-start;min-width:0">
+            <span>${icon} ${safeName}</span>
+            ${mtimeStr ? `<span style="font-size:.72rem;color:var(--dim);margin-top:.1rem">${mtimeStr}</span>` : ''}
+          </span>
           <span style="display:flex;align-items:center;gap:.5rem">
             <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
             <a href="/api/file/download?path=${encPath}" download="${safeName}"
@@ -3654,8 +3934,12 @@ async function deleteFolder(path) {
 }
 
 /* ── Upload files / folder to current LittleFS directory  */
-async function uploadFiles(files, preservePath) {
-  if (!files || !files.length) return;
+async function uploadFiles(fileList, preservePath) {
+  /* Normalise to a real array and drop any null/empty entries up front, so a
+   * FileList edge case (e.g. an empty/placeholder entry) can never throw on
+   * `.name` and abort the upload. */
+  const files = Array.from(fileList || []).filter(f => f && f.name);
+  if (!files.length) return;
   const total = files.length;
   let ok = 0, fail = 0;
   const label = total === 1 ? files[0].name : total + ' files';
@@ -3959,7 +4243,9 @@ async function checkForUpdates(silent = false) {
       { headers: { 'Accept': 'application/vnd.github+json' } }
     );
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
+    const raw  = await r.json();
+    const data = Array.isArray(raw) ? raw[0] : raw;
+    if (!data) throw new Error('No releases found');
     const latest = (data.tag_name || '').replace(/^v/, '');
     const fwVer  = ($('s-fwver').textContent || '').replace(/^v/, '').trim();
     const fsVer  = ($('s-spver') ? $('s-spver').textContent : '').replace(/^v/, '').trim();
@@ -4099,13 +4385,16 @@ async function doFullFactoryReset() {
  * with the auth modals at the bottom of <body>) calls onAuthSucceeded
  * once the user is logged in and the /api/settings probe succeeds. */
 let _bootstrapped = false;
-function onAuthSucceeded() {
+async function onAuthSucceeded() {
   if (_bootstrapped) return;     /* idempotent — login can fire twice on token refresh */
   _bootstrapped = true;
   /* Render the auth management card in the System tab with the current state. */
   updateAuthCard(g_adminSet);
-  loadSettings();
-  refreshStatus().then(() => checkForUpdates(true));   /* check once s-fwver is populated */
+  /* Await both in parallel: loadSettings sets UPDATE_API_URL (update_repo override),
+   * refreshStatus populates s-fwver.  checkForUpdates needs both to be done or it
+   * either hits the wrong repo URL or returns early on a '--' firmware version.  */
+  await Promise.all([loadSettings(), refreshStatus()]);
+  checkForUpdates(true);
   setInterval(refreshStatus, 5000);
   setInterval(() => checkForUpdates(true), 86400000);  /* re-check every 24 h */
 }
@@ -4277,7 +4566,7 @@ async function startAutoUpdate() {
 
     /* ── Phase 2: poll status until done or error ───────────────────── */
 
-    const POLL_GAP_MS = 700, POLL_TIMEOUT_MS = 1000;
+    const POLL_GAP_MS = 700, POLL_TIMEOUT_MS = 3000;
     const DL_MAX = 40, FL_BASE = 40, FL_MAX = 70, FLASH_EST_MS = 30000;
     let lastPollBytes = 0, lastPollTime = 0, seenActive = false;
     let p2mode = 'done';        /* how Phase 2 exited: 'done' | 'idle' | 'streak' */
@@ -4293,24 +4582,26 @@ async function startAutoUpdate() {
       } catch { /* timeout / network — handled below */ }
 
       if (!st) {
-        /* Poll failed.  Only treat it as the flash blackout once a real
-         * state=flashing status has been seen — otherwise a transient timeout
-         * mid-download would wrongly flip the UI to "Flashing" and then back to
-         * "Downloading" on the next good poll.  The device stays responsive for
-         * ~1.5 s after entering FLASHING (before the SPI write blocks httpd), so
-         * a genuine flashing status is reliably caught first. */
         if (seenActive) {
           if (!failSince) failSince = Date.now();
-          if (enteredFlash) {
+          const failMs = Date.now() - failSince;
+          /* Activate the flash-blackout crawl if:
+           *  a) we already confirmed state=flashing via a good poll, OR
+           *  b) polls have been dead for >15 s after download started — the device
+           *     likely finished download + SHA-256 + state transition while httpd
+           *     was too busy under download-traffic load to answer polls in time.
+           * Without (b), the UI stalls at the last known download % forever while
+           * the device is already physically writing to flash.               */
+          if (enteredFlash || (failMs > 15000 && lastPollBytes > 0)) {
             if (!flashAnchorTime) { flashAnchorPct = FL_BASE; flashAnchorTime = Date.now(); }
+            enteredFlash = true;
             const frac = Math.min(1, (Date.now() - flashAnchorTime) / FLASH_EST_MS);
             auStep(1,'done'); auStep(2,'active','Flashing firmware…');
             auProgress(flashAnchorPct + frac * (FL_MAX - 2 - flashAnchorPct));
             auDetail('Writing to flash… (device busy)');
           }
-          /* else: a transient hiccup mid-download — hold the current UI. */
           /* Survive the full flash window (~27 s) + reboot before giving up. */
-          if (Date.now() - failSince >= 40000) {
+          if (failMs >= 40000) {
             p2mode = 'streak';
             auStep(1,'done'); auStep(2,'done');
             auProgress(FL_MAX); auDetail(''); break;
@@ -4350,22 +4641,21 @@ async function startAutoUpdate() {
           auDetail(detail);
           lastPollBytes = rx; lastPollTime = now;
         } else {
-          auProgress(st.progress * (DL_MAX / 100));
-          auDetail(st.progress + '%');
+          /* bytes_total = 0: still in TLS handshake / redirect phase.
+           * Show a small nudge so the bar isn't dead-flat, and tell the
+           * user we're connecting rather than displaying "0%".            */
+          auProgress(2);
+          auDetail('Connecting…');
         }
       } else if (st.state === 'flashing') {
         seenActive = true; enteredFlash = true;
         auStep(1, 'done'); auStep(2, 'active', 'Flashing firmware…');
         const fl  = st.bytes_flashed || 0;
         const tot = st.bytes_total   || 0;
-        let pct;
-        if (tot > 0 && fl > 0) {
-          pct = FL_BASE + (fl / tot) * (FL_MAX - FL_BASE);
-          auDetail('Writing ' + fmtB(fl) + ' / ' + fmtB(tot));
-        } else {
-          pct = Math.max(FL_BASE, FL_BASE + (st.progress / 100) * (FL_MAX - FL_BASE));
-          auDetail('Writing to flash…');
-        }
+        /* Always use bytes-based progress so the bar starts exactly at
+         * FL_BASE (40%) when fl=0 — no jump on the first flashing poll. */
+        const pct = tot > 0 ? FL_BASE + (fl / tot) * (FL_MAX - FL_BASE) : FL_BASE;
+        auDetail(fl > 0 ? 'Writing ' + fmtB(fl) + ' / ' + fmtB(tot) : 'Writing to flash…');
         auProgress(pct);
         flashAnchorPct = pct; flashAnchorTime = now;   /* anchor for the blackout crawl */
       } else if (st.state === 'done' || st.state === 'error') {
