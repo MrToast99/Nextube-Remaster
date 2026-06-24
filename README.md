@@ -38,14 +38,17 @@ Like the work? Help keep me Caffeinated! <br>
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
 - [Modes](#modes)
 - [Weather](#weather)
+- [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)
 - [NTP & Clock Accuracy](#ntp--clock-accuracy)
 - [Social Media Counters](#social-media-counters)
   - [Local Relay (`social_relay.py`)](#local-relay-social_relaypy)
 - [Home Assistant MQTT](#home-assistant-mqtt)
 - [WLED Sync](#wled-sync)
 - [Themes](#themes)
+  - [WeatherLive theme](#weatherlive-theme)
   - [Adding a Custom Theme](#adding-a-custom-theme)
   - [Image Converter Helper](#image-converter-helper)
+- [Custom TTF Fonts](#custom-ttf-fonts)
 - [REST API](#rest-api)
 - [Project Structure](#project-structure)
 - [License](#license)
@@ -90,6 +93,8 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Local social counter relay (`social_relay.py`) | ✅ Working |
 | DAC audio playback (LTK8002D amp, WAV files) | ✅ Working |
 | Clock themes (Nixie/Digital/Flip art) | ✅ Working |
+| WeatherLive procedural theme (animated sky, sun/moon phase, stars, live weather) | ✅ Working |
+| Pushed images on 24H Custom tube 5/6 (`POST /api/cx_image`) | ✅ Working |
 | Countdown / Pomodoro timer modes | ✅ Working |
 | Album/slideshow mode (sliding window — each tube shows a different image) | ✅ Working |
 | Date mode (date display, DD/MM/YY) | ✅ Working |
@@ -104,6 +109,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Weather Panel 3 — animated sunrise/sunset (20 Hz rising/setting sun + mountains) | ✅ Working |
 | Multilingual web UI — 11 languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI) with per-browser preference | ✅ Working |
 | Tube display localisation — day-of-week abbreviation in 11 languages on clock/date panels | ✅ Working |
+| Custom TrueType fonts for clock digits and panel text (stb_truetype, PSRAM-cached glyph renderer, configurable drop shadow) | ✅ Working |
 
 ## Hardware
 
@@ -646,6 +652,7 @@ The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
 - **Display**
   - Theme — populated dynamically from LittleFS; add a folder to `/images/themes/` and it appears in the dropdown automatically
+  - **Custom Face** — select a TrueType font as the clockface digit renderer and weather-panel text font; choose from any `.ttf` uploaded to `/fonts/` on the device; selecting **None** reverts to the theme's JPEG digit artwork. Configure drop shadow colour and toggle under this section (see [Custom TTF Fonts](#custom-ttf-fonts))
   - Brightness; LED accent lighting (Static / Breath / Rainbow / Off) with per-tube colour pickers
   - Enabled mode toggles; auto mode rotation; auto theme rotation (cycle all or selected themes on a timer)
   - Spectrum settings — LED source (amplitude-modulated glow colour **or** follow accent mode), LCD bar colour (fixed **or** follow live WLED primary), Noise Floor threshold
@@ -722,7 +729,7 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 
 | Mode | Description |
 |---|---|
-| **Clock** | 12H or 24H digital clock. **24H Custom** shows rotating info panel(s) on the right-hand tube(s) (configurable under Display → 24H Custom). Available panels: Day+date, Indoor temp & humidity (SHT30), Outdoor temperature, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon. **Single-panel (default):** `H H : M M` with one rotating panel on tube 6. **Dual-panel:** the colon is dropped (`H H  M M`) and tubes 5 **and** 6 each show an **independently-configured** rotating panel — each tube has its own enabled-panel set and cycles through it on the shared rotation interval. |
+| **Clock** | 12H or 24H digital clock. **24H Custom** shows rotating info panel(s) on the right-hand tube(s) (configurable under Display → 24H Custom). Available panels: Day+date, Indoor temp & humidity (SHT30), Outdoor temperature + today's Hi/Lo, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon, and **Pushed image** (an 80×160 JPG you POST from an external script — see [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)). **Single-panel (default):** `H H : M M` with one rotating panel on tube 6. **Dual-panel:** the colon is dropped (`H H  M M`) and tubes 5 **and** 6 each show an **independently-configured** rotating panel — each tube has its own enabled-panel set and cycles through it on the shared rotation interval. Selecting the **WeatherLive** theme replaces the clock with a fully procedural animated weather sky — see [WeatherLive theme](#weatherlive-theme). |
 | **Date** | Date display (DD/MM/YY). Can be enabled alongside Clock — both appear as separate stops in the touch cycle. |
 | **Countdown** | Configurable countdown timer. Middle touch pauses/resumes. |
 | **Pomodoro** | Work/break timer with configurable work and break durations. Middle touch pauses/resumes. Automatically flips between work and break phases. |
@@ -909,6 +916,41 @@ MutiInfo/Temperature/   degreec.jpg   degreef.jpg   minus.jpg
 MutiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
                         rain.jpg  snow.jpg  squalls.jpg  thunderstorm.jpg
                         sand.jpg  tornado.jpg  volcanicAsh.jpg
+```
+
+## Pushed images on tube 5/6 (24H Custom)
+
+The **Pushed image** info panel lets an external script drive the right-hand tube(s) with arbitrary artwork — a tiny status icon, a sparkline rendered elsewhere, a now-playing thumbnail, anything you can produce as a JPG. It is one of the rotating 24H Custom panels, so it shares the tube with whatever other panels you enable.
+
+**Enable it:** Display → **24H Custom**, tick **Pushed Image** for tube 6 (and/or tube 5 in dual-panel mode). Use Clock mode with **24H Custom** time format on any normal (asset) theme.
+
+> Asset/base themes only. The **WeatherLive** theme draws its own procedural panels and ignores the pushed-image panel.
+
+**Endpoint:** `POST /api/cx_image?tube=5|6` — the request body is the raw JPG.
+
+| Parameter | Notes |
+|---|---|
+| `tube` (query) | `6` = rightmost tube (LCD 5); `5` = 2nd-from-right (LCD 4, only visible in **dual-panel** mode). Required. |
+| body | A **JPEG that decodes to exactly 80×160 px** (the tube resolution). Max 96 KB. Non-80×160 images are rejected with `400`. |
+
+**Behaviour:**
+- The image is decoded to RGB565 once on receipt and held in PSRAM. It is shown whenever the Pushed-image panel is the active rotation slot, and **persists until the next push or a reboot** (it is not saved to flash).
+- A fresh push appears within one display tick (~200 ms) if its panel is currently on-screen; otherwise on the panel's next rotation.
+- Until the first image is pushed, an enabled-but-empty Pushed-image slot falls back to the Day+date panel (so the tube is never blank).
+- Honours auth like every other mutation route: open on the LAN with no admin password set; otherwise send `Authorization: Bearer <token>`.
+
+Example with `curl` (push a frame to the rightmost tube):
+```bash
+curl -X POST "http://nextube.local/api/cx_image?tube=6" \
+     -H "Content-Type: image/jpeg" \
+     --data-binary @frame.jpg
+```
+
+Generate an 80×160 JPG on the fly (ImageMagick):
+```bash
+magick -size 80x160 xc:black -gravity center \
+       -fill white -pointsize 28 -annotate 0 "OK" frame.jpg
+curl -X POST "http://nextube.local/api/cx_image?tube=6" --data-binary @frame.jpg
 ```
 
 ## NTP & Clock Accuracy
@@ -1202,6 +1244,26 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 
 ## Themes
 
+### WeatherLive theme
+
+**WeatherLive** is a built-in **procedural** theme (no JPEG assets) — selecting it in the theme dropdown replaces the digit artwork with a fully animated, real-time sky rendered on the fly across all six tubes. It tracks your actual location and weather:
+
+- **Time-of-day sky** — a dithered gradient that shifts through night → dawn → day → dusk, keyed to the **real geocoded sunrise/sunset** (±55 min twilight windows), so day length follows the season and location.
+- **Sun & moon arc** — the sun arcs from sunrise to sunset; at night a moon traces the same path with the **true lunar phase** (crescent → gibbous → full) and position.
+- **Twinkling stars** at night, fading in/out through twilight.
+- **Weather-driven** drifting clouds, wind-blown rain/snow, and lightning flashes on thunderstorms (which also flash the LED ring when the weather-event LED override is on). Driven by the same weather data as the rest of the firmware (online source or your `POST /api/weather`).
+- **Info panel(s)** on tube 5/6 honouring the **24H Custom** dual-tube layout: Day + Date (localised month abbreviation), current temperature over today's Hi/Lo range bar, and Sunrise/Sunset. When a **Custom Face** TTF font is selected the temperature, Hi/Lo, and other panel text are rendered with that font; the Hi/Lo range track, current-temperature marker, and humidity teardrop all honour the shadow setting from **Display → Custom Face**.
+
+**Settings:** when WeatherLive is selected, a **WeatherLive scene** dropdown appears under the theme picker:
+- **Realtime (animated)** — re-renders every tick (~20 Hz) for smooth motion.
+- **Static (updates ~10 min)** — a still snapshot redrawn only on clock/data changes (near-zero CPU).
+
+**WeatherLive Demo** is a sibling theme that accelerates the day/night cycle (full day every 60 s) and auto-cycles every weather condition (10 s each) to preview the whole repertoire unattended.
+
+Notes:
+- WeatherLive renders a **subset** of the 24H Custom panels procedurally and **ignores** the Weather-icon and Pushed-image panels (those need JPEG assets / asset themes); in the web UI the Weather-icon panel option is hidden while WeatherLive is selected.
+- In non-Clock modes (weather, follower counts, countdown, …) WeatherLive has no JPEG assets, so digits/symbols are drawn as procedural glyphs on a black background; the social-media platform logos still load from the built-in system assets.
+
 ### Adding a Custom Theme
 
 The web UI theme dropdown is populated dynamically by scanning `/images/themes/` on LittleFS at runtime (via `/api/themes`). Any folder you upload there with the required file structure will appear in the dropdown automatically — no firmware update needed.
@@ -1317,6 +1379,97 @@ A browser UI opens at **http://localhost:5000**. Features:
 
 Requires Python 3 and Pillow (`pip install Pillow` — auto-installed on first run).
 
+## Custom TTF Fonts
+
+The WeatherLive theme and all custom clock faces support user-supplied TrueType fonts for clock digits and panel text. Any `.ttf` file stored in `/fonts/` on the device is available for selection in the web UI under **Display → Custom Face → Digit font**.
+
+### How it works
+
+- The full `.ttf` file is loaded into **PSRAM** once (on start-up or when changed via the web UI). Only the characters actually displayed are rasterized — everything else costs nothing at render time.
+- A 128-slot FIFO **glyph cache** in PSRAM holds pre-rasterized bitmaps so each character is decoded once per size, then reused.
+- Font height is automatically **normalized** using `0` as the reference: the renderer scales the font so the digit `0` fills the target pixel height. Glyphs that are natively taller than `0` in the font file (e.g. `1` in Jim Nightshade) are automatically capped to the same height, so all digits appear visually uniform regardless of the font's internal bounding-box metrics.
+- **Clock mode** renders each digit individually, centered in its own tube at full tube height.
+- **Weather and WeatherLive panel text** (temperature, Hi/Lo, humidity value, wind speed, etc.) is rendered as a string that is first fitted to the tube width, then height-capped so no glyph overflows. The degree symbol (°) is appended inline as part of the temperature string and positioned naturally by the renderer rather than drawn as a separate fixed element.
+- **Width overflow is handled in two passes to keep stroke weight uniform.** First, all digits `0`–`9` are scanned and if the widest one would exceed the tube width (80 px minus 5 px margin each side), the universal height scale is reduced so that every character shrinks proportionally — stroke weight stays consistent across the whole string. Second, a per-glyph fallback catches any individual character (e.g. `K`, `M`, `°`) that is still wider than the tube after the universal reduction; those are capped individually and do not affect the scale applied to other glyphs.
+
+### Shadow
+
+When a Custom Face font is active a **drop shadow** can be drawn around every glyph. Enable it and pick the shadow colour under **Display → Custom Face → Shadow**. The shadow is a soft bloom (±2 px) that appears behind each rendered character.
+
+Beyond text glyphs, the shadow setting also controls the graphical weather-panel elements:
+
+| Element | Shadow behaviour |
+|---|---|
+| Hi/Lo temperature range track (tube 4) | Soft underline shadow below the bar |
+| Current-temperature marker (tube 4) | Drop shadow offset below the circle |
+| Humidity teardrop (tube 5) | Halo around the teardrop outline |
+
+All three elements use the same shadow colour set in **Display → Custom Face → Shadow**. Set the colour to pure black for a classic engraved look, or to a tinted hue to complement the theme palette.
+
+### Uploading a font
+
+1. Use **System → LittleFS Files** to browse to `/fonts/` (create the folder if it does not exist).
+2. Click **⬆ Upload File(s)** and select your `.ttf` file.
+3. Go to **Display → Custom Face**, click the **↺** button next to the Digit font field to scan for available fonts, then choose your file from the dropdown.
+4. Click **Save** — the new font takes effect on the next clock tick.
+
+### Reducing font file size with `pyftsubset`
+
+Full TTF files can be 200 KB – 2 MB. For the 11 supported display languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI) only a small Latin subset is actually needed. Install [fonttools](https://fonttools.readthedocs.io) and run:
+
+```bash
+pip install fonttools
+```
+
+```bash
+pyftsubset MyFont.ttf \
+  --unicodes="U+0020-007E,U+00A0-00FF,U+2013,U+2014,U+201C,U+201E,U+2026" \
+  --output-file=MyFont-subset.ttf \
+  --no-hinting \
+  --layout-features=""
+```
+
+| Range | Content |
+|---|---|
+| `U+0020–007E` | Basic Latin — digits `0–9`, `A–Z`, `a–z`, `:` `.` `%` `-` and common punctuation |
+| `U+00A0–00FF` | Latin-1 Supplement — all Western European and Nordic diacritics (ä ö ü ß å æ ø ñ ç é à °) plus `¡` `¿` |
+| `U+2013` `U+2014` | En dash, em dash |
+| `U+201C` `U+201E` | Typographic double quotes (used in French and German strings) |
+| `U+2026` | Ellipsis `…` (used in Finnish UI strings) |
+
+- `--no-hinting` — removes TrueType hint tables; not used by the on-device renderer and reduces file size.
+- `--layout-features=""` — strips GSUB/GPOS OpenType feature tables (ligatures, kerning, etc.) which the renderer does not use.
+
+Typical reduction: 200 KB → 30–60 KB; 1 MB → 60–150 KB.
+
+**Batch process a folder (PowerShell):**
+
+```powershell
+Get-ChildItem *.ttf | ForEach-Object {
+    pyftsubset $_.Name `
+        --unicodes="U+0020-007E,U+00A0-00FF,U+2013,U+2014,U+201C,U+201E,U+2026" `
+        --output-file="$($_.BaseName)-subset.ttf" `
+        --no-hinting `
+        --layout-features=""
+}
+```
+
+**Batch process a folder (bash):**
+
+```bash
+for f in *.ttf; do
+  pyftsubset "$f" \
+    --unicodes="U+0020-007E,U+00A0-00FF,U+2013,U+2014,U+201C,U+201E,U+2026" \
+    --output-file="${f%.ttf}-subset.ttf" \
+    --no-hinting \
+    --layout-features=""
+done
+```
+
+> **Build dependency:** `stb_truetype.h` (a single-header C library from [github.com/nothings/stb](https://github.com/nothings/stb)) must be placed at `components/font_render/stb_truetype.h` before building. It is not bundled with the repo — copy it once after cloning and it is picked up automatically by the build system.
+
+---
+
 ## REST API
 
 All endpoints return JSON. The API is backward-compatible with the original firmware's endpoints and adds new ones.
@@ -1347,6 +1500,7 @@ GET  /api/status             → live status: time, wifi, weather, heap, firmwar
 GET  /api/settings           → full configuration JSON
 POST /api/settings           → update config (JSON body; partial — only keys present are changed)
 POST /api/weather            → push external weather data (External source); JSON: temp_c OR temp_f, humidity, condition, icon, weather_code, lat, lon (all optional)
+POST /api/cx_image?tube=5|6  → push an 80×160 JPG (binary body) to a 24H Custom tube-5/6 "Pushed image" info panel (asset themes)
 GET  /api/firmwareVersion    → {"version":"1.0.0"}
 GET  /api/hardwareVersion    → {"version":"1.31"}
 POST /api/reset              → reset settings to defaults + reboot (preserves admin password & AP PIN)
@@ -1368,11 +1522,15 @@ POST /api/update_notify      → {"active":true/false} — activate or clear the
 
 ```
 GET  /api/debug/tasks        → per-task CPU accounting (FreeRTOS runtime stats): name, priority,
-                               core, state, stack high-water mark, runtime, lifetime CPU share.
-                               The go-to tool for diagnosing IDLE-starvation task-WDT warnings —
-                               sample twice and diff run_us for instantaneous load (counters are
-                               32-bit µs and wrap every ~71 min, so lifetime pct is only valid
-                               on short uptimes).
+                               core, state, stack high-water mark, run_us, and pct.
+                               `pct` is INSTANTANEOUS — the handler takes two snapshots ~250 ms
+                               apart and diffs them, so it is correct at any uptime (an earlier
+                               lifetime pct broke once the 32-bit µs counters wrapped at ~71 min).
+                               pct is per-chip: both cores accrue, so the sum across all tasks ≈
+                               200% (IDLE0+IDLE1 absorb the slack). The response also reports
+                               `window_us` (the measured interval); `run_us` is the raw lifetime
+                               counter if you want to diff it yourself. Note: the call blocks ~250 ms
+                               by design. The go-to tool for diagnosing IDLE-starvation task-WDT warnings.
 GET  /api/debug/adc          → single raw mic ADC reading: {"channel","gpio","raw","voltage_mv"}
 POST /api/debug/dac          → inject a test signal on the audio DAC (GPIO25):
                                {"mode":"tone","freq_hz":1000,"amplitude":64} | {"mode":"dc","level":200}
@@ -1415,7 +1573,10 @@ nextube-fw/
 │   ├── ntp_time/                  # NTP synchronisation
 │   ├── ha_mqtt/                   # Home Assistant MQTT auto-discovery + optional telemetry groups
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
-│   └── subscribers/               # Subscriber/follower counter (YouTube, Bilibili, Instagram, TikTok, Mastodon)
+│   ├── subscribers/               # Subscriber/follower counter (YouTube, Bilibili, Instagram, TikTok, Mastodon)
+│   └── font_render/               # stb_truetype TrueType rasterizer — PSRAM glyph cache, norm_ratio height correction
+│       ├── font_render.c          # Renderer implementation (stb_truetype.h must be placed here before building)
+│       └── include/font_render.h  # Public API: fr_init, fr_load_face, fr_draw_glyph_centered, fr_draw_text, …
 ├── data/web/                      # Web UI source (bundled into LittleFS)
 │   ├── index.html                 # Self-contained SPA (English inline; i18n engine built-in)
 │   ├── lang/                      # Lazy-loaded translation files (de fr es it pt nl sv no da fi)
