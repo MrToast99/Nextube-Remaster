@@ -4034,15 +4034,15 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
         int hw_lo = wl_label_half_w(lo, lbl_font, lbl_px);
         int hw_hi = wl_label_half_w(hi, lbl_font, lbl_px);
 
-        /* Anchor lo's left edge to bx0 and hi's right edge to bx1.
-         * Overlap push runs before the right-edge clamp so the push cannot
-         * send hi off the tube (labels may touch for unusually wide fonts). */
-        int cx_lo = bx0 + hw_lo + 1;
-        int cx_hi = bx1 - hw_hi - 1;
-        if (cx_lo - hw_lo < 1)
-            cx_lo = hw_lo + 1;
-        if (cx_hi - hw_hi < cx_lo + hw_lo + 3)
-            cx_hi = cx_lo + hw_lo + 3 + hw_hi;
+        /* Centre the lo/hi pair on the tube with a fixed gap between labels.
+         * The 6 px gap clears the ±2 px shadow bloom on both sides.
+         * Right-edge clamp handles unusually wide fonts. */
+        const int lbl_gap = 6;
+        int pair_w = hw_lo * 2 + lbl_gap + hw_hi * 2;
+        int left   = (LCD_WIDTH - pair_w) / 2;
+        if (left < 1) left = 1;
+        int cx_lo = left + hw_lo;
+        int cx_hi = cx_lo + hw_lo + lbl_gap + hw_hi;
         if (cx_hi + hw_hi > LCD_WIDTH - 1)
             cx_hi = LCD_WIDTH - 1 - hw_hi;
 

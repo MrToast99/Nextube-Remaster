@@ -544,6 +544,8 @@ int fr_measure_text(int fb_w, uint8_t face_id, uint16_t px_size, const char *utf
 {
     if (!utf8_str || !utf8_str[0] || !fr_face_valid(face_id)) return 0;
 
+    const uint16_t orig_px = px_size;   /* caller's target before norm_ratio */
+
     {
         float ratio = s_faces[face_id].norm_ratio;
         if (ratio > 1.001f) {
@@ -562,14 +564,41 @@ int fr_measure_text(int fb_w, uint8_t face_id, uint16_t px_size, const char *utf
         if (g) total_adv += g->advance;
     }
 
+    uint16_t adj_px = px_size;
     if (total_adv > max_w && total_adv > 0) {
-        uint16_t adj_px = (uint16_t)((long)px_size * max_w / total_adv);
+        adj_px = (uint16_t)((long)px_size * max_w / total_adv);
         if (adj_px < 4) adj_px = 4;
         total_adv = 0;
         p = utf8_str;
         while ((cp = fr_utf8_next(&p)) != 0) {
             const fr_glyph_t *g = fr_get_glyph(face_id, cp, adj_px);
             if (g) total_adv += g->advance;
+        }
+    }
+
+    /* Height-fit: apply the same pass as fr_draw_text so the returned advance
+     * matches what fr_draw_text will actually use for centering.  Without this,
+     * fonts whose glyphs exceed orig_px (e.g. "1" in many display fonts) trigger
+     * a further px_size reduction inside fr_draw_text that makes the rendered
+     * text narrower than fr_measure_text reported — causing label overlap when
+     * the measured half-widths are used to position two adjacent labels.       */
+    {
+        int max_h = 0;
+        p = utf8_str;
+        while ((cp = fr_utf8_next(&p)) != 0) {
+            const fr_glyph_t *g = fr_get_glyph(face_id, cp, adj_px);
+            if (g && (int)g->rows > max_h) max_h = (int)g->rows;
+        }
+        if (max_h > (int)orig_px && max_h > 0) {
+            uint16_t h_adj = (uint16_t)((long)adj_px * (int)orig_px / max_h);
+            if (h_adj < 4) h_adj = 4;
+            adj_px = h_adj;
+            total_adv = 0;
+            p = utf8_str;
+            while ((cp = fr_utf8_next(&p)) != 0) {
+                const fr_glyph_t *g = fr_get_glyph(face_id, cp, adj_px);
+                if (g) total_adv += g->advance;
+            }
         }
     }
 
