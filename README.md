@@ -45,7 +45,9 @@ Like the work? Help keep me Caffeinated! <br>
 - [Home Assistant MQTT](#home-assistant-mqtt)
 - [WLED Sync](#wled-sync)
 - [Themes](#themes)
+  - [Built-in Themes](#built-in-themes)
   - [WeatherLive theme](#weatherlive-theme)
+  - [Custom Face](#custom-face)
   - [Adding a Custom Theme](#adding-a-custom-theme)
   - [Image Converter Helper](#image-converter-helper)
 - [Custom TTF Fonts](#custom-ttf-fonts)
@@ -1244,6 +1246,29 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 
 ## Themes
 
+### Built-in Themes
+
+Twelve themes ship pre-loaded in LittleFS with every firmware image. Select them from **Display → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
+
+| Theme | Style |
+|---|---|
+| **NixieOY** *(default)* | Warm amber Nixie-tube glyphs on a dark background — replicates classic neon vacuum tubes |
+| **DarkSlate** | Cool slate-blue digits on near-black — modern minimalist |
+| **DotMatrixRG** | Red/green dot-matrix grid — retro scoreboard look |
+| **DotMatrixY** | Amber dot-matrix grid — classic departure-board aesthetic |
+| **FlipClock** | Split-flap flip animation — simulates the mechanical split-flap display |
+| **Formula1** | High-contrast racing-style segmented digits |
+| **GlitchGR** | Green-on-dark with glitch-art distortion |
+| **LightFuture** | Light background, dark digits — inverted minimal look |
+| **NotionRain** | Dark rain-effect styling |
+| **RedDigits** | Bright red classic digit art |
+| **RetroPaper** | Off-white paper tone — old VFD or e-ink feel |
+| **WireMesh** | Wireframe outlined glyphs — technical circuit-board aesthetic |
+
+All built-in themes include the complete required asset set: digits, AMPM indicators, weather icons, WeekDate images, and info-panel assets. See [Adding a Custom Theme](#adding-a-custom-theme) to install your own.
+
+**Theme rotation** — enable **Theme Rotation** under **Display** to auto-cycle through all or a curated selection of themes on a timer. See [Theme Rotation](#theme-rotation) for details.
+
 ### WeatherLive theme
 
 **WeatherLive** is a built-in **procedural** theme (no JPEG assets) — selecting it in the theme dropdown replaces the digit artwork with a fully animated, real-time sky rendered on the fly across all six tubes. It tracks your actual location and weather:
@@ -1263,6 +1288,48 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 Notes:
 - WeatherLive renders a **subset** of the 24H Custom panels procedurally and **ignores** the Weather-icon and Pushed-image panels (those need JPEG assets / asset themes); in the web UI the Weather-icon panel option is hidden while WeatherLive is selected.
 - In non-Clock modes (weather, follower counts, countdown, …) WeatherLive has no JPEG assets, so digits/symbols are drawn as procedural glyphs on a black background; the social-media platform logos still load from the built-in system assets.
+
+### Custom Face
+
+**Custom Face** layers a TrueType font over any installed theme's selected background artwork. Configure it under **Display → Custom Face**.
+
+| Setting | Description |
+|---|---|
+| **Digit font** | Any `.ttf` uploaded to `/fonts/` on the device, or **Logisoso (built-in)**. Click **↺** to refresh the list after uploading a new font. |
+| **Font colour** | Colour applied to clock digits rendered by the TTF engine. |
+| **Glyph colour** | Colour for weather-panel glyphs and info-panel text rendered with the TTF engine. |
+| **Shadow** | Toggle drop shadow on/off and pick its colour. Applies to clock digits, panel text, and the graphical weather elements (Hi/Lo range bar, current-temperature marker, and humidity teardrop). |
+
+**How it interacts with themes:**
+
+- **Any asset theme (NixieOY, FlipClock, etc.)** — the TTF font renders digits; all other panel assets (weather icons, social media logos, WeekDate images) continue loading from the theme.
+- **WeatherLive** — the TTF font renders all panel text: temperature, Hi/Lo, sunrise/sunset, date, and humidity. The shadow setting also controls the graphical range track, temperature marker, and humidity teardrop. The procedural sky background is unaffected.
+
+**Shadow without a custom font:** the shadow checkbox and colour operate independently of the font selection — on WeatherLive the shadow applies to the procedural graphical elements even when **Digit font → **Logisoso (built-in)** is selected.
+
+**Time formats and 24H Custom panels** determine which info panels appear on tubes 5/6 alongside the clock digits:
+
+| Time format | Tube layout | Info panels |
+|---|---|---|
+| **12H** | `[AM/PM] H H : M M` | None — all six tubes show clock elements |
+| **24H** | `H H : M M [blank] [blank]` | None |
+| **24H (No Sec)** | `H H : M M [info] [info]` | Tube 5 and 6 show rotating info panels |
+| **24H (Custom / CX)** | `H H : M M [blank] [info]` *(single)* or `H H M M [info] [info]` *(dual)* | Fully configurable per-tube rotating panel sets |
+
+**24H Custom info panels** (configured per tube under **Display → 24H Custom**):
+
+| Panel | Content |
+|---|---|
+| Day + Date | Localised day-of-week abbreviation + date digits |
+| Indoor Temp & Humidity | SHT30 sensor reading (°C/°F + %) |
+| Outdoor Temp + Hi/Lo | Current outdoor temperature with today's high/low range |
+| Sunrise & Sunset | Local solar times in HH:MM (NOAA algorithm, geocoded from weather city) |
+| Weather Icon | Condition icon (sun, clouds, rain, snow, …) |
+| Pushed Image | Custom 80×160 JPG pushed via `POST /api/cx_image?tube=5\|6` — see [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom) |
+
+**Dual-panel mode** (`cx_dual_panel`): drops the colon tube so the layout becomes `H H  M M [tube 5] [tube 6]`. Tubes 5 and 6 each have an independent enabled-panel set and cycle through it on the shared rotation interval.
+
+See [Custom TTF Fonts](#custom-ttf-fonts) for font upload instructions and `pyftsubset` subsetting to reduce font file size.
 
 ### Adding a Custom Theme
 

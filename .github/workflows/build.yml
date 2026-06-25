@@ -178,7 +178,7 @@ jobs:
               GUIDANCE="**Web UI changed:** upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update** (config-safe, no reboot). If a full filesystem reflash is required it will be noted explicitly — use \`nextube-littlefs-v${SP_VER}.bin\` via **System → LittleFS Recovery** (⚠️ erases filesystem — back up your config first via **System → Backup & Restore**)."
               ;;
             full)
-              GUIDANCE="**Both partitions changed.** Flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**, then upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update**. Alternatively use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
+              GUIDANCE="**Both partitions changed.** Use the Online updater or Flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**, then upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update**. Alternatively use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
               ;;
             *)
               GUIDANCE="Refer to the included binaries."
