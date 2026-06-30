@@ -652,7 +652,8 @@ void subscribers_start(void)
     s_tiktok_mutex   = xSemaphoreCreateMutex();
     s_mastodon_mutex = xSemaphoreCreateMutex();
     s_refresh_sem    = xSemaphoreCreateBinary();
-    xTaskCreate(subscribers_task, "subscribers", 8192, NULL, 3, NULL);
+    if (xTaskCreate(subscribers_task, "subscribers", 8192, NULL, 3, NULL) != pdPASS)
+        ESP_LOGE(TAG, "subscribers_task creation failed");
 }
 
 /** Wake the subscribers task immediately to start a fresh poll cycle. */

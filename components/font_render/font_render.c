@@ -53,6 +53,25 @@ typedef struct {
 static fr_cache_entry_t s_cache[FR_CACHE_SIZE];
 static int s_cache_next = 0;
 
+/* Per-(face,size,fb) layout memo for fr_draw_glyph_centered().  The universal
+ * scale (univ_adj) and the digit baseline depend only on the face, target pixel
+ * height and framebuffer size — not on the codepoint — yet computing them runs
+ * a 0-9 glyph-box scan (10× stbtt_GetCodepointBox) plus the font v-metrics.
+ * Memoise so a steady clock face pays that once instead of once per digit per
+ * frame.  Invalidated by fr_cache_flush(), which runs on every face change. */
+typedef struct {
+    bool     valid;
+    uint8_t  face_id;
+    uint16_t px_size;
+    int16_t  fb_w, fb_h;
+    uint16_t univ_adj;
+    int      universal_baseline;
+    bool     baseline_valid;
+} fr_layout_memo_t;
+#define FR_LAYOUT_MEMO_N 4
+static fr_layout_memo_t s_layout_memo[FR_LAYOUT_MEMO_N];
+static int s_layout_memo_next = 0;
+
 /* ── Init ───────────────────────────────────────────────────────────────────── */
 void fr_init(void)
 {
@@ -177,6 +196,10 @@ void fr_cache_flush(void)
         memset(&s_cache[i], 0, sizeof(fr_cache_entry_t));
     }
     s_cache_next = 0;
+    /* The layout memo is keyed by face_id, which may now point at a different
+     * font — drop it so univ_adj / baseline are recomputed for the new face. */
+    memset(s_layout_memo, 0, sizeof(s_layout_memo));
+    s_layout_memo_next = 0;
 }
 
 /* ── Glyph lookup / rasterise ───────────────────────────────────────────────── */
@@ -328,21 +351,31 @@ void fr_blit(uint8_t *fb, int fb_w, int fb_h,
  *     cap band is vertically centred in the framebuffer.  This eliminates the
  *     "1 and 9 appear taller" visual inconsistency caused by bitmap-bounds
  *     centering. */
-void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
-                             uint8_t face_id, uint32_t codepoint, uint16_t px_size,
-                             uint8_t cr, uint8_t cg, uint8_t cb,
-                             bool shadow, uint8_t sr, uint8_t sg, uint8_t sb)
+/* Compute (or fetch from the memo) the codepoint-independent layout for a
+ * face/size/framebuffer: the universal scale univ_adj (size that makes '0' the
+ * requested height, then capped so the widest digit fits the tube) and the
+ * universal baseline (where '0' sits when vertically centred).  These are the
+ * expensive parts of fr_draw_glyph_centered() — a 0-9 box scan + v-metrics —
+ * and they do not depend on which glyph is being drawn, so memoising them turns
+ * per-digit-per-frame work into once-per-face/size.  Returns NULL only when '0'
+ * has no usable bounding box (degenerate font). */
+static fr_layout_memo_t *fr_get_layout(uint8_t face_id, uint16_t px_size,
+                                       int fb_w, int fb_h)
 {
-    if (!fr_face_valid(face_id)) return;
+    for (int i = 0; i < FR_LAYOUT_MEMO_N; i++) {
+        fr_layout_memo_t *m = &s_layout_memo[i];
+        if (m->valid && m->face_id == face_id && m->px_size == px_size &&
+            m->fb_w == (int16_t)fb_w && m->fb_h == (int16_t)fb_h)
+            return m;
+    }
+
     const fr_face_t *face = &s_faces[face_id];
 
-    /* 1. MASTER ANCHOR CALCULATION
-     * We measure '0' as the ultimate source of truth. We figure out
-     * exactly what scale is needed to make '0' fit the height requested. */
+    /* MASTER ANCHOR — measure '0', derive the scale that makes it `px_size` tall. */
     int zx0, zy0, zx1, zy1;
     stbtt_GetCodepointBox(&face->info, '0', &zx0, &zy0, &zx1, &zy1);
     int zero_unscaled_h = zy1 - zy0;
-    if (zero_unscaled_h <= 0) return;
+    if (zero_unscaled_h <= 0) return NULL;
 
     int asc, desc, lg;
     stbtt_GetFontVMetrics(&face->info, &asc, &desc, &lg);
@@ -352,13 +385,9 @@ void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
     long calc_adj = (long)px_size * em_span / zero_unscaled_h;
     uint16_t univ_adj = (calc_adj < 8) ? 8 : (uint16_t)calc_adj;
 
-    /* 2. UNIVERSAL WIDTH CAP
-     * Scan digits 0-9 to find the absolute widest character.
-     * If the widest digit overflows the tube, we shrink the universal scale 
-     * so EVERYTHING scales down proportionally, preserving uniform stroke weight. */
+    /* UNIVERSAL WIDTH CAP — shrink uniformly if the widest digit overflows. */
     float scale = stbtt_ScaleForPixelHeight(&face->info, (float)univ_adj);
     int max_digit_w = 0;
-    
     for (char c = '0'; c <= '9'; c++) {
         int cx0, cy0, cx1, cy1;
         if (stbtt_GetCodepointBox(&face->info, c, &cx0, &cy0, &cx1, &cy1)) {
@@ -366,21 +395,57 @@ void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
             if (cw > max_digit_w) max_digit_w = cw;
         }
     }
-
     int max_w = fb_w - FR_GLYPH_MARGIN_PX * 2;
     if (max_digit_w > max_w && max_digit_w > 0) {
         long w_adj = (long)univ_adj * max_w / max_digit_w;
         univ_adj = (w_adj < 8) ? 8 : (uint16_t)w_adj;
     }
 
-    /* 3. Fetch the requested glyph at the universally locked size */
+    /* UNIVERSAL BASELINE — where '0' sits when vertically centred. */
+    int  universal_baseline = 0;
+    bool baseline_valid = false;
+    const fr_glyph_t *zero_glyph = fr_get_glyph(face_id, '0', univ_adj);
+    if (zero_glyph) {
+        int zero_centered_y = (fb_h - zero_glyph->rows) / 2;
+        universal_baseline  = zero_centered_y + zero_glyph->bearing_y;
+        baseline_valid      = true;
+    }
+
+    fr_layout_memo_t *m = &s_layout_memo[s_layout_memo_next];
+    m->valid              = true;
+    m->face_id            = face_id;
+    m->px_size            = px_size;
+    m->fb_w               = (int16_t)fb_w;
+    m->fb_h               = (int16_t)fb_h;
+    m->univ_adj           = univ_adj;
+    m->universal_baseline = universal_baseline;
+    m->baseline_valid     = baseline_valid;
+    s_layout_memo_next = (s_layout_memo_next + 1) % FR_LAYOUT_MEMO_N;
+    return m;
+}
+
+void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
+                             uint8_t face_id, uint32_t codepoint, uint16_t px_size,
+                             uint8_t cr, uint8_t cg, uint8_t cb,
+                             bool shadow, uint8_t sr, uint8_t sg, uint8_t sb)
+{
+    if (!fr_face_valid(face_id)) return;
+
+    /* Universal scale + baseline are codepoint-independent — pull them from the
+     * memo (computed once per face/size/fb) instead of re-running the 0-9 box
+     * scan and v-metrics on every glyph. */
+    fr_layout_memo_t *L = fr_get_layout(face_id, px_size, fb_w, fb_h);
+    if (!L) return;
+    uint16_t univ_adj = L->univ_adj;
+    int      max_w    = fb_w - FR_GLYPH_MARGIN_PX * 2;
+
+    /* Fetch the requested glyph at the universally locked size. */
     const fr_glyph_t *probe = fr_get_glyph(face_id, codepoint, univ_adj);
     if (!probe) return;
 
-    /* 3b. Per-glyph width cap — catches letters wider than '0' (e.g. 'K', 'M').
-     * The '0' check above keeps digits consistent; this second pass ensures any
-     * suffix letter (K/M for social counters, C/F for temperature, etc.) also
-     * stays within the tube margins. */
+    /* Per-glyph width cap — catches letters wider than '0' (e.g. 'K', 'M').
+     * Never fires for digits (the 0-9 scan already capped width), so the
+     * memoised baseline stays exact for the digit case below. */
     if (probe->width > 0 && (int)probe->width > max_w) {
         long w_adj = (long)univ_adj * max_w / (int)probe->width;
         univ_adj = (w_adj < 8) ? 8 : (uint16_t)w_adj;
@@ -388,32 +453,15 @@ void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
         if (!probe) return;
     }
 
-    /* Horizontal Center */
-    int x0 = (fb_w - probe->width) / 2;
+    int x0 = (fb_w - probe->width) / 2;     /* horizontal centre */
     int y0;
-
-    /* 4. UNIVERSAL BASELINE ALIGNMENT
-     * We physically center the '0' in the display, find its baseline, 
-     * and force all other numbers to share that exact same invisible line. */
-    const fr_glyph_t *zero_glyph = fr_get_glyph(face_id, '0', univ_adj);
-    if (zero_glyph) {
-        // Find where '0' naturally sits when mathematically centered
-        int zero_centered_y = (fb_h - zero_glyph->rows) / 2;
-        int universal_baseline = zero_centered_y + zero_glyph->bearing_y;
-
-        if (codepoint >= '0' && codepoint <= '9') {
-            /* All numbers stand perfectly on the shared baseline */
-            y0 = universal_baseline - probe->bearing_y;
-        } else {
-            /* Punctuation (like ':') ignores baselines and perfectly centers itself */
-            y0 = (fb_h - probe->rows) / 2;
-        }
+    if (L->baseline_valid && codepoint >= '0' && codepoint <= '9') {
+        /* All digits stand on the shared baseline so they don't jitter. */
+        y0 = L->universal_baseline - probe->bearing_y;
     } else {
-        /* Failsafe */
+        /* Punctuation / letters centre by their own height. */
         y0 = (fb_h - probe->rows) / 2;
     }
-
-    /* Prevent off-screen clipping */
     if (y0 < 0) y0 = 0;
 
     fr_blit(fb, fb_w, fb_h, probe, x0, y0, cr, cg, cb, shadow, sr, sg, sb);

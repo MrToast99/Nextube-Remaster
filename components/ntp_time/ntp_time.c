@@ -481,7 +481,8 @@ void ntp_apply_servers(void)
 
 void ntp_time_start(void)
 {
-    xTaskCreate(ntp_task, "ntp", 4096, NULL, 5, NULL);
+    if (xTaskCreate(ntp_task, "ntp", 4096, NULL, 5, NULL) != pdPASS)
+        ESP_LOGE(TAG, "ntp_task creation failed");
 }
 
 bool ntp_time_synced(void)    { return s_synced; }

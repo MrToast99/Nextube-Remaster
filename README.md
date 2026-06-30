@@ -39,6 +39,7 @@ Like the work? Help keep me Caffeinated! <br>
 - [Modes](#modes)
 - [Weather](#weather)
 - [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)
+- [Air Quality panel](#air-quality-panel)
 - [NTP & Clock Accuracy](#ntp--clock-accuracy)
 - [Social Media Counters](#social-media-counters)
   - [Local Relay (`social_relay.py`)](#local-relay-social_relaypy)
@@ -86,6 +87,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | OpenWeatherMap weather (free-tier API key) | ✅ Working |
 | Met.no weather (free, no key, elevation-aware) | ✅ Working |
 | External weather (push your own data via `POST /api/weather`) | ✅ Working |
+| Air quality panel (US / European AQI, free keyless Open-Meteo) | ✅ Working |
 | Live weather city verification in web UI | ✅ Working |
 | YouTube subscriber counter (direct + relay) | ✅ Working |
 | Bilibili follower counter (direct) | ✅ Working |
@@ -955,6 +957,24 @@ magick -size 80x160 xc:black -gravity center \
 curl -X POST "http://nextube.local/api/cx_image?tube=6" --data-binary @frame.jpg
 ```
 
+## Air Quality panel
+
+An outdoor **Air Quality Index** info panel for tube 5/6, available on both the **WeatherLive** face and the asset themes (rendered over the theme's `blank.jpg`). It shows a large **"AQI"** label over the index value, sized to fit 1–3 digits and **colour-coded by health band**.
+
+**Data source:** the free, keyless **Open-Meteo Air Quality API**, reusing the same geocoded location as the weather provider — so it works with any weather source (Met.no, Open-Meteo, wttr.in, OWM, external) and needs **no API key**. The value refreshes on the weather poll (every 10 min, but AQI itself is only hourly in nature).
+
+**Two scales** (Display → 24H Custom → **AQI scale**):
+
+| Setting | Behaviour |
+|---|---|
+| **Auto (by location)** | European AQI (0–100) inside the Europe bounding box, US EPA AQI (0–500) elsewhere |
+| **US AQI** | Always the US EPA index (0–500): green → yellow → orange → red → purple → maroon |
+| **European AQI** | Always the CAMS/EEA index (0–100+): good → fair → moderate → poor → very poor → extremely poor |
+
+The number is drawn in its band colour; the "AQI" label uses the theme/Custom-Face font colour. Until the first fetch completes it shows `--`.
+
+**Enable it:** Display → **24H Custom**, tick **Air Quality** for tube 6 (and/or tube 5 in dual-panel mode), and pick the **AQI scale**. Also exposed to Home Assistant as the **Nextube Air Quality** sensor — see [Home Assistant MQTT](#home-assistant-mqtt).
+
 ## NTP & Clock Accuracy
 
 The Nextube synchronises its system clock from NTP servers immediately on WiFi connect, then once per hour. Between syncs, accuracy depends on the active **Time Discipline Mode**.
@@ -1120,6 +1140,7 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 |---|---|---|---|
 | **Nextube Temperature** | `sensor` | Always | SHT30 temperature in °C, updated every 60 s |
 | **Nextube Humidity** | `sensor` | Always | SHT30 relative humidity %, updated every 60 s |
+| **Nextube Air Quality** | `sensor` | Always | Outdoor AQI (US or European per the panel's scale setting) from Open-Meteo, updated every 60 s |
 | **Nextube Mode** | `select` | Always | Read and set the active display mode (Clock, Weather, YouTube, …) |
 | **Nextube Display** | `switch` | Always | Turn the backlight ON or OFF (same as the middle touch button) |
 | **Nextube Brightness** | `number` | Always | LCD brightness 0–100 slider |
@@ -1325,6 +1346,9 @@ Notes:
 | Outdoor Temp + Hi/Lo | Current outdoor temperature with today's high/low range |
 | Sunrise & Sunset | Local solar times in HH:MM (NOAA algorithm, geocoded from weather city) |
 | Weather Icon | Condition icon (sun, clouds, rain, snow, …) |
+| Outdoor Humidity | Outdoor relative humidity (teardrop symbol + %) |
+| Wind | Wind speed (wind symbol + value; km/h, mph, or m/s) |
+| Air Quality | Outdoor AQI, big value colour-coded by health band — see [Air Quality panel](#air-quality-panel) |
 | Pushed Image | Custom 80×160 JPG pushed via `POST /api/cx_image?tube=5\|6` — see [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom) |
 
 **Dual-panel mode** (`cx_dual_panel`): drops the colon tube so the layout becomes `H H  M M [tube 5] [tube 6]`. Tubes 5 and 6 each have an independent enabled-panel set and cycle through it on the shared rotation interval.

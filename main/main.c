@@ -25,6 +25,7 @@
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_littlefs.h"
@@ -312,6 +313,8 @@ static void audio_mic_deferred_start(void *arg)
 
     ESP_LOGI("main", "Audio started (deferred)%s",
              mic_started ? " + mic started" : " — mic not started");
+    ESP_LOGD("main", "audio_defer stack HWM: %u words",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
     vTaskDelete(NULL);
 }
 
@@ -426,7 +429,8 @@ void app_main(void)
      *
      * Stack: audio_init() + mic_init() call chains exceed 4 KB combined.
      * 8 KB matches CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192. */
-    xTaskCreate(audio_mic_deferred_start, "audio_defer", 8192, NULL, 4, NULL);
+    if (xTaskCreate(audio_mic_deferred_start, "audio_defer", 8192, NULL, 4, NULL) != pdPASS)
+        ESP_LOGE(TAG, "audio_defer task creation failed — audio and mic will not start");
 
     leds_init();
     leds_task_start();
@@ -497,6 +501,15 @@ void app_main(void)
                 else
                     ESP_LOGW(TAG, "OTA ROLLBACK — failed firmware version unknown; "
                              "reverted to v%s", FW_VERSION_STR);
+                /* Persist the rollback event in NVS so it survives a power-cycle
+                 * and can be surfaced in diagnostics even if no serial monitor is
+                 * attached.  Cleared when the user acknowledges via the web UI. */
+                nvs_handle_t _nh;
+                if (nvs_open("nextube_diag", NVS_READWRITE, &_nh) == ESP_OK) {
+                    nvs_set_u8(_nh, "ota_rollback", 1);
+                    nvs_commit(_nh);
+                    nvs_close(_nh);
+                }
             }
         }
     }

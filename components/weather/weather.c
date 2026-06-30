@@ -933,6 +933,56 @@ static void fetch_daily_range(void)
     cJSON_Delete(root);
 }
 
+/* Fetch the current US EPA (0-500) and European (0-100+) Air Quality Index plus
+ * PM2.5 from the keyless Open-Meteo air-quality endpoint, using the location the
+ * active provider just geocoded (weather_get_location).  Both indices come in
+ * one request; weather_get_aqi() picks which to show per the configured
+ * standard.  Provider-agnostic, no API key.  No-op until a location is known. */
+static void fetch_air_quality(void)
+{
+    float lat, lon;
+    if (!weather_get_location(&lat, &lon)) return;
+
+    char url[256];
+    snprintf(url, sizeof(url),
+             "https://air-quality-api.open-meteo.com/v1/air-quality"
+             "?latitude=%.4f&longitude=%.4f"
+             "&current=us_aqi,european_aqi,pm2_5"
+             "&timezone=auto",   /* align the "current" hour to local time, not GMT */
+             (double)lat, (double)lon);
+
+    /* air-quality-api.open-meteo.com is a distinct host from the forecast and
+     * geocoding APIs, so its first DNS lookup is cold and can return EAI_AGAIN
+     * (getaddrinfo code 202) when the lwIP resolver is briefly busy right after
+     * the other fetches in this poll.  Retry a few times before giving up so the
+     * panel populates on the first poll instead of waiting 10 min for the next. */
+    char *body = NULL;
+    for (int attempt = 0; attempt < 3 && !body; attempt++) {
+        if (attempt) vTaskDelay(pdMS_TO_TICKS(2000));
+        body = http_get(url);
+    }
+    if (!body) return;
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root) return;
+
+    cJSON *cur = cJSON_GetObjectItem(root, "current");
+    cJSON *aqi = cur ? cJSON_GetObjectItem(cur, "us_aqi")       : NULL;
+    cJSON *eaq = cur ? cJSON_GetObjectItem(cur, "european_aqi") : NULL;
+    cJSON *pm  = cur ? cJSON_GetObjectItem(cur, "pm2_5")        : NULL;
+    if (cJSON_IsNumber(aqi) || cJSON_IsNumber(eaq)) {
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        if (cJSON_IsNumber(aqi)) s_weather.us_aqi       = (int)lroundf((float)aqi->valuedouble);
+        if (cJSON_IsNumber(eaq)) s_weather.european_aqi = (int)lroundf((float)eaq->valuedouble);
+        if (cJSON_IsNumber(pm))  s_weather.pm2_5        = (float)pm->valuedouble;
+        s_weather.aqi_valid = true;
+        xSemaphoreGive(s_wx_mutex);
+        ESP_LOGI(TAG, "air quality: US AQI %d  EU AQI %d",
+                 s_weather.us_aqi, s_weather.european_aqi);
+    }
+    cJSON_Delete(root);
+}
+
 /* ── Task ───────────────────────────────────────────────────────────── */
 static void fetch_weather(void)
 {
@@ -959,6 +1009,9 @@ static void fetch_weather(void)
     /* Today's high/low for the WeatherLive tube-6 panel — keyless Open-Meteo,
      * uses the location the provider above just geocoded. */
     fetch_daily_range();
+
+    /* Air quality (US AQI) — keyless Open-Meteo, same geocoded location. */
+    fetch_air_quality();
 }
 
 static void weather_task(void *arg)
@@ -1029,7 +1082,8 @@ void weather_start(void)
                  (double)s_wx_lat, (double)s_wx_lon);
     }
     config_unlock();
-    xTaskCreate(weather_task, "weather", 8192, NULL, 3, NULL);
+    if (xTaskCreate(weather_task, "weather", 8192, NULL, 3, NULL) != pdPASS)
+        ESP_LOGE(TAG, "weather_task creation failed");
 }
 
 const weather_data_t *weather_get(void)
@@ -1053,4 +1107,32 @@ bool weather_get_location(float *lat, float *lon)
     if (ok) { *lat = s_wx_lat; *lon = s_wx_lon; }
     xSemaphoreGive(s_wx_mutex);
     return ok;
+}
+
+int weather_get_aqi(bool *is_european)
+{
+    /* Resolve the standard: explicit "us"/"eu", or "auto" → European inside the
+     * Europe bounding box (lat 34..72, lon -25..45), US elsewhere. */
+    char std[8] = {0};
+    config_lock();
+    strncpy(std, config_get()->aqi_standard, sizeof(std) - 1);
+    config_unlock();
+
+    bool eu;
+    if      (strcmp(std, "eu") == 0) eu = true;
+    else if (strcmp(std, "us") == 0) eu = false;
+    else {
+        float lat, lon;
+        eu = false;
+        if (weather_get_location(&lat, &lon))
+            eu = (lat >= 34.0f && lat <= 72.0f && lon >= -25.0f && lon <= 45.0f);
+    }
+    if (is_european) *is_european = eu;
+
+    if (!s_wx_mutex) return -1;
+    xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+    bool valid = s_weather.aqi_valid;
+    int  v     = eu ? s_weather.european_aqi : s_weather.us_aqi;
+    xSemaphoreGive(s_wx_mutex);
+    return valid ? v : -1;
 }

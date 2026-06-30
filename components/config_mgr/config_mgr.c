@@ -201,6 +201,7 @@ static void set_defaults(void)
     s_cfg.tube6_panel_push     = false;
     s_cfg.tube6_panel_humidity = false;
     s_cfg.tube6_panel_wind     = false;
+    s_cfg.tube6_panel_aqi      = false;
     s_cfg.tube6_panel_ms       = 5000;
     s_cfg.cx_dual_panel        = false;   /* single panel + colon (original layout) */
     s_cfg.tube5_panel_weather  = false;
@@ -211,6 +212,8 @@ static void set_defaults(void)
     s_cfg.tube5_panel_push     = false;
     s_cfg.tube5_panel_humidity = false;
     s_cfg.tube5_panel_wind     = false;
+    s_cfg.tube5_panel_aqi      = false;
+    strncpy(s_cfg.aqi_standard, "auto", sizeof(s_cfg.aqi_standard) - 1);
     s_cfg.update_repo[0]       = '\0';
 
     /* Rotation off by default; user must explicitly enable it */
@@ -547,7 +550,8 @@ static void parse_json(const char *json, size_t len)
             if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= 3) {
                 for (int ch = 0; ch < 3; ch++) {
                     cJSON *c = cJSON_GetArrayItem(arr, ch);
-                    if (cJSON_IsNumber(c)) color_ptrs[ci][ch] = (uint8_t)c->valueint;
+                    if (cJSON_IsNumber(c) && c->valueint >= 0 && c->valueint <= 255)
+                        color_ptrs[ci][ch] = (uint8_t)c->valueint;
                 }
             }
         }
@@ -613,6 +617,8 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_humidity = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tube6_panel_wind");
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_wind = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_aqi");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_aqi = cJSON_IsTrue(v);
 
         /* Dual-panel mode + tube 5's independent panel set */
         v = cJSON_GetObjectItem(root, "cx_dual_panel");
@@ -633,21 +639,26 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.tube5_panel_humidity = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tube5_panel_wind");
         if (cJSON_IsBool(v)) s_cfg.tube5_panel_wind = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_aqi");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_aqi = cJSON_IsTrue(v);
     }
+    json_read_str(root, "aqi_standard", s_cfg.aqi_standard, sizeof(s_cfg.aqi_standard));
     json_read_u16(root, "tube6_panel_ms", &s_cfg.tube6_panel_ms);
     if (s_cfg.tube6_panel_ms < 1000) s_cfg.tube6_panel_ms = 5000;
     /* Guard: fall back to weekdate if every panel is disabled */
     if (!s_cfg.tube6_panel_weather && !s_cfg.tube6_panel_weekdate &&
         !s_cfg.tube6_panel_ht      && !s_cfg.tube6_panel_temp     &&
         !s_cfg.tube6_panel_sunrise && !s_cfg.tube6_panel_push     &&
-        !s_cfg.tube6_panel_humidity && !s_cfg.tube6_panel_wind)
+        !s_cfg.tube6_panel_humidity && !s_cfg.tube6_panel_wind &&
+        !s_cfg.tube6_panel_aqi)
         s_cfg.tube6_panel_weekdate = true;
     /* Tube 5 only matters in dual mode — guarantee ≥1 panel there too. */
     if (s_cfg.cx_dual_panel &&
         !s_cfg.tube5_panel_weather && !s_cfg.tube5_panel_weekdate &&
         !s_cfg.tube5_panel_ht      && !s_cfg.tube5_panel_temp     &&
         !s_cfg.tube5_panel_sunrise && !s_cfg.tube5_panel_push     &&
-        !s_cfg.tube5_panel_humidity && !s_cfg.tube5_panel_wind)
+        !s_cfg.tube5_panel_humidity && !s_cfg.tube5_panel_wind &&
+        !s_cfg.tube5_panel_aqi)
         s_cfg.tube5_panel_ht = true;
 
     /* Backlight mode */
@@ -697,6 +708,8 @@ static void parse_json(const char *json, size_t len)
         cJSON *wa = cJSON_GetObjectItem(root, "rotation_weights");
         if (cJSON_IsArray(wa)) {
             int n = cJSON_GetArraySize(wa);
+            if (n > APP_MODE_MAX)
+                ESP_LOGW("cfg", "rotation_weights: %d entries in JSON, only %d used", n, APP_MODE_MAX);
             for (int i = 0; i < n && i < APP_MODE_MAX; i++) {
                 cJSON *item = cJSON_GetArrayItem(wa, i);
                 if (cJSON_IsNumber(item)) {
@@ -777,7 +790,10 @@ static void parse_json(const char *json, size_t len)
                 cJSON *r = cJSON_GetArrayItem(rgb, 0);
                 cJSON *g = cJSON_GetArrayItem(rgb, 1);
                 cJSON *b = cJSON_GetArrayItem(rgb, 2);
-                if (r && g && b) {
+                if (r && g && b &&
+                    r->valueint >= 0 && r->valueint <= 255 &&
+                    g->valueint >= 0 && g->valueint <= 255 &&
+                    b->valueint >= 0 && b->valueint <= 255) {
                     s_cfg.backlight_rgb[i][0] = (uint8_t)r->valueint;
                     s_cfg.backlight_rgb[i][1] = (uint8_t)g->valueint;
                     s_cfg.backlight_rgb[i][2] = (uint8_t)b->valueint;
@@ -792,7 +808,8 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsArray(sp) && cJSON_GetArraySize(sp) >= 3) {
             for (int i = 0; i < 3; i++) {
                 cJSON *v = cJSON_GetArrayItem(sp, i);
-                if (cJSON_IsNumber(v)) s_cfg.spectrum_rgb[i] = (uint8_t)v->valueint;
+                if (cJSON_IsNumber(v) && v->valueint >= 0 && v->valueint <= 255)
+                    s_cfg.spectrum_rgb[i] = (uint8_t)v->valueint;
             }
         }
     }
@@ -803,7 +820,8 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsArray(sp) && cJSON_GetArraySize(sp) >= 3) {
             for (int i = 0; i < 3; i++) {
                 cJSON *v = cJSON_GetArrayItem(sp, i);
-                if (cJSON_IsNumber(v)) s_cfg.spectrum_lcd_rgb[i] = (uint8_t)v->valueint;
+                if (cJSON_IsNumber(v) && v->valueint >= 0 && v->valueint <= 255)
+                    s_cfg.spectrum_lcd_rgb[i] = (uint8_t)v->valueint;
             }
         }
     }
@@ -1040,7 +1058,12 @@ void config_mgr_init(void)
 void config_lock(void)   { xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY); }
 void config_unlock(void) { xSemaphoreGiveRecursive(s_mutex); }
 
-void tls_sem_take(void) { if (s_tls_sem) xSemaphoreTake(s_tls_sem, portMAX_DELAY); }
+void tls_sem_take(void) {
+    if (!s_tls_sem) return;
+    /* 30 s timeout: a stalled HTTPS task must not block everything else forever. */
+    if (xSemaphoreTake(s_tls_sem, pdMS_TO_TICKS(30000)) != pdTRUE)
+        ESP_LOGE("tls_sem", "tls_sem_take: 30 s timeout — possible TLS deadlock");
+}
 void tls_sem_give(void) { if (s_tls_sem) xSemaphoreGive(s_tls_sem); }
 
 const nextube_config_t *config_get(void)
@@ -1195,6 +1218,7 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "tube6_panel_push",       s_cfg.tube6_panel_push);
     cJSON_AddBoolToObject  (root, "tube6_panel_humidity",   s_cfg.tube6_panel_humidity);
     cJSON_AddBoolToObject  (root, "tube6_panel_wind",       s_cfg.tube6_panel_wind);
+    cJSON_AddBoolToObject  (root, "tube6_panel_aqi",        s_cfg.tube6_panel_aqi);
     cJSON_AddNumberToObject(root, "tube6_panel_ms",         s_cfg.tube6_panel_ms);
     cJSON_AddBoolToObject  (root, "cx_dual_panel",          s_cfg.cx_dual_panel);
     cJSON_AddBoolToObject  (root, "tube5_panel_weather",    s_cfg.tube5_panel_weather);
@@ -1205,6 +1229,8 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "tube5_panel_push",       s_cfg.tube5_panel_push);
     cJSON_AddBoolToObject  (root, "tube5_panel_humidity",   s_cfg.tube5_panel_humidity);
     cJSON_AddBoolToObject  (root, "tube5_panel_wind",       s_cfg.tube5_panel_wind);
+    cJSON_AddBoolToObject  (root, "tube5_panel_aqi",        s_cfg.tube5_panel_aqi);
+    cJSON_AddStringToObject(root, "aqi_standard",           s_cfg.aqi_standard);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off","WLED"};
     unsigned bl_idx = (unsigned)s_cfg.backlight_mode;

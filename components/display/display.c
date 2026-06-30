@@ -209,26 +209,38 @@ typedef struct {
     uint8_t vcom;       /* VMCTR1 (0xC5) — AC driving voltage for contrast     */
     uint8_t gmp[16];    /* GMCTRP1 (0xE0) — positive gamma correction          */
     uint8_t gmn[16];    /* GMCTRN1 (0xE1) — negative gamma correction          */
+    int8_t  col_off;    /* added to LCD_OFFSET_X in every CASET (GRAM column)  */
+    int8_t  row_off;    /* added to LCD_OFFSET_Y in every RASET (GRAM row)     */
 } panel_profile_t;
 
 static const panel_profile_t s_panel_profiles[] = {
     /* 0: Standard — original Nextube Green-Tab panels */
     {
-        .vcom = 0x0E,
-        .gmp  = {0x02, 0x1C, 0x07, 0x12, 0x37, 0x32, 0x29, 0x2D,
-                 0x29, 0x25, 0x2B, 0x39, 0x00, 0x01, 0x03, 0x10},
-        .gmn  = {0x03, 0x1D, 0x07, 0x06, 0x2E, 0x2C, 0x29, 0x2D,
-                 0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10},
+        .vcom    = 0x0E,
+        .gmp     = {0x02, 0x1C, 0x07, 0x12, 0x37, 0x32, 0x29, 0x2D,
+                    0x29, 0x25, 0x2B, 0x39, 0x00, 0x01, 0x03, 0x10},
+        .gmn     = {0x03, 0x1D, 0x07, 0x06, 0x2E, 0x2C, 0x29, 0x2D,
+                    0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10},
+        .col_off = 0, .row_off = 0,
     },
     /* 1: Vivid — ST7735S replacement panels (e.g. LH096NT-IF09W).
      * VCOM raised from 0x0E → 0x3C restores contrast lost to a mismatched
-     * AC voltage.  Gamma recalibrated for the ST7735S transfer curve. */
+     * AC voltage.  Gamma recalibrated for the ST7735S transfer curve.
+     * col_off=+1 / row_off=0: common ST7735S replacement panels have their
+     * visible glass starting at GRAM COLSTART=25 rather than 24 used by the
+     * original Green-Tab panels (ROWSTART=0 is the same).  Without col_off=+1
+     * the CASET window misses the leftmost column of the glass, causing content
+     * (including rain streaks) to appear shifted left by 1 px with a 1px stale
+     * strip on the right edge.  lcd_col_offset / lcd_row_offset in config are
+     * fine-tuning deltas added ON TOP of this profile-level offset — panels
+     * that instead need COLSTART=26 should set lcd_col_offset=+1 additionally. */
     {
-        .vcom = 0x3C,
-        .gmp  = {0x0F, 0x1A, 0x0F, 0x18, 0x2F, 0x28, 0x20, 0x22,
-                 0x1F, 0x1B, 0x23, 0x37, 0x00, 0x07, 0x02, 0x10},
-        .gmn  = {0x0F, 0x1B, 0x0F, 0x17, 0x33, 0x2C, 0x29, 0x2E,
-                 0x30, 0x30, 0x39, 0x3F, 0x00, 0x07, 0x03, 0x10},
+        .vcom    = 0x3C,
+        .gmp     = {0x0F, 0x1A, 0x0F, 0x18, 0x2F, 0x28, 0x20, 0x22,
+                    0x1F, 0x1B, 0x23, 0x37, 0x00, 0x07, 0x02, 0x10},
+        .gmn     = {0x0F, 0x1B, 0x0F, 0x17, 0x33, 0x2C, 0x29, 0x2E,
+                    0x30, 0x30, 0x39, 0x3F, 0x00, 0x07, 0x03, 0x10},
+        .col_off = 1, .row_off = 0,
     },
 };
 #define PANEL_PROFILE_COUNT  ((int)(sizeof(s_panel_profiles) / sizeof(s_panel_profiles[0])))
@@ -238,11 +250,18 @@ static uint8_t s_init_profiles[LCD_COUNT];
 
 /* ── Per-tube panel fine-tuning ──────────────────────────────────────────── */
 /* Window offset overrides — added to LCD_OFFSET_X/Y in every CASET/RASET.
- * Replacement panels based on ST7735S variants typically need col +2, row +1
- * to prevent 1px of uninitialized frame-buffer from appearing at the right/bottom
- * edge.  Updated by display_apply_tube_offsets(); safe to read from display task. */
-static int8_t  s_col_offsets[LCD_COUNT];   /* default 0 — zero-init by linker */
-static int8_t  s_row_offsets[LCD_COUNT];   /* default 0 — zero-init by linker */
+ * Two independent layers:
+ *   s_profile_col_off / s_profile_row_off — set automatically from the active
+ *     panel profile (profile 1 "Vivid" uses +2/+1 to match the ST7735S GRAM
+ *     window that starts at COLSTART=26, ROWSTART=1 rather than 24/0).
+ *   s_col_offsets / s_row_offsets — per-tube user fine-tuning on top of the
+ *     profile base, set via display_apply_tube_offsets() (lcd_col_offset /
+ *     lcd_row_offset in config).  Range -8..+8 each.
+ * Effective offset = profile_col_off[tube] + col_offsets[tube].              */
+static int8_t  s_profile_col_off[LCD_COUNT]; /* set by display_apply_init_profiles */
+static int8_t  s_profile_row_off[LCD_COUNT]; /* set by display_apply_init_profiles */
+static int8_t  s_col_offsets[LCD_COUNT];     /* user fine-tuning; default 0        */
+static int8_t  s_row_offsets[LCD_COUNT];     /* user fine-tuning; default 0        */
 
 /* Set by display_invalidate() (and internally by display_apply_tube_offsets) to
  * signal the display task to force-repaint every tube on its next tick.
@@ -430,6 +449,11 @@ void display_init(void)
     /* display_apply_invert_mask(), display_apply_tube_offsets(), and
      * display_apply_tube_brightness() are called by app_main() after display_init()
      * once config_mgr has loaded the saved values. */
+
+    /* Create mutexes here so any setter called before display_task_start()
+     * (e.g. display_set_burnin_mask from a web handler) is safe. */
+    if (!s_timer_mutex)   s_timer_mutex   = xSemaphoreCreateMutex();
+    if (!s_cx_push_mutex) s_cx_push_mutex = xSemaphoreCreateMutex();
 
     /* Initialise U8g2 virtual display for H/T panel text rendering.
      * 128×64 full-framebuffer, no hardware I/O.  Buffer allocated internally
@@ -650,9 +674,25 @@ void display_apply_init_profiles(const uint8_t profiles[6])
         vTaskResume(s_display_task_handle);
     }
 
-    ESP_LOGI(TAG, "panel profiles [%u,%u,%u,%u,%u,%u] applied (per-tube reinit)",
+    /* Apply the profile-level GRAM window offsets for all changed tubes.
+     * These are separate from user fine-tuning (s_col_offsets / s_row_offsets);
+     * both layers are additive in every CASET/RASET call.
+     * Update all tubes, not just tube_changed[], so that a profile applied at
+     * boot (before the display task starts) correctly seeds all six values. */
+    for (int i = 0; i < LCD_COUNT; i++) {
+        const panel_profile_t *p = &s_panel_profiles[s_init_profiles[i]];
+        s_profile_col_off[i] = p->col_off;
+        s_profile_row_off[i] = p->row_off;
+    }
+
+    ESP_LOGI(TAG, "panel profiles [%u,%u,%u,%u,%u,%u] applied; "
+             "profile col_off [%d,%d,%d,%d,%d,%d] row_off [%d,%d,%d,%d,%d,%d]",
              s_init_profiles[0], s_init_profiles[1], s_init_profiles[2],
-             s_init_profiles[3], s_init_profiles[4], s_init_profiles[5]);
+             s_init_profiles[3], s_init_profiles[4], s_init_profiles[5],
+             s_profile_col_off[0], s_profile_col_off[1], s_profile_col_off[2],
+             s_profile_col_off[3], s_profile_col_off[4], s_profile_col_off[5],
+             s_profile_row_off[0], s_profile_row_off[1], s_profile_row_off[2],
+             s_profile_row_off[3], s_profile_row_off[4], s_profile_row_off[5]);
 }
 
 void display_debug_set_pwm(uint32_t freq_hz, uint8_t duty_pct)
@@ -696,12 +736,32 @@ static inline void open_lcd_window(uint8_t ox, uint8_t oy, uint8_t w, uint8_t h)
     gpio_set_level(PIN_LCD_DC, 1);
 }
 
+/* Transmit a DMA-capable (SRAM) pixel buffer over SPI using POLLING.
+ *
+ * IMPORTANT — do NOT switch this to the interrupt-driven spi_device_transmit():
+ * an earlier version did, to let the display task sleep during the DMA, but the
+ * device's command/setup writes (lcd_cmd/lcd_data) and several other blits stay
+ * on spi_device_polling_transmit().  The ESP-IDF SPI master does not support
+ * interleaving polling and interrupt transactions on the same device — it
+ * corrupts the transaction queue and trips
+ *   "assert failed: spi_device_transmit spi_master.c (ret_trans == trans_desc)"
+ * (plus a NULL-deref inside the IRAM driver) during the rapid re-renders a mode
+ * switch fires.  Keeping the whole device on polling is also what the
+ * cooperative-park OTA handshake relies on for orphan-free suspension.
+ *   buf MUST be DMA-capable (internal SRAM) — never a PSRAM pointer; the render
+ *   path stages PSRAM through the SRAM `chunk` buffer before sending. */
+static inline void spi_tx_pixels(const void *buf, size_t len_bytes)
+{
+    spi_transaction_t t = { .length = len_bytes * 8, .tx_buffer = buf };
+    spi_device_polling_transmit(spi_dev, &t);
+}
+
 void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
     open_lcd_window(ox, oy, LCD_WIDTH, LCD_HEIGHT);
     uint8_t line[LCD_WIDTH * 2];
     for (int x = 0; x < LCD_WIDTH; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
@@ -715,7 +775,7 @@ void display_fill(int tube, uint16_t color)
     int shift = (int)s_burnin_shift_x;
     int marg  = (shift >= 0) ? shift : -shift;
     if (marg > 0) {
-        uint8_t marg_ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube]
+        uint8_t marg_ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]
                                     + ((shift > 0) ? 0 : (LCD_WIDTH - marg)));
         open_lcd_window(marg_ox, oy, (uint8_t)marg, LCD_HEIGHT);
         for (int y = 0; y < LCD_HEIGHT; y++) {
@@ -726,112 +786,125 @@ void display_fill(int tube, uint16_t color)
     deselect_all();
 }
 
+/* Burn-in edge-margin source override.  When non-NULL, the push functions fill
+ * the |shift|-px edge margin (the columns the shifted CASET window leaves
+ * uncovered) from THIS buffer's edge column instead of the pushed frame's.
+ * WeatherLive arms it with the smooth sky-gradient cache (wl_paint_background)
+ * so a rain streak sitting on the edge column is not duplicated into a fat
+ * 2–3 px band; plain image pushes leave it NULL and replicate the frame's own
+ * edge column.  Consumed (cleared to NULL) by each push call. */
+static const uint8_t *s_wl_edge_margin_src = NULL;
+
+/* Apply this tube's brightness scale (br/100) then gamma LUT to one RGB565
+ * pixel.  Pure integer math.  Single definition shared by every push path so
+ * the transform stays consistent — a forgotten copy is what made the burn-in
+ * margin render lighter than the adjacent (gamma-corrected) content. */
+static inline uint16_t wl_apply_px(uint16_t px, int tube, bool do_br, bool do_gamma, uint8_t br)
+{
+    uint32_t r = (px >> 11) & 0x1Fu;
+    uint32_t g = (px >>  5) & 0x3Fu;
+    uint32_t b =  px        & 0x1Fu;
+    if (do_br)    { r = r * br / 100u; g = g * br / 100u; b = b * br / 100u; }
+    if (do_gamma) { r = s_gamma_lut_5bit[tube][r]; g = s_gamma_lut_6bit[tube][g]; b = s_gamma_lut_5bit[tube][b]; }
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+/* Paint the |shift|-px burn-in edge margin the shifted CASET window leaves
+ * uncovered.  marg_src is an 80-px-wide buffer whose `edge_col` is replicated
+ * down the strip, with this tube's brightness/gamma applied so it matches the
+ * main blit.  Tube must already be selected. */
+static void wl_paint_edge_margin(int tube, const uint8_t *marg_src, uint8_t marg_ox,
+                                 uint8_t oy, int marg, int edge_col, int h,
+                                 bool do_br, bool do_gamma, uint8_t br)
+{
+    uint8_t margbuf[2 * LCD_HEIGHT * 2];   /* ≤ 2 cols × 160 rows */
+    bool do_px = do_br || do_gamma;
+    for (int r = 0; r < h; r++) {
+        const uint8_t *src = marg_src + (r * LCD_WIDTH + edge_col) * 2;
+        uint16_t px = ((uint16_t)src[0] << 8) | src[1];
+        if (do_px) px = wl_apply_px(px, tube, do_br, do_gamma, br);
+        uint8_t hi = (uint8_t)(px >> 8), lo = (uint8_t)(px & 0xFF);
+        uint8_t *dst = margbuf + r * marg * 2;
+        for (int c = 0; c < marg; c++) { dst[c*2] = hi; dst[c*2+1] = lo; }
+    }
+    open_lcd_window(marg_ox, oy, (uint8_t)marg, (uint8_t)h);
+    spi_tx_pixels(margbuf, (size_t)(marg * h * 2));
+}
+
+/* Paint the 4-row red firmware-update indicator at the physical bottom of the
+ * address window (oy + h - 4 .. oy + h - 1).  Tube must already be selected;
+ * the SPI device stays selected so we just reissue CASET/RASET/RAMWR. */
+static void stamp_update_indicator_bottom(uint8_t ox, uint8_t oy, int w, int h)
+{
+    uint8_t ca[] = {0, ox, 0, (uint8_t)(ox + w - 1)};
+    lcd_cmd(0x2A); lcd_data(ca, 4);
+    uint8_t ra[] = {0, (uint8_t)(oy + h - 4), 0, (uint8_t)(oy + h - 1)};
+    lcd_cmd(0x2B); lcd_data(ra, 4);
+    lcd_cmd(0x2C);
+    gpio_set_level(PIN_LCD_DC, 1);
+    uint8_t redline[LCD_WIDTH * 2];
+    for (int x = 0; x < w; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
+    for (int row = 0; row < 4; row++) {
+        spi_transaction_t tr = { .length = (size_t)(w * 2) * 8, .tx_buffer = redline };
+        spi_device_polling_transmit(spi_dev, &tr);
+    }
+}
+
 void display_show_digit(int tube, const uint8_t *data, int w, int h)
 {
     if (tube < 0 || tube >= LCD_COUNT || !data) return;
+
+    /* Consume any sky-cache margin source armed by wl_paint_background; NULL →
+     * replicate the frame's own edge column (plain images). */
+    const uint8_t *marg_src = s_wl_edge_margin_src ? s_wl_edge_margin_src : data;
+    s_wl_edge_margin_src = NULL;
+
     select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
     open_lcd_window(ox, oy, (uint8_t)w, (uint8_t)h);
     /* `data` may be in PSRAM; ESP32 SPI DMA cannot access PSRAM directly.
      * Copy DISP_CHUNK_ROWS rows at a time into a stack SRAM chunk buffer,
-     * optionally scale brightness per-pixel (integer arithmetic, negligible
-     * overhead at 5 Hz), then send via polling transmit.  8 rows reduces
-     * transaction count 160→20 per tube, cutting per-transaction
-     * GPIO/controller overhead by ~8×. */
+     * optionally apply per-tube brightness/gamma per-pixel (integer math),
+     * then send via polling transmit.  8 rows reduces transaction count
+     * 160→20 per tube, cutting per-transaction overhead by ~8×. */
     uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];  /* 1280 B — always SRAM */
     uint8_t br        = s_tube_brightness[tube];
     bool    do_br     = (br < 100);
     bool    do_gamma  = s_gamma_lut_active[tube];
     bool    do_px     = do_br || do_gamma;
 
-    /* Burn-in column shift exposes |shift| visible columns at one edge that the
-     * shifted write window never covers — they would otherwise retain stale
-     * content (the previous mode / wait.jpg / older WeatherLive frame) as a
-     * 1–2 px sliver.  Capture the adjacent edge column of THIS frame and paint
-     * it into that margin after the main blit, so the content (e.g. the sky)
-     * extends seamlessly to the panel edge.  shift>0 → left margin uses col 0;
-     * shift<0 → right margin uses col w-1.  Only meaningful for full-width
-     * (LCD_WIDTH) blits, which is every full-tube draw. */
-    int     shift    = (int)s_burnin_shift_x;
-    int     marg     = (shift >= 0) ? shift : -shift;
-    bool    want_marg = (marg > 0 && w == LCD_WIDTH && h <= LCD_HEIGHT);
-    int     edge_col = (shift > 0) ? 0 : (w - 1);
-    uint8_t marg_ox  = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube]
-                                 + ((shift > 0) ? 0 : (LCD_WIDTH - marg)));
-    uint8_t margbuf[2 * LCD_HEIGHT * 2];   /* ≤ 2 cols × 160 rows */
-
     for (int y = 0; y < h; y += DISP_CHUNK_ROWS) {
         int rows = (y + DISP_CHUNK_ROWS <= h) ? DISP_CHUNK_ROWS : h - y;
         memcpy(chunk, data + y * w * 2, (size_t)(rows * w * 2));
         if (do_px) {
-            /* Single-pass brightness scale + gamma LUT.
-             * Brightness runs first (linear channel scale), gamma LUT second
-             * (maps the already-scaled value through out = in^γ).  Both are
-             * pure integer arithmetic — no float ops inside the pixel loop. */
             int npx = rows * w;
             for (int j = 0; j < npx; j++) {
                 uint16_t px = ((uint16_t)chunk[j * 2] << 8) | chunk[j * 2 + 1];
-                uint32_t r = (px >> 11) & 0x1Fu;
-                uint32_t g = (px >>  5) & 0x3Fu;
-                uint32_t b =  px        & 0x1Fu;
-                if (do_br) {
-                    r = r * br / 100u;
-                    g = g * br / 100u;
-                    b = b * br / 100u;
-                }
-                if (do_gamma) {
-                    r = s_gamma_lut_5bit[tube][r];
-                    g = s_gamma_lut_6bit[tube][g];
-                    b = s_gamma_lut_5bit[tube][b];
-                }
-                px = (uint16_t)((r << 11) | (g << 5) | b);
+                px = wl_apply_px(px, tube, do_br, do_gamma, br);
                 chunk[j * 2]     = (uint8_t)(px >> 8);
                 chunk[j * 2 + 1] = (uint8_t)(px & 0xFF);
             }
         }
-        /* Stash the (transformed) edge column for the burn-in margin strip. */
-        if (want_marg) {
-            for (int rr = 0; rr < rows; rr++) {
-                const uint8_t *src = chunk + (rr * w + edge_col) * 2;
-                uint8_t       *dst = margbuf + ((y + rr) * marg) * 2;
-                for (int c = 0; c < marg; c++) { dst[c*2] = src[0]; dst[c*2+1] = src[1]; }
-            }
-        }
-        spi_transaction_t t = { .length = (size_t)(rows * w * 2) * 8, .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_pixels(chunk, (size_t)(rows * w * 2));
     }
 
-    /* Paint the exposed burn-in margin with the captured edge column so the
-     * panel edge shows this frame's content instead of a stale sliver. */
-    if (want_marg) {
-        open_lcd_window(marg_ox, oy, (uint8_t)marg, (uint8_t)h);
-        spi_transaction_t tm = { .length = (size_t)(marg * h * 2) * 8, .tx_buffer = margbuf };
-        spi_device_polling_transmit(spi_dev, &tm);
+    /* Burn-in column shift exposes |shift| visible columns at one edge that the
+     * shifted write window never covers — fill them so the panel edge shows
+     * this frame's sky rather than a stale sliver.  shift>0 → left margin from
+     * col 0; shift<0 → right margin from col w-1.  Full-width blits only. */
+    int  shift = (int)s_burnin_shift_x;
+    int  marg  = (shift >= 0) ? shift : -shift;
+    if (marg > 0 && w == LCD_WIDTH && h <= LCD_HEIGHT) {
+        int     edge_col = (shift > 0) ? 0 : (w - 1);
+        uint8_t marg_ox  = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]
+                                     + ((shift > 0) ? 0 : (LCD_WIDTH - marg)));
+        wl_paint_edge_margin(tube, marg_src, marg_ox, oy, marg, edge_col, h, do_br, do_gamma, br);
     }
 
-    /* ── Update indicator overlay ──────────────────────────────────────── */
-    /* When s_update_indicator is set, paint 4 rows of solid red at the
-     * physical bottom of tube 5.  Physical bottom = the last 4 rows of the
-     * address window (oy + h - 4 .. oy + h - 1).  Uses the already-computed
-     * ox/oy so the overlay tracks per-tube window offset corrections.
-     * Red in RGB565 big-endian = 0xF800 → bytes {0xF8, 0x00}.
-     * The SPI device is still selected (cs low) so no extra select call is
-     * needed — we simply reissue CASET/RASET for the 4-row window. */
-    if (tube == LCD_COUNT - 1 && s_update_indicator) {
-        uint8_t ca2[] = {0, ox, 0, (uint8_t)(ox + w - 1)};
-        lcd_cmd(0x2A); lcd_data(ca2, 4);
-        uint8_t ra2[] = {0, (uint8_t)(oy + h - 4), 0, (uint8_t)(oy + h - 1)};
-        lcd_cmd(0x2B); lcd_data(ra2, 4);
-        lcd_cmd(0x2C);
-        gpio_set_level(PIN_LCD_DC, 1);
-        uint8_t redline[LCD_WIDTH * 2];
-        for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
-        for (int row = 0; row < 4; row++) {
-            spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
-            spi_device_polling_transmit(spi_dev, &tr);
-        }
-    }
+    /* Firmware-update indicator: 4-row red bar at the physical bottom of tube 5. */
+    if (tube == LCD_COUNT - 1 && s_update_indicator)
+        stamp_update_indicator_bottom(ox, oy, w, h);
 
     deselect_all();
 }
@@ -873,8 +946,8 @@ static void display_fill_snow(int tube)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
     open_lcd_window(ox, oy, LCD_WIDTH, LCD_HEIGHT);
     uint8_t line[LCD_WIDTH * 2];   /* 160 B — always SRAM, within stack budget */
     for (int y = 0; y < LCD_HEIGHT; y++) {
@@ -1291,8 +1364,8 @@ static void display_show_image_region(int tube, const char *path,
         if (src_w <= 0 || src_h <= 0) return;
         select_tube(tube);
         uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                               + (int)s_col_offsets[tube] + dst_x);
-        uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + dst_y);
+                               + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube] + dst_x);
+        uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube] + dst_y);
         open_lcd_window(ox, oy, (uint8_t)src_w, (uint8_t)src_h);
         uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];
         memset(chunk, 0, (size_t)src_w * 2 * DISP_CHUNK_ROWS);
@@ -1320,8 +1393,8 @@ static void display_show_image_region(int tube, const char *path,
 
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                           + (int)s_col_offsets[tube] + dst_x);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + dst_y);
+                           + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube] + dst_x);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube] + dst_y);
     open_lcd_window(ox, oy, (uint8_t)src_w, (uint8_t)src_h);
 
     uint8_t  chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];
@@ -1570,12 +1643,84 @@ static bool spiffs_file_exists(const char *path)
     return true;
 }
 
+/* ── PNG format cache ────────────────────────────────────────────────────
+ * spiffs_file_exists() costs one fopen()/fclose() per call.  In clock mode
+ * it fires on every render frame (digits: 6 × 5 Hz ≈ 30/s; AMPM: ~5/s).
+ * The helpers below cache the PNG-vs-JPG decision so the probe happens once
+ * per theme-change instead of per-frame.
+ * Call display_theme_cache_flush() after any hotpatch that adds/removes PNGs. */
+
+#define SYS_ICON_CACHE_N 8
+static struct { char name[24]; bool has_png; } s_sys_icon_cache[SYS_ICON_CACHE_N];
+static int s_sys_icon_n = 0;
+
+static bool sys_icon_has_png(const char *name)
+{
+    for (int i = 0; i < s_sys_icon_n; i++)
+        if (strcmp(s_sys_icon_cache[i].name, name) == 0)
+            return s_sys_icon_cache[i].has_png;
+    char probe[256];
+    snprintf(probe, sizeof(probe), "/images/system/%s.png", name);
+    bool has = spiffs_file_exists(probe);
+    if (s_sys_icon_n < SYS_ICON_CACHE_N) {
+        strlcpy(s_sys_icon_cache[s_sys_icon_n].name, name, 24);
+        s_sys_icon_cache[s_sys_icon_n].has_png = has;
+        s_sys_icon_n++;
+    }
+    return has;
+}
+
+#define AMPM_CACHE_N 16
+static struct { char key[88]; bool has_png; } s_ampm_cache[AMPM_CACHE_N];
+static int  s_ampm_cache_n         = 0;
+static char s_ampm_cache_theme[64] = {0};
+
+static bool theme_ampm_has_png(const char *theme, const char *name)
+{
+    if (strcmp(s_ampm_cache_theme, theme) != 0) {
+        strlcpy(s_ampm_cache_theme, theme, sizeof(s_ampm_cache_theme));
+        s_ampm_cache_n = 0;
+    }
+    char key[88];
+    snprintf(key, sizeof(key), "%s/%s", theme, name);
+    for (int i = 0; i < s_ampm_cache_n; i++)
+        if (strcmp(s_ampm_cache[i].key, key) == 0)
+            return s_ampm_cache[i].has_png;
+    char probe[256];
+    snprintf(probe, sizeof(probe), "/images/themes/%s/AMPM/%s.png", theme, name);
+    bool has = spiffs_file_exists(probe);
+    if (s_ampm_cache_n < AMPM_CACHE_N) {
+        strlcpy(s_ampm_cache[s_ampm_cache_n].key, key, sizeof(s_ampm_cache[0].key));
+        s_ampm_cache[s_ampm_cache_n].has_png = has;
+        s_ampm_cache_n++;
+    }
+    return has;
+}
+
+void display_theme_cache_flush(void)
+{
+    s_ampm_cache_n = 0;
+    s_ampm_cache_theme[0] = '\0';
+}
+
 void display_show_number(int tube, int digit, const char *theme)
 {
+    /* Cache whether the active theme provides PNG digits.
+     * Probes once on first call for each theme (checks 0.png);
+     * holds until the next theme switch — eliminates ~30 fopen/s in clock mode. */
+    static char s_num_theme[64] = {0};
+    static bool s_num_has_png   = false;
+    if (strcmp(s_num_theme, theme) != 0) {
+        strlcpy(s_num_theme, theme, sizeof(s_num_theme));
+        char probe[256];
+        snprintf(probe, sizeof(probe), "/images/themes/%s/Numbers/0.png", theme);
+        s_num_has_png = spiffs_file_exists(probe);
+    }
     char p[256];
-    /* Prefer PNG over JPG when the theme supplies one. */
-    snprintf(p, sizeof(p), "/images/themes/%s/Numbers/%d.png", theme, digit);
-    if (!spiffs_file_exists(p)) display_path_number(p, sizeof(p), theme, digit);
+    if (s_num_has_png)
+        snprintf(p, sizeof(p), "/images/themes/%s/Numbers/%d.png", theme, digit);
+    else
+        display_path_number(p, sizeof(p), theme, digit);
     snprintf(s_png_bg_override, sizeof(s_png_bg_override),
              "/images/themes/%s/AMPM/blank.jpg", theme);
     display_show_image(tube, p);
@@ -1594,17 +1739,18 @@ void display_show_ampm(int tube, const char *name, const char *theme)
         if (!strcmp(name, "youtube")   || !strcmp(name, "instagram") ||
             !strcmp(name, "tiktok")    || !strcmp(name, "mastodon")  ||
             !strcmp(name, "wait")) {
-            /* Prefer PNG (transparent) over JPG for system icons. */
-            snprintf(p, sizeof(p), "/images/system/%s.png", name);
-            if (!spiffs_file_exists(p)) snprintf(p, sizeof(p), "/images/system/%s.jpg", name);
+            if (sys_icon_has_png(name))
+                snprintf(p, sizeof(p), "/images/system/%s.png", name);
+            else
+                snprintf(p, sizeof(p), "/images/system/%s.jpg", name);
         }
         display_show_image(tube, p);
         return;
     }
     /* Prefer PNG over JPG when the theme supplies one. */
-    char png_p[256];
-    snprintf(png_p, sizeof(png_p), "/images/themes/%s/AMPM/%s.png", theme, name);
-    if (spiffs_file_exists(png_p)) {
+    if (theme_ampm_has_png(theme, name)) {
+        char png_p[256];
+        snprintf(png_p, sizeof(png_p), "/images/themes/%s/AMPM/%s.png", theme, name);
         snprintf(s_png_bg_override, sizeof(s_png_bg_override),
                  "/images/themes/%s/AMPM/blank.jpg", theme);
         display_show_image(tube, png_p);
@@ -1616,8 +1762,10 @@ void display_show_ampm(int tube, const char *name, const char *theme)
      * Supply the theme's AMPM blank as the compositing background so system-path
      * PNGs appear over the correct theme background instead of black. */
     if (!img_cache_get(p, NULL, NULL)) {
-        snprintf(p, sizeof(p), "/images/system/%s.png", name);
-        if (!spiffs_file_exists(p)) snprintf(p, sizeof(p), "/images/system/%s.jpg", name);
+        if (sys_icon_has_png(name))
+            snprintf(p, sizeof(p), "/images/system/%s.png", name);
+        else
+            snprintf(p, sizeof(p), "/images/system/%s.jpg", name);
     }
     snprintf(s_png_bg_override, sizeof(s_png_bg_override),
              "/images/themes/%s/AMPM/blank.jpg", theme);
@@ -1702,8 +1850,8 @@ static void display_show_colon_blink(int tube, const char *theme, bool show_colo
 
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                            + (int)s_col_offsets[tube] + s_colon_bx0);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + s_colon_by0);
+                            + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube] + s_colon_bx0);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube] + s_colon_by0);
     open_lcd_window(ox, oy, (uint8_t)s_colon_bw, (uint8_t)s_colon_bh);
 
     uint8_t line[LCD_WIDTH * 2];
@@ -1850,8 +1998,8 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
 
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                            + (int)s_col_offsets[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube]);
+                            + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
     open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)LCD_HEIGHT);
 
     uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];   /* 1280 B — SRAM stack */
@@ -2114,8 +2262,8 @@ static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
 
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                            + (int)s_col_offsets[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + y_start);
+                            + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube] + y_start);
     open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)BUF_H);
 
     /* U8g2 tile layout: byte[tile_row * BUF_W + col] stores 8 vertical pixel
@@ -2177,8 +2325,8 @@ static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
     const int BUF_W = 128;
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                            + (int)s_col_offsets[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + y_tube);
+                            + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube] + y_tube);
     open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)rows);
     uint8_t line[LCD_WIDTH * 2];
     for (int row = 0; row < rows; row++) {
@@ -2529,8 +2677,8 @@ static void cx6_stamp_update_indicator(int tube)
     if (!s_update_indicator) return;
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                            + (int)s_col_offsets[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube]);
+                            + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
     open_lcd_window(ox, (uint8_t)(oy + LCD_HEIGHT - 4), (uint8_t)LCD_WIDTH, 4);
     uint8_t redline[LCD_WIDTH * 2];
     for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
@@ -2570,7 +2718,7 @@ static void cx6_stamp_update_indicator(int tube)
  * panel_id is an index into the ordered list [weather, weekdate, ht, temp,
  * sunrise, push]; the caller resolves which concrete panel this maps to.       */
 /* Render one 24H-Custom info panel onto `lcd_tube` (5 = rightmost, 4 = the
- * 2nd-from-right in dual mode).  `enabled[8]` is the caller's panel set
+ * 2nd-from-right in dual mode).  `enabled[9]` is the caller's panel set
  * (tube6_panel_* or tube5_panel_*); `panel_id` indexes the enabled entries;
  * `*last_kind` tracks the previously drawn kind for that tube so backgrounds
  * are cleared only on a panel switch. */
@@ -2582,6 +2730,7 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
                           int dmin_disp, int dmax_disp);
 static void wl_humidity_panel(uint8_t *fb, int hum);
 static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, int g, int b);
+static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g, int fg_b);
 
 /* Per-frame render state set by render_weatherlive at the top of each frame.
  * Defaults reflect legacy WeatherLive behaviour (white glyphs, dark shadow). */
@@ -2738,15 +2887,16 @@ static float to_display_temp(float celsius, bool use_fahrenheit)
 }
 
 static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
-                             int lcd_tube, const bool enabled[8],
+                             int lcd_tube, const bool enabled[9],
                              uint8_t panel_id, int8_t *last_kind)
 {
     /* Resolve panel_id → concrete panel kind by walking the caller's enabled[].
      * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor temp+Hi/Lo,
-     * 4=sunrise, 5=externally-pushed image, 6=outdoor humidity, 7=wind. */
+     * 4=sunrise, 5=externally-pushed image, 6=outdoor humidity, 7=wind,
+     * 8=air quality. */
     int kind = -1;
     int count = 0;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 9; i++) {
         if (enabled[i]) {
             if (count == (int)panel_id) { kind = i; break; }
             count++;
@@ -2984,6 +3134,24 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
         wl_wind_panel(fb, ow ? (int)lroundf(ow->wind_kph) : 0, cfg->wind_unit, fg_r, fg_g, fg_b);
         display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
+
+    } else if (kind == 8) {
+        /* ── Air-quality panel — identical to the WeatherLive AQI panel, rendered
+         * into the shared framebuffer over the theme's AMPM/blank.jpg via the
+         * SAME wl_aqi_panel() drawing code.  weather_get_aqi() returns -1 until
+         * the first fetch, so the panel shows "--" rather than a stale value
+         * (no weekdate cold-boot fallback needed — it self-heals). */
+        uint8_t *fb = wl_fb();
+        if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+
+        cx_seed_framebuf(fb, lcd_tube, cfg);
+
+        int fg_r, fg_g, fg_b;
+        cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
+        bool eu;
+        int  aqi = weather_get_aqi(&eu);
+        wl_aqi_panel(fb, aqi, eu, fg_r, fg_g, fg_b);
+        display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
     }
 
     *last_kind = (int8_t)kind;   /* record which panel was just drawn */
@@ -3132,6 +3300,11 @@ static void wl_cloud_lump(uint8_t *fb, int cx, int cy, int R,
 {
     if (R <= 0) return;
     int ro = R * R;
+    /* Reciprocal of ro in 16.16 fixed point so the per-pixel alpha falloff is a
+     * multiply+shift instead of an integer divide (~32-cycle DIV) per pixel.
+     * peak_a*(ro-d2) ≤ peak_a*ro and inv_ro ≤ 65536/ro, so the product is
+     * bounded by peak_a*65536 (≈16.7M) — no uint32 overflow. */
+    uint32_t inv_ro = ((uint32_t)1 << 16) / (uint32_t)ro;
     for (int y = cy - R; y <= cy + R; y++) {
         if (y < 0 || y >= LCD_HEIGHT) continue;
         uint8_t *row = fb + y * LCD_WIDTH * 2;
@@ -3139,7 +3312,8 @@ static void wl_cloud_lump(uint8_t *fb, int cx, int cy, int R,
             if (x < 0 || x >= LCD_WIDTH) continue;
             int dx = x - cx, dy = y - cy, d2 = dx * dx + dy * dy;
             if (d2 >= ro) continue;
-            wl_blend_px(row + x * 2, r, g, b, peak_a * (ro - d2) / ro);
+            int a = (int)(((uint32_t)(peak_a * (ro - d2)) * inv_ro) >> 16);
+            wl_blend_px(row + x * 2, r, g, b, a);
         }
     }
 }
@@ -3159,6 +3333,20 @@ static uint8_t *wl_fb(void)
     if (!s_wl_fb) s_wl_fb = PSRAM_MALLOC(LCD_WIDTH * LCD_HEIGHT * 2);
     return s_wl_fb;
 }
+
+/* Dirty-row SPI optimisation: per-tube previous-frame buffers (PSRAM).
+ * display_show_digit_dirty() compares the new frame row-by-row against the
+ * stored previous frame and only issues CASET/RASET+pixel-data for contiguous
+ * spans of changed rows, cutting SPI bandwidth by ~45% in clear-sky frames. */
+static uint8_t *s_wl_prev_fb[LCD_COUNT];      /* 6 × 25 600 B PSRAM prev frames */
+static bool     s_wl_prev_valid[LCD_COUNT];   /* true once prev buffer is seeded */
+static int8_t   s_wl_prev_shift[LCD_COUNT];   /* s_burnin_shift_x at last seed   */
+static bool     s_wl_prev_indicator;          /* s_update_indicator at last frame  */
+static int64_t  s_wl_prev_call_us[LCD_COUNT]; /* esp_timer µs of last dirty call  */
+/* If display_show_digit_dirty has not been called for a tube in more than this
+ * many µs, treat prev buffer as stale (WeatherLive was inactive — mode switch).
+ * 300 ms = 3 missed frames at 10 Hz; any real mode switch takes longer. */
+#define WL_DIRTY_STALE_US 300000LL
 
 /* Cached sky gradient (another 80×160 PSRAM slab).
  * The dither pattern is (x%4, y%4) — identical for every tube since all tubes
@@ -3184,11 +3372,17 @@ static inline unsigned wl_hash(unsigned x)
  * and the tube-6 info panel. */
 static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
 {
+    /* Default: no sky-cache margin override — a static custom background (or a
+     * sky-cache alloc failure) leaves the push replicating the frame's own edge
+     * column.  Re-armed to the gradient cache below when the procedural sky is
+     * used, so the burn-in shift doesn't duplicate an edge rain streak. */
+    s_wl_edge_margin_src = NULL;
+
     /* Custom background: load static blank image from the chosen theme (PNG preferred, JPG fallback). */
     if (s_wl_bg_theme[0] != '\0' && strncmp(s_wl_bg_theme, "WeatherLive", 11) != 0) {
         char bg_path[256];
         snprintf(bg_path, sizeof(bg_path), "/images/themes/%s/AMPM/blank.png", s_wl_bg_theme);
-        if (spiffs_file_exists(bg_path)) {
+        if (theme_ampm_has_png(s_wl_bg_theme, "blank")) {
             /* Decode once into PSRAM cache; reuse on subsequent calls. */
             if (strcmp(s_wl_bg_png_cached, bg_path) != 0) {
                 s_wl_bg_png_cached[0] = '\0';
@@ -3276,8 +3470,12 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
         if (s_wl_sky_cache)
             memcpy(s_wl_sky_key, sky_key, sizeof(s_wl_sky_key));
     }
-    if (s_wl_sky_cache)
+    if (s_wl_sky_cache) {
         memcpy(fb, s_wl_sky_cache, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        /* Arm the burn-in edge margin to replicate this smooth gradient rather
+         * than the final (rain-streaked) frame. */
+        s_wl_edge_margin_src = s_wl_sky_cache;
+    }
 
     /* 1b. Twinkling stars — fixed pseudo-random points in the upper sky that
      *     fade in through dusk and out through dawn (sc->night), each pulsing on
@@ -3566,37 +3764,45 @@ static void wl_degree(uint8_t *fb, int cx, int cy, int rad, int r, int g, int b)
     }
 }
 
-/* Composite one big clock glyph (digit, ':', '.', '-', …) into `fb`, which must
- * already hold the desired background.  The glyph is rendered through U8g2's
- * 1-bpp buffer, bilinearly anti-aliased and ringed with a soft dark outline.
- * logisoso42 is upscaled 2× via bilinear AA.  TTF fonts go through font_render
- * and bypass this path entirely (see FreeType fast-path at top of function).
- * ' '/'\0' draw nothing (background shows through). */
-static void wl_glyph(uint8_t *fb, char ch)
+/* ── U8g2 glyph coverage cache ───────────────────────────────────────────────
+ * wl_glyph() composites the digit onto the animated sky every frame, so the
+ * blend is inherently per-frame — but rasterising the glyph SHAPE (u8g2 draw +
+ * bilinear AA + the 5×5 shadow-halo scan over every empty pixel) depends only
+ * on the character, not the sky.  Cache the resulting per-pixel coverage
+ * (glyph alpha + shadow-halo alpha) keyed by (ch, shadow) and replay it each
+ * frame with cheap blends.  Colour changes do NOT invalidate the cache
+ * (coverage is shape-only); the font (logisoso42) and 2× scale are constant on
+ * this path.  Applies to the u8g2 fallback only — the FreeType path already
+ * caches rasterised bitmaps inside font_render. */
+#define WL_GLYPH_PIXELS  (LCD_WIDTH * LCD_HEIGHT)
+#define WL_GLYPH_CACHE_N 12
+typedef struct {
+    bool     valid;
+    char     ch;
+    bool     shadow;
+    uint8_t *cov;    /* glyph alpha per pixel (0 where none)                  */
+    uint8_t *halo;   /* shadow alpha per pixel (allocated only when shadow)   */
+} wl_glyph_cache_t;
+static wl_glyph_cache_t s_glyph_cache[WL_GLYPH_CACHE_N];
+static int              s_glyph_cache_next = 0;
+
+/* Rasterise glyph `ch` (logisoso42, 2× bilinear AA + soft shadow halo).
+ * When cov_out != NULL: write coverage into cov_out[]/halo_out[] (cache build,
+ *   fb unused).  When cov_out == NULL: blend directly onto `fb` (OOM fallback).
+ * The two modes share one copy of the rasterisation math so they can never
+ * drift apart. */
+static void wl_glyph_render(uint8_t *fb, char ch, bool shadow,
+                            uint8_t *cov_out, uint8_t *halo_out)
 {
-    if (ch == ' ' || ch == '\0') return;
-
-    /* FreeType fast-path: delegate to font_render when a TTF face is loaded */
-    if (s_ft_face_id >= 0) {
-        fr_draw_glyph_centered(fb, LCD_WIDTH, LCD_HEIGHT,
-                               (uint8_t)s_ft_face_id, (uint32_t)(unsigned char)ch,
-                               WL_FT_BIG_PX,
-                               s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b,
-                               s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
-        return;
-    }
-
     char s[2] = { ch, '\0' };
     const int BUF_W = 128, BUF_H = 64;
-
     const uint8_t *dfont = u8g2_font_logisoso42_tf;
     const int SCALE = 2;
-
-    const int SRC_W   = LCD_WIDTH  / SCALE;              /* 40 @ 2×, 20 @ 4× */
+    const int SRC_W   = LCD_WIDTH  / SCALE;              /* 40 @ 2× */
     /* Cap OUT_H to LCD_HEIGHT: BUF_H*4=256 would overflow the 160-px display. */
     const int OUT_H   = (BUF_H * SCALE <= LCD_HEIGHT) ? BUF_H * SCALE : LCD_HEIGHT;
-    const int MARGIN  = (LCD_HEIGHT - OUT_H) / 2;        /* 16 @ 2×,  0 @ 4× */
-    const int VIS_SRC = OUT_H / SCALE;                   /* 64 @ 2×, 40 @ 4× */
+    const int MARGIN  = (LCD_HEIGHT - OUT_H) / 2;        /* 16 @ 2× */
+    const int VIS_SRC = OUT_H / SCALE;                   /* 64 @ 2× */
 
     u8g2_ClearBuffer(&s_u8g2);
     u8g2_SetFont(&s_u8g2, dfont);
@@ -3624,7 +3830,7 @@ static void wl_glyph(uint8_t *fb, char ch)
         float fys = oy * inv_scale - half_inv;
         int   y0  = (int)floorf(fys);
         float ty  = fys - (float)y0;
-        uint8_t *row = fb + (oy + MARGIN) * LCD_WIDTH * 2;
+        uint8_t *row = fb ? fb + (oy + MARGIN) * LCD_WIDTH * 2 : NULL;
         for (int ox = 0; ox < LCD_WIDTH; ox++) {
             float fxs = ox * inv_scale - half_inv;
             int   x0  = (int)floorf(fxs);
@@ -3639,10 +3845,11 @@ static void wl_glyph(uint8_t *fb, char ch)
             if      (cov <= 70)  cov = 0;
             else if (cov >= 188) cov = 255;
             else                 cov = (cov - 70) * 255 / 118;
-            uint8_t *px = row + ox * 2;
+            int idx = (oy + MARGIN) * LCD_WIDTH + ox;
             if (cov > 4) {
-                wl_blend_px(px, s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b, cov);
-            } else if (s_wl_shadow) {
+                if (cov_out) cov_out[idx] = (uint8_t)cov;
+                else wl_blend_px(row + ox * 2, s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b, cov);
+            } else if (shadow) {
                 int halo_a = 0;
                 for (int dn = -2; dn <= 2 && halo_a < 200; dn++) {
                     for (int dm = -2; dm <= 2 && halo_a < 200; dm++) {
@@ -3653,11 +3860,68 @@ static void wl_glyph(uint8_t *fb, char ch)
                         if (a > halo_a) halo_a = a;
                     }
                 }
-                if (halo_a > 0) wl_blend_px(px, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, halo_a);
+                if (halo_a > 0) {
+                    if (cov_out) halo_out[idx] = (uint8_t)halo_a;
+                    else wl_blend_px(row + ox * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, halo_a);
+                }
             }
         }
     }
     #undef WL_SRC
+}
+
+/* Return a cached coverage map for (ch, shadow), building one on miss.
+ * NULL only if the PSRAM maps could not be allocated (caller renders direct). */
+static wl_glyph_cache_t *wl_glyph_cache_get(char ch, bool shadow)
+{
+    for (int i = 0; i < WL_GLYPH_CACHE_N; i++) {
+        wl_glyph_cache_t *e = &s_glyph_cache[i];
+        if (e->valid && e->ch == ch && e->shadow == shadow) return e;
+    }
+    /* Miss — claim the next ring slot, reusing its buffers where possible. */
+    wl_glyph_cache_t *e = &s_glyph_cache[s_glyph_cache_next];
+    if (!e->cov) e->cov = PSRAM_MALLOC(WL_GLYPH_PIXELS);
+    if (!e->cov) return NULL;
+    if (shadow && !e->halo) e->halo = PSRAM_MALLOC(WL_GLYPH_PIXELS);
+    if (shadow && !e->halo) return NULL;
+    memset(e->cov, 0, WL_GLYPH_PIXELS);
+    if (e->halo) memset(e->halo, 0, WL_GLYPH_PIXELS);
+    wl_glyph_render(NULL, ch, shadow, e->cov, e->halo);
+    e->ch = ch; e->shadow = shadow; e->valid = true;
+    s_glyph_cache_next = (s_glyph_cache_next + 1) % WL_GLYPH_CACHE_N;
+    return e;
+}
+
+/* Composite one big clock glyph (digit, ':', '.', '-', …) into `fb`, which must
+ * already hold the desired background.  ' '/'\0' draw nothing.  TTF fonts go
+ * through font_render's bitmap cache; the u8g2 path replays a cached coverage
+ * map so the glyph shape is rasterised once per character, not once per frame. */
+static void wl_glyph(uint8_t *fb, char ch)
+{
+    if (ch == ' ' || ch == '\0') return;
+
+    /* FreeType fast-path: delegate to font_render when a TTF face is loaded. */
+    if (s_ft_face_id >= 0) {
+        fr_draw_glyph_centered(fb, LCD_WIDTH, LCD_HEIGHT,
+                               (uint8_t)s_ft_face_id, (uint32_t)(unsigned char)ch,
+                               WL_FT_BIG_PX,
+                               s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b,
+                               s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
+        return;
+    }
+
+    bool shadow = s_wl_shadow;
+    wl_glyph_cache_t *e = wl_glyph_cache_get(ch, shadow);
+    if (!e) { wl_glyph_render(fb, ch, shadow, NULL, NULL); return; }  /* OOM fallback */
+
+    /* Replay cached coverage.  Colours are read live so glyph/shadow colour
+     * changes take effect with no rebuild (coverage is shape-only). */
+    for (int i = 0; i < WL_GLYPH_PIXELS; i++) {
+        if (e->cov[i] > 4)
+            wl_blend_px(fb + i * 2, s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b, e->cov[i]);
+        else if (shadow && e->halo && e->halo[i] > 0)
+            wl_blend_px(fb + i * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, e->halo[i]);
+    }
 }
 
 static void wl_draw_tube(int tube, char ch, const wl_scene_t *sc);  /* forward */
@@ -3789,10 +4053,154 @@ static void wl_show_colon_blink(bool show_colon)
         } else {
             memcpy(line, src, (size_t)s_wl_colon_bw * 2);
         }
-        spi_transaction_t tx = { .length = (size_t)(s_wl_colon_bw * 2) * 8,
-                                  .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &tx);
+        spi_tx_pixels(line, (size_t)(s_wl_colon_bw * 2));
     }
+    deselect_all();
+}
+
+/* Push a WeatherLive tube frame using dirty-row SPI optimisation.
+ *
+ * Compares `data` (raw RGB565, PSRAM) row-by-row against the stored previous
+ * frame and only issues CASET/RASET+pixel-data for contiguous spans of changed
+ * rows.  Unchanged rows are not transmitted — saves ~45% SPI bandwidth in
+ * clear-sky animated frames (only cloud/star rows change).
+ *
+ * Falls back to a full display_show_digit() push on the first frame for each
+ * tube (no prior state), when the burn-in column shift changes (window moved),
+ * or when the prev buffer could not be allocated from PSRAM.
+ *
+ * Only call with w==LCD_WIDTH and h==LCD_HEIGHT (full-tube frames). */
+static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h)
+{
+    if (tube < 0 || tube >= LCD_COUNT || !data) return;
+
+    /* Consume the sky-cache margin source now (the full-push fallback's
+     * display_show_digit would otherwise clear it first); re-arm before
+     * delegating so the fallback paints the same sky margin. */
+    const uint8_t *marg_src = s_wl_edge_margin_src ? s_wl_edge_margin_src : data;
+    s_wl_edge_margin_src = NULL;
+
+    const size_t tube_bytes = (size_t)w * h * 2;
+    const int    row_bytes  = w * 2;
+
+    /* Lazy-init per-tube previous-frame buffer from PSRAM. */
+    if (!s_wl_prev_fb[tube])
+        s_wl_prev_fb[tube] = (uint8_t *)heap_caps_malloc(tube_bytes, MALLOC_CAP_SPIRAM);
+
+    /* If the burn-in column window moved, this is the first valid frame, or the
+     * prev buffer is stale (WeatherLive was inactive — mode switch happened),
+     * fall through to a full push so the entire panel is coherent, then seed
+     * the previous-frame buffer for the next call. */
+    int64_t now_us = esp_timer_get_time();
+    bool shift_changed = (s_wl_prev_valid[tube] &&
+                          s_wl_prev_shift[tube] != s_burnin_shift_x);
+    bool stale = (s_wl_prev_valid[tube] &&
+                  (now_us - s_wl_prev_call_us[tube]) > WL_DIRTY_STALE_US);
+    if (!s_wl_prev_fb[tube] || !s_wl_prev_valid[tube] || shift_changed || stale) {
+        s_wl_edge_margin_src = marg_src;   /* re-arm for the delegated full push */
+        display_show_digit(tube, data, w, h);
+        if (s_wl_prev_fb[tube]) {
+            memcpy(s_wl_prev_fb[tube], data, tube_bytes);
+            s_wl_prev_valid[tube] = true;
+            s_wl_prev_shift[tube] = s_burnin_shift_x;
+            s_wl_prev_call_us[tube] = now_us;
+        }
+        return;
+    }
+    s_wl_prev_call_us[tube] = now_us;
+
+    uint8_t *prev = s_wl_prev_fb[tube];
+
+    /* If the update-indicator state changed for tube 5, invalidate those 4
+     * rows in the prev buffer so they are always resent on the transition
+     * frame (indicator appears/disappears cleanly). */
+    if (tube == LCD_COUNT - 1 &&
+        (bool)s_update_indicator != s_wl_prev_indicator) {
+        memset(prev + (h - 4) * row_bytes, 0xFF, (size_t)4 * row_bytes);
+        s_wl_prev_indicator = s_update_indicator;
+    }
+
+    /* ── Dirty-row comparison ──────────────────────────────────────────── */
+    /* Pre-compute window offsets (mirrors display_show_digit). */
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
+
+    uint8_t br      = s_tube_brightness[tube];
+    bool    do_br   = (br < 100);
+    bool    do_gamma = s_gamma_lut_active[tube];
+    bool    do_px   = do_br || do_gamma;
+
+    int   shift     = (int)s_burnin_shift_x;
+    int   marg      = (shift >= 0) ? shift : -shift;
+    bool  want_marg = (marg > 0 && w == LCD_WIDTH && h <= LCD_HEIGHT);
+    int   edge_col  = (shift > 0) ? 0 : (w - 1);
+    uint8_t marg_ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]
+                                + ((shift > 0) ? 0 : (LCD_WIDTH - marg)));
+
+    uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];   /* 1 280 B SRAM */
+
+    bool any_dirty = false;
+    int  span_start = -1;
+
+    /* select_tube must be called before the first open_lcd_window; deselect_all
+     * must be called at the end.  We call select_tube once here even if no rows
+     * turn out to be dirty — it is cheap, and deselect_all below handles it. */
+    select_tube(tube);
+
+    /* Iterate one row past the end (r == h) to flush the final open span. */
+    for (int r = 0; r <= h; r++) {
+        bool row_dirty = (r < h) &&
+                         (memcmp(data + r * row_bytes,
+                                 prev + r * row_bytes, (size_t)row_bytes) != 0);
+
+        if (row_dirty && span_start < 0) {
+            span_start = r;              /* begin a new contiguous span */
+        } else if (!row_dirty && span_start >= 0) {
+            /* Closed span [span_start, r) — issue window + pixel data. */
+            int span_h = r - span_start;
+            open_lcd_window(ox, (uint8_t)(oy + span_start), (uint8_t)w, (uint8_t)span_h);
+
+            for (int y = 0; y < span_h; y += DISP_CHUNK_ROWS) {
+                int rows    = (y + DISP_CHUNK_ROWS <= span_h) ? DISP_CHUNK_ROWS : span_h - y;
+                int abs_row = span_start + y;
+                memcpy(chunk, data + abs_row * row_bytes, (size_t)(rows * w * 2));
+
+                if (do_px) {
+                    int npx = rows * w;
+                    for (int j = 0; j < npx; j++) {
+                        uint16_t px = ((uint16_t)chunk[j * 2] << 8) | chunk[j * 2 + 1];
+                        px = wl_apply_px(px, tube, do_br, do_gamma, br);
+                        chunk[j * 2]     = (uint8_t)(px >> 8);
+                        chunk[j * 2 + 1] = (uint8_t)(px & 0xFF);
+                    }
+                }
+
+                spi_tx_pixels(chunk, (size_t)(rows * w * 2));
+            }
+
+            /* Update prev for exactly this span.  Clean rows already equal data
+             * (that is why they were not dirty), so copying only changed spans
+             * keeps prev == data while skipping the unchanged-row PSRAM writes
+             * that the old full-frame memcpy did every frame. */
+            memcpy(prev + (size_t)span_start * row_bytes,
+                   data + (size_t)span_start * row_bytes,
+                   (size_t)span_h * row_bytes);
+
+            any_dirty  = true;
+            span_start = -1;
+        }
+    }
+
+    if (any_dirty) {
+        /* Repaint the burn-in edge margin from marg_src (the smooth sky-cache
+         * column, not the rain-streaked frame) so a streak sitting on the edge
+         * column isn't duplicated into a 2–3 px band. */
+        if (want_marg)
+            wl_paint_edge_margin(tube, marg_src, marg_ox, oy, marg, edge_col, h, do_br, do_gamma, br);
+        if (tube == LCD_COUNT - 1 && s_update_indicator)
+            stamp_update_indicator_bottom(ox, oy, w, h);
+    }
+
     deselect_all();
 }
 
@@ -3804,8 +4212,7 @@ static void wl_draw_tube(int tube, char ch, const wl_scene_t *sc)
     if (!fb) { display_fill(tube, wl_rgb565(sc->tr, sc->tg, sc->tb)); return; }
     wl_paint_background(fb, tube, sc);
     wl_glyph(fb, ch);
-    /* Push the frame (handles PSRAM→SRAM copy + per-tube gamma/brightness). */
-    display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+    display_show_digit_dirty(tube, fb, LCD_WIDTH, LCD_HEIGHT);
 }
 
 /* WeatherLive has no JPEG theme assets, so when a non-clock mode (weather,
@@ -4262,9 +4669,82 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
     wl_text(fb, 40, 150, u8g2_font_logisoso16_tf, label, r, g, b, 0);
 }
 
+/* US EPA AQI category → display colour (slightly muted so it reads over the
+ * sky gradient).  Bands: 0-50 good, 51-100 moderate, 101-150 USG, 151-200
+ * unhealthy, 201-300 very unhealthy, 301+ hazardous. */
+static void wl_aqi_band_color(int aqi, int *r, int *g, int *b)
+{
+    if      (aqi <=  50) { *r =   0; *g = 190; *b =  70; }   /* green   */
+    else if (aqi <= 100) { *r = 225; *g = 200; *b =   0; }   /* yellow  */
+    else if (aqi <= 150) { *r = 255; *g = 126; *b =   0; }   /* orange  */
+    else if (aqi <= 200) { *r = 240; *g =  45; *b =  45; }   /* red     */
+    else if (aqi <= 300) { *r = 160; *g =  80; *b = 170; }   /* purple  */
+    else                 { *r = 165; *g =  50; *b =  60; }   /* maroon  */
+}
+
+/* European AQI (EAQI, 0-100+) category → display colour, per the CAMS/EEA scale.
+ * Bands: 0-20 good, 20-40 fair, 40-60 moderate, 60-80 poor, 80-100 very poor,
+ * 100+ extremely poor. */
+static void wl_eaqi_band_color(int aqi, int *r, int *g, int *b)
+{
+    if      (aqi <=  20) { *r =  70; *g = 200; *b = 180; }   /* good — cyan/teal  */
+    else if (aqi <=  40) { *r =  80; *g = 200; *b = 120; }   /* fair — green      */
+    else if (aqi <=  60) { *r = 225; *g = 200; *b =   0; }   /* moderate — yellow */
+    else if (aqi <=  80) { *r = 240; *g =  80; *b =  80; }   /* poor — red        */
+    else if (aqi <= 100) { *r = 160; *g =  40; *b =  60; }   /* very poor — dk red */
+    else                 { *r = 140; *g =  50; *b = 150; }   /* extreme — purple  */
+}
+
+/* Air-quality panel: an "AQI" label over the index, the number coloured by its
+ * category.  `european` selects the EAQI (0-100) scale + colours vs the US EPA
+ * (0-500) scale.  aqi < 0 → no data yet → dashes in the foreground colour.
+ * Mirrors the humidity/wind panels; value is resolved by weather_get_aqi(). */
+static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g, int fg_b)
+{
+    /* "AQI" label — ~2× the original (logisoso20 → logisoso42 / FT 40 px),
+     * centred in the top zone. */
+    wl_text(fb, 40, 48, u8g2_font_logisoso42_tf, "AQI", fg_r, fg_g, fg_b, 40);
+
+    int r, g, b;
+    if (european) wl_eaqi_band_color(aqi, &r, &g, &b);
+    else          wl_aqi_band_color(aqi, &r, &g, &b);
+
+    static int  s_aqi_last = -1000;
+    static char s_aqi_str[12];
+    if (aqi != s_aqi_last) {
+        if (aqi < 0) snprintf(s_aqi_str, sizeof(s_aqi_str), "--");
+        else         snprintf(s_aqi_str, sizeof(s_aqi_str), "%d", aqi);
+        s_aqi_last = aqi;
+    }
+    if (aqi < 0) { r = fg_r; g = fg_g; b = fg_b; }
+
+    /* Scale the value so 1, 2 or 3 digits each sit comfortably centred in the
+     * lower zone (AQI is 0-500 / EAQI 0-100+).  Indexed by digit count; the FT
+     * path additionally width-caps to the tube inside fr_draw_text. */
+    static const int aqi_ft_px[3]  = { 72, 60, 46 };   /* 1, 2, 3 digits (TTF)  */
+    static const int aqi_u8_cap[3] = { 46, 42, 28 };   /* 1, 2, 3 digits (u8g2) */
+    int nc  = (int)strlen(s_aqi_str);
+    int idx = (nc <= 1) ? 0 : (nc <= 2) ? 1 : 2;
+    const int zone_cy = 100;                            /* centre of value zone  */
+
+    if (s_ft_face_id >= 0) {
+        uint16_t px = (uint16_t)aqi_ft_px[idx];
+        int by = zone_cy + 7 * (int)px / 10;
+        wl_text(fb, 40, by, u8g2_font_logisoso28_tf, s_aqi_str, r, g, b, px);
+    } else {
+        int cap = aqi_u8_cap[idx];
+        const uint8_t *font = (cap >= 46) ? u8g2_font_logisoso46_tf
+                            : (cap >= 42) ? u8g2_font_logisoso42_tf
+                            : (cap >= 28) ? u8g2_font_logisoso28_tf
+                                          : u8g2_font_logisoso20_tf;
+        int by = zone_cy + cap / 2;
+        wl_text(fb, 40, by, font, s_aqi_str, r, g, b, 0);
+    }
+}
+
 /* WeatherLive info-panel kinds (the subset rendered procedurally over the sky).
  * Today's high/low is folded into the TEMP panel — there is no separate kind. */
-enum { WLP_WEEKDATE = 0, WLP_TEMP, WLP_SUNRISE, WLP_HUMIDITY, WLP_WIND, WLP_INDOOR_HT };
+enum { WLP_WEEKDATE = 0, WLP_TEMP, WLP_SUNRISE, WLP_HUMIDITY, WLP_WIND, WLP_INDOOR_HT, WLP_AQI };
 
 /* Render one WeatherLive info panel (`kind`) over the sky panorama on `tube`.
  * Temperatures are already unit-converted by the caller; sunrise/sunset are
@@ -4348,6 +4828,11 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
                     fg_r, fg_g, fg_b, 32);
         }
 
+    } else if (kind == WLP_AQI) {
+        bool eu;
+        int  aqi = weather_get_aqi(&eu);
+        wl_aqi_panel(fb, aqi, eu, fg_r, fg_g, fg_b);
+
     } else { /* WLP_SUNRISE — asset-style sun glyphs: rise on top, set below. */
         char rs[8], ss[8];
         snprintf(rs, sizeof(rs), "%02d:%02d", (sunrise / 60) % 24, sunrise % 60);
@@ -4372,7 +4857,7 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
 /* Build the ordered list of WeatherLive panel kinds enabled for a tube; returns
  * the count (≥1, falls back to weekday/date).  The TEMP panel already carries
  * today's high/low, so there is no separate Hi/Lo entry. */
-static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, int out[6])
+static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, bool aq, int out[7])
 {
     int n = 0;
     if (wd) out[n++] = WLP_WEEKDATE;
@@ -4381,6 +4866,7 @@ static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, i
     if (hm) out[n++] = WLP_HUMIDITY;
     if (wn) out[n++] = WLP_WIND;
     if (ht) out[n++] = WLP_INDOOR_HT;
+    if (aq) out[n++] = WLP_AQI;
     if (n == 0) out[n++] = WLP_WEEKDATE;
     return n;
 }
@@ -4644,27 +5130,29 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     /* Tube-6 panel kinds for this device (WeatherLive subset).  Default layout
      * (non-CX) rotates weekday/date → temp → lo/hi on tube 6 every ~rot_ms. */
     /* Panel-list cache — only rebuilt when the config flags change. */
-    static int  s_l6[6], s_n6, s_l5[6], s_n5;
-    static bool s_t6wd, s_t6tp, s_t6sr, s_t6hm, s_t6wn, s_t6ht;
-    static bool s_t5wd, s_t5tp, s_t5sr, s_t5hm, s_t5wn, s_t5ht;
+    static int  s_l6[7], s_n6, s_l5[7], s_n5;
+    static bool s_t6wd, s_t6tp, s_t6sr, s_t6hm, s_t6wn, s_t6ht, s_t6aq;
+    static bool s_t5wd, s_t5tp, s_t5sr, s_t5hm, s_t5wn, s_t5ht, s_t5aq;
     static bool s_pl_init;
     bool t6wd = cfg->tube6_panel_weekdate, t6tp = cfg->tube6_panel_temp,
          t6sr = cfg->tube6_panel_sunrise,  t6hm = cfg->tube6_panel_humidity,
-         t6wn = cfg->tube6_panel_wind,     t6ht = cfg->tube6_panel_ht;
+         t6wn = cfg->tube6_panel_wind,     t6ht = cfg->tube6_panel_ht,
+         t6aq = cfg->tube6_panel_aqi;
     bool t5wd = cfg->tube5_panel_weekdate, t5tp = cfg->tube5_panel_temp,
          t5sr = cfg->tube5_panel_sunrise,  t5hm = cfg->tube5_panel_humidity,
-         t5wn = cfg->tube5_panel_wind,     t5ht = cfg->tube5_panel_ht;
+         t5wn = cfg->tube5_panel_wind,     t5ht = cfg->tube5_panel_ht,
+         t5aq = cfg->tube5_panel_aqi;
     if (!s_pl_init ||
         t6wd!=s_t6wd || t6tp!=s_t6tp || t6sr!=s_t6sr ||
-        t6hm!=s_t6hm || t6wn!=s_t6wn || t6ht!=s_t6ht ||
+        t6hm!=s_t6hm || t6wn!=s_t6wn || t6ht!=s_t6ht || t6aq!=s_t6aq ||
         t5wd!=s_t5wd || t5tp!=s_t5tp || t5sr!=s_t5sr ||
-        t5hm!=s_t5hm || t5wn!=s_t5wn || t5ht!=s_t5ht) {
+        t5hm!=s_t5hm || t5wn!=s_t5wn || t5ht!=s_t5ht || t5aq!=s_t5aq) {
         s_n6 = is_24cx
-            ? wl_panel_list(t6wd, t6tp, t6sr, t6hm, t6wn, t6ht, s_l6)
+            ? wl_panel_list(t6wd, t6tp, t6sr, t6hm, t6wn, t6ht, t6aq, s_l6)
             : (s_l6[0] = WLP_WEEKDATE, s_l6[1] = WLP_TEMP, s_l6[2] = WLP_SUNRISE, 3);
-        s_n5 = wl_panel_list(t5wd, t5tp, t5sr, t5hm, t5wn, t5ht, s_l5);
-        s_t6wd=t6wd; s_t6tp=t6tp; s_t6sr=t6sr; s_t6hm=t6hm; s_t6wn=t6wn; s_t6ht=t6ht;
-        s_t5wd=t5wd; s_t5tp=t5tp; s_t5sr=t5sr; s_t5hm=t5hm; s_t5wn=t5wn; s_t5ht=t5ht;
+        s_n5 = wl_panel_list(t5wd, t5tp, t5sr, t5hm, t5wn, t5ht, t5aq, s_l5);
+        s_t6wd=t6wd; s_t6tp=t6tp; s_t6sr=t6sr; s_t6hm=t6hm; s_t6wn=t6wn; s_t6ht=t6ht; s_t6aq=t6aq;
+        s_t5wd=t5wd; s_t5tp=t5tp; s_t5sr=t5sr; s_t5hm=t5hm; s_t5wn=t5wn; s_t5ht=t5ht; s_t5aq=t5aq;
         s_pl_init = true;
     }
     int k6 = s_l6[(int)((now_us / rot_us) % s_n6)];
@@ -5438,8 +5926,8 @@ static void render_spectrum(const nextube_config_t *cfg)
         }
 
         select_tube(tube);
-        uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube]);
-        uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube]);
+        uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+        uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
         open_lcd_window(ox, oy, LCD_WIDTH, LCD_HEIGHT);
 
         for (int y = 0; y < LCD_HEIGHT; y++) {
@@ -6845,8 +7333,8 @@ static void ht_blit_ticker_2x(int tube, const uint8_t *tile_buf, uint16_t fg)
 
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                            + (int)s_col_offsets[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube]
+                            + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]
                             + TICKER_Y_MARGIN);
     open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)TICKER_OUT_H);
 
@@ -6939,8 +7427,9 @@ int display_get_ticker_speed(void)
 /* ── Main display task ──────────────────────────────────────────────── */
 static void display_task(void *arg)
 {
-    s_timer_mutex   = xSemaphoreCreateMutex();
-    s_cx_push_mutex = xSemaphoreCreateMutex();
+    /* Mutexes created in display_init(); only allocate here if somehow missed. */
+    if (!s_timer_mutex)   s_timer_mutex   = xSemaphoreCreateMutex();
+    if (!s_cx_push_mutex) s_cx_push_mutex = xSemaphoreCreateMutex();
     s_timer_start  = xTaskGetTickCount();
 
     /* Pre-allocate shared PSRAM buffers used by the image cache and flip
@@ -7680,7 +8169,8 @@ static void display_task(void *arg)
                          + (cfg->tube6_panel_sunrise  ? 1 : 0)
                          + (cfg->tube6_panel_push     ? 1 : 0)
                          + (cfg->tube6_panel_humidity ? 1 : 0)
-                         + (cfg->tube6_panel_wind     ? 1 : 0);
+                         + (cfg->tube6_panel_wind     ? 1 : 0)
+                         + (cfg->tube6_panel_aqi      ? 1 : 0);
                 if (cnt6 < 1) cnt6 = 1;  /* config enforces ≥1 */
                 int cnt5 = (cfg->tube5_panel_weather  ? 1 : 0)
                          + (cfg->tube5_panel_weekdate ? 1 : 0)
@@ -7689,7 +8179,8 @@ static void display_task(void *arg)
                          + (cfg->tube5_panel_sunrise  ? 1 : 0)
                          + (cfg->tube5_panel_push     ? 1 : 0)
                          + (cfg->tube5_panel_humidity ? 1 : 0)
-                         + (cfg->tube5_panel_wind     ? 1 : 0);
+                         + (cfg->tube5_panel_wind     ? 1 : 0)
+                         + (cfg->tube5_panel_aqi      ? 1 : 0);
                 if (cnt5 < 1) cnt5 = 1;
                 uint32_t panel_ms = cfg->tube6_panel_ms < 1000 ? 5000
                                                                 : cfg->tube6_panel_ms;
@@ -7823,19 +8314,21 @@ static void display_task(void *arg)
                     t.tm_min  != s_cx_last_t.tm_min  ||  /* H/T: refresh each minute */
                     t.tm_mday != s_cx_last_t.tm_mday;    /* date panel: new day      */
                 if (cx_render) {
-                    const bool en6[8] = {
+                    const bool en6[9] = {
                         cfg->tube6_panel_weather, cfg->tube6_panel_weekdate,
                         cfg->tube6_panel_ht,      cfg->tube6_panel_temp,
                         cfg->tube6_panel_sunrise, cfg->tube6_panel_push,
                         cfg->tube6_panel_humidity, cfg->tube6_panel_wind,
+                        cfg->tube6_panel_aqi,
                     };
                     render_cx_panel(cfg, &t, 5, en6, s_cx_panel, &s_cx_last_kind);
                     if (dual_cx) {
-                        const bool en5[8] = {
+                        const bool en5[9] = {
                             cfg->tube5_panel_weather, cfg->tube5_panel_weekdate,
                             cfg->tube5_panel_ht,      cfg->tube5_panel_temp,
                             cfg->tube5_panel_sunrise, cfg->tube5_panel_push,
                             cfg->tube5_panel_humidity, cfg->tube5_panel_wind,
+                            cfg->tube5_panel_aqi,
                         };
                         render_cx_panel(cfg, &t, 4, en5, s_cx_panel5, &s_cx_last_kind5);
                     }
@@ -8229,9 +8722,12 @@ static void display_task(void *arg)
 
 void display_task_start(void)
 {
-    xTaskCreatePinnedToCore(display_task, "display", DISPLAY_STACK_SIZE, NULL, 6,
-                            &s_display_task_handle, 1);
-    ESP_LOGI(TAG, "Display task started");
+    if (xTaskCreatePinnedToCore(display_task, "display", DISPLAY_STACK_SIZE, NULL, 6,
+                               &s_display_task_handle, 1) != pdPASS) {
+        ESP_LOGE(TAG, "Display task creation FAILED — s_display_task_handle is NULL");
+    } else {
+        ESP_LOGI(TAG, "Display task started");
+    }
 }
 
 void display_busy_hint(uint32_t ms)
@@ -8277,6 +8773,11 @@ void display_show_wait(void)
             vTaskSuspend(s_display_task_handle);
         }
     }
+    /* Zero the burn-in shift so the full 80-column window is used for every
+     * tube — a non-zero shift repeats col 0 or col 79 at the exposed panel
+     * edge, which shows as a 1-2 px lighter strip on the dark wait screen.
+     * OTA always ends in esp_restart(), so there is nothing to restore. */
+    s_burnin_shift_x = 0;
     for (int i = 0; i < LCD_COUNT; i++) {
         display_show_image(i, "/images/system/wait.jpg");
     }

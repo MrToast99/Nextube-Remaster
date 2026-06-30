@@ -401,6 +401,8 @@ static void led_task(void *arg)
 
 void leds_task_start(void)
 {
-    xTaskCreatePinnedToCore(led_task, "leds", 2048, NULL, 4, NULL, 1);
-    ESP_LOGI(TAG, "LED effect task started");
+    if (xTaskCreatePinnedToCore(led_task, "leds", 2048, NULL, 4, NULL, 1) != pdPASS)
+        ESP_LOGE(TAG, "led_task creation failed");
+    else
+        ESP_LOGI(TAG, "LED effect task started");
 }

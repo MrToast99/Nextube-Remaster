@@ -222,6 +222,7 @@ static void dac_teardown(void)
 static void apply_volume(uint8_t *buf, int len_bytes,
                          uint16_t bits_per_sample, int vol_pct)
 {
+    if (vol_pct < 0)   vol_pct = 0;
     if (vol_pct >= 100) return;
     const float scale = vol_pct / 100.0f;
 
@@ -268,6 +269,7 @@ static void audio_play_task(void *arg)
     if (fread(&hdr, 1, sizeof(hdr), f) < (int)sizeof(hdr)) goto task_close;
     if (memcmp(hdr.riff_id, "RIFF", 4) != 0 || memcmp(hdr.wave_id, "WAVE", 4) != 0) goto task_close;
     if (hdr.audio_format != 1) goto task_close;
+    if (hdr.bits_per_sample != 8 && hdr.bits_per_sample != 16) goto task_close;
 
     {
         long data_start = -1;
@@ -278,6 +280,7 @@ static void audio_play_task(void *arg)
             if (fread(cid, 1, 4, f) < 4) break;
             if (fread(&csz, 1, 4, f) < 4) break;
             if (memcmp(cid, "data", 4) == 0) { data_start = ftell(f); break; }
+            if (csz == 0) break;
             fseek(f, (long)(csz + (csz & 1)), SEEK_CUR);
         }
         if (data_start < 0) goto task_close;
@@ -311,7 +314,14 @@ static void audio_play_task(void *arg)
 
         if (raw_bytes > 0 && raw_bytes <= PSRAM_PRELOAD_MAX) {
             size_t post_conv  = (hdr.bits_per_sample == 16) ? raw_bytes/2 : raw_bytes;
-            size_t expanded   = post_conv * upsample;
+            /* Guard against size_t overflow before the upsample multiplication.
+             * A crafted WAV with a very low sample_rate can produce a huge upsample
+             * factor; overflowing alloc_size would under-allocate and the fill loop
+             * would write past the end of the PSRAM buffer. */
+            bool size_ok = ((size_t)upsample <= 1 ||
+                            post_conv <= SIZE_MAX / (size_t)upsample);
+            if (size_ok) {
+            size_t expanded   = post_conv * (size_t)upsample;
             size_t alloc_size = (raw_bytes > expanded) ? raw_bytes : expanded;
 
             preload = (uint8_t *)heap_caps_malloc(alloc_size, MALLOC_CAP_SPIRAM);
@@ -332,6 +342,7 @@ static void audio_play_task(void *arg)
                 }
                 preload_n = (size_t)out8;
             }
+            } /* if (size_ok) */
         }
     }
 
@@ -547,10 +558,13 @@ void audio_set_volume(int vol)
 
 void audio_stop(void)
 {
+    if (!s_play_mutex) return;
     s_stop_flag = true;
-    for (int i = 0; i < 30 && s_audio_task != NULL; i++) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+    /* s_play_mutex is Given when idle and Taken while a clip plays.
+     * Taking it here blocks until the task exits and gives it back,
+     * then we restore the idle (Given) state for the next caller. */
+    if (xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(300)) == pdTRUE)
+        xSemaphoreGive(s_play_mutex);
 }
 
 /* ── DAC test API ────────────────────────────────────────────────────── */
@@ -598,8 +612,9 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
     /* Stop any active playback so we have exclusive DAC access. */
     if (s_audio_task) {
         s_stop_flag = true;
-        for (int i = 0; i < 50 && s_audio_task != NULL; i++)
-            vTaskDelay(pdMS_TO_TICKS(10));
+        if (s_play_mutex &&
+            xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(500)) == pdTRUE)
+            xSemaphoreGive(s_play_mutex);
         s_stop_flag = false;
     }
 
@@ -658,7 +673,13 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             return;
         }
         uint8_t *buf = (uint8_t *)malloc(DAC_DMA_BUF_SIZE);
-        if (!buf) { ESP_LOGE(TAG, "DAC test: OOM"); return; }
+        if (!buf) {
+            ESP_LOGE(TAG, "DAC test: OOM");
+            dac_continuous_disable(s_dac_cont);
+            dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL;
+            mic_set_audio_active(false);
+            return;
+        }
         memset(buf, (uint8_t)level, DAC_DMA_BUF_SIZE);
         size_t w;
         for (int i = 0; i < DAC_DESC_NUM; i++)
@@ -693,7 +714,13 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         }
 
         uint8_t *buf = (uint8_t *)malloc(DAC_DMA_BUF_SIZE);
-        if (!buf) { ESP_LOGE(TAG, "DAC test: tone OOM"); return; }
+        if (!buf) {
+            ESP_LOGE(TAG, "DAC test: tone OOM");
+            dac_continuous_disable(s_dac_cont);
+            dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL;
+            mic_set_audio_active(false);
+            return;
+        }
         size_t w;
         for (int d = 0; d < DAC_DESC_NUM; d++) {
             int base = d * DAC_DMA_BUF_SIZE;

@@ -737,8 +737,10 @@ void mic_task_start(void)
      * too tight: under field conditions the combined depth triggered a stack
      * overflow that corrupted the saved SP, causing Core 1's SPI flash IPC
      * to hang while waiting for Core 0's (now-corrupted) acknowledgement. */
-    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 5, NULL, 0);
-    ESP_LOGI(TAG, "mic_task started (core 0)");
+    if (xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 5, NULL, 0) != pdPASS)
+        ESP_LOGE(TAG, "mic_task creation failed");
+    else
+        ESP_LOGI(TAG, "mic_task started (core 0)");
 }
 
 void mic_get_bands(float out[MIC_BAND_COUNT])

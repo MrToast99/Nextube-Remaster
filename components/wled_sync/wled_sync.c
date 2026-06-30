@@ -125,6 +125,8 @@ void wled_sync_start(void)
     s_mutex   = xSemaphoreCreateMutex();
     /* Core 0, priority 3 — below led_task (priority 4 on Core 1).
      * recvfrom() blocks so no CPU is wasted when no packets arrive. */
-    xTaskCreatePinnedToCore(wled_sync_task, "wled_sync", 3072, NULL, 3, NULL, 0);
-    ESP_LOGI(TAG, "WLED sync task started");
+    if (xTaskCreatePinnedToCore(wled_sync_task, "wled_sync", 3072, NULL, 3, NULL, 0) != pdPASS)
+        ESP_LOGE(TAG, "wled_sync_task creation failed");
+    else
+        ESP_LOGI(TAG, "WLED sync task started");
 }

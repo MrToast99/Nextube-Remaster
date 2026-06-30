@@ -270,6 +270,8 @@ select option{background:var(--accent);color:var(--text)}
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-sunrise" style="width:14px;height:14px"> Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(calculated from weather location)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-humidity" style="width:14px;height:14px"> Humidity <span style="color:var(--dim);font-size:.78rem">(outdoor humidity — drop symbol + value)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-wind" style="width:14px;height:14px"> Wind <span style="color:var(--dim);font-size:.78rem">(wind speed km/h — wind symbol + value)</span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-aqi" style="width:14px;height:14px"> Air Quality <span style="color:var(--dim);font-size:.78rem">(AQI — Open-Meteo, no key)</span></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem">AQI scale <select id="f-aqistd" style="font-size:.8rem;background:var(--accent);border:1px solid var(--dim);color:var(--text);border-radius:4px;padding:1px 4px"><option value="auto">Auto (by location)</option><option value="us">US AQI (0–500)</option><option value="eu">European AQI (0–100)</option></select></label>
         <label id="f-cx-push-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-push" style="width:14px;height:14px"> Pushed Image <span style="color:var(--dim);font-size:.78rem">(JPG via POST /api/cx_image?tube=6)</span></label>
       </div>
       <div style="display:flex;align-items:center;gap:.6rem;font-size:.85rem">
@@ -289,6 +291,7 @@ select option{background:var(--accent);color:var(--text)}
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-sunrise" style="width:14px;height:14px"> Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(calculated from weather location)</span></label>
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-humidity" style="width:14px;height:14px"> Humidity <span style="color:var(--dim);font-size:.78rem">(outdoor humidity — drop symbol + value)</span></label>
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-wind" style="width:14px;height:14px"> Wind <span style="color:var(--dim);font-size:.78rem">(wind speed km/h — wind symbol + value)</span></label>
+          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-aqi" style="width:14px;height:14px"> Air Quality <span style="color:var(--dim);font-size:.78rem">(AQI — Open-Meteo, no key)</span></label>
           <label id="f-cx5-push-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-push" style="width:14px;height:14px"> Pushed Image <span style="color:var(--dim);font-size:.78rem">(JPG via POST /api/cx_image?tube=5)</span></label>
         </div>
       </div>
@@ -2344,6 +2347,8 @@ async function loadSettings() {
   $('f-cx-sunrise').checked  = cfg.tube6_panel_sunrise  === true;
   $('f-cx-humidity').checked = cfg.tube6_panel_humidity === true;
   $('f-cx-wind').checked     = cfg.tube6_panel_wind     === true;
+  $('f-cx-aqi').checked      = cfg.tube6_panel_aqi      === true;
+  $('f-aqistd').value        = cfg.aqi_standard || 'auto';
   $('f-cx-push').checked     = cfg.tube6_panel_push     === true;
   $('f-cx-panel-ms').value   = Math.round((cfg.tube6_panel_ms || 5000) / 1000);
   $('f-cx-dual').checked      = cfg.cx_dual_panel        === true;
@@ -2354,6 +2359,7 @@ async function loadSettings() {
   $('f-cx5-sunrise').checked  = cfg.tube5_panel_sunrise  === true;
   $('f-cx5-humidity').checked = cfg.tube5_panel_humidity === true;
   $('f-cx5-wind').checked     = cfg.tube5_panel_wind     === true;
+  $('f-cx5-aqi').checked      = cfg.tube5_panel_aqi      === true;
   $('f-cx5-push').checked      = cfg.tube5_panel_push      === true;
   onCxDualChange();
   $('f-leading-zero').checked = cfg.leading_zero === true;
@@ -3084,6 +3090,8 @@ async function saveSettings() {
     tube6_panel_sunrise:  $('f-cx-sunrise').checked,
     tube6_panel_humidity: $('f-cx-humidity').checked,
     tube6_panel_wind:     $('f-cx-wind').checked,
+    tube6_panel_aqi:      $('f-cx-aqi').checked,
+    aqi_standard:         $('f-aqistd').value,
     tube6_panel_push:     $('f-cx-push').checked,
     tube6_panel_ms:       Math.max(1, +$('f-cx-panel-ms').value) * 1000,
     cx_dual_panel:        $('f-cx-dual').checked,
@@ -3094,6 +3102,7 @@ async function saveSettings() {
     tube5_panel_sunrise:  $('f-cx5-sunrise').checked,
     tube5_panel_humidity: $('f-cx5-humidity').checked,
     tube5_panel_wind:     $('f-cx5-wind').checked,
+    tube5_panel_aqi:      $('f-cx5-aqi').checked,
     tube5_panel_push:     $('f-cx5-push').checked,
     notify_update_on_display: $('f-notify-update').checked,
     burnin_auto_enabled:    $('bi-sched-en').checked,

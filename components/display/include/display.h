@@ -69,12 +69,17 @@ void display_apply_tube_vcom(const uint8_t vcom[6]);
  *  Each element clamped to [0.5, 3.0].  Call after display_init(). */
 void display_apply_tube_gamma(const float gamma[6]);
 
-/** Set per-tube CASET/RASET window offset adjustments.
- *  col_off[i] is added to LCD_OFFSET_X; row_off[i] to LCD_OFFSET_Y.
- *  Range -8..+8. Replacement panels based on ST7735S variants typically need
- *  col_off=+2, row_off=+1 to prevent 1px static at the right/bottom edge.
- *  Thread-safe: values are cached and applied on the next render tick.
- *  Call after display_init() and again when lcd_col/row_offset changes. */
+/** Set per-tube CASET/RASET user fine-tuning offsets.
+ *  col_off[i] / row_off[i] are added to the effective column/row origin,
+ *  which is already LCD_OFFSET_X/Y + the profile-level GRAM offset (profile 1
+ *  "Vivid" contributes +2/+1 automatically for ST7735S replacement panels).
+ *  Use these for additional per-unit trimming beyond the profile default.
+ *  Range -8..+8.  Thread-safe; takes effect on the next render tick.
+ *  NOTE: Users who previously set col_off=+1 as a workaround for replacement
+ *  panel misalignment should set it back to 0 after switching to profile 1,
+ *  since the profile now handles the base +1 column offset automatically.
+ *  Panels that need COLSTART=26 (vs the more common 25) should set
+ *  lcd_col_offset=+1 as additional fine-tuning on top of the profile. */
 void display_apply_tube_offsets(const int8_t col_off[6], const int8_t row_off[6]);
 
 /** Set per-tube software brightness scale (0-100; 100 = no scaling, default).
@@ -109,6 +114,11 @@ void display_path_humidity   (char *buf, size_t n, const char *theme, const char
 /* ── High-level helpers ────────────────────────────────────────────── */
 void display_show_number(int tube, int digit,        const char *theme);
 void display_show_ampm  (int tube, const char *name, const char *theme);
+
+/** Invalidate the PNG-vs-JPG format cache for theme assets.
+ *  Call after any hotpatch or WebUI pull that adds or removes theme PNGs,
+ *  so the next render re-probes rather than serving the stale cached result. */
+void display_theme_cache_flush(void);
 
 /* ── Update indicator ──────────────────────────────────────────────── */
 /** Activate or clear the clock-face firmware-update indicator.

@@ -55,6 +55,7 @@
 #include "config_mgr.h"
 #include "fw_version.h"
 #include "sht30.h"
+#include "weather.h"     /* air-quality sensor (weather_get_aqi)        */
 #include "wifi_manager.h"
 #include "display.h"
 #include "audio.h"       /* ticker notification chime (audio_play_file) */
@@ -157,6 +158,23 @@ static void publish_discovery(void)
              "\"value_template\":\"{{ value_json.humidity }}\","
              "\"unit_of_measurement\":\"%%\","
              "\"device_class\":\"humidity\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, state_t, dev);
+    publish(topic, payload, 1);
+
+    /* ── Air-quality sensor (outdoor AQI from Open-Meteo) ── */
+    make_topic(state_t, sizeof(state_t), "sensor/aqi/state");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/%s_aqi/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Air Quality\","
+             "\"unique_id\":\"%s_aqi\","
+             "\"state_topic\":\"%s\","
+             "\"value_template\":\"{{ value_json.aqi }}\","
+             "\"device_class\":\"aqi\","
+             "\"state_class\":\"measurement\","
              "\"device\":{%s}"
              "}",
              s_hostname, state_t, dev);
@@ -420,11 +438,21 @@ void ha_mqtt_publish_button(const char *btn)
 
 static void publish_sensors(void)
 {
-    const sht30_reading_t *s = sht30_get();
-    if (!s || !s->valid) return;
-
     char topic[TOPIC_MAXLEN];
     char payload[64];
+
+    /* Outdoor air quality — independent of the SHT30, so publish before the
+     * sensor-validity gate below.  weather_get_aqi() returns -1 until the first
+     * successful fetch. */
+    int aqi = weather_get_aqi(NULL);
+    if (aqi >= 0) {
+        make_topic(topic, sizeof(topic), "sensor/aqi/state");
+        snprintf(payload, sizeof(payload), "{\"aqi\":%d}", aqi);
+        publish(topic, payload, 0);
+    }
+
+    const sht30_reading_t *s = sht30_get();
+    if (!s || !s->valid) return;
 
     make_topic(topic, sizeof(topic), "sensor/temperature/state");
     snprintf(payload, sizeof(payload), "{\"temperature\":%.1f}", (double)s->temp_c);
@@ -1154,7 +1182,9 @@ void ha_mqtt_start(void)
      * handler no-ops until the broker connection is up. */
     ntp_register_sync_listener(on_ntp_sync_stats);
 
-    xTaskCreatePinnedToCore(ha_mqtt_task, "ha_mqtt",
-                            4096, NULL, 3, NULL, 0);
-    ESP_LOGI(TAG, "MQTT task started (broker: %s:%u)", s_broker, (unsigned)s_port);
+    if (xTaskCreatePinnedToCore(ha_mqtt_task, "ha_mqtt",
+                               4096, NULL, 3, NULL, 0) != pdPASS)
+        ESP_LOGE(TAG, "ha_mqtt_task creation failed");
+    else
+        ESP_LOGI(TAG, "MQTT task started (broker: %s:%u)", s_broker, (unsigned)s_port);
 }

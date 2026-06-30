@@ -146,7 +146,8 @@ void sht30_set_offset(float offset_c)
 
 void sht30_task_start(void)
 {
-    xTaskCreate(sht30_task, "sht30", 4096, NULL, 4, NULL);
+    if (xTaskCreate(sht30_task, "sht30", 4096, NULL, 4, NULL) != pdPASS)
+        ESP_LOGE(TAG, "sht30_task creation failed");
 }
 
 const sht30_reading_t *sht30_get(void)

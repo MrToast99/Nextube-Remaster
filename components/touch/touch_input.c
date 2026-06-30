@@ -253,12 +253,14 @@ void touch_input_init(void)
      * Keeps the 50 ms poll loop unblocked during slow flash writes.
      * Pinned to CPU 0 where other app tasks live. */
     s_touch_queue = xQueueCreate(8, sizeof(touch_pad_id_t));
-    xTaskCreatePinnedToCore(touch_handler_task, "touch_hdl", 3072, NULL,
-                            4, &s_handler_task, 0);
+    if (xTaskCreatePinnedToCore(touch_handler_task, "touch_hdl", 3072, NULL,
+                               4, &s_handler_task, 0) != pdPASS)
+        ESP_LOGE(TAG, "touch_handler_task creation failed");
 
     /* Poll task on CPU 0 – away from the display task's JPEG decoding on CPU 1 */
-    xTaskCreatePinnedToCore(touch_poll_task, "touch", 3072, NULL,
-                            5, &touch_task_handle, 0);
+    if (xTaskCreatePinnedToCore(touch_poll_task, "touch", 3072, NULL,
+                               5, &touch_task_handle, 0) != pdPASS)
+        ESP_LOGE(TAG, "touch_poll_task creation failed");
 }
 
 void touch_input_register_callback(touch_callback_t cb) { user_cb = cb; }

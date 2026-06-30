@@ -957,13 +957,28 @@ static volatile bool s_ota_active    = false;
 /* Set by ota_pull_task in NVS before reboot; consumed on the first api_webui_pull
  * call after that reboot.  Allows the browser to complete the webui half of an
  * online-updater without a valid session (sessions are RAM-only and are cleared by
- * the OTA reboot). */
-static bool          s_post_ota_auth = false;
+ * the OTA reboot).  Expires after POST_OTA_AUTH_TTL_US so a device that stays up
+ * indefinitely without completing Phase 4 does not leave auth bypassed forever. */
+static bool          s_post_ota_auth        = false;
+static int64_t       s_post_ota_auth_set_us = 0;
+#define POST_OTA_AUTH_TTL_US  (5LL * 60 * 1000000LL)   /* 5 minutes */
 /* true when this boot has the NVS post_ota flag set — cleared when the flag
  * is consumed by api_webui_pull_auto.  While set, api_ota_pull_status returns
  * 503 so the old Phase-2 poll loop detects the reboot via !rs.ok and
  * advances to Phase 3/4 even when no admin password is configured. */
 static bool          s_post_ota_boot_pending = false;
+
+/* True only while the post-OTA bypass is set AND has not expired. */
+static bool post_ota_auth_valid(void)
+{
+    if (!s_post_ota_auth) return false;
+    if (esp_timer_get_time() - s_post_ota_auth_set_us > POST_OTA_AUTH_TTL_US) {
+        ESP_LOGW(TAG, "post_ota auth bypass expired (>5 min) — re-auth required");
+        s_post_ota_auth = false;
+        return false;
+    }
+    return true;
+}
 
 /* Returns true (and clears the NVS flag) if a post-OTA bypass is pending.
  * Result is cached in s_post_ota_auth so only one NVS read is needed. */
@@ -977,6 +992,7 @@ static bool consume_post_ota_flag(void)
         nvs_set_u8(h, "post_ota", 0);
         nvs_commit(h);
         s_post_ota_boot_pending = false;
+        s_post_ota_auth_set_us  = esp_timer_get_time();
     }
     nvs_close(h);
     return had;
@@ -1441,6 +1457,11 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
                                    "Not a valid ZIP file"), ESP_FAIL;
     }
 
+    /* Invalidate the shell cache NOW so any request arriving during extraction
+     * gets a cache-miss and re-reads from LittleFS after the new file lands,
+     * not the stale pre-extraction version. */
+    shell_cache_flush();
+
     cJSON *files_arr = cJSON_CreateArray();
     int ok = 0, skipped = 0, failed = 0;
 
@@ -1456,18 +1477,24 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
         const zip_lfh_t *h = (const zip_lfh_t *)p;
         p += sizeof(zip_lfh_t);
 
-        if (p + h->fname_len + h->extra_len > end) break;
+        /* Size-based bounds checks: compare remaining space against the field
+         * lengths rather than `p + len > end`.  comp_sz is an attacker- (or
+         * corruption-) controlled uint32_t, so the pointer-arithmetic form can
+         * wrap on 32-bit and silently bypass the guard, leading to an OOB read
+         * in the fwrite below. */
+        if ((size_t)(h->fname_len + h->extra_len) > (size_t)(end - p)) break;
         char fname[256] = {0};
         int fnl = h->fname_len < 255 ? h->fname_len : 255;
         memcpy(fname, p, fnl);
         p += h->fname_len + h->extra_len;
 
-        if (p + h->comp_sz > end) break;
+        if (h->comp_sz > (size_t)(end - p)) break;
         const uint8_t *data = p;
         p += h->comp_sz;
 
-        /* Skip directory entries. */
-        if (fnl > 0 && fname[fnl - 1] == '/') continue;
+        /* Skip directory entries and zero-length filenames. */
+        if (fnl == 0) continue;
+        if (fname[fnl - 1] == '/') continue;
 
         /* Reject path traversal. */
         if (strstr(fname, "..") || strstr(fname, "//")) {
@@ -1518,6 +1545,7 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
 
     free(zip);
     hp_drop_stale_index();
+    display_theme_cache_flush();   /* re-probe PNG format on next render */
     ESP_LOGI(TAG, "hotpatch complete: %d written, %d skipped, %d failed",
              ok, skipped, failed);
 
@@ -1794,6 +1822,15 @@ static void ota_pull_task(void *arg)
     ESP_LOGI(TAG, "[ota] writing to partition '%s' at 0x%08" PRIx32 " (%lu B)",
              upd->label, upd->address, (unsigned long)upd->size);
 
+    if ((size_t)received > upd->size) {
+        snprintf(s_pull.error, sizeof(s_pull.error),
+                 "Image too large (%d B) for OTA partition (%lu B)",
+                 received, (unsigned long)upd->size);
+        ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+        free(img);
+        goto pull_err;
+    }
+
     esp_ota_handle_t h;
     if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK) {
         snprintf(s_pull.error, sizeof(s_pull.error), "OTA begin failed");
@@ -1908,12 +1945,23 @@ static esp_err_t api_ota_pull_status(httpd_req_t *r)
     return send_json(r, buf);
 }
 
+static int64_t s_last_ota_pull_us = 0;
+#define OTA_PULL_RATE_LIMIT_US  (60LL * 1000000LL)   /* 60 seconds between pulls */
+
 static esp_err_t api_ota_pull(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
     if (s_ota_active) {
         httpd_resp_set_status(r, "409 Conflict");
         return send_json(r, "{\"error\":\"ota_in_progress\"}");
+    }
+    {
+        int64_t now = esp_timer_get_time();
+        if (s_last_ota_pull_us > 0 && now - s_last_ota_pull_us < OTA_PULL_RATE_LIMIT_US) {
+            httpd_resp_set_status(r, "429 Too Many Requests");
+            return send_json(r, "{\"error\":\"rate_limited\",\"retry_after_s\":60}");
+        }
+        s_last_ota_pull_us = now;
     }
 
     int len = r->content_len;
@@ -1944,21 +1992,27 @@ static esp_err_t api_ota_pull(httpd_req_t *r)
     s_pull.url[sizeof(s_pull.url) - 1] = '\0';
 
     cJSON *hash_j = cJSON_GetObjectItem(j, "sha256");
-    if (cJSON_IsString(hash_j) && hash_j->valuestring && strlen(hash_j->valuestring) == 64)
+    if (cJSON_IsString(hash_j) && hash_j->valuestring && strlen(hash_j->valuestring) == 64) {
         strncpy(s_pull.sha256, hash_j->valuestring, 64);
-    else
+        s_pull.sha256[64] = '\0';
+    } else {
         s_pull.sha256[0] = '\0';
+    }
 
     /* Optional: webui ZIP URL + hash to apply after firmware reboot.
      * Stored in NVS so the post-reboot handler can start the pull without
      * receiving a POST body (which fails on some connections after a reboot). */
     s_pull.webui_url[0] = s_pull.webui_sha256[0] = '\0';
     cJSON *wurl_j = cJSON_GetObjectItem(j, "webui_url");
-    if (cJSON_IsString(wurl_j) && wurl_j->valuestring && wurl_j->valuestring[0])
+    if (cJSON_IsString(wurl_j) && wurl_j->valuestring && wurl_j->valuestring[0]) {
         strncpy(s_pull.webui_url, wurl_j->valuestring, sizeof(s_pull.webui_url) - 1);
+        s_pull.webui_url[sizeof(s_pull.webui_url) - 1] = '\0';
+    }
     cJSON *wsha_j = cJSON_GetObjectItem(j, "webui_sha256");
-    if (cJSON_IsString(wsha_j) && wsha_j->valuestring && strlen(wsha_j->valuestring) == 64)
+    if (cJSON_IsString(wsha_j) && wsha_j->valuestring && strlen(wsha_j->valuestring) == 64) {
         strncpy(s_pull.webui_sha256, wsha_j->valuestring, 64);
+        s_pull.webui_sha256[64] = '\0';
+    }
     cJSON_Delete(j);
 
     if (s_pull.sha256[0])
@@ -2140,6 +2194,9 @@ static void webui_pull_task(void *arg)
     ESP_LOGI(TAG, "[webui] ZIP valid — extracting to LittleFS…");
 
     {
+        /* Invalidate the shell cache before any file is written so concurrent
+         * requests get a cache-miss during extraction, not stale content. */
+        shell_cache_flush();
         int ok = 0, skipped = 0, failed = 0;
         const uint8_t *p = zip, *end = zip + received;
         while (p + (int)sizeof(zip_lfh_t) <= end) {
@@ -2148,15 +2205,20 @@ static void webui_pull_task(void *arg)
             if (sig != ZIP_LFH_SIG) { p++; continue; }
             const zip_lfh_t *h = (const zip_lfh_t *)p;
             p += sizeof(zip_lfh_t);
-            if (p + h->fname_len + h->extra_len > end) break;
+            /* Size-based bounds checks — see the hotpatch extractor: the
+             * `p + comp_sz > end` form can wrap on 32-bit (comp_sz is an
+             * attacker/corruption-controlled uint32_t) and bypass the guard,
+             * causing an OOB read in the fwrite below. */
+            if ((size_t)(h->fname_len + h->extra_len) > (size_t)(end - p)) break;
             char fname[256] = {0};
             int fnl = h->fname_len < 255 ? h->fname_len : 255;
             memcpy(fname, p, fnl);
             p += h->fname_len + h->extra_len;
-            if (p + h->comp_sz > end) break;
+            if (h->comp_sz > (size_t)(end - p)) break;
             const uint8_t *data = p;
             p += h->comp_sz;
-            if (fnl > 0 && fname[fnl-1] == '/') { ESP_LOGD(TAG, "[webui]  dir  %s", fname); continue; }
+            if (fnl == 0) continue;
+            if (fname[fnl-1] == '/') { ESP_LOGD(TAG, "[webui]  dir  %s", fname); continue; }
             if (strstr(fname, "..") || strstr(fname, "//")) {
                 ESP_LOGW(TAG, "[webui]  SKIP (path traversal) %s", fname);
                 failed++; continue;
@@ -2190,6 +2252,7 @@ static void webui_pull_task(void *arg)
         }
         free(zip);
         hp_drop_stale_index();
+        display_theme_cache_flush();   /* re-probe PNG format on next render */
         ESP_LOGI(TAG, "[webui] extraction done: %d written, %d skipped, %d failed", ok, skipped, failed);
         if (failed > 0)
             snprintf(s_webui.error, sizeof(s_webui.error), "%d file(s) failed to write", failed);
@@ -2226,7 +2289,7 @@ webui_err:
 
 static esp_err_t api_webui_pull_status(httpd_req_t *r)
 {
-    if (!s_post_ota_auth) { REQUIRE_AUTH(r); }
+    if (!post_ota_auth_valid()) { REQUIRE_AUTH(r); }
     static const char *const names[] = { "idle","running","done","error" };
     char buf[192];
     snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"error\":\"%s\"}",
@@ -2256,7 +2319,7 @@ static esp_err_t api_webui_pull_auto(httpd_req_t *r)
         return send_json(r, "{\"status\":\"done\"}");
 
     if (!s_post_ota_auth) s_post_ota_auth = consume_post_ota_flag();
-    if (!s_post_ota_auth) { REQUIRE_AUTH(r); }
+    if (!post_ota_auth_valid()) { REQUIRE_AUTH(r); }
 
     nvs_handle_t h;
     if (nvs_open("nextube_sec", NVS_READWRITE, &h) != ESP_OK)
@@ -2287,7 +2350,7 @@ static esp_err_t api_webui_pull(httpd_req_t *r)
 {
     /* Consume the one-time NVS bypass flag set before OTA reboot. */
     if (!s_post_ota_auth) s_post_ota_auth = consume_post_ota_flag();
-    if (!s_post_ota_auth) { REQUIRE_AUTH(r); }
+    if (!post_ota_auth_valid()) { REQUIRE_AUTH(r); }
     if (s_ota_active) {
         httpd_resp_set_status(r, "409 Conflict");
         return send_json(r, "{\"error\":\"ota_in_progress\"}");
@@ -3604,7 +3667,7 @@ static void post_ota_autostart_task(void *arg)
     /* Consume the one-time post_ota flag: clears it in NVS and lets
      * api_ota_pull_status stop returning 503.  Also marks this boot as
      * post-OTA-authorised so a manual browser poll/trigger bypasses auth. */
-    consume_post_ota_flag();
+    consume_post_ota_flag();   /* clears NVS; also sets s_post_ota_auth_set_us */
     s_post_ota_auth = true;
 
     if (s_ota_active) {
@@ -3669,8 +3732,9 @@ void web_server_start(void)
                 ESP_LOGI(TAG, "[boot] post-OTA boot — device will auto-pull WebUI; ota_pull_status → 503 until it fires");
                 /* Drive the WebUI pull ourselves rather than waiting for the
                  * browser to reach us through the post-reboot network churn. */
-                xTaskCreatePinnedToCore(post_ota_autostart_task, "post_ota_auto",
-                                        4096, NULL, 4, NULL, 0);
+                if (xTaskCreatePinnedToCore(post_ota_autostart_task, "post_ota_auto",
+                                           4096, NULL, 4, NULL, 0) != pdPASS)
+                    ESP_LOGE(TAG, "[boot] post_ota_autostart_task creation failed");
             }
         }
     }

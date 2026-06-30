@@ -275,6 +275,7 @@ typedef struct {
     bool             tube6_panel_push;       /* Externally-pushed JPG (POST /api/cx_image?tube=6) */
     bool             tube6_panel_humidity;   /* Outdoor humidity (drop symbol + value) */
     bool             tube6_panel_wind;        /* Wind speed (wind symbol + km/h value) */
+    bool             tube6_panel_aqi;         /* Air quality — US EPA AQI (Open-Meteo, keyless) */
     uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
     /* Dual info-panel mode (24H Custom): when true the colon is dropped and an
      * INDEPENDENT info panel is shown on BOTH tube 5 (2nd-from-right, LCD index
@@ -291,6 +292,8 @@ typedef struct {
     bool             tube5_panel_push;       /* Externally-pushed JPG (POST /api/cx_image?tube=5) */
     bool             tube5_panel_humidity;   /* Outdoor humidity (drop symbol + value) */
     bool             tube5_panel_wind;        /* Wind speed (wind symbol + km/h value) */
+    bool             tube5_panel_aqi;         /* Air quality — US EPA AQI (Open-Meteo, keyless) */
+    char             aqi_standard[8];         /* AQI scale: "auto" (by location) | "us" | "eu" */
     char             update_repo[64];
 } nextube_config_t;
 
