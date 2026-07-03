@@ -82,6 +82,17 @@ static const char *TAG = "mic";
 #define PHASE1_ALPHA    0.02f
 #define DC_ALPHA        0.999f
 
+/* Attack/release smoothing for s_disp_smooth[] (see the temporal-smoothing
+ * block in mic_task).  This is the display/peak-hold path ONLY — the gate's
+ * own s_gate_smooth[] keeps the original single symmetric alpha (0.35,
+ * tau ~45 ms) unchanged; see the comment at s_gate_smooth's use for why.
+ * SMOOTH_ATTACK reacts to a rising band almost immediately (tau ~1 frame,
+ * ~16-24 ms) for snappier response; SMOOTH_RELEASE is slower (tau ~5-6
+ * frames, ~90 ms) so it averages out noise-floor fluctuations on the way
+ * down instead of tracking every wiggle. */
+#define SMOOTH_ATTACK   0.65f
+#define SMOOTH_RELEASE  0.18f
+
 /* ── Sensitivity (compile-time) ──────────────────────────────────────── */
 #define MIC_GAIN        1.0f    /* LMV321 handles hardware gain */
 #define MIC_NOISE_FLOOR 1.0f   /* Goertzel normalisation floor for active frames */
@@ -210,6 +221,18 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
  * clearly leads, but mids and treble live.  1.0 = linear (old behaviour);
  * lower = flatter/more compressed. */
 #define SPEC_GAMMA  0.45f
+
+/* ── Pre-gamma squelch (kills near-zero-ratio noise flicker) ────────────
+ * SPEC_GAMMA's whole job is to boost quiet-but-real bands into visibility,
+ * but it boosts quiet-but-NOT-real ones just as eagerly: a band sitting at
+ * 1 % of the loudest band's peak (pure noise-floor jitter once the sum-gate
+ * is open because something elsewhere is playing) still renders
+ * 0.01^0.45 ≈ 0.15 — two lit segments of nothing.  Squelch remaps the
+ * bottom SPEC_SQUELCH_RATIO of the ratio range to a hard 0 and rescales the
+ * remainder back to [0,1] before applying gamma, so the compression curve
+ * is unchanged for anything above the squelch line and there's no visible
+ * jump at the boundary (ratio == squelch maps continuously to 0). */
+#define SPEC_SQUELCH_RATIO  0.04f
 
 /* With BIN-SUMMED bands (see s_bin_band) the tilt is now OFF by default:
  * log-spaced bands sum more bins as frequency rises (bandwidth ∝ f), which
@@ -518,18 +541,26 @@ static void mic_task(void *arg)
         }
         if (s_noise_cal < PHASE1_FRAMES) s_noise_cal++;
 
-        /* ── Temporal smoothing (EMA, τ ≈ 3 frames ≈ 45 ms) ──
-         * Computed BEFORE the silence gate so the gate decision uses the
-         * smoothed total instead of raw per-frame power.  A single broadband
-         * noise burst can spike raw power[b] for one frame and briefly open
-         * the gate across all bands, producing a visible multi-tube blip.
-         * The EMA attenuates any single-frame transient to ≤35 % of its
-         * amplitude, preventing false gate triggers while sustained audio
-         * (which builds the EMA to steady state within 2-3 frames) still
-         * opens the gate normally. */
-        static float s_smooth[BAND_COUNT];
-        for (int b = 0; b < BAND_COUNT; b++)
-            s_smooth[b] += 0.35f * (power[b] - s_smooth[b]);
+        /* ── Temporal smoothing — TWO separate EMAs from here on ──
+         *
+         * s_gate_smooth: unchanged symmetric EMA (τ ≈ 3 frames ≈ 45 ms), used
+         * ONLY for the gate decision and WiFi-spike rejection below.  Do NOT
+         * give this one a fast attack — the WiFi-spike heuristic explicitly
+         * relies on "a single loud frame can only move this by 35 %" to tell
+         * a genuine sudden-loud-onset apart from an RF spike; speeding up
+         * attack here would make real drum hits trip the same rejection.
+         *
+         * s_disp_smooth: feeds the peak-hold / displayed bars only (below).
+         * Asymmetric — fast attack, slow release (see SMOOTH_ATTACK/RELEASE)
+         * — so transients register almost immediately while floor-noise
+         * jitter on the way down gets averaged out instead of flickering. */
+        static float s_gate_smooth[BAND_COUNT];
+        static float s_disp_smooth[BAND_COUNT];
+        for (int b = 0; b < BAND_COUNT; b++) {
+            s_gate_smooth[b] += 0.35f * (power[b] - s_gate_smooth[b]);
+            float a = (power[b] > s_disp_smooth[b]) ? SMOOTH_ATTACK : SMOOTH_RELEASE;
+            s_disp_smooth[b] += a * (power[b] - s_disp_smooth[b]);
+        }
 
         /* ── SPECTRAL silence gate (runtime tuneable via the noise-floor
          * slider; cfg->mic_silence_gate, new semantics) ──
@@ -542,7 +573,7 @@ static void mic_task(void *arg)
          * Floor adaptation above happens on gated frames too (it must — the
          * floor is learned FROM silence; the old pre-analysis gate starved it). */
         float total_power = 0.0f;
-        for (int b = 0; b < BAND_COUNT; b++) total_power += s_smooth[b];
+        for (int b = 0; b < BAND_COUNT; b++) total_power += s_gate_smooth[b];
 
         /* WiFi background-scan RF-coupling spike rejection.
          * The ESP32 WiFi binary scans ~13 channels every ~5 s for roaming.
@@ -551,19 +582,26 @@ static void mic_task(void *arg)
          * blackout.  Observed spike magnitudes: 400–3800 total_power.
          *
          * Detection signature: previous frame was at moderate-or-lower power
-         * (< 200) AND current frame jumps to > 400.  Real audio never makes
-         * that jump; even a sudden loud onset builds gradually over multiple
-         * EMA frames (α=0.35 means one loud frame only moves s_smooth by 35%).
+         * (< 200) AND current frame jumps to > 400.  This runs on total_power,
+         * i.e. s_gate_smooth — kept at the original unchanged α=0.35 (one
+         * loud frame only moves it by 35%) specifically so this "real audio
+         * never makes that jump in one frame" assumption still holds; it
+         * does NOT run on the faster-attack s_disp_smooth used for display.
          * The 200/400 thresholds are calibrated from field recordings:
          *   • max legitimate audio peak seen:   ~190 total_power
          *   • min scan spike seen:              ~533 total_power
          *   • s_prev at spike onset (scans fire during audio, not just silence):
          *     observed range 0–83 in recordings → threshold 200 gives margin.
-         * When triggered, reset s_smooth so the spike does not contaminate
-         * future EMA state; the silence-gate below then suppresses output. */
+         * When triggered, reset both smoothed arrays so the spike does not
+         * contaminate future EMA state (s_disp_smooth especially — its fast
+         * attack would otherwise have already jumped toward the spike this
+         * same frame); the silence-gate below then suppresses output. */
         static float s_prev_total = 0.0f;
         if (s_prev_total < 200.0f && total_power > 400.0f) {
-            for (int b = 0; b < BAND_COUNT; b++) s_smooth[b] = 0.0f;
+            for (int b = 0; b < BAND_COUNT; b++) {
+                s_gate_smooth[b] = 0.0f;
+                s_disp_smooth[b] = 0.0f;
+            }
             total_power = 0.0f;
         }
         s_prev_total = total_power;
@@ -598,18 +636,24 @@ static void mic_task(void *arg)
 
         /* ── Peak-hold ── */
         for (int b = 0; b < BAND_COUNT; b++) {
-            if (s_smooth[b] > peak[b]) peak[b]  = s_smooth[b];
-            else                       peak[b] *= DECAY;
+            if (s_disp_smooth[b] > peak[b]) peak[b]  = s_disp_smooth[b];
+            else                            peak[b] *= DECAY;
             if (peak[b] > max_power) max_power = peak[b];
         }
 
         /* ── Publish normalised 0.0–1.0 values + debug snapshot ──
-         * Perceptual gamma applied at publish (see SPEC_GAMMA) — debug
-         * snapshots below stay in linear power units for diagnostics.
-         * powf computed outside the critical section (ints stay enabled). */
+         * Perceptual gamma applied at publish (see SPEC_GAMMA), with the
+         * pre-gamma squelch remap (see SPEC_SQUELCH_RATIO) so near-zero
+         * ratios don't get boosted into visible noise.  Debug snapshots
+         * below stay in linear power units for diagnostics.  powf computed
+         * outside the critical section (ints stay enabled). */
         float disp_out[BAND_COUNT];
-        for (int b = 0; b < BAND_COUNT; b++)
-            disp_out[b] = powf(peak[b] / max_power, SPEC_GAMMA);
+        for (int b = 0; b < BAND_COUNT; b++) {
+            float ratio = peak[b] / max_power;
+            ratio = (ratio - SPEC_SQUELCH_RATIO) / (1.0f - SPEC_SQUELCH_RATIO);
+            if (ratio < 0.0f) ratio = 0.0f;
+            disp_out[b] = powf(ratio, SPEC_GAMMA);
+        }
         taskENTER_CRITICAL(&s_mux);
         for (int b = 0; b < BAND_COUNT; b++) {
             s_bands[b]     = disp_out[b];

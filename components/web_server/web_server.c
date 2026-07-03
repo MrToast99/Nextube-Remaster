@@ -25,6 +25,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "mbedtls/sha256.h"
+#include "mbedtls/constant_time.h"
 
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -755,11 +756,11 @@ static esp_err_t api_status(httpd_req_t *r)
         cJSON_AddNumberToObject(wj, "humidity", w->humidity);
         cJSON_AddStringToObject(wj, "condition", w->condition);
     }
-    const sht30_reading_t *sensor = sht30_get();
-    if (sensor && sensor->valid) {
+    sht30_reading_t sensor;
+    if (sht30_get(&sensor)) {
         cJSON *sj = cJSON_AddObjectToObject(root, "sensor");
-        cJSON_AddNumberToObject(sj, "temp_c",   sensor->temp_c);
-        cJSON_AddNumberToObject(sj, "humidity", sensor->humidity);
+        cJSON_AddNumberToObject(sj, "temp_c",   sensor.temp_c);
+        cJSON_AddNumberToObject(sj, "humidity", sensor.humidity);
     }
     const sub_count_t *s = subscribers_get();
     if (s && s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
@@ -906,6 +907,22 @@ static void ota_suspend_tasks(void)
         "leds",       /* RMT DMA       — Core 1 bus traffic during writes    */
         "mic",        /* I2S/ADC DMA   — continuous DMA, CPU interrupts      */
         "audio_play", /* DAC/I2S       — ephemeral, only present if playing  */
+        "ha_mqtt",    /* MQTT broker connect/publish — was missing entirely;
+                       * observed in the field retrying esp_mqtt_client_start()
+                       * every 5 s throughout an entire webui-pull download +
+                       * extraction window, each attempt trying to spawn a new
+                       * internal esp-mqtt task and failing ("Error create mqtt
+                       * task") — the same transient internal-SRAM contention
+                       * class as the mDNS receive-buffer failures, just
+                       * landing on MQTT's task creation instead.  Suspending
+                       * this only pauses OUR wrapper task (its own connect
+                       * retry loop + 60 s publish loop); if a connection was
+                       * ALREADY established before this call, the underlying
+                       * esp-mqtt library's own internal worker task is a
+                       * separate task not covered here and keeps running —
+                       * acceptable, since an idle established connection is
+                       * far lighter than the active-connect-attempt storm
+                       * this fixes. */
         NULL,
     };
     for (int i = 0; k_tasks[i]; i++) {
@@ -924,7 +941,7 @@ static void ota_suspend_tasks(void)
 static void webui_resume_tasks(void)
 {
     static const char *const k_tasks[] = {
-        "weather", "subscribers", "ntp", "sht30", "leds", "mic", "audio_play", NULL,
+        "weather", "subscribers", "ntp", "sht30", "leds", "mic", "audio_play", "ha_mqtt", NULL,
     };
     for (int i = 0; k_tasks[i]; i++) {
         TaskHandle_t h = xTaskGetHandle(k_tasks[i]);
@@ -1123,6 +1140,8 @@ static esp_err_t api_ota_impl(httpd_req_t *r)
                     heap_caps_free(img_buf); esp_ota_abort(h); return ESP_FAIL;
                 }
                 p += chunk; rem -= chunk;
+                vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs,
+                                  * starves IDLE (see ota_pull_task's identical fix) */
             }
         }
         heap_caps_free(img_buf);
@@ -1157,6 +1176,8 @@ static esp_err_t api_ota_impl(httpd_req_t *r)
             }
             if (esp_ota_write(h, buf, n) != ESP_OK) { free(buf); esp_ota_abort(h); return ESP_FAIL; }
             rem -= n;
+            vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs,
+                              * starves IDLE (see ota_pull_task's identical fix) */
         }
         free(buf);
 
@@ -1269,6 +1290,10 @@ static esp_err_t api_fs_ota_impl(httpd_req_t *r)
                 flash_ok = false;
                 break;
             }
+            vTaskDelay(1);   /* yield between sectors — flash HAL disables IRQs, starves
+                              * IDLE; a LittleFS image can run ~7 MB (vs. ~1.7 MB for
+                              * firmware), so this loop is even more exposed to the
+                              * watchdog risk fixed in ota_pull_task's write loop. */
         }
         heap_caps_free(img_buf);
 
@@ -1327,6 +1352,7 @@ static esp_err_t api_fs_ota_impl(httpd_req_t *r)
             if (esp_partition_write(part, written, buf, FS_SECTOR) != ESP_OK)
                 FS_OTA_FAIL("Write failed");
             written += rx;
+            vTaskDelay(1);   /* yield between sectors — see the PSRAM-path loop above */
         }
         free(buf);
 #undef FS_OTA_FAIL
@@ -1541,6 +1567,8 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
             cJSON_AddItemToArray(files_arr, cJSON_CreateString(fname));
             ok++;
         }
+        vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs, starves IDLE
+                          * (same fix as webui_pull_task's identical extraction loop) */
     }
 
     free(zip);
@@ -1622,15 +1650,17 @@ static bool sha256_verify(const uint8_t *buf, size_t len, const char *expected_h
     mbedtls_sha256_finish(&ctx, digest);
     mbedtls_sha256_free(&ctx);
 
-    /* Convert expected hex to bytes and compare */
+    /* Convert expected hex to bytes, then compare in constant time (same
+     * discipline as auth.c token/hash comparisons). */
+    uint8_t expected[32];
     for (int i = 0; i < 32; i++) {
         int hi = expected_hex[i * 2];
         int lo = expected_hex[i * 2 + 1];
         hi = (hi <= '9') ? hi - '0' : hi - 'a' + 10;
         lo = (lo <= '9') ? lo - '0' : lo - 'a' + 10;
-        if (digest[i] != (uint8_t)((hi << 4) | lo)) return false;
+        expected[i] = (uint8_t)((hi << 4) | lo);
     }
-    return true;
+    return mbedtls_ct_memcmp(digest, expected, sizeof(digest)) == 0;
 }
 
 #define OTA_PULL_TIMEOUT_MS 120000
@@ -1649,7 +1679,11 @@ static void ota_pull_task(void *arg)
     s_pull.state    = OTA_PULL_DOWNLOADING;
     s_pull.progress = 0;
 
-    /* Wait for a valid wall-clock before opening any TLS connection. */
+    /* Wait for a valid wall-clock before opening any TLS connection.  MUST run
+     * BEFORE ota_suspend_tasks() below — that suspends the "ntp" task itself,
+     * so if it ran first and time wasn't valid yet, this loop would spin the
+     * full 30 s waiting on a task that can no longer ever sync, and every
+     * pull attempted before the first NTP sync would fail outright. */
     if (!ntp_has_valid_time()) {
         ESP_LOGW(TAG, "[ota] time not valid — waiting up to 30 s for NTP/RTC…");
         for (int i = 0; i < 30 && !ntp_has_valid_time(); i++) {
@@ -1665,9 +1699,35 @@ static void ota_pull_task(void *arg)
     }
     ESP_LOGI(TAG, "[ota] time valid — heap free %lu B", (unsigned long)esp_get_free_heap_size());
 
+    /* Park the display BEFORE the download starts, not just before the flash
+     * write — matching api_ota_impl (manual upload), which has always parked
+     * immediately.  The animated display task alone runs at up to ~50-90%
+     * CPU (WeatherLive); leaving it fully active for the whole multi-second
+     * download meant httpd's single worker task could be slow enough to
+     * answer /api/ota_pull_status polls that the web UI missed the brief
+     * download→flashing transition, despite the two 1.5 s holds further down
+     * being sized for exactly the opposite assumption (a quiet, unsuspended
+     * device stalls this handoff).  display_show_wait() only touches the
+     * display task — safe to call this early with no effect on tls_sem
+     * below. */
+    display_show_wait();
+
     ESP_LOGD(TAG, "[ota] waiting for TLS semaphore…");
     tls_sem_take();
     ESP_LOGD(TAG, "[ota] TLS semaphore acquired");
+
+    /* ota_suspend_tasks() suspends weather/subscribers, which independently
+     * take this SAME tls_sem for their own HTTPS fetches — it must run AFTER
+     * we've already acquired the semaphore above, never before.  If it ran
+     * first and one of them happened to be mid-handshake (holding tls_sem)
+     * at that instant, vTaskSuspend would freeze it there forever without
+     * releasing the semaphore, and our tls_sem_take() above would then burn
+     * its full 30 s timeout and proceed UNSERIALIZED — reintroducing the
+     * internal-RAM-fragmentation risk tls_sem exists to prevent.  Suspending
+     * them here, once we already hold the semaphore ourselves, closes that
+     * window entirely while still keeping them off the bus for the entire
+     * download loop below (not just the flash write, as before). */
+    ota_suspend_tasks();
 
     char s_ota_ua[128];
     { const char *r = config_get()->update_repo;
@@ -1808,9 +1868,9 @@ static void ota_pull_task(void *arg)
      * before httpd load increases during flash erase/write cycles.      */
     vTaskDelay(pdMS_TO_TICKS(1500));
 
-    display_show_wait();
-    ota_suspend_tasks();
-    ESP_LOGI(TAG, "[ota] background tasks suspended");
+    /* display_show_wait()/ota_suspend_tasks() already ran at task start —
+     * no need to repeat them here now that suspension covers the download
+     * too, not just the flash write. */
 
     const esp_partition_t *upd = esp_ota_get_next_update_partition(NULL);
     if (!upd) {
@@ -1861,6 +1921,12 @@ static void ota_pull_task(void *arg)
             last_pct = pct;
             ESP_LOGI(TAG, "[ota] flash %d%% (%d/%d B)", pct, received - rem, received);
         }
+        vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs, starves IDLE
+                          * (same fix already applied to the webui ZIP-extraction loop;
+                          * missing here let IDLE0 go unfed long enough across this loop
+                          * + esp_ota_end()'s own read-back verify to trip the 30 s task
+                          * watchdog — observed in the field, non-fatal only because
+                          * CONFIG_ESP_TASK_WDT_PANIC is off, but right at the edge). */
     }
     free(img);
     ESP_LOGI(TAG, "[ota] flash write done");
@@ -2074,15 +2140,42 @@ static void webui_pull_task(void *arg)
     }
     ESP_LOGI(TAG, "[webui] time valid — heap free %lu B", (unsigned long)esp_get_free_heap_size());
 
-    /* Suspend competing background tasks for the duration of the download and
-     * extraction — reduces network/flash contention and prevents WDT triggers
-     * during the long LittleFS write phase.  Resumed at all exit points.    */
-    ota_suspend_tasks();
-    tasks_suspended = true;
+    /* Show the wait screen BEFORE any of this: gives the user immediate
+     * feedback, and — critically — this task extracts files DIRECTLY onto
+     * the SAME LittleFS partition the display task reads theme/font/image
+     * assets from (see the fopen/fwrite loop below).  Without parking the
+     * display first, it can be mid-read on a file this task is concurrently
+     * overwriting (partial/torn read), plus the SPI0 bus contention
+     * ota_suspend_tasks() below exists to avoid.  Every sibling flash-write
+     * path (api_ota_impl, api_fs_ota_impl, ota_pull_task) already does this;
+     * this one was the one gap.  Positioned before tls_sem_take() — it only
+     * touches the display task, so it's safe to do this early, and wait.jpg
+     * loads correctly here because LittleFS still holds the PRE-patch
+     * content (see api_fs_ota_impl's identical reasoning). */
+    display_show_wait();
 
     ESP_LOGD(TAG, "[webui] waiting for TLS semaphore…");
     tls_sem_take();
     ESP_LOGD(TAG, "[webui] TLS semaphore acquired");
+
+    /* Suspend competing background tasks for the duration of the download and
+     * extraction — reduces network/flash contention and prevents WDT triggers
+     * during the long LittleFS write phase.  Resumed at all exit points.
+     *
+     * MUST run AFTER tls_sem_take() above, never before: ota_suspend_tasks()
+     * suspends "weather"/"subscribers", which independently take this SAME
+     * tls_sem for their own HTTPS fetches.  If it ran first and one of them
+     * was mid-handshake (holding tls_sem) at that instant, vTaskSuspend would
+     * freeze it there forever without releasing the semaphore, and our
+     * tls_sem_take() above would then burn its full 30 s timeout and proceed
+     * UNSERIALIZED — reintroducing the internal-RAM-fragmentation /
+     * MBEDTLS_ERR_RSA_PUBLIC_FAILED risk tls_sem exists to prevent (see the
+     * TLS memory strategy comment in sdkconfig.defaults).  Suspending them
+     * here, once we already hold the semaphore ourselves, closes that
+     * window entirely while still keeping them off the bus for the download
+     * + extraction that follows. */
+    ota_suspend_tasks();
+    tasks_suspended = true;
 
     char s_webui_ua[128];
     { const char *r = config_get()->update_repo;
@@ -2271,6 +2364,11 @@ static void webui_pull_task(void *arg)
         }
     }
     if (tasks_suspended) webui_resume_tasks();
+    /* This flow does NOT reboot on success (unlike every other
+     * display_show_wait() caller) — un-park the display now, or the tubes
+     * are stuck showing wait.jpg forever with no reboot ever coming to fix
+     * it. */
+    display_resume_after_wait();
     s_webui.state = WEBUI_DONE;
     s_ota_active  = false;
     ESP_LOGI(TAG, "[webui] state → DONE");
@@ -2282,6 +2380,10 @@ webui_err_notls:
 webui_err:
     ESP_LOGE(TAG, "[webui] FAILED: %s", s_webui.error);
     if (tasks_suspended) webui_resume_tasks();
+    /* Same reasoning as the success path — a failed pull doesn't reboot
+     * either, so the display would otherwise be stuck on wait.jpg with no
+     * automatic recovery at all. */
+    display_resume_after_wait();
     s_webui.state = WEBUI_ERROR;
     s_ota_active  = false;
     vTaskDelete(NULL);

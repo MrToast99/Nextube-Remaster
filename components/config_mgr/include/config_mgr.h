@@ -56,8 +56,9 @@ typedef struct {
     bool             leading_zero;       /* true = show "09:30", false = show " 9:30" */
     uint8_t          led_brightness;     /* 0-100 */
     uint8_t          lcd_brightness;     /* primary brightness 0-100 */
-    bool             auto_brightness;    /* enable night mode */
-    uint8_t          night_brightness;   /* 0-100 */
+    bool             auto_brightness;    /* enable night mode (shared window for LCD + LED) */
+    uint8_t          night_brightness;   /* 0-100 — LCD backlight during the night window */
+    uint8_t          led_night_brightness; /* 0-100 — accent LEDs during the night window */
     uint8_t          night_start_hour;   /* 0-23 */
     uint8_t          night_end_hour;     /* 0-23 (hour it switches back to primary) */
     backlight_mode_t backlight_mode;

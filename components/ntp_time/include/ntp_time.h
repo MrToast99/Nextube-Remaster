@@ -38,6 +38,13 @@ bool ntp_rtc_battery_ok(void);  /* true if the RTC seed at boot was >= 2025-01-0
                                   * the physical battery/RTC state at power-on.  When
                                   * false the web UI shows a "replace CR1220" warning. */
 void ntp_get_local(struct tm *t);
+bool ntp_is_night_window(uint8_t start_hour, uint8_t end_hour);
+                                 /* true if the current local hour falls in
+                                  * [start_hour, end_hour), wrapping past
+                                  * midnight if start >= end (e.g. 22 to 7).
+                                  * Always false until ntp_has_valid_time().
+                                  * Shared by the LCD and LED night-brightness
+                                  * checks so the wraparound logic lives once. */
 void ntp_apply_timezone(void);  /* re-apply TZ from current config (call after settings change) */
 void ntp_apply_servers(void);   /* update SNTP server list from current config (call after settings change) */
 void ntp_seed_rtc_early(void);  /* call from app_main BEFORE display_task_start() — reads RTC once and

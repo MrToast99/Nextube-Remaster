@@ -104,7 +104,20 @@ static void touch_poll_task(void *arg)
 
             if (touch_channel_read_data(s_chan[i], TOUCH_CHAN_DATA_TYPE_SMOOTH,
                                         smooth) != ESP_OK) {
+                /* Read failed — don't leave a stale pressed state behind: a
+                 * persistent failure with raw_now stuck true on LEFT+RIGHT
+                 * would count toward the 15 s setup-AP combo. */
+                raw_now[i] = false;
                 continue;
+            }
+
+            /* Recover a channel whose baseline never seeded (init-time read
+             * failure left it 0): threshold 0 means `raw` can never trigger
+             * AND the IIR below is gated on baseline > 0 — without this
+             * re-seed the channel stays dead until reboot. */
+            if (s_baseline[i] == 0 && smooth[0] > 0) {
+                s_baseline[i] = smooth[0];
+                ESP_LOGW(TAG, "Touch%d baseline re-seeded to %u", i, (unsigned)smooth[0]);
             }
 
             /* Dynamic threshold: 20 % drop below software baseline */

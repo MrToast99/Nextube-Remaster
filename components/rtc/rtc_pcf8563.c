@@ -62,10 +62,21 @@ void pcf8563_init(void)
         return;
     }
 
-    /* Clear PCF8563 control registers to disable alarms and clock-out */
+    /* Clear PCF8563 control registers: 0x00/0x01 disable alarms + timer
+     * interrupts; 0x0D is the CLKOUT control — the chip powers up with
+     * CLKOUT ENABLED at 32.768 kHz (FE=1), a continuous square wave on the
+     * CLKOUT pin (EMI source) unless explicitly cleared.  The old code only
+     * wrote 0x00/0x01 and never touched 0x0D despite claiming clock-out was
+     * disabled.  Writes are checked: if they fail the chip isn't responding,
+     * so leave s_initialized false rather than paying an I²C timeout on
+     * every rtc_get_time() call. */
     uint8_t zero = 0;
-    i2c_write_reg(0x00, &zero, 1);
-    i2c_write_reg(0x01, &zero, 1);
+    if (i2c_write_reg(0x00, &zero, 1) != ESP_OK ||
+        i2c_write_reg(0x01, &zero, 1) != ESP_OK ||
+        i2c_write_reg(0x0D, &zero, 1) != ESP_OK) {
+        ESP_LOGW(TAG, "PCF8563 not responding — RTC disabled");
+        return;
+    }
     s_initialized = true;
     ESP_LOGI(TAG, "PCF8563 RTC ready");
 }

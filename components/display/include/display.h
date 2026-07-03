@@ -185,11 +185,21 @@ void display_task_start(void);
  *  update or LittleFS bin flash).  The image is loaded from
  *  /images/system/wait.jpg while the filesystem is still mounted.
  *
- *  There is no matching resume call: both flash paths always end with
- *  esp_restart(), so the display task is never un-suspended.
+ *  Most callers end with esp_restart() so the display task is never
+ *  un-suspended — a fresh boot re-initialises it.  The one exception is the
+ *  online-updater's WebUI-only patch (webui_pull_task), which does NOT
+ *  reboot on success; call display_resume_after_wait() below when a caller
+ *  needs the display back without a reboot.
  *
  *  Safe to call from any task after display_task_start(). */
 void display_show_wait(void);
+
+/** Undo display_show_wait() without a reboot: resumes the parked display
+ *  task and forces an immediate full repaint so the wait screen is replaced
+ *  on the very next tick.  Call this after a flash-write flow that does NOT
+ *  call esp_restart() when it's done (currently only webui_pull_task).
+ *  Safe to call from any task. */
+void display_resume_after_wait(void);
 
 /** Push an externally-supplied JPG to a 24H_CX info-panel tube (asset themes).
  *  Decodes the JPG (which must be exactly LCD_WIDTH×LCD_HEIGHT = 80×160) to

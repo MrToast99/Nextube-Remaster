@@ -16,6 +16,7 @@
 #include "config_mgr.h"
 #include "microphone.h"
 #include "wled_sync.h"
+#include "ntp_time.h"   /* ntp_is_night_window — shared LCD/LED night-brightness window */
 #include "esp_log.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
@@ -25,6 +26,19 @@
 #include <math.h>
 
 static const char *TAG = "leds";
+
+/* Night-brightness override for the accent LEDs — same shared auto_brightness
+ * toggle and night window (night_start_hour/night_end_hour) the LCD backlight
+ * uses (see display_task), just a separate target value since the LEDs and
+ * the LCD backlight usually want different night dimming.  Must be called
+ * with config_lock() held (reads multiple cfg fields via the shared pointer). */
+static inline uint8_t night_adjusted_led_brightness(const nextube_config_t *cfg)
+{
+    if (cfg->auto_brightness &&
+        ntp_is_night_window(cfg->night_start_hour, cfg->night_end_hour))
+        return cfg->led_night_brightness;
+    return cfg->led_brightness;
+}
 
 /* Set true by audio driver while a sound is playing.
  * The LED task skips ws2812_write() while this is set, stopping RMT
@@ -211,7 +225,7 @@ static void led_task(void *arg)
             uint8_t          bl_brightness;
             config_lock();
             bl            = config_get()->backlight_mode;
-            bl_brightness = config_get()->led_brightness;
+            bl_brightness = night_adjusted_led_brightness(config_get());
             config_unlock();
 
             if (bl == BL_MODE_WLED) {
@@ -264,7 +278,7 @@ static void led_task(void *arg)
 
         config_lock();
         const nextube_config_t *cfg = config_get();
-        led_brightness      = cfg->led_brightness;
+        led_brightness      = night_adjusted_led_brightness(cfg);
         led_effect_speed    = cfg->led_effect_speed;
         if (led_effect_speed < 1)  led_effect_speed = 1;
         if (led_effect_speed > 10) led_effect_speed = 10;
@@ -401,7 +415,10 @@ static void led_task(void *arg)
 
 void leds_task_start(void)
 {
-    if (xTaskCreatePinnedToCore(led_task, "leds", 2048, NULL, 4, NULL, 1) != pdPASS)
+    /* 4096: the task calls ESP_LOGW (printf formatting ~1-1.5 KB of stack),
+     * sinf, config_lock, mic_get_bands — 2048 left no headroom for a warning
+     * firing at max call depth (stack-canary abort). */
+    if (xTaskCreatePinnedToCore(led_task, "leds", 4096, NULL, 4, NULL, 1) != pdPASS)
         ESP_LOGE(TAG, "led_task creation failed");
     else
         ESP_LOGI(TAG, "LED effect task started");

@@ -41,9 +41,48 @@ static TaskHandle_t s_display_task_handle = NULL;
 
 /* Cooperative park handshake for OTA (see display_show_wait): the display
  * task checks s_park_req at its loop boundary — never mid-render, never with
- * an SPI transaction in flight — sets s_parked, and suspends itself. */
+ * an SPI transaction in flight — sets s_parked, and suspends itself.
+ * display_pause_for_spi()/display_unpause() reuse the same handshake as a
+ * RESUMABLE variant for the appliers that must own the LCD bus (VCOM /
+ * panel-profile reinit, invert mask). */
 static volatile bool s_park_req = false;
 static volatile bool s_parked   = false;
+
+/* Cooperatively pause the display task at its loop boundary so the caller
+ * may transmit on the LCD SPI bus itself.  Returns true when the task is
+ * genuinely suspended (or not running yet — boot path); false on timeout,
+ * in which case the caller MUST NOT touch the bus.
+ *
+ * Why not vTaskSuspend() from outside: an asynchronous suspend can land
+ * while the display task is INSIDE spi_device_polling_transmit(), i.e.
+ * holding the spi_master bus lock.  The caller's first lcd_cmd() then
+ * blocks forever on that lock and the vTaskResume() that would free it is
+ * never reached — both tasks wedged until power cycle. */
+static bool display_pause_for_spi(uint32_t timeout_ms)
+{
+    if (!s_display_task_handle) return true;   /* boot: task not started yet */
+    s_park_req = true;
+    for (uint32_t i = 0; i < timeout_ms / 10 && !s_parked; i++)
+        vTaskDelay(pdMS_TO_TICKS(10));
+    if (!s_parked) {
+        s_park_req = false;   /* withdraw — task keeps running normally */
+        return false;
+    }
+    /* s_parked is set just BEFORE the task's vTaskSuspend(NULL); make sure
+     * the suspend has actually landed so our later vTaskResume() isn't a
+     * no-op on a still-running task (which would then suspend forever). */
+    while (eTaskGetState(s_display_task_handle) != eSuspended)
+        vTaskDelay(1);
+    return true;
+}
+
+static void display_unpause(void)
+{
+    if (!s_display_task_handle) return;
+    s_park_req = false;
+    s_parked   = false;
+    vTaskResume(s_display_task_handle);
+}
 
 /* Short-lived "busy" backoff (display_busy_hint): a wall-clock deadline, in
  * esp_timer microseconds, until which the heavy WeatherLive realtime animation
@@ -51,6 +90,25 @@ static volatile bool s_parked   = false;
  * lower-priority httpd task isn't starved by the display task.  Auto-expires —
  * unlike the OTA park, it never suspends the task. */
 static volatile int64_t s_busy_until_us = 0;
+/* 64-bit loads/stores are not atomic on Xtensa: the deadline is written by
+ * httpd (core 0) and read by the display task (core 1) every frame, so both
+ * sides go through this spinlock-guarded accessor pair.  A torn read was
+ * only ever worth one mis-timed frame, but the fix costs a few dozen cycles. */
+static portMUX_TYPE s_busy_mux = portMUX_INITIALIZER_UNLOCKED;
+static inline int64_t busy_until_us(void)
+{
+    taskENTER_CRITICAL(&s_busy_mux);
+    int64_t v = s_busy_until_us;
+    taskEXIT_CRITICAL(&s_busy_mux);
+    return v;
+}
+static inline void busy_set_until_us(int64_t v, bool only_if_later)
+{
+    taskENTER_CRITICAL(&s_busy_mux);
+    if (!only_if_later || v > s_busy_until_us)
+        s_busy_until_us = v;
+    taskEXIT_CRITICAL(&s_busy_mux);
+}
 
 /* ── U8g2 virtual display for 24H-CX H/T panel text rendering ────────────────
  * We configure U8g2 for a 128×64 "nodisp" (no hardware) display.  The 128-px
@@ -117,6 +175,10 @@ static SemaphoreHandle_t s_timer_mutex = NULL;
  * Safety: LCD_OFFSET_X=24 so shift -2 → col 22 (still on-panel).
  *         LCD_WIDTH=80 so shift +2 → right edge col 105 (panel is ≥128 wide). */
 static int8_t s_burnin_shift_x = 0;
+/* Maximum |s_burnin_shift_x| — the edge-band painters cover this many GRAM
+ * columns beyond the window on BOTH sides so any glass alignment within the
+ * band always shows freshly painted content (see wl_paint_edge_margin_full). */
+#define BURNIN_SHIFT_MAX 2
 
 /* Burn-in colour-cycle mask: each bit = one tube (bit 0 = tube 0 … bit 5 =
  * tube 5).  When a bit is set, that tube shows a cycling colour sequence
@@ -286,18 +348,25 @@ static uint8_t s_tube_brightness[LCD_COUNT];
  * gamma curve.  Updated by display_apply_tube_vcom(). */
 static uint8_t s_tube_vcom[LCD_COUNT];
 
-/* ── Software gamma correction ───────────────────────────────────────────────
+/* ── Software gamma + brightness correction ──────────────────────────────────
  * Pre-computed lookup tables that map each possible R5/B5 (0–31) and G6 (0–63)
- * channel value through out = in^gamma before the pixel is sent to the display.
+ * channel value through out = (in*br/100)^gamma before the pixel is sent to
+ * the display. Brightness scaling is folded into the same table as gamma —
+ * both are rebuilt together — so the per-pixel hot path (wl_apply_px and its
+ * duplicates) is a single LUT lookup instead of a "divide by 100, then LUT"
+ * sequence. Xtensa has no hardware integer divider, so removing that per-pixel
+ * `/100` from every dirty pixel is the point; brightness/gamma only change via
+ * a settings apply (boot or web UI), never per frame, so rebuilding the LUT on
+ * every brightness OR gamma change is cheap relative to the per-pixel savings.
  *
  * Gamma > 1.0 darkens midtones (fixes washed / low-contrast panels whose native
- * response curve is flatter than expected).  Gamma = 1.0 is identity — the
- * s_gamma_lut_active flag short-circuits the table entirely so there is no
- * per-pixel overhead when gamma correction is off.
+ * response curve is flatter than expected). br=100 and gamma=1.0 together are
+ * identity — the s_gamma_lut_active flag short-circuits the table entirely so
+ * there is no per-pixel overhead when neither correction is active.
  *
- * The tables are rebuilt by rebuild_gamma_lut() whenever the gamma value
- * changes.  The display task is suspended during the rebuild to avoid reading
- * a partially-updated table.                                                   */
+ * The tables are rebuilt by rebuild_gamma_lut() whenever the gamma OR
+ * brightness value changes.  The display task is suspended during the rebuild
+ * to avoid reading a partially-updated table.                                 */
 static float   s_gamma[LCD_COUNT];                  /* per-tube exponent; 1.0 = identity */
 static bool    s_gamma_lut_active[LCD_COUNT];        /* false = LUT skipped (identity)    */
 static uint8_t s_gamma_lut_5bit[LCD_COUNT][32];      /* R and B channels (5-bit, 0–31)    */
@@ -305,8 +374,11 @@ static uint8_t s_gamma_lut_6bit[LCD_COUNT][64];      /* G channel        (6-bit,
 
 static void rebuild_gamma_lut(int tube)
 {
-    float g = s_gamma[tube];
-    if (fabsf(g - 1.0f) < 0.005f) {
+    float   g  = s_gamma[tube];
+    uint8_t br = s_tube_brightness[tube];
+    bool identity_gamma = fabsf(g - 1.0f) < 0.005f;
+    bool identity_br    = (br >= 100);
+    if (identity_gamma && identity_br) {
         /* Identity — fill with pass-through values and disable the LUT path. */
         for (int i = 0; i < 32; i++) s_gamma_lut_5bit[tube][i] = (uint8_t)i;
         for (int i = 0; i < 64; i++) s_gamma_lut_6bit[tube][i] = (uint8_t)i;
@@ -314,11 +386,13 @@ static void rebuild_gamma_lut(int tube)
         return;
     }
     for (int i = 0; i < 32; i++) {
-        float v = powf((float)i / 31.0f, g) * 31.0f + 0.5f;
+        uint32_t scaled = identity_br ? (uint32_t)i : ((uint32_t)i * br) / 100u;
+        float v = identity_gamma ? (float)scaled : (powf((float)scaled / 31.0f, g) * 31.0f + 0.5f);
         s_gamma_lut_5bit[tube][i] = (v >= 31.0f) ? 31u : (uint8_t)v;
     }
     for (int i = 0; i < 64; i++) {
-        float v = powf((float)i / 63.0f, g) * 63.0f + 0.5f;
+        uint32_t scaled = identity_br ? (uint32_t)i : ((uint32_t)i * br) / 100u;
+        float v = identity_gamma ? (float)scaled : (powf((float)scaled / 63.0f, g) * 63.0f + 0.5f);
         s_gamma_lut_6bit[tube][i] = (v >= 63.0f) ? 63u : (uint8_t)v;
     }
     s_gamma_lut_active[tube] = true;
@@ -486,11 +560,20 @@ static uint8_t s_invert_mask = 0;
 void display_apply_invert_mask(uint8_t mask)
 {
     s_invert_mask = mask & 0x3F;
+    /* Called live from the web UI while the display task renders: transmitting
+     * here without pausing would flip CS/DC lines mid-frame (garbled tube) and
+     * race spi_device_polling_transmit on the same device handle.  Same
+     * cooperative pause as the VCOM/profile appliers; no-op cost at boot. */
+    if (!display_pause_for_spi(5000)) {
+        ESP_LOGW(TAG, "invert apply: display task did not pause — deferred to next reboot");
+        return;   /* s_invert_mask is stored; boot / next reinit re-applies it */
+    }
     for (int i = 0; i < LCD_COUNT; i++) {
         select_tube(i);
         lcd_cmd((s_invert_mask & (1u << i)) ? 0x21 : 0x20);  /* INVON : INVOFF */
     }
     deselect_all();
+    display_unpause();
     ESP_LOGI(TAG, "lcd_invert_mask 0x%02X applied", s_invert_mask);
 }
 
@@ -523,8 +606,30 @@ void display_apply_tube_offsets(const int8_t col_off[6], const int8_t row_off[6]
 
 void display_apply_tube_brightness(const uint8_t br[6])
 {
-    for (int i = 0; i < LCD_COUNT; i++)
-        s_tube_brightness[i] = (br[i] > 100) ? 100 : br[i];
+    /* Brightness is folded into the same LUT as gamma (see rebuild_gamma_lut)
+     * — only rebuild the tubes whose value actually changed, same pattern as
+     * display_apply_tube_gamma(). */
+    bool tube_changed[LCD_COUNT] = {false};
+    bool any = false;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        uint8_t v = (br[i] > 100) ? 100 : br[i];
+        if (s_tube_brightness[i] != v) {
+            s_tube_brightness[i] = v;
+            tube_changed[i]      = true;
+            any                  = true;
+        }
+    }
+    if (!any) return;
+
+    if (s_display_task_handle) {
+        vTaskSuspend(s_display_task_handle);
+    }
+    for (int i = 0; i < LCD_COUNT; i++) {
+        if (tube_changed[i]) rebuild_gamma_lut(i);
+    }
+    if (s_display_task_handle) {
+        vTaskResume(s_display_task_handle);
+    }
     ESP_LOGI(TAG, "tube brightness [%u,%u,%u,%u,%u,%u]",
              s_tube_brightness[0], s_tube_brightness[1], s_tube_brightness[2],
              s_tube_brightness[3], s_tube_brightness[4], s_tube_brightness[5]);
@@ -545,11 +650,14 @@ void display_apply_tube_vcom(const uint8_t vcom[6])
     if (!any) return;
 
     /* VMCTR1 is only latched during the SLPOUT→DISPON window — same constraint
-     * as profile gamma registers.  Suspend the display task and do a per-tube
-     * SWRESET + full reinit for each tube whose VCOM changed. */
-    if (s_display_task_handle) {
-        vTaskSuspend(s_display_task_handle);
-        vTaskDelay(pdMS_TO_TICKS(2));
+     * as profile gamma registers.  Cooperatively pause the display task (it
+     * self-suspends at its loop boundary, guaranteed outside any SPI
+     * transaction) and do a per-tube SWRESET + reinit for each changed tube.
+     * An outside vTaskSuspend here could land mid-transmit with the SPI bus
+     * lock held → our first lcd_cmd would deadlock (see display_pause_for_spi). */
+    if (!display_pause_for_spi(5000)) {
+        ESP_LOGW(TAG, "VCOM apply: display task did not pause — deferred to next reboot");
+        return;   /* s_tube_vcom[] is stored; boot-time apply will latch it */
     }
     for (int i = 0; i < LCD_COUNT; i++) {
         if (!tube_changed[i]) continue;
@@ -560,7 +668,7 @@ void display_apply_tube_vcom(const uint8_t vcom[6])
         deselect_all();
         display_fill(i, 0x0000);
     }
-    if (s_display_task_handle) vTaskResume(s_display_task_handle);
+    display_unpause();
 
     ESP_LOGI(TAG, "tube VCOM [0x%02X,0x%02X,0x%02X,0x%02X,0x%02X,0x%02X]",
              s_tube_vcom[0], s_tube_vcom[1], s_tube_vcom[2],
@@ -643,16 +751,18 @@ void display_apply_init_profiles(const uint8_t profiles[6])
      * silently ignored by the panel.  The panel wakes from reset but never
      * exits sleep mode, leaving the old VCOM and gamma untouched.
      *
-     * Fix: suspend the display task for the entire reinit loop so we have
-     * exclusive ownership of the SPI bus and all CS lines.
-     * s_display_task_handle is NULL at boot (display_task_start() not yet
-     * called), so the guard is safe for the boot-time apply path too. */
-    if (s_display_task_handle) {
-        vTaskSuspend(s_display_task_handle);
-        /* Wait 2 ms after suspend to let any in-flight SPI transaction the
-         * display task started complete in hardware before we touch the CS
-         * lines.  A single 8-row chunk at 26 MHz takes ≈ 0.4 ms worst-case. */
-        vTaskDelay(pdMS_TO_TICKS(2));
+     * Fix: cooperatively pause the display task for the entire reinit loop so
+     * we have exclusive ownership of the SPI bus and all CS lines.  The task
+     * self-suspends at its loop boundary — guaranteed outside any SPI
+     * transaction, so no bus-lock can be held by the suspended task (an
+     * outside vTaskSuspend could land mid-transmit with the lock held and
+     * deadlock our first lcd_cmd — see display_pause_for_spi).
+     * display_pause_for_spi() returns true immediately at boot
+     * (display_task_start() not yet called), so the boot-time apply path
+     * still works unchanged. */
+    if (!display_pause_for_spi(5000)) {
+        ESP_LOGW(TAG, "profile apply: display task did not pause — deferred to next reboot");
+        return;   /* s_init_profiles[] is stored; boot-time apply will latch it */
     }
 
     for (int i = 0; i < LCD_COUNT; i++) {
@@ -670,9 +780,7 @@ void display_apply_init_profiles(const uint8_t profiles[6])
         display_fill(i, 0x0000);
     }
 
-    if (s_display_task_handle) {
-        vTaskResume(s_display_task_handle);
-    }
+    display_unpause();
 
     /* Apply the profile-level GRAM window offsets for all changed tubes.
      * These are separate from user fine-tuning (s_col_offsets / s_row_offsets);
@@ -760,28 +868,23 @@ void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
-    open_lcd_window(ox, oy, LCD_WIDTH, LCD_HEIGHT);
-    uint8_t line[LCD_WIDTH * 2];
-    for (int x = 0; x < LCD_WIDTH; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
+    /* Fill the whole ±BURNIN_SHIFT_MAX band in one window — solid colour, so
+     * simply widening the fill covers the shifted window AND every edge
+     * column any glass alignment could expose (see wl_paint_edge_margin_full
+     * for why the full band matters on the ST7735S replacement panels).
+     * display_fill() is a state-transition/blank operation (mode switch,
+     * error fallback, boot init), never called from the 20 Hz animated hot
+     * path, so the extra ~4 columns here don't matter the way they did in
+     * the per-frame WeatherLive/spectrum paths. */
+    const int FILL_W = LCD_WIDTH + 2 * BURNIN_SHIFT_MAX;
+    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X - BURNIN_SHIFT_MAX + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                    + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
+    open_lcd_window(ox, oy, (uint8_t)FILL_W, LCD_HEIGHT);
+    uint8_t line[(LCD_WIDTH + 2 * BURNIN_SHIFT_MAX) * 2];
+    for (int x = 0; x < FILL_W; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
     for (int y = 0; y < LCD_HEIGHT; y++) {
         spi_transaction_t t = { .length = sizeof(line)*8, .tx_buffer = line };
         spi_device_polling_transmit(spi_dev, &t);
-    }
-    /* Also clear the |shift|-px column the burn-in shift leaves uncovered at the
-     * panel edge, so a fill (e.g. a transition clear / blanked tube) doesn't
-     * leave a stale sliver there.  Same colour, narrow window at the fixed edge. */
-    int shift = (int)s_burnin_shift_x;
-    int marg  = (shift >= 0) ? shift : -shift;
-    if (marg > 0) {
-        uint8_t marg_ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]
-                                    + ((shift > 0) ? 0 : (LCD_WIDTH - marg)));
-        open_lcd_window(marg_ox, oy, (uint8_t)marg, LCD_HEIGHT);
-        for (int y = 0; y < LCD_HEIGHT; y++) {
-            spi_transaction_t t = { .length = (size_t)(marg * 2) * 8, .tx_buffer = line };
-            spi_device_polling_transmit(spi_dev, &t);
-        }
     }
     deselect_all();
 }
@@ -795,34 +898,103 @@ void display_fill(int tube, uint16_t color)
  * edge column.  Consumed (cleared to NULL) by each push call. */
 static const uint8_t *s_wl_edge_margin_src = NULL;
 
-/* Apply this tube's brightness scale (br/100) then gamma LUT to one RGB565
- * pixel.  Pure integer math.  Single definition shared by every push path so
- * the transform stays consistent — a forgotten copy is what made the burn-in
- * margin render lighter than the adjacent (gamma-corrected) content. */
-static inline uint16_t wl_apply_px(uint16_t px, int tube, bool do_br, bool do_gamma, uint8_t br)
+/* Apply this tube's combined brightness+gamma LUT (see rebuild_gamma_lut) to
+ * one RGB565 pixel.  Pure integer math, single LUT lookup per channel — no
+ * per-pixel divide.  Single definition shared by every push path so the
+ * transform stays consistent — a forgotten copy is what made the burn-in
+ * margin render lighter than the adjacent (gamma-corrected) content.
+ *
+ * always_inline is not optional here: this is called from ~9 sites including
+ * the busiest per-pixel loop in the file (display_show_digit_dirty).  Under
+ * -Os "static inline" is only a hint — gcc will happily leave a function
+ * called from this many places out-of-line, turning every pixel into a real
+ * call/ret.  That regression is exactly why this logic used to be duplicated
+ * inline at each call site instead of shared; always_inline keeps it shared
+ * AND branch-free. */
+static inline __attribute__((always_inline)) uint16_t wl_apply_px(uint16_t px, int tube, bool do_px)
 {
+    if (!do_px) return px;
     uint32_t r = (px >> 11) & 0x1Fu;
     uint32_t g = (px >>  5) & 0x3Fu;
     uint32_t b =  px        & 0x1Fu;
-    if (do_br)    { r = r * br / 100u; g = g * br / 100u; b = b * br / 100u; }
-    if (do_gamma) { r = s_gamma_lut_5bit[tube][r]; g = s_gamma_lut_6bit[tube][g]; b = s_gamma_lut_5bit[tube][b]; }
+    r = s_gamma_lut_5bit[tube][r];
+    g = s_gamma_lut_6bit[tube][g];
+    b = s_gamma_lut_5bit[tube][b];
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
-/* Paint the |shift|-px burn-in edge margin the shifted CASET window leaves
- * uncovered.  marg_src is an 80-px-wide buffer whose `edge_col` is replicated
- * down the strip, with this tube's brightness/gamma applied so it matches the
- * main blit.  Tube must already be selected. */
-static void wl_paint_edge_margin(int tube, const uint8_t *marg_src, uint8_t marg_ox,
-                                 uint8_t oy, int marg, int edge_col, int h,
-                                 bool do_br, bool do_gamma, uint8_t br)
+/* Paint the burn-in edge BANDS — every GRAM column the shifted CASET window
+ * can leave exposed on EITHER side across the full shift range
+ * (±BURNIN_SHIFT_MAX), refreshed from marg_src's edge columns with this
+ * tube's brightness/gamma applied so they match the main blit.
+ *
+ * Why both full bands instead of just the |shift| columns at the nominal
+ * near edge: the nominal geometry assumes the visible glass is EXACTLY the
+ * 80 GRAM columns starting at the calibrated base.  The ST7735S replacement
+ * panels needed per-profile column offsets precisely because their glass
+ * alignment differs — and any visible column that falls outside the painted
+ * area keeps whatever was last written there (a frozen rain streak, a bright
+ * daytime pixel), showing as a persistent 1-2 px bright line whose side and
+ * width track the hourly shift.  Painting the full band [base-MAX, base+s)
+ * and [base+s+80, base+80+MAX) makes the maintenance independent of the true
+ * glass alignment; off-glass GRAM writes are harmless.
+ *
+ * EXPENSIVE — up to 2 extra SPI window-opens + full-height transmits per
+ * call (≈4 GRAM columns total, even at shift=0, since both bands are always
+ * >0 wide).  Call this only at low-frequency correctness points (first
+ * frame, the hour a shift change lands, non-animated pushes) — NOT from the
+ * per-tick animated hot path.  See wl_paint_edge_margin_narrow for that. */
+static void wl_paint_edge_margin_full(int tube, const uint8_t *marg_src,
+                                      uint8_t oy, int h, bool do_px)
 {
-    uint8_t margbuf[2 * LCD_HEIGHT * 2];   /* ≤ 2 cols × 160 rows */
-    bool do_px = do_br || do_gamma;
+    int base = (int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube];
+    int s    = (int)s_burnin_shift_x;
+
+    const struct { int x0, w, edge_col; } band[2] = {
+        { base - BURNIN_SHIFT_MAX,  s + BURNIN_SHIFT_MAX, 0 },             /* left  */
+        { base + s + LCD_WIDTH,     BURNIN_SHIFT_MAX - s, LCD_WIDTH - 1 }, /* right */
+    };
+    uint8_t margbuf[(2 * BURNIN_SHIFT_MAX) * LCD_HEIGHT * 2];   /* ≤ 4 cols */
+
+    for (int b = 0; b < 2; b++) {
+        int w = band[b].w;
+        if (w <= 0 || band[b].x0 < 0) continue;
+        for (int r = 0; r < h; r++) {
+            const uint8_t *src = marg_src + (r * LCD_WIDTH + band[b].edge_col) * 2;
+            uint16_t px = ((uint16_t)src[0] << 8) | src[1];
+            if (do_px) px = wl_apply_px(px, tube, do_px);
+            uint8_t hi = (uint8_t)(px >> 8), lo = (uint8_t)(px & 0xFF);
+            uint8_t *dst = margbuf + r * w * 2;
+            for (int c = 0; c < w; c++) { dst[c*2] = hi; dst[c*2+1] = lo; }
+        }
+        open_lcd_window((uint8_t)band[b].x0, oy, (uint8_t)w, (uint8_t)h);
+        spi_tx_pixels(margbuf, (size_t)(w * h * 2));
+    }
+}
+
+/* Cheap per-frame margin refresh — paints ONLY the |shift| columns at the
+ * single edge the CURRENT shift nominally exposes (the original, pre-full-
+ * band behaviour), replicating marg_src's own edge column there so the
+ * sliver stays in sync with the animated sky every tick.  Zero cost at
+ * shift=0 (the common case — 1 of every 5 hours). This is what runs from
+ * the animated hot path (display_show_digit_dirty, render_spectrum); the
+ * wider wl_paint_edge_margin_full() only needs to run once per shift change
+ * (see s_wl_prev_shift — a shift change already forces a full re-push) to
+ * cover the ST7735S glass-misalignment case, not every frame in between. */
+static void wl_paint_edge_margin_narrow(int tube, const uint8_t *marg_src,
+                                        uint8_t oy, int h, bool do_px)
+{
+    int shift = (int)s_burnin_shift_x;
+    int marg  = (shift >= 0) ? shift : -shift;
+    if (marg <= 0) return;
+    int edge_col   = (shift > 0) ? 0 : (LCD_WIDTH - 1);
+    uint8_t marg_ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]
+                                + ((shift > 0) ? 0 : (LCD_WIDTH - marg)));
+    uint8_t margbuf[BURNIN_SHIFT_MAX * LCD_HEIGHT * 2];
     for (int r = 0; r < h; r++) {
         const uint8_t *src = marg_src + (r * LCD_WIDTH + edge_col) * 2;
         uint16_t px = ((uint16_t)src[0] << 8) | src[1];
-        if (do_px) px = wl_apply_px(px, tube, do_br, do_gamma, br);
+        if (do_px) px = wl_apply_px(px, tube, do_px);
         uint8_t hi = (uint8_t)(px >> 8), lo = (uint8_t)(px & 0xFF);
         uint8_t *dst = margbuf + r * marg * 2;
         for (int c = 0; c < marg; c++) { dst[c*2] = hi; dst[c*2+1] = lo; }
@@ -869,10 +1041,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
      * then send via polling transmit.  8 rows reduces transaction count
      * 160→20 per tube, cutting per-transaction overhead by ~8×. */
     uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];  /* 1280 B — always SRAM */
-    uint8_t br        = s_tube_brightness[tube];
-    bool    do_br     = (br < 100);
-    bool    do_gamma  = s_gamma_lut_active[tube];
-    bool    do_px     = do_br || do_gamma;
+    bool    do_px     = s_gamma_lut_active[tube];    /* brightness+gamma combined LUT */
 
     for (int y = 0; y < h; y += DISP_CHUNK_ROWS) {
         int rows = (y + DISP_CHUNK_ROWS <= h) ? DISP_CHUNK_ROWS : h - y;
@@ -881,7 +1050,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
             int npx = rows * w;
             for (int j = 0; j < npx; j++) {
                 uint16_t px = ((uint16_t)chunk[j * 2] << 8) | chunk[j * 2 + 1];
-                px = wl_apply_px(px, tube, do_br, do_gamma, br);
+                px = wl_apply_px(px, tube, do_px);
                 chunk[j * 2]     = (uint8_t)(px >> 8);
                 chunk[j * 2 + 1] = (uint8_t)(px & 0xFF);
             }
@@ -889,18 +1058,15 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
         spi_tx_pixels(chunk, (size_t)(rows * w * 2));
     }
 
-    /* Burn-in column shift exposes |shift| visible columns at one edge that the
-     * shifted write window never covers — fill them so the panel edge shows
-     * this frame's sky rather than a stale sliver.  shift>0 → left margin from
-     * col 0; shift<0 → right margin from col w-1.  Full-width blits only. */
-    int  shift = (int)s_burnin_shift_x;
-    int  marg  = (shift >= 0) ? shift : -shift;
-    if (marg > 0 && w == LCD_WIDTH && h <= LCD_HEIGHT) {
-        int     edge_col = (shift > 0) ? 0 : (w - 1);
-        uint8_t marg_ox  = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]
-                                     + ((shift > 0) ? 0 : (LCD_WIDTH - marg)));
-        wl_paint_edge_margin(tube, marg_src, marg_ox, oy, marg, edge_col, h, do_br, do_gamma, br);
-    }
+    /* Refresh the burn-in edge bands on BOTH sides of the shifted window so
+     * every potentially-visible edge column shows this frame's sky rather
+     * than a stale sliver — regardless of the panel's true glass alignment
+     * (see wl_paint_edge_margin_full).  This path is display_show_digit()
+     * itself — the full/non-dirty push, called at most once per digit change
+     * (≤1/s) or at a shift-change fallback, never the 20 Hz animated hot
+     * path — so the extra cost of the wide paint is fine here. */
+    if (w == LCD_WIDTH && h <= LCD_HEIGHT)
+        wl_paint_edge_margin_full(tube, marg_src, oy, h, do_px);
 
     /* Firmware-update indicator: 4-row red bar at the physical bottom of tube 5. */
     if (tube == LCD_COUNT - 1 && s_update_indicator)
@@ -1398,10 +1564,7 @@ static void display_show_image_region(int tube, const char *path,
     open_lcd_window(ox, oy, (uint8_t)src_w, (uint8_t)src_h);
 
     uint8_t  chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];
-    uint8_t  br     = s_tube_brightness[tube];
-    bool     do_br  = (br < 100);
-    bool     do_gam = s_gamma_lut_active[tube];
-    bool     do_px  = do_br || do_gam;
+    bool     do_px  = s_gamma_lut_active[tube];    /* brightness+gamma combined LUT */
 
     for (int y = src_y; y < src_y + src_h; y += DISP_CHUNK_ROWS) {
         int rows = DISP_CHUNK_ROWS;
@@ -1414,16 +1577,7 @@ static void display_show_image_region(int tube, const char *path,
             int npx = rows * src_w;
             for (int j = 0; j < npx; j++) {
                 uint16_t px = ((uint16_t)chunk[j*2] << 8) | chunk[j*2+1];
-                uint32_t r5 = (px >> 11) & 0x1Fu;
-                uint32_t g6 = (px >>  5) & 0x3Fu;
-                uint32_t b5 =  px        & 0x1Fu;
-                if (do_br) { r5=r5*br/100u; g6=g6*br/100u; b5=b5*br/100u; }
-                if (do_gam) {
-                    r5 = s_gamma_lut_5bit[tube][r5];
-                    g6 = s_gamma_lut_6bit[tube][g6];
-                    b5 = s_gamma_lut_5bit[tube][b5];
-                }
-                px = (uint16_t)((r5<<11)|(g6<<5)|b5);
+                px = wl_apply_px(px, tube, do_px);
                 chunk[j*2]   = (uint8_t)(px>>8);
                 chunk[j*2+1] = (uint8_t)(px&0xFF);
             }
@@ -1839,14 +1993,17 @@ static void display_show_colon_blink(int tube, const char *theme, bool show_colo
     display_path_ampm(p, sizeof(p), theme, show_colon ? "colon" : "blank");
     int w = 0, h = 0;
     const uint8_t *img = img_cache_get(p, &w, &h);
-    if (!img || w <= 0 || h <= 0) {
+    /* Re-validate the cached diff box against THIS image's dimensions: the
+     * box is computed once per theme NAME, but a custom-theme re-upload can
+     * replace the colon/blank files under the same name with smaller images —
+     * indexing with the stale box would then read past the decode buffer. */
+    if (!img || w <= 0 || h <= 0 ||
+        s_colon_bx0 + s_colon_bw > w || s_colon_by0 + s_colon_bh > h) {
         display_show_ampm(tube, show_colon ? "colon" : "blank", theme);
         return;
     }
 
-    uint8_t br     = s_tube_brightness[tube];
-    bool    do_br  = (br < 100);
-    bool    do_gam = s_gamma_lut_active[tube];
+    bool    do_px  = s_gamma_lut_active[tube];    /* brightness+gamma combined LUT */
 
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
@@ -1857,15 +2014,10 @@ static void display_show_colon_blink(int tube, const char *theme, bool show_colo
     uint8_t line[LCD_WIDTH * 2];
     for (int yy = 0; yy < s_colon_bh; yy++) {
         const uint8_t *src = img + ((size_t)(s_colon_by0 + yy) * w + s_colon_bx0) * 2;
-        if (do_br || do_gam) {
+        if (do_px) {
             for (int xx = 0; xx < s_colon_bw; xx++) {
                 uint16_t px = ((uint16_t)src[xx*2] << 8) | src[xx*2+1];
-                uint32_t r = (px >> 11) & 0x1Fu, g = (px >> 5) & 0x3Fu, b = px & 0x1Fu;
-                if (do_br)  { r = r*br/100u; g = g*br/100u; b = b*br/100u; }
-                if (do_gam) { r = s_gamma_lut_5bit[tube][r];
-                              g = s_gamma_lut_6bit[tube][g];
-                              b = s_gamma_lut_5bit[tube][b]; }
-                px = (uint16_t)((r << 11) | (g << 5) | b);
+                px = wl_apply_px(px, tube, do_px);
                 line[xx*2] = (uint8_t)(px >> 8); line[xx*2+1] = (uint8_t)(px & 0xFF);
             }
         } else {
@@ -1972,21 +2124,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
 
     /* Apply per-tube brightness and gamma to fg once before the pixel loop
      * (bg is always 0x0000; scaling zero stays zero, no special case).   */
-    {
-        uint8_t  br     = s_tube_brightness[tube];
-        bool     do_br  = (br < 100);
-        bool     do_gam = s_gamma_lut_active[tube];
-        if (do_br || do_gam) {
-            uint32_t r5 = (fg >> 11) & 0x1Fu;
-            uint32_t g6 = (fg >>  5) & 0x3Fu;
-            uint32_t b5 =  fg        & 0x1Fu;
-            if (do_br)  { r5=r5*br/100u; g6=g6*br/100u; b5=b5*br/100u; }
-            if (do_gam) { r5=s_gamma_lut_5bit[tube][r5];
-                          g6=s_gamma_lut_6bit[tube][g6];
-                          b5=s_gamma_lut_5bit[tube][b5]; }
-            fg = (uint16_t)((r5<<11)|(g6<<5)|b5);
-        }
-    }
+    fg = wl_apply_px(fg, tube, s_gamma_lut_active[tube]);
     uint8_t fg_hi = (uint8_t)(fg >> 8);
     uint8_t fg_lo = (uint8_t)(fg & 0xFF);
 
@@ -2235,23 +2373,9 @@ static uint16_t ht_sample_theme_color(const char *theme)
  *   fg     : RGB565 foreground colour; background is always black (0x0000)   */
 static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
 {
-    /* Apply per-tube brightness and gamma to fg once so the inner loop is
+    /* Apply per-tube brightness+gamma to fg once so the inner loop is
      * branch-free (bg is always 0x0000; brightness/gamma of 0 stays 0).    */
-    {
-        uint8_t  br     = s_tube_brightness[tube];
-        bool     do_br  = (br < 100);
-        bool     do_gam = s_gamma_lut_active[tube];
-        if (do_br || do_gam) {
-            uint32_t r = (fg >> 11) & 0x1Fu;
-            uint32_t g = (fg >>  5) & 0x3Fu;
-            uint32_t b =  fg        & 0x1Fu;
-            if (do_br)  { r = r * br / 100u; g = g * br / 100u; b = b * br / 100u; }
-            if (do_gam) { r = s_gamma_lut_5bit[tube][r];
-                          g = s_gamma_lut_6bit[tube][g];
-                          b = s_gamma_lut_5bit[tube][b]; }
-            fg = (uint16_t)((r << 11) | (g << 5) | b);
-        }
-    }
+    fg = wl_apply_px(fg, tube, s_gamma_lut_active[tube]);
     uint8_t fg_hi = (uint8_t)(fg >> 8);
     uint8_t fg_lo = (uint8_t)(fg & 0xFF);
 
@@ -2302,24 +2426,10 @@ static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
      * would (a) read past the end of the 80×160×2-byte bg_rgb565 buffer and
      * (b) send extra pixel data to the ST7735 after its window closes, which
      * some panel variants wrap to a visible row, producing a phantom colour bar. */
-    if (y_tube >= LCD_HEIGHT) return;
+    if (y_tube < 0 || y_tube >= LCD_HEIGHT) return;   /* no negative-index bg reads */
     if (rows > LCD_HEIGHT - y_tube) rows = LCD_HEIGHT - y_tube;
 
-    {
-        uint8_t  br     = s_tube_brightness[tube];
-        bool     do_br  = (br < 100);
-        bool     do_gam = s_gamma_lut_active[tube];
-        if (do_br || do_gam) {
-            uint32_t r = (fg >> 11) & 0x1Fu;
-            uint32_t g = (fg >>  5) & 0x3Fu;
-            uint32_t b =  fg        & 0x1Fu;
-            if (do_br)  { r = r * br / 100u; g = g * br / 100u; b = b * br / 100u; }
-            if (do_gam) { r = s_gamma_lut_5bit[tube][r];
-                          g = s_gamma_lut_6bit[tube][g];
-                          b = s_gamma_lut_5bit[tube][b]; }
-            fg = (uint16_t)((r << 11) | (g << 5) | b);
-        }
-    }
+    fg = wl_apply_px(fg, tube, s_gamma_lut_active[tube]);
     uint8_t fg_hi = (uint8_t)(fg >> 8);
     uint8_t fg_lo = (uint8_t)(fg & 0xFF);
     const int BUF_W = 128;
@@ -2973,8 +3083,8 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
          * Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
          * The 60 *-sm.jpg symbol files previously required by this panel are
          * no longer needed and have been removed from the filesystem image.  */
-        const sht30_reading_t *s = sht30_get();
-        if (!s || !s->valid) {
+        sht30_reading_t s;
+        if (!sht30_get(&s)) {
             if (kind != *last_kind) display_fill(lcd_tube, 0x0000);
             goto cx_tube6_done;
         }
@@ -2989,7 +3099,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
 
         {
             bool use_f = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
-            int  temp  = (int)lroundf(to_display_temp(s->temp_c, use_f));
+            int  temp  = (int)lroundf(to_display_temp(s.temp_c, use_f));
             if (temp >  99) temp =  99;
             if (temp < -99) temp = -99;
             char buf[16];
@@ -2998,7 +3108,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         }
 
         {
-            int hum = (int)(s->humidity + 0.5f);
+            int hum = (int)(s.humidity + 0.5f);
             if (hum > 99) hum = 99;
             if (hum <  0) hum = 0;
             char buf[8];
@@ -3621,9 +3731,10 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
                     }
             } else {                                        /* rain: wind-slanted streak */
                 int len = 7 + (int)(sc->wind * 6.0f);        /* longer in stronger wind */
+                float slope = sc->wind * 1.3f;   /* loop-invariant across s — hoisted */
                 for (int s = 0; s < len; s++) {
                     int y = py + s;
-                    int x = cxl + (int)((float)s * sc->wind * 1.3f);   /* lean downwind */
+                    int x = cxl + (int)((float)s * slope);   /* lean downwind */
                     if (y < 0 || y >= LCD_HEIGHT) continue;
                     /* Bright, near-opaque 2-px-wide streak with a soft darker
                      * edge so it reads clearly over a light daytime sky. */
@@ -4023,31 +4134,26 @@ static void wl_show_colon_blink(bool show_colon)
 
     const uint8_t *buf = show_colon ? s_wl_colon_on_buf : s_wl_colon_off_buf;
 
-    uint8_t br     = s_tube_brightness[2];
-    bool    do_br  = (br < 100);
-    bool    do_gam = s_gamma_lut_active[2];
+    bool    do_px  = s_gamma_lut_active[2];    /* brightness+gamma combined LUT */
 
     select_tube(2);
+    /* Profile offsets INCLUDED — this was the one window computation in the
+     * file missing them, so on panels with a non-zero profile offset (the
+     * ST7735S replacements) the colon box landed displaced by 1-2 px,
+     * smearing the colon and leaving a stale bright edge at the box border. */
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                            + (int)s_col_offsets[2] + s_wl_colon_bx0);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[2] + s_wl_colon_by0);
+                            + (int)s_col_offsets[2] + (int)s_profile_col_off[2] + s_wl_colon_bx0);
+    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[2] + (int)s_profile_row_off[2] + s_wl_colon_by0);
     open_lcd_window(ox, oy, (uint8_t)s_wl_colon_bw, (uint8_t)s_wl_colon_bh);
 
     uint8_t line[LCD_WIDTH * 2];
     for (int yy = 0; yy < s_wl_colon_bh; yy++) {
         const uint8_t *src = buf + ((size_t)(s_wl_colon_by0 + yy) * LCD_WIDTH
                                     + s_wl_colon_bx0) * 2;
-        if (do_br || do_gam) {
+        if (do_px) {
             for (int xx = 0; xx < s_wl_colon_bw; xx++) {
                 uint16_t px = ((uint16_t)src[xx*2] << 8) | src[xx*2+1];
-                uint32_t r  = (px >> 11) & 0x1Fu;
-                uint32_t g  = (px >>  5) & 0x3Fu;
-                uint32_t b  =  px        & 0x1Fu;
-                if (do_br)  { r = r*br/100u; g = g*br/100u; b = b*br/100u; }
-                if (do_gam) { r = s_gamma_lut_5bit[2][r];
-                              g = s_gamma_lut_6bit[2][g];
-                              b = s_gamma_lut_5bit[2][b]; }
-                px = (uint16_t)((r << 11) | (g << 5) | b);
+                px = wl_apply_px(px, 2, do_px);
                 line[xx*2] = (uint8_t)(px >> 8); line[xx*2+1] = (uint8_t)(px & 0xFF);
             }
         } else {
@@ -4125,17 +4231,9 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
     uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
 
-    uint8_t br      = s_tube_brightness[tube];
-    bool    do_br   = (br < 100);
-    bool    do_gamma = s_gamma_lut_active[tube];
-    bool    do_px   = do_br || do_gamma;
+    bool    do_px   = s_gamma_lut_active[tube];    /* brightness+gamma combined LUT */
 
-    int   shift     = (int)s_burnin_shift_x;
-    int   marg      = (shift >= 0) ? shift : -shift;
-    bool  want_marg = (marg > 0 && w == LCD_WIDTH && h <= LCD_HEIGHT);
-    int   edge_col  = (shift > 0) ? 0 : (w - 1);
-    uint8_t marg_ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]
-                                + ((shift > 0) ? 0 : (LCD_WIDTH - marg)));
+    bool  want_marg = (w == LCD_WIDTH && h <= LCD_HEIGHT);
 
     uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];   /* 1 280 B SRAM */
 
@@ -4169,7 +4267,7 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
                     int npx = rows * w;
                     for (int j = 0; j < npx; j++) {
                         uint16_t px = ((uint16_t)chunk[j * 2] << 8) | chunk[j * 2 + 1];
-                        px = wl_apply_px(px, tube, do_br, do_gamma, br);
+                        px = wl_apply_px(px, tube, do_px);
                         chunk[j * 2]     = (uint8_t)(px >> 8);
                         chunk[j * 2 + 1] = (uint8_t)(px & 0xFF);
                     }
@@ -4194,9 +4292,16 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
     if (any_dirty) {
         /* Repaint the burn-in edge margin from marg_src (the smooth sky-cache
          * column, not the rain-streaked frame) so a streak sitting on the edge
-         * column isn't duplicated into a 2–3 px band. */
+         * column isn't duplicated into a fat band.  NARROW on purpose: this is
+         * the 20 Hz animated hot path, so it only touches the |shift| columns
+         * the current shift nominally exposes (matching the original,
+         * pre-full-band cost — zero at shift=0).  The wider correctness paint
+         * that covers actual glass misalignment on the ST7735S replacements
+         * already ran this hour via the shift_changed full-push fallback
+         * above (see wl_paint_edge_margin_full in display_show_digit) — it
+         * doesn't need to repeat every frame in between. */
         if (want_marg)
-            wl_paint_edge_margin(tube, marg_src, marg_ox, oy, marg, edge_col, h, do_br, do_gamma, br);
+            wl_paint_edge_margin_narrow(tube, marg_src, oy, h, do_px);
         if (tube == LCD_COUNT - 1 && s_update_indicator)
             stamp_update_indicator_bottom(ox, oy, w, h);
     }
@@ -4417,46 +4522,70 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
         char lo[12], hi[12];
         snprintf(lo, sizeof(lo), "%d", dmin_disp);
         snprintf(hi, sizeof(hi), "%d", dmax_disp);
-        int lo_len = (int)strlen(lo);
-        int hi_len = (int)strlen(hi);
 
-        /* Downgrade font when either label needs 3 chars (negative two-digit).
-         * FT by-adj = 7*px/10; u8g2 by-adj = ascent/2 (logisoso20≈10, logisoso16≈7). */
-        const uint8_t *lbl_font;
-        uint16_t       lbl_px;
-        int            lbl_by_adj;
-        if (lo_len >= 3 || hi_len >= 3) {
-            lbl_font   = u8g2_font_logisoso16_tf;
-            lbl_px     = 22;
-            lbl_by_adj = s_ft_face_id >= 0 ? 15 : 7;
-        } else {
-            lbl_font   = u8g2_font_logisoso20_tf;
-            lbl_px     = 24;
-            lbl_by_adj = s_ft_face_id >= 0 ? 19 : 10;
+        /* Label layout (font choice, measured half-widths via wl_label_half_w,
+         * and the centred x positions) depends on dmin_disp/dmax_disp — which
+         * change once per weather poll, not once per animated tick like this
+         * panel redraws — AND on the active FreeType face (wl_label_half_w
+         * measures real glyph metrics; the by-adjust differs between the FT
+         * and u8g2 paths).  Cache keyed on all three so the glyph-metrics
+         * walk only re-runs when the range or the font actually changes. */
+        static int            s_lbl_dmin = -1000000, s_lbl_dmax = -1000000;
+        static int            s_lbl_face = -1000000;   /* s_ft_face_id at cache time */
+        static const uint8_t *s_lbl_font;
+        static uint16_t       s_lbl_px;
+        static int            s_lbl_cx_lo, s_lbl_cx_hi, s_lbl_by;
+        if (dmin_disp != s_lbl_dmin || dmax_disp != s_lbl_dmax ||
+            s_ft_face_id != s_lbl_face) {
+            int lo_len = (int)strlen(lo);
+            int hi_len = (int)strlen(hi);
+
+            /* Downgrade font when either label needs 3 chars (negative two-digit).
+             * FT by-adj = 7*px/10; u8g2 by-adj = ascent/2 (logisoso20≈10, logisoso16≈7). */
+            const uint8_t *lbl_font;
+            uint16_t       lbl_px;
+            int            lbl_by_adj;
+            if (lo_len >= 3 || hi_len >= 3) {
+                lbl_font   = u8g2_font_logisoso16_tf;
+                lbl_px     = 22;
+                lbl_by_adj = s_ft_face_id >= 0 ? 15 : 7;
+            } else {
+                lbl_font   = u8g2_font_logisoso20_tf;
+                lbl_px     = 24;
+                lbl_by_adj = s_ft_face_id >= 0 ? 19 : 10;
+            }
+
+            /* Measure actual pixel half-widths for both render paths.
+             * FT path accounts for norm_ratio and width-fit; u8g2 reads metrics
+             * from the bitmap font directly.  Both are exact for the chosen font. */
+            int hw_lo = wl_label_half_w(lo, lbl_font, lbl_px);
+            int hw_hi = wl_label_half_w(hi, lbl_font, lbl_px);
+
+            /* Centre the lo/hi pair on the tube with a fixed gap between labels.
+             * The 6 px gap clears the ±2 px shadow bloom on both sides.
+             * Right-edge clamp handles unusually wide fonts. */
+            const int lbl_gap = 6;
+            int pair_w = hw_lo * 2 + lbl_gap + hw_hi * 2;
+            int left   = (LCD_WIDTH - pair_w) / 2;
+            if (left < 1) left = 1;
+            int cx_lo = left + hw_lo;
+            int cx_hi = cx_lo + hw_lo + lbl_gap + hw_hi;
+            if (cx_hi + hw_hi > LCD_WIDTH - 1)
+                cx_hi = LCD_WIDTH - 1 - hw_hi;
+
+            int _mid = (by + 5 + LCD_HEIGHT - 1) / 2;
+
+            s_lbl_font  = lbl_font;
+            s_lbl_px    = lbl_px;
+            s_lbl_cx_lo = cx_lo;
+            s_lbl_cx_hi = cx_hi;
+            s_lbl_by    = _mid + lbl_by_adj;
+            s_lbl_dmin  = dmin_disp;
+            s_lbl_dmax  = dmax_disp;
+            s_lbl_face  = s_ft_face_id;
         }
-
-        /* Measure actual pixel half-widths for both render paths.
-         * FT path accounts for norm_ratio and width-fit; u8g2 reads metrics
-         * from the bitmap font directly.  Both are exact for the chosen font. */
-        int hw_lo = wl_label_half_w(lo, lbl_font, lbl_px);
-        int hw_hi = wl_label_half_w(hi, lbl_font, lbl_px);
-
-        /* Centre the lo/hi pair on the tube with a fixed gap between labels.
-         * The 6 px gap clears the ±2 px shadow bloom on both sides.
-         * Right-edge clamp handles unusually wide fonts. */
-        const int lbl_gap = 6;
-        int pair_w = hw_lo * 2 + lbl_gap + hw_hi * 2;
-        int left   = (LCD_WIDTH - pair_w) / 2;
-        if (left < 1) left = 1;
-        int cx_lo = left + hw_lo;
-        int cx_hi = cx_lo + hw_lo + lbl_gap + hw_hi;
-        if (cx_hi + hw_hi > LCD_WIDTH - 1)
-            cx_hi = LCD_WIDTH - 1 - hw_hi;
-
-        int _mid     = (by + 5 + LCD_HEIGHT - 1) / 2;
-        int label_by = _mid + lbl_by_adj;
-        wl_text(fb, cx_lo, label_by, lbl_font, lo, 200, 215, 235, lbl_px);
-        wl_text(fb, cx_hi, label_by, lbl_font, hi, 235, 225, 150, lbl_px);
+        wl_text(fb, s_lbl_cx_lo, s_lbl_by, s_lbl_font, lo, 200, 215, 235, s_lbl_px);
+        wl_text(fb, s_lbl_cx_hi, s_lbl_by, s_lbl_font, hi, 235, 225, 150, s_lbl_px);
     }
 }
 
@@ -4640,17 +4769,31 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
         }
     }
     /* Convert km/h → the configured unit, then draw the value with a small
-     * unit label beneath it. */
-    int val; const char *label;
-    if (unit && strcmp(unit, "mph") == 0) {
-        val = (int)lroundf((float)wind_kph * 0.621371f); label = "mph";
-    } else if (unit && strcmp(unit, "m/s") == 0) {
-        val = (int)lroundf((float)wind_kph / 3.6f);       label = "m/s";
-    } else {
-        val = wind_kph;                                   label = "km/h";
+     * unit label beneath it.  wind_kph/unit only change on a weather poll
+     * (minutes apart) — memoize the conversion + snprintf so the lroundf
+     * and string formatting don't re-run on every animated tick this panel
+     * is redrawn (up to 20 Hz). */
+    static int  s_wind_last_kph = -1000000;
+    static char s_wind_last_unit[8] = "";
+    static int  s_wind_val;
+    static char s_wind_v[12];
+    static const char *s_wind_label = "km/h";
+    if (wind_kph != s_wind_last_kph || strcmp(unit ? unit : "", s_wind_last_unit) != 0) {
+        if (unit && strcmp(unit, "mph") == 0) {
+            s_wind_val = (int)lroundf((float)wind_kph * 0.621371f); s_wind_label = "mph";
+        } else if (unit && strcmp(unit, "m/s") == 0) {
+            s_wind_val = (int)lroundf((float)wind_kph / 3.6f);       s_wind_label = "m/s";
+        } else {
+            s_wind_val = wind_kph;                                   s_wind_label = "km/h";
+        }
+        snprintf(s_wind_v, sizeof(s_wind_v), "%d", s_wind_val);
+        s_wind_last_kph = wind_kph;
+        strncpy(s_wind_last_unit, unit ? unit : "", sizeof(s_wind_last_unit) - 1);
+        s_wind_last_unit[sizeof(s_wind_last_unit) - 1] = '\0';
     }
-    char v[12];
-    snprintf(v, sizeof(v), "%d", val);
+    int val = s_wind_val;
+    const char *label = s_wind_label;
+    char *v = s_wind_v;
     /* zone: streak shadow bottom ~row 72, unit label top ~row 134, centre 103 */
     {
         int nc = (val >= 100) ? 3 : (val >= 10) ? 2 : 1;
@@ -4887,7 +5030,7 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
      * The same early-out also honours a short-lived busy hint (display_busy_hint)
      * raised around CPU/flash-bound web operations such as a config save, so the
      * httpd task on the same core isn't starved by this every-tick render. */
-    if (s_park_req || esp_timer_get_time() < s_busy_until_us) return;
+    if (s_park_req || esp_timer_get_time() < busy_until_us()) return;
 
     /* Configure per-frame render state from cfg. Both WeatherLive and Custom
      * faces use the user's color/shadow prefs; only Custom can override the
@@ -5094,7 +5237,9 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
 
     int h = t->tm_hour, m = t->tm_min;
     bool pm = (h >= 12);
-    if (strcmp(cfg->time_type, "12H") == 0) { h %= 12; if (h == 0) h = 12; }
+    bool is_12h  = (strcmp(cfg->time_type, "12H")    == 0);
+    bool is_24cx = (strcmp(cfg->time_type, "24H_CX") == 0);
+    if (is_12h) { h %= 12; if (h == 0) h = 12; }
 
     /* Unit-converted temp + today's range for the info panels. */
     bool fahr = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
@@ -5106,10 +5251,10 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
      * indoor_hum = -1 signals absent or not-yet-valid sensor. */
     int indoor_temp_disp = 0, indoor_hum = -1;
     {
-        const sht30_reading_t *sht = sht30_get();
-        if (sht && sht->valid) {
-            indoor_temp_disp = (int)lroundf(to_display_temp(sht->temp_c, fahr));
-            indoor_hum = (int)lroundf(sht->humidity);
+        sht30_reading_t sht;
+        if (sht30_get(&sht)) {
+            indoor_temp_disp = (int)lroundf(to_display_temp(sht.temp_c, fahr));
+            indoor_hum = (int)lroundf(sht.humidity);
             if (indoor_hum > 99) indoor_hum = 99;
             if (indoor_hum < 0)  indoor_hum = 0;
         }
@@ -5117,8 +5262,6 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
 
     bool date_us = (strcmp(cfg->date_format, "MM/DD/YY") == 0);  /* month-over-day */
     const char *wind_unit = cfg->wind_unit;
-    bool is_24cx = (strcmp(cfg->time_type, "24H_CX") == 0);
-    bool is_12h  = (strcmp(cfg->time_type, "12H")    == 0);
     bool is_24   = !is_12h && !is_24cx && (strcmp(cfg->time_type, "24H") == 0);
     bool dual    = is_24cx && cfg->cx_dual_panel;
     int  rot_ms  = (cfg->tube6_panel_ms >= 1000) ? cfg->tube6_panel_ms : 5000;
@@ -5737,7 +5880,7 @@ static void render_countdown_display(const nextube_config_t *cfg,
                                      int32_t remaining_s)
 {
     /* Honour OTA park and config-save busy hint — same guard as render_weatherlive. */
-    if (s_park_req || esp_timer_get_time() < s_busy_until_us) return;
+    if (s_park_req || esp_timer_get_time() < busy_until_us()) return;
     if (remaining_s < 0) remaining_s = 0;
     int m = remaining_s / 60, s = remaining_s % 60;
     bool wl = cx_is_wl_sky(cfg);
@@ -5765,7 +5908,7 @@ static void render_pomodoro_display(const nextube_config_t *cfg,
                                     int32_t remaining_s, bool in_break)
 {
     /* Honour OTA park and config-save busy hint — same guard as render_weatherlive. */
-    if (s_park_req || esp_timer_get_time() < s_busy_until_us) return;
+    if (s_park_req || esp_timer_get_time() < busy_until_us()) return;
     if (remaining_s < 0) remaining_s = 0;
     int m = remaining_s / 60, s = remaining_s % 60;
     bool wl = cx_is_wl_sky(cfg);
@@ -5900,6 +6043,18 @@ static void render_spectrum(const nextube_config_t *cfg)
      * immediately.  No PSRAM touched; line buffer is always DMA-safe. */
     uint8_t line[LCD_WIDTH * 2];   /* 160 B SRAM line buffer */
 
+    /* Burn-in edge-band margin cache: the margin is solid black and only
+     * needs repainting when s_burnin_shift_x actually changes (or on a
+     * tube's first visit) — NOT every 20 Hz frame, which was the previous
+     * bug (always re-doing 2 extra SPI window-opens + full-height transmits
+     * per tube even when nothing about the margin had changed). */
+    static int  s_spec_margin_shift = 1000;   /* sentinel outside the real -2..2 range */
+    static bool s_spec_margin_done[LCD_COUNT];
+    if (s_burnin_shift_x != s_spec_margin_shift) {
+        memset(s_spec_margin_done, 0, sizeof(s_spec_margin_done));
+        s_spec_margin_shift = s_burnin_shift_x;
+    }
+
     for (int tube = 0; tube < LCD_COUNT; tube++) {
 
         /* Skip masked tubes — burn-in or snow will overwrite them immediately
@@ -5969,6 +6124,32 @@ static void render_spectrum(const nextube_config_t *cfg)
                 .tx_buffer = line,
             };
             spi_device_polling_transmit(spi_dev, &t);
+        }
+
+        /* Black-fill the burn-in edge bands on BOTH sides of the shifted
+         * window so no edge column — wherever the glass actually sits — keeps
+         * showing stale content from a previous mode/frame (see
+         * wl_paint_edge_margin_full for the full-band rationale).  The
+         * spectrum layout's true edge columns are black padding anyway.
+         * Only needed once per shift value per tube — see s_spec_margin_done
+         * above; black doesn't go stale like an animated sky would. */
+        if (!s_spec_margin_done[tube]) {
+            int base = (int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube];
+            int s    = (int)s_burnin_shift_x;
+            const struct { int x0, w; } band[2] = {
+                { base - BURNIN_SHIFT_MAX, s + BURNIN_SHIFT_MAX },   /* left  */
+                { base + s + LCD_WIDTH,    BURNIN_SHIFT_MAX - s },   /* right */
+            };
+            uint8_t black[(2 * BURNIN_SHIFT_MAX) * 2] = {0};   /* ≤ 4 px wide */
+            for (int b = 0; b < 2; b++) {
+                if (band[b].w <= 0 || band[b].x0 < 0) continue;
+                open_lcd_window((uint8_t)band[b].x0, oy, (uint8_t)band[b].w, LCD_HEIGHT);
+                for (int y = 0; y < LCD_HEIGHT; y++) {
+                    spi_transaction_t mt = { .length = (size_t)(band[b].w * 2) * 8, .tx_buffer = black };
+                    spi_device_polling_transmit(spi_dev, &mt);
+                }
+            }
+            s_spec_margin_done[tube] = true;
         }
         deselect_all();
     }
@@ -7312,21 +7493,7 @@ void display_timer_toggle(void)
 static void ht_blit_ticker_2x(int tube, const uint8_t *tile_buf, uint16_t fg)
 {
     /* Per-tube brightness + gamma on fg (bg is always black → stays black). */
-    {
-        uint8_t  br     = s_tube_brightness[tube];
-        bool     do_br  = (br < 100);
-        bool     do_gam = s_gamma_lut_active[tube];
-        if (do_br || do_gam) {
-            uint32_t r = (fg >> 11) & 0x1Fu;
-            uint32_t g = (fg >>  5) & 0x3Fu;
-            uint32_t b =  fg        & 0x1Fu;
-            if (do_br)  { r = r * br / 100u; g = g * br / 100u; b = b * br / 100u; }
-            if (do_gam) { r = s_gamma_lut_5bit[tube][r];
-                          g = s_gamma_lut_6bit[tube][g];
-                          b = s_gamma_lut_5bit[tube][b]; }
-            fg = (uint16_t)((r << 11) | (g << 5) | b);
-        }
-    }
+    fg = wl_apply_px(fg, tube, s_gamma_lut_active[tube]);
     uint8_t fg_hi = (uint8_t)(fg >> 8);
     uint8_t fg_lo = (uint8_t)(fg & 0xFF);
     const int BUF_W = 128;
@@ -7658,23 +7825,10 @@ static void display_task(void *arg)
         /* Apply backlight on/off whenever the config changes.
          * Default to primary lcd_brightness, overridden by Night Mode if enabled. */
         uint8_t target_brt = cfg->lcd_brightness;
-        struct tm now_tm;
 
-        if (cfg->auto_brightness && ntp_has_valid_time()) {
-            ntp_get_local(&now_tm);
-            int hr = now_tm.tm_hour;
-            bool is_night = false;
-            uint8_t start = cfg->night_start_hour;
-            uint8_t end   = cfg->night_end_hour;
-
-            if (start < end) {
-                if (hr >= start && hr < end) is_night = true;
-            } else {
-                /* Wraps around midnight (e.g. 22:00 to 07:00) */
-                if (hr >= start || hr < end) is_night = true;
-            }
-            if (is_night) target_brt = cfg->night_brightness;
-        }
+        if (cfg->auto_brightness &&
+            ntp_is_night_window(cfg->night_start_hour, cfg->night_end_hour))
+            target_brt = cfg->night_brightness;
 
         if (first || cfg->backlight_on != last_bl_on ||
                      target_brt != last_bl_brt) {
@@ -8124,10 +8278,13 @@ static void display_task(void *arg)
              * dual_cx (24H_CX dual-panel) also has no colon blink regardless of
              * theme, and was the first case fixed; the nosec_flip path covers the
              * remaining no-seconds + FlipClock combinations. */
-            bool dual_cx    = (strcmp(cfg->time_type, "24H_CX") == 0) && cfg->cx_dual_panel;
-            bool nosec_flip = (strcmp(cfg->theme, "FlipClock") == 0) &&
-                              (strcmp(cfg->time_type, "24H_CX") == 0 ||
-                               strcmp(cfg->time_type, "24H_NS") == 0);
+            /* is_24ns/is_24cx/is_flip resolved once and reused below — dual_cx,
+             * nosec_flip, and is_nosec all previously re-ran the same strcmp. */
+            bool is_24ns  = (strcmp(cfg->time_type, "24H_NS") == 0);
+            bool is_24cx  = (strcmp(cfg->time_type, "24H_CX") == 0);
+            bool is_flip  = (strcmp(cfg->theme, "FlipClock")  == 0);
+            bool dual_cx    = is_24cx && cfg->cx_dual_panel;
+            bool nosec_flip = is_flip && (is_24cx || is_24ns);
             if (last_display_epoch > 0 && !first && !mode_changed && !theme_changed &&
                 !dual_cx && !nosec_flip) {
                 time_t delta = now_epoch - last_display_epoch;
@@ -8140,11 +8297,8 @@ static void display_task(void *arg)
             struct tm t;
             localtime_r(&now_epoch, &t);
 
-            bool is_24ns  = (strcmp(cfg->time_type, "24H_NS") == 0);
-            bool is_24cx  = (strcmp(cfg->time_type, "24H_CX") == 0);  /* dual_cx computed above */
             bool dual_changed = (dual_cx != last_cx_dual);
             bool is_nosec = is_24ns || is_24cx;
-            bool is_flip  = (strcmp(cfg->theme, "FlipClock")  == 0);
             bool time_type_changed    = (strcmp(cfg->time_type, last_time_type) != 0);
             bool leading_zero_changed = (cfg->leading_zero != last_leading_zero);
             /* 24H_NS / 24H_CX show no seconds — only re-render on minute/hour change.
@@ -8233,7 +8387,7 @@ static void display_task(void *arg)
                      * else-if colon path below.  If the cache is still valid
                      * and no config rebuild is needed, push the colon state
                      * directly so it keeps blinking through the busy window. */
-                    if (esp_timer_get_time() < s_busy_until_us &&
+                    if (esp_timer_get_time() < busy_until_us() &&
                             s_wl_colon_cache_valid &&
                             !first && !mode_changed && !theme_changed && !custom_changed)
                         wl_show_colon_blink(t.tm_sec % 2 == 0);
@@ -8610,7 +8764,7 @@ static void display_task(void *arg)
             (mode == APP_MODE_CLOCK) &&
             ((strncmp(cfg->theme, "WeatherLive", 11) == 0) ||
              (strcmp(cfg->clock_face, "custom") == 0)) &&
-            (esp_timer_get_time() < s_busy_until_us || s_park_req);
+            (esp_timer_get_time() < busy_until_us() || s_park_req);
         if (!wl_clock_was_busy) {
             strncpy(last_custom_bg,  cfg->custom_bg,  sizeof(last_custom_bg)  - 1);
             last_custom_bg[sizeof(last_custom_bg) - 1]  = '\0';
@@ -8733,17 +8887,17 @@ void display_task_start(void)
 void display_busy_hint(uint32_t ms)
 {
     int64_t until = esp_timer_get_time() + (int64_t)ms * 1000;
-    if (until > s_busy_until_us) s_busy_until_us = until;
+    busy_set_until_us(until, true);   /* only extend, never shorten */
 }
 
 void display_busy_clear(void)
 {
-    s_busy_until_us = 0;
+    busy_set_until_us(0, false);
 }
 
 void display_config_changed(void)
 {
-    s_busy_until_us = 0;      /* lift any pending busy backoff immediately */
+    busy_set_until_us(0, false);  /* lift any pending busy backoff immediately */
     s_settings_saved = true;  /* force a mode_changed re-render next tick */
     if (s_display_task_handle)
         xTaskAbortDelay(s_display_task_handle);
@@ -8767,19 +8921,48 @@ void display_show_wait(void)
         for (int i = 0; i < 500 && !s_parked; i++)
             vTaskDelay(pdMS_TO_TICKS(10));
         if (!s_parked) {
-            /* Task wedged mid-iteration — fall back to the hard suspend
-             * (the pre-existing behaviour) rather than racing it forever. */
-            ESP_LOGW(TAG, "display task did not park in 5 s — hard suspend");
+            /* Task wedged mid-iteration — hard-suspend it so it can't touch
+             * flash cache during the OTA write, but DO NOT draw the wait
+             * screen: the suspended task may hold the SPI bus lock (or have
+             * an orphaned transaction open), and transmitting from this task
+             * would either deadlock on the lock or trip the spi_master
+             * "ret_trans == trans_desc" assert — the exact failure the
+             * cooperative park was added to avoid.  Stale tube content for
+             * the update's duration is the acceptable cost. */
+            ESP_LOGW(TAG, "display task did not park in 5 s — hard suspend, "
+                          "skipping wait screen");
             vTaskSuspend(s_display_task_handle);
+            return;
         }
     }
     /* Zero the burn-in shift so the full 80-column window is used for every
      * tube — a non-zero shift repeats col 0 or col 79 at the exposed panel
      * edge, which shows as a 1-2 px lighter strip on the dark wait screen.
-     * OTA always ends in esp_restart(), so there is nothing to restore. */
+     * Most callers end in esp_restart() so there is nothing to restore — but
+     * webui_pull_task does NOT reboot on success, so display_resume_after_wait()
+     * below exists for exactly that path; it re-applies the real shift via the
+     * forced full repaint. */
     s_burnin_shift_x = 0;
     for (int i = 0; i < LCD_COUNT; i++) {
         display_show_image(i, "/images/system/wait.jpg");
     }
     ESP_LOGI(TAG, "Wait screen shown on all tubes — display task parked");
+}
+
+/* Undo display_show_wait(): resume the parked display task and force an
+ * immediate full repaint so the wait screen is replaced on the very next
+ * tick rather than whatever the next natural mode/theme change happens to
+ * be.  Needed because webui_pull_task is the one flash-write caller of
+ * display_show_wait() that does NOT reboot afterward — every other caller
+ * (api_ota_impl, api_fs_ota_impl, ota_pull_task) ends in esp_restart(), so a
+ * fresh boot re-initialises the display task and "resuming" was never
+ * needed until this one.  Safe to call even if the task hard-suspended
+ * (display_unpause() no-ops cleanly if s_display_task_handle is NULL; if it
+ * hard-suspended rather than cooperatively parked, this still un-suspends it
+ * via the same vTaskResume — s_park_req/s_parked being false either way is
+ * harmless since the task re-checks them fresh on its next loop iteration). */
+void display_resume_after_wait(void)
+{
+    display_unpause();
+    display_invalidate();
 }

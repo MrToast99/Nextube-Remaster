@@ -609,12 +609,25 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
 {
     if (!mode) return;
 
-    /* Stop any active playback so we have exclusive DAC access. */
+    /* Stop any active playback so we have exclusive DAC access.
+     *
+     * MUST NOT proceed if the playback task hasn't released the mutex: the
+     * teardown below deletes s_dac_cont while the task could still be inside
+     * dac_continuous_write() on it (use-after-free → DAC driver crash /
+     * wedged I2S0).  Worst-case drain is an in-flight write (≤1 s timeout)
+     * + fade + ring drain, so wait longer than audio_play_file's 700 ms and
+     * abort the test request on timeout — same "drop as a last resort"
+     * policy audio_play_file uses.  s_stop_flag stays set on the abort path
+     * so the wedged task still exits ASAP. */
     if (s_audio_task) {
         s_stop_flag = true;
-        if (s_play_mutex &&
-            xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(500)) == pdTRUE)
-            xSemaphoreGive(s_play_mutex);
+        if (!s_play_mutex ||
+            xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            ESP_LOGW(TAG, "DAC test '%s': playback still draining after 2 s — "
+                          "request dropped, retry shortly", mode);
+            return;
+        }
+        xSemaphoreGive(s_play_mutex);
         s_stop_flag = false;
     }
 

@@ -28,12 +28,13 @@ bool sht30_read(sht30_reading_t *out);
  * (task exits immediately). */
 void sht30_task_start(void);
 
-/* Return the last reading from the background task (non-blocking).
- * The returned pointer is valid for the lifetime of the firmware.
- * `valid` is false until the first successful read completes.
- * The configured temperature offset (see sht30_set_offset) is applied
- * before returning — callers always receive the corrected value. */
-const sht30_reading_t *sht30_get(void);
+/* Copy the last reading from the background task into *out (non-blocking,
+ * thread-safe — each caller gets a private copy; the display task, ha_mqtt,
+ * and web_server all call this concurrently).  Returns out->valid, which is
+ * false until the first successful read completes.  The configured
+ * temperature offset (see sht30_set_offset) is applied before returning —
+ * callers always receive the corrected value. */
+bool sht30_get(sht30_reading_t *out);
 
 /* Set a fixed offset (°C) added to every temperature reading returned by
  * sht30_get().  Use a negative value to correct for ESP32 self-heating.

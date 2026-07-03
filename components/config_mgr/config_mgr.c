@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"   /* xTaskGetCurrentTaskHandle — tls_sem ownership */
 #include "nvs_flash.h"
 
 static const char *TAG = "config";
@@ -34,6 +35,7 @@ static void set_defaults(void)
     s_cfg.lcd_brightness  = 60;
     s_cfg.auto_brightness = false;
     s_cfg.night_brightness = 30;
+    s_cfg.led_night_brightness = 20;
     s_cfg.night_start_hour = 22;
     s_cfg.night_end_hour   = 7;
     s_cfg.backlight_mode  = BL_MODE_BREATH;
@@ -564,13 +566,21 @@ static void parse_json(const char *json, size_t len)
     }
     json_read_u8(root, "night_brightness", &s_cfg.night_brightness);
     if (s_cfg.night_brightness > 100) s_cfg.night_brightness = 100;
+    json_read_u8(root, "led_night_brightness", &s_cfg.led_night_brightness);
+    if (s_cfg.led_night_brightness > 100) s_cfg.led_night_brightness = 100;
     json_read_u8(root, "night_start_hour", &s_cfg.night_start_hour);
+    if (s_cfg.night_start_hour > 23) s_cfg.night_start_hour = 23;
     json_read_u8(root, "night_end_hour",   &s_cfg.night_end_hour);
+    if (s_cfg.night_end_hour > 23) s_cfg.night_end_hour = 23;
 
     json_read_u16(root, "default_countdown_time", &s_cfg.countdown_minutes);
+    if (s_cfg.countdown_minutes < 1) s_cfg.countdown_minutes = 1;
     json_read_u16(root, "pomodoro_work",          &s_cfg.pomodoro_work);
+    if (s_cfg.pomodoro_work < 1) s_cfg.pomodoro_work = 1;
     json_read_u16(root, "pomodoro_break",         &s_cfg.pomodoro_break);
+    if (s_cfg.pomodoro_break < 1) s_cfg.pomodoro_break = 1;
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
+    if (s_cfg.album_switch_ms < 500) s_cfg.album_switch_ms = 2000; /* 0/tiny would thrash SPIFFS JPEG reads every frame */
     { cJSON *v = cJSON_GetObjectItem(root, "album_shuffle");
       if (cJSON_IsBool(v)) s_cfg.album_shuffle = cJSON_IsTrue(v); }
     json_read_u16(root, "weather_panel_ms",       &s_cfg.weather_panel_ms);
@@ -941,22 +951,38 @@ static bool load_from_flash(void)
     return true;
 }
 
-static void save_to_flash(void)
+/* Atomically replace the on-flash config with `json` (frees it).
+ *
+ * Writes a temp file first, verifies the full length landed, then rename()s
+ * it over the live file — LittleFS rename replaces the destination in a
+ * single commit, so a power cut at ANY point leaves either the old or the
+ * new config.json intact, never a truncated one.  (The old fopen(..., "w")
+ * truncated the live file before writing: a power cut mid-save destroyed
+ * all settings including WiFi creds, dropping the device into setup-AP.)
+ *
+ * Call WITHOUT the config mutex held: LittleFS writes can take hundreds of
+ * ms while garbage-collecting, and the display task takes the lock every
+ * frame — holding it across the write visibly freezes the clock. */
+static void write_config_file(char *json)
 {
-    char *json = config_to_json(true);   /* persist the WiFi password */
     if (!json) return;
+    static const char *TMP_PATH = "/spiffs/config.json.tmp";
 
-    FILE *f = fopen(CONFIG_PATH, "w");
+    size_t len = strlen(json);
+    bool   ok  = false;
+    FILE  *f   = fopen(TMP_PATH, "w");
     if (f) {
-        size_t len = strlen(json);
-        size_t wr  = fwrite(json, 1, len, f);
-        fclose(f);
-        if (wr != len)
-            ESP_LOGE(TAG, "Config write truncated (%u of %u bytes)", (unsigned)wr, (unsigned)len);
-        else
-            ESP_LOGI(TAG, "Config saved to flash (%u bytes)", (unsigned)len);
+        ok = (fwrite(json, 1, len, f) == len);
+        if (fclose(f) != 0) ok = false;
+    }
+    if (!ok) {
+        ESP_LOGE(TAG, "Config save failed (temp write) — old config left intact");
+        remove(TMP_PATH);
+    } else if (rename(TMP_PATH, CONFIG_PATH) != 0) {
+        ESP_LOGE(TAG, "Config save failed (rename) — old config left intact");
+        remove(TMP_PATH);
     } else {
-        ESP_LOGE(TAG, "Failed to open config for writing");
+        ESP_LOGI(TAG, "Config saved to flash (%u bytes)", (unsigned)len);
     }
     free(json);
 }
@@ -1019,13 +1045,21 @@ static bool config_restore_from_nvs(void)
 
     bool restored = false;
     if (nvs_get_blob(h, NVS_CFG_KEY, buf, &sz) == ESP_OK) {
+        /* The NVS backup is only erased below when `restored` is true, so the
+         * file write must be VERIFIED — a short write (FS full right after a
+         * wipe) with the backup erased would leave the corrupt file as the
+         * only copy for the next boot. */
         FILE *f = fopen(CONFIG_PATH, "w");
         if (f) {
-            fwrite(buf, 1, sz, f);
-            fclose(f);
-            parse_json(buf, sz);
-            ESP_LOGI(TAG, "Config restored from NVS backup (%u B)", (unsigned)sz);
-            restored = true;
+            bool wr_ok = (fwrite(buf, 1, sz, f) == sz);
+            if (fclose(f) != 0) wr_ok = false;
+            if (wr_ok) {
+                parse_json(buf, sz);
+                ESP_LOGI(TAG, "Config restored from NVS backup (%u B)", (unsigned)sz);
+                restored = true;
+            } else {
+                ESP_LOGE(TAG, "cfg restore: short write to %s — keeping NVS backup", CONFIG_PATH);
+            }
         } else {
             ESP_LOGE(TAG, "cfg restore: cannot write %s", CONFIG_PATH);
         }
@@ -1044,9 +1078,9 @@ static bool config_restore_from_nvs(void)
 void config_mgr_init(void)
 {
     /* Recursive mutex: config_to_json() may be called from within an
-     * already-locked context (config_set_json → save_to_flash → config_to_json),
-     * so a plain mutex would deadlock.  A recursive mutex allows the same
-     * task to re-acquire it without blocking. */
+     * already-locked context (config_set_json / config_reset serialise while
+     * holding the lock), so a plain mutex would deadlock.  A recursive mutex
+     * allows the same task to re-acquire it without blocking. */
     s_mutex   = xSemaphoreCreateRecursiveMutex();
     /* Plain mutex: TLS semaphore is never re-acquired by the same task. */
     s_tls_sem = xSemaphoreCreateMutex();
@@ -1058,13 +1092,29 @@ void config_mgr_init(void)
 void config_lock(void)   { xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY); }
 void config_unlock(void) { xSemaphoreGiveRecursive(s_mutex); }
 
+/* Ownership tracking for the take-timeout case: a caller whose take() timed
+ * out never owned the mutex, so its later give() must be a no-op.  Giving a
+ * FreeRTOS mutex from a non-holder while the true holder still holds it
+ * trips the priority-disinheritance configASSERT in queue.c → panic. */
+static volatile TaskHandle_t s_tls_owner = NULL;
+
 void tls_sem_take(void) {
     if (!s_tls_sem) return;
     /* 30 s timeout: a stalled HTTPS task must not block everything else forever. */
-    if (xSemaphoreTake(s_tls_sem, pdMS_TO_TICKS(30000)) != pdTRUE)
-        ESP_LOGE("tls_sem", "tls_sem_take: 30 s timeout — possible TLS deadlock");
+    if (xSemaphoreTake(s_tls_sem, pdMS_TO_TICKS(30000)) == pdTRUE)
+        s_tls_owner = xTaskGetCurrentTaskHandle();
+    else
+        ESP_LOGE("tls_sem", "tls_sem_take: 30 s timeout — proceeding UNSERIALIZED "
+                            "(possible TLS deadlock in the holder)");
 }
-void tls_sem_give(void) { if (s_tls_sem) xSemaphoreGive(s_tls_sem); }
+void tls_sem_give(void) {
+    if (!s_tls_sem) return;
+    if (s_tls_owner == xTaskGetCurrentTaskHandle()) {
+        s_tls_owner = NULL;
+        xSemaphoreGive(s_tls_sem);
+    }
+    /* else: our take() timed out — we never owned it; giving would assert. */
+}
 
 const nextube_config_t *config_get(void)
 {
@@ -1076,8 +1126,13 @@ bool config_set_json(const char *json, size_t len)
     if (!json || len == 0) return false;
     xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
     parse_json(json, len);
-    save_to_flash();
+    /* Serialise under the lock (RAM-only, fast) so the snapshot is
+     * consistent, but do the slow flash write AFTER unlocking — the display
+     * task takes this lock every frame and a LittleFS garbage-collection
+     * write can stall for hundreds of ms. */
+    char *out = config_to_json(true);   /* persist the WiFi password */
     xSemaphoreGiveRecursive(s_mutex);
+    write_config_file(out);
     return true;
 }
 
@@ -1197,6 +1252,7 @@ char *config_to_json(bool include_password)
     cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);
     cJSON_AddBoolToObject  (root, "auto_brightness",  s_cfg.auto_brightness);
     cJSON_AddNumberToObject(root, "night_brightness", s_cfg.night_brightness);
+    cJSON_AddNumberToObject(root, "led_night_brightness", s_cfg.led_night_brightness);
     cJSON_AddNumberToObject(root, "night_start_hour", s_cfg.night_start_hour);
     cJSON_AddNumberToObject(root, "night_end_hour",   s_cfg.night_end_hour);
     cJSON_AddNumberToObject(root, "default_countdown_time", s_cfg.countdown_minutes);
@@ -1382,8 +1438,9 @@ void config_reset(void)
 {
     xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
     set_defaults();
-    save_to_flash();
+    char *out = config_to_json(true);
     xSemaphoreGiveRecursive(s_mutex);
+    write_config_file(out);   /* flash write outside the lock */
     ESP_LOGI(TAG, "Config reset to factory defaults");
 }
 

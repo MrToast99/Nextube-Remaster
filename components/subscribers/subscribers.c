@@ -114,10 +114,12 @@ static void fetch_youtube(void)
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
         tls_sem_take();
+        /* init returns NULL on heap exhaustion — perform/get_status would
+         * deref it (same guard at every fetch site in this file). */
         esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_err_t err = esp_http_client_perform(client);
-        int status = esp_http_client_get_status_code(client);
-        esp_http_client_cleanup(client);
+        esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+        int status = client ? esp_http_client_get_status_code(client) : 0;
+        esp_http_client_cleanup(client);   /* NULL-safe */
         tls_sem_give();
 
         if (err == ESP_OK && status == 200) {
@@ -160,9 +162,9 @@ static void fetch_youtube(void)
             .timeout_ms    = 45000,   /* Playwright fetch can take up to ~30 s on cold start */
         };
         esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_err_t err    = esp_http_client_perform(client);
-        int       status = esp_http_client_get_status_code(client);
-        esp_http_client_cleanup(client);
+        esp_err_t err    = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+        int       status = client ? esp_http_client_get_status_code(client) : 0;
+        esp_http_client_cleanup(client);   /* NULL-safe */
 
         if (err == ESP_OK && status == 200) {
             relay_buf[ctx.buf_len] = '\0';
@@ -212,9 +214,9 @@ static void fetch_bilibili(void)
     };
     tls_sem_take();
     esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+    int status = client ? esp_http_client_get_status_code(client) : 0;
+    esp_http_client_cleanup(client);   /* NULL-safe */
     tls_sem_give();
 
     if (err == ESP_OK && status == 200) {
@@ -224,7 +226,7 @@ static void fetch_bilibili(void)
             cJSON *data = cJSON_GetObjectItem(root, "data");
             cJSON *card = cJSON_GetObjectItem(data, "card");
             cJSON *fans = cJSON_GetObjectItem(card, "fans");
-            if (fans) {
+            if (cJSON_IsNumber(fans)) {   /* a format change to string must not read garbage */
                 xSemaphoreTake(s_sub_mutex, portMAX_DELAY);
                 s_sub.subscriber_count = (uint32_t)fans->valueint;
                 s_sub.valid = true;
@@ -279,9 +281,9 @@ static void fetch_instagram(void)
             .user_data = &ctx, .timeout_ms = 15000,
         };
         esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_err_t err = esp_http_client_perform(client);
-        int status    = esp_http_client_get_status_code(client);
-        esp_http_client_cleanup(client);
+        esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+        int status    = client ? esp_http_client_get_status_code(client) : 0;
+        esp_http_client_cleanup(client);   /* NULL-safe */
 
         if (err == ESP_OK && status == 200) {
             relay_buf[ctx.buf_len] = '\0';
@@ -325,12 +327,14 @@ static void fetch_instagram(void)
         };
         tls_sem_take();
         esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_http_client_set_header(client, "x-ig-app-id", "936619743392459");
-        esp_http_client_set_header(client, "User-Agent",
-            "Instagram 219.0.0.12.117 Android (28/9; 420dpi; 1080x2148; samsung; SM-G977B)");
-        esp_err_t err = esp_http_client_perform(client);
-        int status = esp_http_client_get_status_code(client);
-        esp_http_client_cleanup(client);
+        if (client) {
+            esp_http_client_set_header(client, "x-ig-app-id", "936619743392459");
+            esp_http_client_set_header(client, "User-Agent",
+                "Instagram 219.0.0.12.117 Android (28/9; 420dpi; 1080x2148; samsung; SM-G977B)");
+        }
+        esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+        int status = client ? esp_http_client_get_status_code(client) : 0;
+        esp_http_client_cleanup(client);   /* NULL-safe */
         tls_sem_give();
 
         if (err == ESP_OK && status == 200) {
@@ -409,14 +413,16 @@ static void fetch_tiktok(void)
         };
         tls_sem_take();
         esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        char auth[80];
-        snprintf(auth, sizeof(auth), "Bearer %s", tiktok_key);
-        esp_http_client_set_header(client, "Authorization", auth);
-        esp_http_client_set_header(client, "Content-Type", "application/json");
-        esp_http_client_set_post_field(client, body, strlen(body));
-        esp_err_t err = esp_http_client_perform(client);
-        int status    = esp_http_client_get_status_code(client);
-        esp_http_client_cleanup(client);
+        if (client) {
+            char auth[80];
+            snprintf(auth, sizeof(auth), "Bearer %s", tiktok_key);
+            esp_http_client_set_header(client, "Authorization", auth);
+            esp_http_client_set_header(client, "Content-Type", "application/json");
+            esp_http_client_set_post_field(client, body, strlen(body));
+        }
+        esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+        int status    = client ? esp_http_client_get_status_code(client) : 0;
+        esp_http_client_cleanup(client);   /* NULL-safe */
         tls_sem_give();
 
         if (err == ESP_OK && status == 200) {
@@ -452,9 +458,9 @@ static void fetch_tiktok(void)
             .user_data = &ctx, .timeout_ms = 10000,
         };
         esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_err_t err = esp_http_client_perform(client);
-        int status    = esp_http_client_get_status_code(client);
-        esp_http_client_cleanup(client);
+        esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+        int status    = client ? esp_http_client_get_status_code(client) : 0;
+        esp_http_client_cleanup(client);   /* NULL-safe */
 
         if (err == ESP_OK && status == 200) {
             relay_buf[ctx.buf_len] = '\0';
@@ -521,9 +527,9 @@ static void fetch_mastodon(void)
     };
     tls_sem_take();
     esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-    esp_err_t err    = esp_http_client_perform(client);
-    int       status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    esp_err_t err    = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+    int       status = client ? esp_http_client_get_status_code(client) : 0;
+    esp_http_client_cleanup(client);   /* NULL-safe */
     tls_sem_give();
 
     if (err == ESP_OK && status == 200) {

@@ -105,6 +105,20 @@ static void make_topic(char *buf, size_t n, const char *suffix)
     snprintf(buf, n, "nextube/%s/%s", s_hostname, suffix);
 }
 
+/* Restrict a token to [A-Za-z0-9_-] in place, replacing everything else
+ * with '_'. s_hostname is interpolated unescaped into both MQTT topic
+ * strings and hand-built JSON discovery payloads — a hostname containing
+ * '"' or '\' would corrupt the JSON, so it must never carry those chars. */
+static void sanitize_mqtt_token(char *s)
+{
+    for (; *s; s++) {
+        char c = *s;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-'))
+            *s = '_';
+    }
+}
+
 /* ── Publish helpers ───────────────────────────────────────────────── */
 static void publish(const char *topic, const char *payload, int retain)
 {
@@ -451,15 +465,15 @@ static void publish_sensors(void)
         publish(topic, payload, 0);
     }
 
-    const sht30_reading_t *s = sht30_get();
-    if (!s || !s->valid) return;
+    sht30_reading_t s;
+    if (!sht30_get(&s)) return;
 
     make_topic(topic, sizeof(topic), "sensor/temperature/state");
-    snprintf(payload, sizeof(payload), "{\"temperature\":%.1f}", (double)s->temp_c);
+    snprintf(payload, sizeof(payload), "{\"temperature\":%.1f}", (double)s.temp_c);
     publish(topic, payload, 0);
 
     make_topic(topic, sizeof(topic), "sensor/humidity/state");
-    snprintf(payload, sizeof(payload), "{\"humidity\":%.1f}", (double)s->humidity);
+    snprintf(payload, sizeof(payload), "{\"humidity\":%.1f}", (double)s.humidity);
     publish(topic, payload, 0);
 }
 
@@ -1079,7 +1093,18 @@ static void ha_mqtt_task(void *arg)
 
     esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID,
                                    mqtt_event_handler, NULL);
-    esp_mqtt_client_start(s_client);
+
+    esp_err_t start_err = ESP_FAIL;
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        start_err = esp_mqtt_client_start(s_client);
+        if (start_err == ESP_OK) break;
+        ESP_LOGE(TAG, "esp_mqtt_client_start failed (%s), attempt %d/5",
+                 esp_err_to_name(start_err), attempt);
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+    if (start_err != ESP_OK) {
+        ESP_LOGE(TAG, "MQTT client failed to start — MQTT disabled for this boot");
+    }
 
     /* ── Publish loop (60 s tick) ── */
     app_mode_t last_mode       = (app_mode_t)-1;
@@ -1158,6 +1183,16 @@ static void ha_mqtt_task(void *arg)
 /* ── Public entry point ────────────────────────────────────────────── */
 void ha_mqtt_start(void)
 {
+    /* No teardown path exists for s_client/the task below — calling this
+     * twice would spawn a second ha_mqtt_task racing the first over the
+     * shared s_client/s_connected globals. */
+    static bool s_started = false;
+    if (s_started) {
+        ESP_LOGW(TAG, "ha_mqtt_start() called again — ignoring (already running)");
+        return;
+    }
+    s_started = true;
+
     /* Snapshot the config fields we need at task creation time.
      * The task references these static copies for the rest of its lifetime. */
     config_lock();
@@ -1169,6 +1204,10 @@ void ha_mqtt_start(void)
     strncpy(s_pass, cfg->mqtt_password, sizeof(s_pass) - 1);
     s_discovery = cfg->mqtt_ha_discovery;
     config_unlock();
+
+    /* Hostname flows unescaped into JSON discovery payloads (see
+     * publish_discovery) — keep it to a safe charset. */
+    sanitize_mqtt_token(s_hostname);
 
     /* Precompute ticker topic strings (hostname is now set above) */
     make_topic(s_topic_ticker_set,   sizeof(s_topic_ticker_set),   "ticker/set");

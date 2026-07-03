@@ -495,3 +495,15 @@ void ntp_get_local(struct tm *t)
     time(&now);
     localtime_r(&now, t);
 }
+
+bool ntp_is_night_window(uint8_t start_hour, uint8_t end_hour)
+{
+    if (!ntp_has_valid_time()) return false;
+    struct tm now_tm;
+    ntp_get_local(&now_tm);
+    int hr = now_tm.tm_hour;
+    if (start_hour < end_hour)
+        return hr >= start_hour && hr < end_hour;
+    /* Wraps around midnight (e.g. 22:00 to 07:00) */
+    return hr >= start_hour || hr < end_hour;
+}

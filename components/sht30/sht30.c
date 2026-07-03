@@ -150,19 +150,24 @@ void sht30_task_start(void)
         ESP_LOGE(TAG, "sht30_task creation failed");
 }
 
-const sht30_reading_t *sht30_get(void)
+bool sht30_get(sht30_reading_t *out)
 {
-    static sht30_reading_t copy;
+    /* Copy-out, not a pointer to shared state: the old API returned a
+     * pointer to one static `copy` shared by all callers — the display task
+     * (core 1), ha_mqtt, and web_server all call this concurrently, and one
+     * caller's copy overwrote the struct while another was still reading
+     * through its pointer (torn temp/valid mix published to HA). */
+    if (!out) return false;
     if (s_mutex) {
         xSemaphoreTake(s_mutex, portMAX_DELAY);
-        copy = s_last;
+        *out = s_last;
         xSemaphoreGive(s_mutex);
     } else {
-        copy = s_last;
+        *out = s_last;
     }
     /* Apply calibration offset — corrects for ESP32 self-heating or sensor
      * placement.  Humidity is not affected; only temperature is offset. */
-    if (copy.valid)
-        copy.temp_c += s_offset_c;
-    return &copy;
+    if (out->valid)
+        out->temp_c += s_offset_c;
+    return out->valid;
 }

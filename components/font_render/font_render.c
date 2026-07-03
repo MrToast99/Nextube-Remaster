@@ -52,6 +52,7 @@ typedef struct {
 
 static fr_cache_entry_t s_cache[FR_CACHE_SIZE];
 static int s_cache_next = 0;
+static int s_cache_mru  = -1;   /* most-recently-hit slot; see fr_get_glyph */
 
 /* Per-(face,size,fb) layout memo for fr_draw_glyph_centered().  The universal
  * scale (univ_adj) and the digit baseline depend only on the face, target pixel
@@ -98,6 +99,12 @@ int fr_load_face(const char *spiffs_path)
         if (!s_faces[i].loaded) { slot = i; break; }
     }
     if (slot < 0) {
+        /* Evicted face_id 0 is REUSED for the new font, so any cached glyph
+         * bitmaps / layout memos keyed face_id=0 would be served for the
+         * wrong font (stale glyphs, wrong baseline).  The display side skips
+         * its own flush when the returned id is unchanged (see
+         * wl_refresh_ft_face) — so the flush must happen here. */
+        fr_cache_flush();
         heap_caps_free(s_faces[0].font_data);
         s_faces[0].loaded = false;
         slot = 0;
@@ -124,8 +131,13 @@ int fr_load_face(const char *spiffs_path)
         ESP_LOGE(TAG, "PSRAM alloc failed (%ld bytes)", sz);
         return -1;
     }
-    fread(buf, 1, (size_t)sz, f);
+    size_t rd = fread(buf, 1, (size_t)sz, f);
     fclose(f);
+    if (rd != (size_t)sz) {
+        heap_caps_free(buf);
+        ESP_LOGE(TAG, "short read on %s (%u/%ld B)", spiffs_path, (unsigned)rd, sz);
+        return -1;
+    }
 
     int offset = stbtt_GetFontOffsetForIndex(buf, 0);
     if (!stbtt_InitFont(&s_faces[slot].info, buf, offset)) {
@@ -196,6 +208,7 @@ void fr_cache_flush(void)
         memset(&s_cache[i], 0, sizeof(fr_cache_entry_t));
     }
     s_cache_next = 0;
+    s_cache_mru  = -1;
     /* The layout memo is keyed by face_id, which may now point at a different
      * font — drop it so univ_adj / baseline are recomputed for the new face. */
     memset(s_layout_memo, 0, sizeof(s_layout_memo));
@@ -203,15 +216,30 @@ void fr_cache_flush(void)
 }
 
 /* ── Glyph lookup / rasterise ───────────────────────────────────────────────── */
+
+/* s_cache_mru (declared with the cache above): the render paths look the
+ * SAME glyph up twice in a row (shadow pass then foreground pass), and
+ * measure+draw makes several passes over the same string — a one-slot MRU
+ * check skips most of the 128-entry linear scans. */
 const fr_glyph_t *fr_get_glyph(uint8_t face_id, uint32_t codepoint, uint16_t px_size)
 {
     if (!fr_face_valid(face_id)) return NULL;
+
+    /* MRU fast path */
+    if (s_cache_mru >= 0) {
+        fr_cache_entry_t *m = &s_cache[s_cache_mru];
+        if (m->valid && m->face_id == face_id &&
+            m->codepoint == codepoint && m->px_size == px_size) {
+            return &m->g;
+        }
+    }
 
     /* Cache hit */
     for (int i = 0; i < FR_CACHE_SIZE; i++) {
         fr_cache_entry_t *e = &s_cache[i];
         if (e->valid && e->face_id == face_id &&
             e->codepoint == codepoint && e->px_size == px_size) {
+            s_cache_mru = i;
             return &e->g;
         }
     }
@@ -256,6 +284,7 @@ const fr_glyph_t *fr_get_glyph(uint8_t face_id, uint32_t codepoint, uint16_t px_
     slot->g.bearing_x = (int16_t)ix0;
     slot->g.bearing_y = (int16_t)(-iy0); /* positive = above baseline */
     slot->g.advance  = (int16_t)(int)(advance_u * scale + 0.5f);
+    s_cache_mru  = s_cache_next;   /* the shadow/foreground pair re-hits this */
     s_cache_next = (s_cache_next + 1) % FR_CACHE_SIZE;
     return &slot->g;
 }
@@ -468,6 +497,18 @@ void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
 }
 
 /* ── UTF-8 decoder ──────────────────────────────────────────────────────────── */
+/* Consume one continuation byte; a NUL (string byte-truncated mid-codepoint,
+ * e.g. by a snprintf cut) must NOT be stepped over — without this check the
+ * decoder walked past the terminator and kept reading out-of-bounds until it
+ * happened to hit a zero byte. */
+static inline uint32_t fr_utf8_cont(const char **p)
+{
+    unsigned char c = (unsigned char)**p;
+    if (!c) return 0;          /* leave *p on the NUL so the caller loop ends */
+    (*p)++;
+    return (uint32_t)(c & 0x3F);
+}
+
 static uint32_t fr_utf8_next(const char **p)
 {
     unsigned char c = (unsigned char)**p;
@@ -476,20 +517,20 @@ static uint32_t fr_utf8_next(const char **p)
     if (c < 0x80) return c;
     if ((c & 0xE0) == 0xC0) {
         uint32_t cp = (uint32_t)(c & 0x1F) << 6;
-        cp |= (unsigned char)*((*p)++) & 0x3F;
+        cp |= fr_utf8_cont(p);
         return cp;
     }
     if ((c & 0xF0) == 0xE0) {
         uint32_t cp = (uint32_t)(c & 0x0F) << 12;
-        cp |= ((unsigned char)*((*p)++) & 0x3F) << 6;
-        cp |= (unsigned char)*((*p)++) & 0x3F;
+        cp |= fr_utf8_cont(p) << 6;
+        cp |= fr_utf8_cont(p);
         return cp;
     }
     if ((c & 0xF8) == 0xF0) {
         uint32_t cp = (uint32_t)(c & 0x07) << 18;
-        cp |= ((unsigned char)*((*p)++) & 0x3F) << 12;
-        cp |= ((unsigned char)*((*p)++) & 0x3F) << 6;
-        cp |= (unsigned char)*((*p)++) & 0x3F;
+        cp |= fr_utf8_cont(p) << 12;
+        cp |= fr_utf8_cont(p) << 6;
+        cp |= fr_utf8_cont(p);
         return cp;
     }
     return '?';

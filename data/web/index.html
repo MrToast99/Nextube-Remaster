@@ -59,7 +59,7 @@ select option{background:var(--accent);color:var(--text)}
 .progress-bar{height:100%;background:var(--hi);transition:width .3s,background .5s}
 .progress.ota{height:8px;border-radius:4px;margin-top:.6rem}
 @keyframes ota-pulse{0%,100%{opacity:1}50%{opacity:.35}}
-.progress-bar.pulsing{animation:ota-pulse 1.1s ease-in-out infinite}
+.progress-bar.pulsing,.au-bar.pulsing{animation:ota-pulse 1.1s ease-in-out infinite}
 .file-row{display:flex;justify-content:space-between;align-items:center;padding:.35rem .7rem;border-bottom:1px solid rgba(255,255,255,.05)}
 .file-row:last-child{border-bottom:none}
 .file-row:hover{background:rgba(255,255,255,.04)}
@@ -299,12 +299,15 @@ select option{background:var(--accent);color:var(--text)}
 
     <div class="field meter"><label data-i18n="disp.lcd_brightness">LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">60</span>%</div>
 
+    <div class="field meter"><label data-i18n="disp.led_brightness">LED Brightness</label><input type="range" id="f-ledbr" min="0" max="100"><span id="v-ledbr">60</span>%</div>
+
     <div style="border:1px solid var(--accent);padding:.8rem;border-radius:8px;margin-bottom:1rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;margin-bottom:0">
         <input type="checkbox" id="f-ab-en"> <span data-i18n="disp.night_brightness">Night Brightness</span>
       </label>
       <div id="ab-cfg" style="display:none;margin-top:.8rem;border-top:1px solid var(--accent);padding-top:.8rem">
         <div class="field meter"><label data-i18n="disp.night_lcd_brightness">Night LCD Brightness</label><input type="range" id="f-nightbr" min="0" max="100"><span id="v-nightbr">30</span>%</div>
+        <div class="field meter"><label data-i18n="disp.night_led_brightness">Night LED Brightness</label><input type="range" id="f-nightledbr" min="0" max="100"><span id="v-nightledbr">20</span>%</div>
         <div style="display:flex;gap:1.5rem">
           <div class="field"><label data-i18n="disp.night_start">Night starts at</label><input type="number" id="f-nightsh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
           <div class="field"><label data-i18n="disp.night_end">Night ends at</label><input type="number" id="f-nighteh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
@@ -312,8 +315,6 @@ select option{background:var(--accent);color:var(--text)}
         <small style="color:var(--dim);display:block;margin-top:.4rem" data-i18n="disp.night_ntp_note">NTP time must be synced for this to work.</small>
       </div>
     </div>
-
-    <div class="field meter"><label data-i18n="disp.led_brightness">LED Brightness</label><input type="range" id="f-ledbr" min="0" max="100"><span id="v-ledbr">60</span>%</div>
 
     <!-- ── Advanced Display ────────────────────────────────────── -->
     <div style="border:1px solid var(--accent);border-radius:8px;margin-bottom:1rem">
@@ -1579,7 +1580,8 @@ Object.assign(I18N.en, {
   "disp.notify_update_hint":"(shows a 2-row red indicator at the bottom of tube 6 when a firmware update is available)",
   "disp.tube6_display":"Tube 6 Display","opt.blank":"Blank","opt.weather_icon":"Weather Icon",
   "disp.lcd_brightness":"LCD Brightness","disp.night_brightness":"Night Brightness",
-  "disp.night_lcd_brightness":"Night LCD Brightness","disp.night_start":"Night starts at","disp.night_end":"Night ends at",
+  "disp.night_lcd_brightness":"Night LCD Brightness","disp.night_led_brightness":"Night LED Brightness",
+  "disp.night_start":"Night starts at","disp.night_end":"Night ends at",
   "disp.night_ntp_note":"NTP time must be synced for this to work.","disp.led_brightness":"LED Brightness",
   "disp.advanced":"Advanced Display",
   "disp.theme_rotation":"Theme Rotation",
@@ -2065,7 +2067,7 @@ document.querySelectorAll('#tabs button').forEach(b => {
 });
 
 /* ── Range sliders ─────────────────────────────────── */
-['lcdbr','ledbr','vol','nightbr'].forEach(id => {
+['lcdbr','ledbr','vol','nightbr','nightledbr'].forEach(id => {
   const el = $('f-'+id);
   if(el) el.oninput = () => $('v-'+id).textContent = el.value;
 });
@@ -2390,6 +2392,7 @@ async function loadSettings() {
   $('f-ab-en').checked = cfg.auto_brightness || false;
   $('ab-cfg').style.display = cfg.auto_brightness ? 'block' : 'none';
   { const _nightbr = cfg.night_brightness != null ? cfg.night_brightness : 30; $('f-nightbr').value = _nightbr; $('v-nightbr').textContent = _nightbr; }
+  { const _nightledbr = cfg.led_night_brightness != null ? cfg.led_night_brightness : 20; $('f-nightledbr').value = _nightledbr; $('v-nightledbr').textContent = _nightledbr; }
   $('f-nightsh').value = cfg.night_start_hour !== undefined ? cfg.night_start_hour : 22;
   $('f-nighteh').value = cfg.night_end_hour !== undefined ? cfg.night_end_hour : 7;
   { const _ledbr = cfg.led_brightness != null ? cfg.led_brightness : 60; $('f-ledbr').value = _ledbr; $('v-ledbr').textContent = _ledbr; }
@@ -2987,6 +2990,7 @@ async function saveSettings() {
     led_brightness: +$('f-ledbr').value,
     auto_brightness: $('f-ab-en').checked,
     night_brightness: +$('f-nightbr').value,
+    led_night_brightness: +$('f-nightledbr').value,
     night_start_hour: +$('f-nightsh').value,
     night_end_hour: +$('f-nighteh').value,
     backlight_mode: $('f-blmode').value,
@@ -4465,9 +4469,9 @@ async function onAuthSucceeded() {
 
 <script>
 /* ── Online Updater orchestration ───────────────────────────────────────── */
-let _latestReleaseData = null;   /* full GitHub API release object, set by checkForUpdates */
+let _latestReleaseData = null;
 let _auRunning = false;
-let _auProceed = null;           /* resolves the notes-preview gate; null when not waiting */
+let _auProceed = null;
 
 function fmtB(b) {
   if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
@@ -4552,6 +4556,7 @@ async function startAutoUpdate() {
 
   auStep(1,'active'); auStep(2,''); auStep(3,''); auStep(4,'');
   auProgress(0); auDetail('');
+  $('au-bar').classList.remove('pulsing');
 
   try {
     /* GitHub API asset objects include a digest field: "sha256:<64 hex chars>"
@@ -4677,6 +4682,7 @@ async function startAutoUpdate() {
 
     /* ── Phase 3: wait for reboot ───────────────────────────────────── */
     auStep(3, 'active', 'Rebooting device…');
+    $('au-bar').classList.add('pulsing');
     const rebootStart = Date.now();
     const rebootTick  = setInterval(() => {
       auDetail('Waiting for device… ' + Math.round((Date.now() - rebootStart) / 1000) + 's');
@@ -4712,12 +4718,14 @@ async function startAutoUpdate() {
     /* Let stale keep-alive connections drain before Phase 4 fires. */
     auDetail('Stabilising connection…');
     await new Promise(res => setTimeout(res, 4000));
+    $('au-bar').classList.remove('pulsing');
     auStep(3,'done'); auProgress(80); auDetail('');
 
     /* ── Phase 4: update web UI ─────────────────────────────────────── */
     if (uiAsset) {
       auStep(4, 'active', 'Updating web UI…');
       auDetail('Waiting for device to start web UI update…');
+      $('au-bar').classList.add('pulsing');
 
       /* Fire a single trigger for firmware that doesn't self-start. */
       const triggerWebuiPull = async () => {
@@ -4792,6 +4800,7 @@ async function startAutoUpdate() {
           started = true; idleSince = null;
           auDetail('Applying update to filesystem… (this can take ~1 min)');
         } else if (ws.state === 'done') {
+          $('au-bar').classList.remove('pulsing');
           auStep(4,'done'); auProgress(100); auDetail('');
           break;
         } else if (ws.state === 'error') {
@@ -4818,6 +4827,7 @@ async function startAutoUpdate() {
       'Reload page ↺</button>';
 
   } catch(e) {
+    $('au-bar')?.classList.remove('pulsing');
     for (let i = 1; i <= 4; i++) {
       if (document.getElementById('au-s'+i)?.classList.contains('active'))
         auStep(i, 'error');
