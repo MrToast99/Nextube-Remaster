@@ -220,7 +220,7 @@ select option{background:var(--accent);color:var(--text)}
       <div class="field">
         <label>Digit font <span style="color:var(--dim);font-size:.82rem">(TTF from /spiffs/fonts/)</span></label>
         <div style="display:flex;gap:8px;align-items:center">
-          <select id="f-custom-font" style="flex:1" onchange="markDirty()"><option value="">Logisoso (built-in)</option></select>
+          <select id="f-custom-font" class="ttf-font-select" style="flex:1" onchange="onFontSelectChange(this)"><option value="">Logisoso (built-in)</option></select>
           <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadFontList(true)" title="Scan for TTF files on device">↺</button>
         </div>
       </div>
@@ -262,6 +262,13 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <div id="tube6cx-section" style="display:none;border:1px solid var(--accent);padding:.8rem;border-radius:8px;margin-bottom:1rem">
       <div style="font-size:.85rem;font-weight:600;margin-bottom:.6rem">Tube 6 Info Panels <span style="color:var(--dim);font-weight:normal;font-size:.8rem">(24H Custom — rotate when enabled)</span></div>
+      <div id="f-cx-font-row" class="field" style="display:none;margin-bottom:.7rem">
+        <label style="font-size:.85rem">Info panel font <span style="color:var(--dim);font-size:.78rem">(Outdoor Temperature, Humidity, Wind, Air Quality &amp; Outdoor Temp/Humidity panels; TTF from /spiffs/fonts/ — does not affect the clock digits)</span></label>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:.3rem">
+          <select id="f-cx-font" class="ttf-font-select" style="flex:1" onchange="onFontSelectChange(this)"><option value="">Logisoso (built-in)</option></select>
+          <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadFontList(true)" title="Scan for TTF files on device">↺</button>
+        </div>
+      </div>
       <div style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.7rem">
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weekdate" style="width:14px;height:14px"> Day &amp; Date <span style="color:var(--dim);font-size:.78rem">(day name / MM-DD)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-ht" style="width:14px;height:14px"> Indoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(SHT30 sensor)</span></label>
@@ -272,6 +279,7 @@ select option{background:var(--accent);color:var(--text)}
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-wind" style="width:14px;height:14px"> Wind <span style="color:var(--dim);font-size:.78rem">(wind speed km/h — wind symbol + value)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-aqi" style="width:14px;height:14px"> Air Quality <span style="color:var(--dim);font-size:.78rem">(AQI — Open-Meteo, no key)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem">AQI scale <select id="f-aqistd" style="font-size:.8rem;background:var(--accent);border:1px solid var(--dim);color:var(--text);border-radius:4px;padding:1px 4px"><option value="auto">Auto (by location)</option><option value="us">US AQI (0–500)</option><option value="eu">European AQI (0–100)</option></select></label>
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-outdoor-ht" style="width:14px;height:14px"> Outdoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(combined panel)</span></label>
         <label id="f-cx-push-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-push" style="width:14px;height:14px"> Pushed Image <span style="color:var(--dim);font-size:.78rem">(JPG via POST /api/cx_image?tube=6)</span></label>
       </div>
       <div style="display:flex;align-items:center;gap:.6rem;font-size:.85rem">
@@ -292,6 +300,7 @@ select option{background:var(--accent);color:var(--text)}
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-humidity" style="width:14px;height:14px"> Humidity <span style="color:var(--dim);font-size:.78rem">(outdoor humidity — drop symbol + value)</span></label>
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-wind" style="width:14px;height:14px"> Wind <span style="color:var(--dim);font-size:.78rem">(wind speed km/h — wind symbol + value)</span></label>
           <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-aqi" style="width:14px;height:14px"> Air Quality <span style="color:var(--dim);font-size:.78rem">(AQI — Open-Meteo, no key)</span></label>
+          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-outdoor-ht" style="width:14px;height:14px"> Outdoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(combined panel — saves a rotation slot)</span></label>
           <label id="f-cx5-push-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-push" style="width:14px;height:14px"> Pushed Image <span style="color:var(--dim);font-size:.78rem">(JPG via POST /api/cx_image?tube=5)</span></label>
         </div>
       </div>
@@ -2173,6 +2182,18 @@ function updateClockFaceControls() {
   const bgGroup = $('custom-bg-group');
   if (bgGroup) bgGroup.style.display = isCustom ? '' : 'none';
 
+  /* Asset-theme info-panel font picker — same custom_font value as the
+   * Custom/WeatherLive "Digit font" control above, just shown in the other
+   * place it applies (24H Custom asset themes). Hidden whenever the Custom
+   * face control is already visible to avoid showing the same setting twice. */
+  const cxFontRow = $('f-cx-font-row');
+  if (cxFontRow) {
+    const tt = $('f-timetype') ? $('f-timetype').value : '';
+    const cxFontWasHidden = cxFontRow.style.display === 'none';
+    cxFontRow.style.display = (tt === '24H_CX' && !isCustom && !isWl) ? '' : 'none';
+    if (cxFontWasHidden && cxFontRow.style.display !== 'none') loadFontList();
+  }
+
   /* Hide CX weather/push panel options for any procedural mode */
   ['f-cx-weather-row', 'f-cx5-weather-row',
    'f-cx-push-row',    'f-cx5-push-row'].forEach(id => {
@@ -2256,9 +2277,9 @@ async function loadThemes(manual) {
 }
 
 async function loadFontList(manual) {
-  const sel = $('f-custom-font');
-  if (!sel) return;
-  const current = sel.value;
+  const sels = Array.from(document.querySelectorAll('.ttf-font-select'));
+  if (!sels.length) return;
+  const current = sels[0].value;
   try {
     const data = await api('file/ls?dir=/fonts');
     if (!Array.isArray(data)) return;
@@ -2266,20 +2287,34 @@ async function loadFontList(manual) {
       .filter(f => f.type === 'file' && /\.ttf$/i.test(f.name))
       .map(f => f.name)
       .sort((a, b) => a.localeCompare(b));
-    sel.innerHTML = '<option value="">Logisoso (built-in)</option>' +
+    const optsHtml = '<option value="">Logisoso (built-in)</option>' +
       ttfs.map(n => `<option value="${n.replace(/"/g,'&quot;')}">${n.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</option>`).join('');
-    if (current && !ttfs.includes(current)) {
-      const opt = document.createElement('option');
-      opt.value = current; opt.textContent = current + ' (?)';
-      sel.appendChild(opt);
-    }
-    sel.value = current;
+    sels.forEach(sel => {
+      sel.innerHTML = optsHtml;
+      if (current && !ttfs.includes(current)) {
+        const opt = document.createElement('option');
+        opt.value = current; opt.textContent = current + ' (?)';
+        sel.appendChild(opt);
+      }
+      sel.value = current;
+    });
     if (manual) toast(ttfs.length
       ? `${ttfs.length} font${ttfs.length === 1 ? '' : 's'} found`
       : 'No TTF files in /spiffs/fonts/');
   } catch(_) {
     if (manual) toast('Could not scan fonts folder', true);
   }
+}
+
+/* Keep every .ttf-font-select in sync — there is a single custom_font config
+ * value but it's exposed in two places (Custom/WeatherLive face controls and
+ * the 24H Custom asset-theme info-panel controls), only one of which is
+ * visible at a time. */
+function onFontSelectChange(el) {
+  markDirty();
+  document.querySelectorAll('.ttf-font-select').forEach(sel => {
+    if (sel !== el) sel.value = el.value;
+  });
 }
 
 /* ── Load settings ─────────────────────────────────── */
@@ -2329,14 +2364,16 @@ async function loadSettings() {
   if ($('f-custom-glyph-color'))  $('f-custom-glyph-color').value  = rgbHex(cfg.custom_glyph_color);
   if ($('f-custom-shadow'))       $('f-custom-shadow').value       = cfg.custom_shadow !== false ? '1' : '0';
   if ($('f-custom-shadow-color')) $('f-custom-shadow-color').value = rgbHex(cfg.custom_shadow_color);
-  if ($('f-custom-font')) {
-    const _fsel = $('f-custom-font'), _fval = cfg.custom_font || '';
-    if (_fval && !Array.from(_fsel.options).find(o => o.value === _fval)) {
-      const _fopt = document.createElement('option');
-      _fopt.value = _fval; _fopt.textContent = _fval;
-      _fsel.appendChild(_fopt);
-    }
-    _fsel.value = _fval;
+  {
+    const _fval = cfg.custom_font || '';
+    document.querySelectorAll('.ttf-font-select').forEach(_fsel => {
+      if (_fval && !Array.from(_fsel.options).find(o => o.value === _fval)) {
+        const _fopt = document.createElement('option');
+        _fopt.value = _fval; _fopt.textContent = _fval;
+        _fsel.appendChild(_fopt);
+      }
+      _fsel.value = _fval;
+    });
   }
   onCustomShadowChange();
   updateClockFaceControls();
@@ -2351,6 +2388,7 @@ async function loadSettings() {
   $('f-cx-wind').checked     = cfg.tube6_panel_wind     === true;
   $('f-cx-aqi').checked      = cfg.tube6_panel_aqi      === true;
   $('f-aqistd').value        = cfg.aqi_standard || 'auto';
+  $('f-cx-outdoor-ht').checked = cfg.tube6_panel_outdoor_ht === true;
   $('f-cx-push').checked     = cfg.tube6_panel_push     === true;
   $('f-cx-panel-ms').value   = Math.round((cfg.tube6_panel_ms || 5000) / 1000);
   $('f-cx-dual').checked      = cfg.cx_dual_panel        === true;
@@ -2362,6 +2400,7 @@ async function loadSettings() {
   $('f-cx5-humidity').checked = cfg.tube5_panel_humidity === true;
   $('f-cx5-wind').checked     = cfg.tube5_panel_wind     === true;
   $('f-cx5-aqi').checked      = cfg.tube5_panel_aqi      === true;
+  $('f-cx5-outdoor-ht').checked = cfg.tube5_panel_outdoor_ht === true;
   $('f-cx5-push').checked      = cfg.tube5_panel_push      === true;
   onCxDualChange();
   $('f-leading-zero').checked = cfg.leading_zero === true;
@@ -2643,6 +2682,7 @@ function onTimeTypeChange() {
   const tt = $('f-timetype').value;
   $('tube5-section').style.display   = (tt === '24H_NS') ? '' : 'none';
   $('tube6cx-section').style.display = (tt === '24H_CX') ? '' : 'none';
+  updateClockFaceControls();
 }
 
 /* Show the tube-5 panel selector only when dual-panel mode is enabled. */
@@ -3096,6 +3136,7 @@ async function saveSettings() {
     tube6_panel_wind:     $('f-cx-wind').checked,
     tube6_panel_aqi:      $('f-cx-aqi').checked,
     aqi_standard:         $('f-aqistd').value,
+    tube6_panel_outdoor_ht: $('f-cx-outdoor-ht').checked,
     tube6_panel_push:     $('f-cx-push').checked,
     tube6_panel_ms:       Math.max(1, +$('f-cx-panel-ms').value) * 1000,
     cx_dual_panel:        $('f-cx-dual').checked,
@@ -3107,6 +3148,7 @@ async function saveSettings() {
     tube5_panel_humidity: $('f-cx5-humidity').checked,
     tube5_panel_wind:     $('f-cx5-wind').checked,
     tube5_panel_aqi:      $('f-cx5-aqi').checked,
+    tube5_panel_outdoor_ht: $('f-cx5-outdoor-ht').checked,
     tube5_panel_push:     $('f-cx5-push').checked,
     notify_update_on_display: $('f-notify-update').checked,
     burnin_auto_enabled:    $('bi-sched-en').checked,

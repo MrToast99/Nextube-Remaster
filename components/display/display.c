@@ -2828,7 +2828,7 @@ static void cx6_stamp_update_indicator(int tube)
  * panel_id is an index into the ordered list [weather, weekdate, ht, temp,
  * sunrise, push]; the caller resolves which concrete panel this maps to.       */
 /* Render one 24H-Custom info panel onto `lcd_tube` (5 = rightmost, 4 = the
- * 2nd-from-right in dual mode).  `enabled[9]` is the caller's panel set
+ * 2nd-from-right in dual mode).  `enabled[10]` is the caller's panel set
  * (tube6_panel_* or tube5_panel_*); `panel_id` indexes the enabled entries;
  * `*last_kind` tracks the previously drawn kind for that tube so backgrounds
  * are cleared only on a panel switch. */
@@ -2841,6 +2841,8 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
 static void wl_humidity_panel(uint8_t *fb, int hum);
 static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, int g, int b);
 static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g, int fg_b);
+static void wl_outdoor_ht_panel(uint8_t *fb, const char *lang, int temp_disp, int hum, bool valid,
+                                int fg_r, int fg_g, int fg_b);
 
 /* Per-frame render state set by render_weatherlive at the top of each frame.
  * Defaults reflect legacy WeatherLive behaviour (white glyphs, dark shadow). */
@@ -2997,16 +2999,25 @@ static float to_display_temp(float celsius, bool use_fahrenheit)
 }
 
 static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
-                             int lcd_tube, const bool enabled[9],
+                             int lcd_tube, const bool enabled[10],
                              uint8_t panel_id, int8_t *last_kind)
 {
+    /* Keep the active TTF face in sync with cfg->custom_font even though this
+     * is an asset (non-Custom/WeatherLive) theme: the outdoor temp/humidity/
+     * wind/AQI/combined-H-T panel kinds below reuse the SAME wl_text()-based
+     * drawing code as the WeatherLive renderer, which is otherwise the only
+     * caller of wl_refresh_ft_face().  Without this, s_ft_face_id would be a
+     * stale leftover from whatever theme/clock-face was last active instead
+     * of reflecting the current setting.  Cheap no-op when unchanged. */
+    wl_refresh_ft_face(cfg->custom_font);
+
     /* Resolve panel_id → concrete panel kind by walking the caller's enabled[].
      * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor temp+Hi/Lo,
      * 4=sunrise, 5=externally-pushed image, 6=outdoor humidity, 7=wind,
-     * 8=air quality. */
+     * 8=air quality, 9=outdoor H/T (combined). */
     int kind = -1;
     int count = 0;
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 10; i++) {
         if (enabled[i]) {
             if (count == (int)panel_id) { kind = i; break; }
             count++;
@@ -3018,12 +3029,13 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
     const int push_idx = (lcd_tube == 5) ? 1 : 0;   /* tube6=LCD5→1, tube5=LCD4→0 */
 
     /* Weather-dependent panels (0 = icon, 3 = outdoor temp+Hi/Lo, 6 = humidity,
-     * 7 = wind) with no data yet — cold boot: the first fetch takes 10 s to
-     * minutes — render the weekdate panel in their slot instead of a black tube.
-     * Day + date only need the RTC-seeded clock, valid from the first tick.
-     * Self-healing: once weather_get() turns valid, the real panel renders
-     * on its next rotation (and *last_kind tracking forces the bg clear). */
-    if (kind == 0 || kind == 3 || kind == 6 || kind == 7) {
+     * 7 = wind, 9 = outdoor H/T) with no data yet — cold boot: the first fetch
+     * takes 10 s to minutes — render the weekdate panel in their slot instead
+     * of a black tube. Day + date only need the RTC-seeded clock, valid from
+     * the first tick. Self-healing: once weather_get() turns valid, the real
+     * panel renders on its next rotation (and *last_kind tracking forces the
+     * bg clear). */
+    if (kind == 0 || kind == 3 || kind == 6 || kind == 7 || kind == 9) {
         const weather_data_t *w = weather_get();
         if (!w || !w->valid) kind = 1;
     }
@@ -3261,6 +3273,25 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         bool eu;
         int  aqi = weather_get_aqi(&eu);
         wl_aqi_panel(fb, aqi, eu, fg_r, fg_g, fg_b);
+        display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
+
+    } else if (kind == 9) {
+        /* ── Outdoor H/T panel (combined) — identical to the WeatherLive
+         * OUTDOOR_HT panel, rendered into the shared framebuffer over the
+         * theme's AMPM/blank.jpg via the SAME wl_outdoor_ht_panel() drawing
+         * code.  Validity ensured by the cold-boot guard above. */
+        const weather_data_t *ow = weather_get();
+        uint8_t *fb = wl_fb();
+        if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+
+        cx_seed_framebuf(fb, lcd_tube, cfg);
+
+        int fg_r, fg_g, fg_b;
+        cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
+        bool use_f     = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
+        int  temp_disp = (ow && ow->valid) ? (int)lroundf(to_display_temp(ow->temp_c, use_f)) : 0;
+        int  hum       = (ow && ow->valid) ? (int)lroundf(ow->humidity) : 0;
+        wl_outdoor_ht_panel(fb, cfg->language, temp_disp, hum, ow && ow->valid, fg_r, fg_g, fg_b);
         display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
     }
 
@@ -4596,13 +4627,15 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
  * panel so both render identically.  `hum` is the relative humidity in whole %. */
 static void wl_humidity_panel(uint8_t *fb, int hum)
 {
-    /* Panel-1 geometry scaled 0.86× so shadow bottom lands at row 79 (top-half). */
-    const int tip = 4, cx = 40, bcy = 58, rad = 19;
+    /* Panel-1 geometry scaled 0.86×, then shrunk another 25% (tip/bcy/rad ×0.75,
+     * re-centred on the same vertical midpoint) so the droplet reads smaller
+     * without shifting its visual centre in the top-half zone. */
+    const int tip = 13, cx = 40, bcy = 54, rad = 14;
     const int SH = 2;
 
     /* Shadow half-width lookup: s_hum_sh_hw[i] = half-width at row bcy+i (circular cap).
-     * Precomputed once from rad=19; SH outset added at use. */
-    static int8_t s_hum_sh_hw[22];   /* indices 0..rad+SH = 0..21 */
+     * Precomputed once from rad=14; SH outset added at use. */
+    static int8_t s_hum_sh_hw[22];   /* indices 0..rad+SH = 0..16, sized for the old rad=19 */
     static bool   s_hum_sh_init;
     if (!s_hum_sh_init) {
         for (int i = 0; i <= rad + SH; i++) {
@@ -4652,12 +4685,12 @@ static void wl_humidity_panel(uint8_t *fb, int hum)
     }
 
     /* Specular highlight — scaled proportionally to new bulb size. */
-    for (int y = bcy - rad + 3; y <= bcy - rad + 10; y++) {
+    for (int y = bcy - rad + 2; y <= bcy - rad + 8; y++) {
         if (y < 0 || y >= LCD_HEIGHT) continue;
-        for (int x = cx - 10; x <= cx - 2; x++) {
+        for (int x = cx - 8; x <= cx - 2; x++) {
             if (x < 0 || x >= LCD_WIDTH) continue;
-            int dx = x - (cx - 6), dy = y - (bcy - rad + 6);
-            if (dx * dx + dy * dy <= 12)
+            int dx = x - (cx - 5), dy = y - (bcy - rad + 5);
+            if (dx * dx + dy * dy <= 7)
                 wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, 220, 240, 255, 180);
         }
     }
@@ -4885,9 +4918,49 @@ static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g
     }
 }
 
+/* Outdoor temp (top zone) + outdoor humidity (bottom zone) — same layout as
+ * WLP_INDOOR_HT but sourced from weather_get() and labelled "Out" instead of
+ * "In".  Kept as an independent function (own static cache) rather than
+ * sharing state with the indoor panel, since dual-panel mode can render both
+ * simultaneously on different tubes. */
+static void wl_outdoor_ht_panel(uint8_t *fb, const char *lang, int temp_disp, int hum, bool valid,
+                                 int fg_r, int fg_g, int fg_b)
+{
+    /* "Out" label — top zone rows 5-24. */
+    wl_text(fb, 40, 28, u8g2_font_logisoso20_tf,
+            inout_label(lang, false), fg_r, fg_g, fg_b, 20);
+
+    if (valid) {
+        /* Temperature — auto-scale into rows 32-97 (zone centre 64). */
+        static const int s_oht_ft_px[4]  = { 55, 55, 36, 28 };
+        static const int s_oht_u8_cap[4] = { 42, 42, 28, 28 };
+        wl_draw_temp_scaled(fb, temp_disp, 64, fg_r, fg_g, fg_b,
+                            s_oht_ft_px, s_oht_u8_cap);
+
+        /* Humidity — centred in rows 103-155 (zone centre 129). */
+        static int  s_oht_hum_last = -1;
+        static char s_oht_hum_str[12];
+        if (hum != s_oht_hum_last) {
+            snprintf(s_oht_hum_str, sizeof(s_oht_hum_str), "%d%%", hum);
+            s_oht_hum_last = hum;
+        }
+        int by_h = (s_ft_face_id >= 0) ? 129 + 7 * 32 / 10 : 129 + 14;
+        wl_text(fb, 40, by_h, u8g2_font_logisoso28_tf, s_oht_hum_str,
+                fg_r, fg_g, fg_b, 32);
+    } else {
+        /* Weather not yet valid — show dashes. */
+        int by_t = (s_ft_face_id >= 0) ? 64 + 7 * 36 / 10 : 64 + 14;
+        wl_text(fb, 40, by_t, u8g2_font_logisoso28_tf, "--",
+                fg_r, fg_g, fg_b, 36);
+        int by_h = (s_ft_face_id >= 0) ? 129 + 7 * 32 / 10 : 129 + 14;
+        wl_text(fb, 40, by_h, u8g2_font_logisoso28_tf, "--%",
+                fg_r, fg_g, fg_b, 32);
+    }
+}
+
 /* WeatherLive info-panel kinds (the subset rendered procedurally over the sky).
  * Today's high/low is folded into the TEMP panel — there is no separate kind. */
-enum { WLP_WEEKDATE = 0, WLP_TEMP, WLP_SUNRISE, WLP_HUMIDITY, WLP_WIND, WLP_INDOOR_HT, WLP_AQI };
+enum { WLP_WEEKDATE = 0, WLP_TEMP, WLP_SUNRISE, WLP_HUMIDITY, WLP_WIND, WLP_INDOOR_HT, WLP_AQI, WLP_OUTDOOR_HT };
 
 /* Render one WeatherLive info panel (`kind`) over the sky panorama on `tube`.
  * Temperatures are already unit-converted by the caller; sunrise/sunset are
@@ -4976,6 +5049,12 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
         int  aqi = weather_get_aqi(&eu);
         wl_aqi_panel(fb, aqi, eu, fg_r, fg_g, fg_b);
 
+    } else if (kind == WLP_OUTDOOR_HT) {
+        const weather_data_t *w = weather_get();
+        bool valid = (w && w->valid);
+        int  hum   = valid ? (int)lroundf(w->humidity) : 0;
+        wl_outdoor_ht_panel(fb, lang, temp_disp, hum, valid, fg_r, fg_g, fg_b);
+
     } else { /* WLP_SUNRISE — asset-style sun glyphs: rise on top, set below. */
         char rs[8], ss[8];
         snprintf(rs, sizeof(rs), "%02d:%02d", (sunrise / 60) % 24, sunrise % 60);
@@ -5000,7 +5079,7 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
 /* Build the ordered list of WeatherLive panel kinds enabled for a tube; returns
  * the count (≥1, falls back to weekday/date).  The TEMP panel already carries
  * today's high/low, so there is no separate Hi/Lo entry. */
-static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, bool aq, int out[7])
+static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, bool aq, bool oht, int out[8])
 {
     int n = 0;
     if (wd) out[n++] = WLP_WEEKDATE;
@@ -5010,6 +5089,7 @@ static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, b
     if (wn) out[n++] = WLP_WIND;
     if (ht) out[n++] = WLP_INDOOR_HT;
     if (aq) out[n++] = WLP_AQI;
+    if (oht) out[n++] = WLP_OUTDOOR_HT;
     if (n == 0) out[n++] = WLP_WEEKDATE;
     return n;
 }
@@ -5273,29 +5353,29 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     /* Tube-6 panel kinds for this device (WeatherLive subset).  Default layout
      * (non-CX) rotates weekday/date → temp → lo/hi on tube 6 every ~rot_ms. */
     /* Panel-list cache — only rebuilt when the config flags change. */
-    static int  s_l6[7], s_n6, s_l5[7], s_n5;
-    static bool s_t6wd, s_t6tp, s_t6sr, s_t6hm, s_t6wn, s_t6ht, s_t6aq;
-    static bool s_t5wd, s_t5tp, s_t5sr, s_t5hm, s_t5wn, s_t5ht, s_t5aq;
+    static int  s_l6[8], s_n6, s_l5[8], s_n5;
+    static bool s_t6wd, s_t6tp, s_t6sr, s_t6hm, s_t6wn, s_t6ht, s_t6aq, s_t6oht;
+    static bool s_t5wd, s_t5tp, s_t5sr, s_t5hm, s_t5wn, s_t5ht, s_t5aq, s_t5oht;
     static bool s_pl_init;
     bool t6wd = cfg->tube6_panel_weekdate, t6tp = cfg->tube6_panel_temp,
          t6sr = cfg->tube6_panel_sunrise,  t6hm = cfg->tube6_panel_humidity,
          t6wn = cfg->tube6_panel_wind,     t6ht = cfg->tube6_panel_ht,
-         t6aq = cfg->tube6_panel_aqi;
+         t6aq = cfg->tube6_panel_aqi,      t6oht = cfg->tube6_panel_outdoor_ht;
     bool t5wd = cfg->tube5_panel_weekdate, t5tp = cfg->tube5_panel_temp,
          t5sr = cfg->tube5_panel_sunrise,  t5hm = cfg->tube5_panel_humidity,
          t5wn = cfg->tube5_panel_wind,     t5ht = cfg->tube5_panel_ht,
-         t5aq = cfg->tube5_panel_aqi;
+         t5aq = cfg->tube5_panel_aqi,      t5oht = cfg->tube5_panel_outdoor_ht;
     if (!s_pl_init ||
         t6wd!=s_t6wd || t6tp!=s_t6tp || t6sr!=s_t6sr ||
-        t6hm!=s_t6hm || t6wn!=s_t6wn || t6ht!=s_t6ht || t6aq!=s_t6aq ||
+        t6hm!=s_t6hm || t6wn!=s_t6wn || t6ht!=s_t6ht || t6aq!=s_t6aq || t6oht!=s_t6oht ||
         t5wd!=s_t5wd || t5tp!=s_t5tp || t5sr!=s_t5sr ||
-        t5hm!=s_t5hm || t5wn!=s_t5wn || t5ht!=s_t5ht || t5aq!=s_t5aq) {
+        t5hm!=s_t5hm || t5wn!=s_t5wn || t5ht!=s_t5ht || t5aq!=s_t5aq || t5oht!=s_t5oht) {
         s_n6 = is_24cx
-            ? wl_panel_list(t6wd, t6tp, t6sr, t6hm, t6wn, t6ht, t6aq, s_l6)
+            ? wl_panel_list(t6wd, t6tp, t6sr, t6hm, t6wn, t6ht, t6aq, t6oht, s_l6)
             : (s_l6[0] = WLP_WEEKDATE, s_l6[1] = WLP_TEMP, s_l6[2] = WLP_SUNRISE, 3);
-        s_n5 = wl_panel_list(t5wd, t5tp, t5sr, t5hm, t5wn, t5ht, t5aq, s_l5);
-        s_t6wd=t6wd; s_t6tp=t6tp; s_t6sr=t6sr; s_t6hm=t6hm; s_t6wn=t6wn; s_t6ht=t6ht; s_t6aq=t6aq;
-        s_t5wd=t5wd; s_t5tp=t5tp; s_t5sr=t5sr; s_t5hm=t5hm; s_t5wn=t5wn; s_t5ht=t5ht; s_t5aq=t5aq;
+        s_n5 = wl_panel_list(t5wd, t5tp, t5sr, t5hm, t5wn, t5ht, t5aq, t5oht, s_l5);
+        s_t6wd=t6wd; s_t6tp=t6tp; s_t6sr=t6sr; s_t6hm=t6hm; s_t6wn=t6wn; s_t6ht=t6ht; s_t6aq=t6aq; s_t6oht=t6oht;
+        s_t5wd=t5wd; s_t5tp=t5tp; s_t5sr=t5sr; s_t5hm=t5hm; s_t5wn=t5wn; s_t5ht=t5ht; s_t5aq=t5aq; s_t5oht=t5oht;
         s_pl_init = true;
     }
     int k6 = s_l6[(int)((now_us / rot_us) % s_n6)];
@@ -8324,7 +8404,8 @@ static void display_task(void *arg)
                          + (cfg->tube6_panel_push     ? 1 : 0)
                          + (cfg->tube6_panel_humidity ? 1 : 0)
                          + (cfg->tube6_panel_wind     ? 1 : 0)
-                         + (cfg->tube6_panel_aqi      ? 1 : 0);
+                         + (cfg->tube6_panel_aqi      ? 1 : 0)
+                         + (cfg->tube6_panel_outdoor_ht ? 1 : 0);
                 if (cnt6 < 1) cnt6 = 1;  /* config enforces ≥1 */
                 int cnt5 = (cfg->tube5_panel_weather  ? 1 : 0)
                          + (cfg->tube5_panel_weekdate ? 1 : 0)
@@ -8334,7 +8415,8 @@ static void display_task(void *arg)
                          + (cfg->tube5_panel_push     ? 1 : 0)
                          + (cfg->tube5_panel_humidity ? 1 : 0)
                          + (cfg->tube5_panel_wind     ? 1 : 0)
-                         + (cfg->tube5_panel_aqi      ? 1 : 0);
+                         + (cfg->tube5_panel_aqi      ? 1 : 0)
+                         + (cfg->tube5_panel_outdoor_ht ? 1 : 0);
                 if (cnt5 < 1) cnt5 = 1;
                 uint32_t panel_ms = cfg->tube6_panel_ms < 1000 ? 5000
                                                                 : cfg->tube6_panel_ms;
@@ -8468,21 +8550,21 @@ static void display_task(void *arg)
                     t.tm_min  != s_cx_last_t.tm_min  ||  /* H/T: refresh each minute */
                     t.tm_mday != s_cx_last_t.tm_mday;    /* date panel: new day      */
                 if (cx_render) {
-                    const bool en6[9] = {
+                    const bool en6[10] = {
                         cfg->tube6_panel_weather, cfg->tube6_panel_weekdate,
                         cfg->tube6_panel_ht,      cfg->tube6_panel_temp,
                         cfg->tube6_panel_sunrise, cfg->tube6_panel_push,
                         cfg->tube6_panel_humidity, cfg->tube6_panel_wind,
-                        cfg->tube6_panel_aqi,
+                        cfg->tube6_panel_aqi,      cfg->tube6_panel_outdoor_ht,
                     };
                     render_cx_panel(cfg, &t, 5, en6, s_cx_panel, &s_cx_last_kind);
                     if (dual_cx) {
-                        const bool en5[9] = {
+                        const bool en5[10] = {
                             cfg->tube5_panel_weather, cfg->tube5_panel_weekdate,
                             cfg->tube5_panel_ht,      cfg->tube5_panel_temp,
                             cfg->tube5_panel_sunrise, cfg->tube5_panel_push,
                             cfg->tube5_panel_humidity, cfg->tube5_panel_wind,
-                            cfg->tube5_panel_aqi,
+                            cfg->tube5_panel_aqi,      cfg->tube5_panel_outdoor_ht,
                         };
                         render_cx_panel(cfg, &t, 4, en5, s_cx_panel5, &s_cx_last_kind5);
                     }

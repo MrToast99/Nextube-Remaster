@@ -68,14 +68,17 @@ typedef struct {
     bool             led_weather_override; /* let weather events (e.g. thunderstorm lightning) flash the accent LEDs */
     bool             wlive_animate;        /* WeatherLive: true = realtime animation, false = static (redraw only on clock change) */
     /* Custom clock face — active when clock_face == "custom".  Ignored for
-     * asset-theme clock faces (clock_face == "").                          */
+     * asset-theme clock faces (clock_face == ""), EXCEPT custom_font below,
+     * which also drives the 24H_CX asset-theme info panels.                */
     char             clock_face[16];      /* "" = use theme, "custom" = Custom clock face */
     char             custom_bg[32];       /* background: "WeatherLive" = animated sky, else theme name */
     uint8_t          custom_font_color[3];   /* info-panel / label text RGB */
     uint8_t          custom_glyph_color[3];  /* clock digit glyph RGB */
     bool             custom_shadow;          /* shadow on/off for glyphs and text */
     uint8_t          custom_shadow_color[3]; /* shadow RGB (used when custom_shadow=true) */
-    char             custom_font[64];        /* TTF filename in /spiffs/fonts/; "" = logisoso (u8g2 fallback) */
+    char             custom_font[64];        /* TTF filename in /spiffs/fonts/; "" = logisoso (u8g2 fallback).
+                                               * Also applies to 24H_CX asset-theme Outdoor Temp/Humidity/Wind/
+                                               * AQI/combined-H-T panels (they share wl_text() with WeatherLive). */
     uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
     uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
     bool             spectrum_lcd_wled;     /* true = LCD bars follow the WLED primary colour
@@ -277,6 +280,9 @@ typedef struct {
     bool             tube6_panel_humidity;   /* Outdoor humidity (drop symbol + value) */
     bool             tube6_panel_wind;        /* Wind speed (wind symbol + km/h value) */
     bool             tube6_panel_aqi;         /* Air quality — US EPA AQI (Open-Meteo, keyless) */
+    bool             tube6_panel_outdoor_ht;  /* Outdoor temp (top half) + outdoor humidity (bottom half) —
+                                                * combines what tube6_panel_temp + tube6_panel_humidity would
+                                                * otherwise need two separate rotation slots for. */
     uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
     /* Dual info-panel mode (24H Custom): when true the colon is dropped and an
      * INDEPENDENT info panel is shown on BOTH tube 5 (2nd-from-right, LCD index
@@ -294,6 +300,7 @@ typedef struct {
     bool             tube5_panel_humidity;   /* Outdoor humidity (drop symbol + value) */
     bool             tube5_panel_wind;        /* Wind speed (wind symbol + km/h value) */
     bool             tube5_panel_aqi;         /* Air quality — US EPA AQI (Open-Meteo, keyless) */
+    bool             tube5_panel_outdoor_ht;  /* Outdoor temp (top half) + outdoor humidity (bottom half) */
     char             aqi_standard[8];         /* AQI scale: "auto" (by location) | "us" | "eu" */
     char             update_repo[64];
 } nextube_config_t;

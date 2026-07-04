@@ -204,6 +204,7 @@ static void set_defaults(void)
     s_cfg.tube6_panel_humidity = false;
     s_cfg.tube6_panel_wind     = false;
     s_cfg.tube6_panel_aqi      = false;
+    s_cfg.tube6_panel_outdoor_ht = false;
     s_cfg.tube6_panel_ms       = 5000;
     s_cfg.cx_dual_panel        = false;   /* single panel + colon (original layout) */
     s_cfg.tube5_panel_weather  = false;
@@ -215,6 +216,7 @@ static void set_defaults(void)
     s_cfg.tube5_panel_humidity = false;
     s_cfg.tube5_panel_wind     = false;
     s_cfg.tube5_panel_aqi      = false;
+    s_cfg.tube5_panel_outdoor_ht = false;
     strncpy(s_cfg.aqi_standard, "auto", sizeof(s_cfg.aqi_standard) - 1);
     s_cfg.update_repo[0]       = '\0';
 
@@ -629,6 +631,8 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_wind = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tube6_panel_aqi");
         if (cJSON_IsBool(v)) s_cfg.tube6_panel_aqi = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube6_panel_outdoor_ht");
+        if (cJSON_IsBool(v)) s_cfg.tube6_panel_outdoor_ht = cJSON_IsTrue(v);
 
         /* Dual-panel mode + tube 5's independent panel set */
         v = cJSON_GetObjectItem(root, "cx_dual_panel");
@@ -651,6 +655,8 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.tube5_panel_wind = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "tube5_panel_aqi");
         if (cJSON_IsBool(v)) s_cfg.tube5_panel_aqi = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "tube5_panel_outdoor_ht");
+        if (cJSON_IsBool(v)) s_cfg.tube5_panel_outdoor_ht = cJSON_IsTrue(v);
     }
     json_read_str(root, "aqi_standard", s_cfg.aqi_standard, sizeof(s_cfg.aqi_standard));
     json_read_u16(root, "tube6_panel_ms", &s_cfg.tube6_panel_ms);
@@ -660,7 +666,7 @@ static void parse_json(const char *json, size_t len)
         !s_cfg.tube6_panel_ht      && !s_cfg.tube6_panel_temp     &&
         !s_cfg.tube6_panel_sunrise && !s_cfg.tube6_panel_push     &&
         !s_cfg.tube6_panel_humidity && !s_cfg.tube6_panel_wind &&
-        !s_cfg.tube6_panel_aqi)
+        !s_cfg.tube6_panel_aqi    && !s_cfg.tube6_panel_outdoor_ht)
         s_cfg.tube6_panel_weekdate = true;
     /* Tube 5 only matters in dual mode — guarantee ≥1 panel there too. */
     if (s_cfg.cx_dual_panel &&
@@ -668,7 +674,7 @@ static void parse_json(const char *json, size_t len)
         !s_cfg.tube5_panel_ht      && !s_cfg.tube5_panel_temp     &&
         !s_cfg.tube5_panel_sunrise && !s_cfg.tube5_panel_push     &&
         !s_cfg.tube5_panel_humidity && !s_cfg.tube5_panel_wind &&
-        !s_cfg.tube5_panel_aqi)
+        !s_cfg.tube5_panel_aqi    && !s_cfg.tube5_panel_outdoor_ht)
         s_cfg.tube5_panel_ht = true;
 
     /* Backlight mode */
@@ -1275,6 +1281,7 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "tube6_panel_humidity",   s_cfg.tube6_panel_humidity);
     cJSON_AddBoolToObject  (root, "tube6_panel_wind",       s_cfg.tube6_panel_wind);
     cJSON_AddBoolToObject  (root, "tube6_panel_aqi",        s_cfg.tube6_panel_aqi);
+    cJSON_AddBoolToObject  (root, "tube6_panel_outdoor_ht", s_cfg.tube6_panel_outdoor_ht);
     cJSON_AddNumberToObject(root, "tube6_panel_ms",         s_cfg.tube6_panel_ms);
     cJSON_AddBoolToObject  (root, "cx_dual_panel",          s_cfg.cx_dual_panel);
     cJSON_AddBoolToObject  (root, "tube5_panel_weather",    s_cfg.tube5_panel_weather);
@@ -1286,6 +1293,7 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "tube5_panel_humidity",   s_cfg.tube5_panel_humidity);
     cJSON_AddBoolToObject  (root, "tube5_panel_wind",       s_cfg.tube5_panel_wind);
     cJSON_AddBoolToObject  (root, "tube5_panel_aqi",        s_cfg.tube5_panel_aqi);
+    cJSON_AddBoolToObject  (root, "tube5_panel_outdoor_ht", s_cfg.tube5_panel_outdoor_ht);
     cJSON_AddStringToObject(root, "aqi_standard",           s_cfg.aqi_standard);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off","WLED"};
