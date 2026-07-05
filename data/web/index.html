@@ -1326,6 +1326,19 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
+      <h2 style="color:#ffa000">&#x1F310; Update Repo Override</h2>
+      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.6rem">
+        <code>update_repo</code> overrides the GitHub repo used for firmware/web-UI update
+        checks (default <code>MrToast99/Nextube-Remaster</code>). Importing a settings file
+        that omits this field does <strong>not</strong> clear it — the config loader merges
+        field-by-field, so a stale override can persist silently. Use this to remove it.
+      </p>
+      <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+        <span>Current: <code id="dbg-update-repo-val">(none)</code></span>
+        <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="dbgClearUpdateRepo()">Clear override</button>
+      </div>
+    </div>
+    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
       <h2 style="color:#ffa000">&#x1F527; Hardware Debug</h2>
       <p style="font-size:.8rem;color:var(--dim);margin-bottom:.8rem">
         Runtime ADC pin selection — change takes effect immediately without a rebuild.
@@ -3623,6 +3636,33 @@ function dbgShow() {
     dbgSetGate(cfg.mic_silence_gate);
   if (cfg && cfg.time_discipline_mode != null)
     $('dbg-tdm').value = String(cfg.time_discipline_mode);
+  dbgRefreshUpdateRepo();
+}
+
+/* Reflect the current update_repo override (or its absence) in the debug panel. */
+function dbgRefreshUpdateRepo() {
+  const el = $('dbg-update-repo-val');
+  if (el) el.textContent = (cfg && cfg.update_repo) ? cfg.update_repo : '(none — using default)';
+}
+
+/* Clear a stale update_repo override.  Sending it as an explicit empty string
+ * (rather than just omitting it) is required — config_set_json() merges
+ * field-by-field, so an omitted field leaves the existing NVS value alone. */
+async function dbgClearUpdateRepo() {
+  try {
+    const r = await secureFetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ update_repo: '' })
+    });
+    if (!r.ok) { toast('Clear failed: ' + await r.text(), true); return; }
+    if (cfg) cfg.update_repo = '';
+    UPDATE_REPO     = 'MrToast99/Nextube-Remaster';
+    UPDATE_API_URL  = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+    UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
+    const gl = $('github-repo-link'); if (gl) gl.href = UPDATE_REPO_URL;
+    dbgRefreshUpdateRepo();
+    toast('update_repo cleared — using default repo');
+  } catch(e) { toast('Clear failed: ' + e.message, true); }
 }
 
 /* Switch clock-disciplining mode live (partial settings update — no reboot). */
