@@ -99,7 +99,6 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Clock themes (Nixie/Digital/Flip art) | ✅ Working |
 | WeatherLive procedural theme (animated sky, sun/moon phase, stars, live weather) | ✅ Working |
 | Pushed images on 24H Custom tube 5/6 (`POST /api/cx_image`) | ✅ Working |
-| Countdown / Pomodoro timer modes | ✅ Working |
 | Album/slideshow mode (sliding window — each tube shows a different image) | ✅ Working |
 | Date mode (date display, DD/MM/YY) | ✅ Working |
 | Spectrum mode (microphone audio visualiser — 24 Goertzel bands, 4 per tube → LED + LCD) | ✅ Working |
@@ -667,7 +666,6 @@ The web UI provides:
   - Social Media Counters (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters))
   - WLED Sync (see [WLED Sync](#wled-sync))
   - Home Assistant MQTT (broker, port, credentials, optional telemetry groups — see [Home Assistant MQTT](#home-assistant-mqtt))
-  - Countdown and Pomodoro durations
 - **Audio** — volume, ticker notification sound file
 - **System**
   - OTA firmware update and web UI / LittleFS update
@@ -735,8 +733,6 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 |---|---|
 | **Clock** | 12H or 24H digital clock. **24H Custom** shows rotating info panel(s) on the right-hand tube(s) (configurable under Display → 24H Custom). Available panels: Day+date, Indoor temp & humidity (SHT30), Outdoor temperature + today's Hi/Lo, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon, and **Pushed image** (an 80×160 JPG you POST from an external script — see [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)). **Single-panel (default):** `H H : M M` with one rotating panel on tube 6. **Dual-panel:** the colon is dropped (`H H  M M`) and tubes 5 **and** 6 each show an **independently-configured** rotating panel — each tube has its own enabled-panel set and cycles through it on the shared rotation interval. Selecting the **WeatherLive** theme replaces the clock with a fully procedural animated weather sky — see [WeatherLive theme](#weatherlive-theme). |
 | **Date** | Date display (DD/MM/YY). Can be enabled alongside Clock — both appear as separate stops in the touch cycle. |
-| **Countdown** | Configurable countdown timer. Middle touch pauses/resumes. |
-| **Pomodoro** | Work/break timer with configurable work and break durations. Middle touch pauses/resumes. Automatically flips between work and break phases. |
 | **YouTube** | Live subscriber count. Direct fetch or via local relay (recommended — see [Social Media Counters](#social-media-counters)). |
 | **Instagram** | Live follower count. Fetched directly from Instagram's unofficial public API — no account or relay required. |
 | **TikTok** | Live follower count. Requires the local relay (`social_relay.py`) — TikTok's bot detection blocks direct ESP32 fetches. |
@@ -763,7 +759,7 @@ Enable **Theme Rotation** in Display settings to automatically cycle through the
 | Button | Action |
 |---|---|
 | LEFT | Previous enabled mode |
-| MIDDLE | **Countdown / Pomodoro:** pause / resume the timer. **All other modes:** toggle LCD displays on/off (backlight) |
+| MIDDLE | Toggle LCD displays on/off (backlight) |
 | RIGHT | Next enabled mode |
 | LEFT + RIGHT (hold 15 s) | Force the setup AP on — broadcasts `Nextube-Setup` so you can reach the web UI at `192.168.4.1` to fix WiFi credentials |
 
@@ -1269,14 +1265,12 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 
 ### Built-in Themes
 
-Twelve themes ship pre-loaded in LittleFS with every firmware image. Select them from **Display → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
+Ten themes ship pre-loaded in LittleFS with every firmware image. Select them from **Display → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
 
 | Theme | Style |
 |---|---|
 | **NixieOY** *(default)* | Warm amber Nixie-tube glyphs on a dark background — replicates classic neon vacuum tubes |
 | **DarkSlate** | Cool slate-blue digits on near-black — modern minimalist |
-| **DotMatrixRG** | Red/green dot-matrix grid — retro scoreboard look |
-| **DotMatrixY** | Amber dot-matrix grid — classic departure-board aesthetic |
 | **FlipClock** | Split-flap flip animation — simulates the mechanical split-flap display |
 | **Formula1** | High-contrast racing-style segmented digits |
 | **GlitchGR** | Green-on-dark with glitch-art distortion |
@@ -1308,7 +1302,7 @@ All built-in themes include the complete required asset set: digits, AMPM indica
 
 Notes:
 - WeatherLive renders a **subset** of the 24H Custom panels procedurally and **ignores** the Weather-icon and Pushed-image panels (those need JPEG assets / asset themes); in the web UI the Weather-icon panel option is hidden while WeatherLive is selected.
-- In non-Clock modes (weather, follower counts, countdown, …) WeatherLive has no JPEG assets, so digits/symbols are drawn as procedural glyphs on a black background; the social-media platform logos still load from the built-in system assets.
+- In non-Clock modes (weather, follower counts, …) WeatherLive has no JPEG assets, so digits/symbols are drawn as procedural glyphs on a black background; the social-media platform logos still load from the built-in system assets.
 
 ### Custom Face
 
@@ -1389,10 +1383,6 @@ All paths are relative to `/images/themes/{ThemeName}/`.
 │   ├── am.jpg           ← 12H clock AM indicator
 │   ├── pm.jpg           ← 12H clock PM indicator
 │   ├── colon.jpg        ← clock separator (tube 2)
-│   ├── countdown.jpg    ← countdown mode label (tube 0)
-│   ├── pomodoro.jpg     ← pomodoro mode label (tube 0)
-│   ├── pomodorosb.jpg   ← pomodoro work-session indicator (tube 5)
-│   ├── pomodorolb.jpg   ← pomodoro break indicator (tube 5)
 │   ├── youtube.jpg      ← YouTube mode icon (tube 0)
 │   ├── instagram.jpg    ← Instagram mode icon (tube 0)
 │   ├── tiktok.jpg       ← TikTok mode icon (tube 0)

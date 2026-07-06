@@ -147,9 +147,6 @@ select option{background:var(--accent);color:var(--text)}
     <h2 data-i18n="dash.quick_actions">Quick Actions</h2>
     <div class="btn-group">
       <button class="btn btn-primary" data-mode-bit="0"  onclick="setMode('Clock')" data-i18n="mode.clock">Clock</button>
-      <button class="btn btn-outline" data-mode-bit="1"  onclick="setMode('Countdown')" data-i18n="mode.countdown">Countdown</button>
-
-      <button class="btn btn-outline" data-mode-bit="3"  onclick="setMode('Pomodoro')" data-i18n="mode.pomodoro">Pomodoro</button>
       <button class="btn btn-outline" data-mode-bit="4"  onclick="setMode('Date')" data-i18n="mode.date">Date</button>
       <button class="btn btn-outline" data-mode-bit="5"  onclick="setMode('Album')" data-i18n="mode.album">Album</button>
       <button class="btn btn-outline" data-mode-bit="6"  onclick="setMode('Weather')" data-i18n="mode.weather">Weather</button>
@@ -197,6 +194,24 @@ select option{background:var(--accent);color:var(--text)}
             <option value="0" data-i18n="svc.wlive_static">Static (updates ~10 min)</option>
           </select>
         </div>
+        <div class="field" id="custom-bg-fill-wrap" style="display:none">
+          <label>Fill style</label>
+          <select id="f-custom-bg-fill" onchange="onCustomBgFillChange()">
+            <option value="solid">Solid color</option>
+            <option value="linear_v">Linear gradient (vertical)</option>
+            <option value="linear_h">Linear gradient (horizontal)</option>
+            <option value="diagonal">Linear gradient (diagonal)</option>
+            <option value="radial">Radial gradient</option>
+          </select>
+        </div>
+        <div class="field" id="custom-bg-color1-wrap" style="display:none">
+          <label id="custom-bg-color1-label">Fill color</label>
+          <input type="color" id="f-custom-bg-color1" value="#000000" onchange="markDirty()" style="height:2rem;cursor:pointer">
+        </div>
+        <div class="field" id="custom-bg-color2-wrap" style="display:none">
+          <label>Gradient end color</label>
+          <input type="color" id="f-custom-bg-color2" value="#3c3c78" onchange="markDirty()" style="height:2rem;cursor:pointer">
+        </div>
       </div>
       <div class="field">
         <label>Font color <span style="color:var(--dim);font-size:.82rem">(info panels &amp; labels)</span></label>
@@ -223,6 +238,18 @@ select option{background:var(--accent);color:var(--text)}
           <select id="f-custom-font" class="ttf-font-select" style="flex:1" onchange="onFontSelectChange(this)"><option value="">Logisoso (built-in)</option></select>
           <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadFontList(true)" title="Scan for TTF files on device">↺</button>
         </div>
+      </div>
+    </div>
+    <!-- DotMatrix theme's on/off dot colors — every cell in a glyph's 7x14
+         grid is always painted, so both colors are independently set. -->
+    <div id="dotmatrix-color-wrap" style="display:none">
+      <div class="field">
+        <label>Dot color (on) <span style="color:var(--dim);font-size:.82rem">(lit cells)</span></label>
+        <input type="color" id="f-dm-on-color" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+      </div>
+      <div class="field">
+        <label>Dot color (off) <span style="color:var(--dim);font-size:.82rem">(unlit cells)</span></label>
+        <input type="color" id="f-dm-off-color" value="#191919" onchange="markDirty()" style="height:2rem;cursor:pointer">
       </div>
     </div>
     <div class="field"><label data-i18n="disp.time_format">Time Format</label>
@@ -547,9 +574,6 @@ select option{background:var(--accent);color:var(--text)}
     <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="disp.enabled_modes_desc">Choose which modes are accessible via the touch buttons. Clock and Date can both be enabled at the same time.</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-clock" checked onchange="markDirty()"> <span data-i18n="mode.clock">Clock</span> <span style="font-size:.73rem;color:var(--dim)" data-i18n="disp.hint_time">(time)</span></label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-countdown" onchange="markDirty()"> <span data-i18n="mode.countdown">Countdown</span></label>
-
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-pomodoro" onchange="markDirty()"> <span data-i18n="mode.pomodoro">Pomodoro</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-date" onchange="markDirty()"> <span data-i18n="mode.date">Date</span> <span style="font-size:.73rem;color:var(--dim)" data-i18n="disp.hint_full_date">(full date)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album" onchange="markDirty()"> <span data-i18n="mode.album">Album</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather" onchange="markDirty()"> <span data-i18n="mode.weather">Weather</span></label>
@@ -596,9 +620,6 @@ select option{background:var(--accent);color:var(--text)}
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.35rem .8rem">
         <!-- each row: [checkbox] [name flex] [weight input] [× label] -->
         <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="0"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Clock</span><input type="number" class="rot-weight-in" data-bit="0"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
-        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="1"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Countdown</span><input type="number" class="rot-weight-in" data-bit="1"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
-
-        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="3"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Pomodoro</span><input type="number" class="rot-weight-in" data-bit="3"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
         <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="4"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Date</span><input type="number" class="rot-weight-in" data-bit="4"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
         <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="5"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Album</span><input type="number" class="rot-weight-in" data-bit="5"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
         <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="6"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Weather</span><input type="number" class="rot-weight-in" data-bit="6"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
@@ -1048,28 +1069,6 @@ select option{background:var(--accent);color:var(--text)}
     </div>
   </div><!-- #wled-card -->
 
-  <div class="card" id="timer-card">
-    <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleTimerCard()">
-      <span id="timer-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
-      <h2 style="margin:0;border:none;padding:0;flex:1" data-i18n="svc.timer">Timer Settings</h2>
-    </div>
-    <div id="timer-body" style="display:none;margin-top:.9rem">
-    <div class="row">
-      <div class="field"><label data-i18n="svc.countdown_dur">Countdown Duration (minutes)</label>
-        <input id="f-countdown" type="number" min="1" max="999" value="1">
-      </div>
-    </div>
-    <div class="row">
-      <div class="field"><label data-i18n="svc.pomo_work">Pomodoro Work Duration (minutes)</label>
-        <input id="f-pomo-work" type="number" min="1" max="999" value="25">
-      </div>
-      <div class="field"><label data-i18n="svc.pomo_break">Pomodoro Break Duration (minutes)</label>
-        <input id="f-pomo-break" type="number" min="1" max="999" value="5">
-      </div>
-    </div>
-    </div>
-  </div>
-
   <div class="card" id="album-card">
     <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleAlbumCard()">
       <span id="album-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
@@ -1118,30 +1117,6 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
     <div class="field meter"><label data-i18n="hw.volume">Volume</label><input type="range" id="f-vol" min="0" max="100"><span id="v-vol">20</span>%</div>
-    <div class="field"><label data-i18n="hw.music_file">Clock Music File</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input id="f-music" type="text" style="flex:1">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-music')">▶ <span data-i18n="hw.test">Test</span></button>
-      </div>
-    </div>
-    <div class="field"><label data-i18n="hw.bell">Bell Sound</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input id="f-bell" type="text" style="flex:1">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-bell')">▶ <span data-i18n="hw.test">Test</span></button>
-      </div>
-    </div>
-    <div class="field"><label data-i18n="hw.tone">Tone Sound (Pomodoro/Countdown)</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input id="f-tone" type="text" style="flex:1">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-tone')">▶ <span data-i18n="hw.test">Test</span></button>
-      </div>
-    </div>
-    <div class="field"><label data-i18n="hw.timer_sound">Timer Sound</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input id="f-timer" type="text" style="flex:1">
-        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-timer')">▶ <span data-i18n="hw.test">Test</span></button>
-      </div>
-    </div>
     <div class="field"><label data-i18n="hw.click_sound">Button Click Sound</label>
       <div style="display:flex;gap:8px;align-items:center">
         <input id="f-click" type="text" style="flex:1" placeholder="/spiffs/audio/click.wav">
@@ -1587,7 +1562,7 @@ Object.assign(I18N.en, {
   "dash.local_time":"Local Time","dash.mode":"Mode","dash.weather":"Weather",
   "dash.local_sensor":"Local Sensor","dash.subscribers":"Subscribers",
   "dash.free_heap":"Free Heap","dash.quick_actions":"Quick Actions",
-  "mode.clock":"Clock","mode.countdown":"Countdown","mode.pomodoro":"Pomodoro",
+  "mode.clock":"Clock",
   "mode.date":"Date","mode.album":"Album","mode.weather":"Weather","mode.spectrum":"Spectrum",
   "mode.youtube":"YouTube","mode.instagram":"Instagram","mode.tiktok":"TikTok","mode.mastodon":"Mastodon"
 });
@@ -1669,8 +1644,6 @@ Object.assign(I18N.en, {
   "svc.mqtt_help":"Exposes temperature, humidity (SHT30), display mode, backlight on/off, and brightness as HA entities. Uses MQTT auto-discovery — no manual HA configuration required. Uses plain <code>mqtt://</code> (no TLS).",
   "svc.wled":"WLED Sync","svc.wled_enable":"Enable listener task","svc.udp_port":"UDP Port","svc.udp_port_hint":"(default 21324)",
   "svc.wled_help":"Listens for <strong>WLED UDP Notifier v2</strong> broadcasts on your LAN and mirrors the primary colour & brightness to Nextube's accent LEDs. Requires <strong>WLED Controller</strong> to be selected as the LED Accent Lighting mode (Display tab).<br>On each WLED device: <strong>Config → Sync Interfaces → UDP Sync → Send on direct change ✓</strong> — no target IP needed, WLED broadcasts to the whole subnet.",
-  "svc.timer":"Timer Settings","svc.countdown_dur":"Countdown Duration (minutes)",
-  "svc.pomo_work":"Pomodoro Work Duration (minutes)","svc.pomo_break":"Pomodoro Break Duration (minutes)",
   "svc.album":"Album Settings","svc.slide_dur":"Slide Duration (ms)",
   "svc.shuffle":"Shuffle — randomise playback order on each album load",
   "svc.save":"Save Services"
@@ -1712,8 +1685,7 @@ Object.assign(I18N.en, {
 Object.assign(I18N.en, {
   "hw.sht30":"Indoor Sensor (SHT30)","hw.temp_offset":"Temperature Offset",
   "hw.audio":"Audio Settings","hw.enable_audio":"Enable audio output","hw.volume":"Volume",
-  "hw.music_file":"Clock Music File","hw.bell":"Bell Sound","hw.tone":"Tone Sound (Pomodoro/Countdown)",
-  "hw.timer_sound":"Timer Sound","hw.click_sound":"Button Click Sound","hw.test":"Test",
+  "hw.click_sound":"Button Click Sound","hw.test":"Test",
   "hw.enable_click":"Enable click sound on button press","hw.save":"Save Hardware",
   "hw.ticker_sound":"Ticker Notification Sound (MQTT / Home Assistant)",
   "hw.enable_ticker_sound":"Play sound when ticker text arrives via MQTT/HA"
@@ -2167,7 +2139,7 @@ async function api(path, opts) {
 
 /* ── Theme list (dynamic from /api/themes) ─────────── */
 const DEFAULT_THEMES = [
-  'DarkSlate','DotMatrixRG','DotMatrixY','FlipClock','Formula1',
+  'DarkSlate','DotMatrix','FlipClock','Formula1',
   'GlitchGR','LightFuture','NixieOY','NotionRain','RedDigits',
   'RetroPaper','WireMesh'
 ];
@@ -2180,6 +2152,11 @@ function updateClockFaceControls() {
   const isCustom = face === 'Custom';
   const isWl     = !isCustom && face.startsWith('WeatherLive');
   const isProcedural = isCustom || isWl;
+  const isDotMatrix = face === 'DotMatrix';
+
+  /* DotMatrix on/off dot colors — only meaningful for that one theme. */
+  const dmWrap = $('dotmatrix-color-wrap');
+  if (dmWrap) dmWrap.style.display = isDotMatrix ? '' : 'none';
 
   /* Legacy WeatherLive animation toggle */
   const wlWrap = $('wlive-anim-wrap');
@@ -2207,11 +2184,17 @@ function updateClockFaceControls() {
     if (cxFontWasHidden && cxFontRow.style.display !== 'none') loadFontList();
   }
 
-  /* Hide CX weather/push panel options for any procedural mode */
+  /* Hide CX weather/push panel options for any procedural mode.
+   * Restoring 'flex' explicitly (not '') matters: these labels' flex layout
+   * (gap:.5rem between checkbox and text) is set via inline style, and
+   * clearing display down to '' falls back to the browser default for
+   * <label> (inline) instead of restoring flex — collapsing the gap so the
+   * checkbox and text sit right next to each other, unlike every other row
+   * in this list whose display never gets touched by JS. */
   ['f-cx-weather-row', 'f-cx5-weather-row',
    'f-cx-push-row',    'f-cx5-push-row'].forEach(id => {
     const el = $(id);
-    if (el) el.style.display = isProcedural ? 'none' : '';
+    if (el) el.style.display = isProcedural ? 'none' : 'flex';
   });
 }
 function updateWliveVisibility() { updateClockFaceControls(); } /* compat alias */
@@ -2220,8 +2203,23 @@ function onCustomBgChange() {
   markDirty();
   const bg = ($('f-custom-bg').value || '');
   const isWl = bg.startsWith('WeatherLive');
+  const isCc = bg === 'CustomColor';
   const w = $('wlive-anim-custom-wrap');
   if (w) w.style.display = isWl ? '' : 'none';
+  ['custom-bg-fill-wrap', 'custom-bg-color1-wrap'].forEach(id => {
+    const el = $(id);
+    if (el) el.style.display = isCc ? '' : 'none';
+  });
+  if (isCc) onCustomBgFillChange();
+  else { const c2 = $('custom-bg-color2-wrap'); if (c2) c2.style.display = 'none'; }
+}
+function onCustomBgFillChange() {
+  markDirty();
+  const isSolid = ($('f-custom-bg-fill').value || 'solid') === 'solid';
+  const c2 = $('custom-bg-color2-wrap');
+  if (c2) c2.style.display = isSolid ? 'none' : '';
+  const lbl = $('custom-bg-color1-label');
+  if (lbl) lbl.textContent = isSolid ? 'Fill color' : 'Gradient start color';
 }
 function onCustomShadowChange() {
   markDirty();
@@ -2250,7 +2248,8 @@ function populateThemes(themes) {
   });
   if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
 
-  /* Background dropdown: "WeatherLive" first, then non-WeatherLive themes */
+  /* Background dropdown: "WeatherLive" and "CustomColor" first, then
+   * non-WeatherLive themes */
   const bg = $('f-custom-bg');
   if (bg) {
     const prevBg = bg.value;
@@ -2258,7 +2257,10 @@ function populateThemes(themes) {
     const wlOpt = document.createElement('option');
     wlOpt.value = 'WeatherLive'; wlOpt.textContent = 'WeatherLive (animated sky)';
     bg.appendChild(wlOpt);
-    const bgExcluded = new Set(['Formula1','glitchGR','lightfuture','notionrain','reddigits']);
+    const ccOpt = document.createElement('option');
+    ccOpt.value = 'CustomColor'; ccOpt.textContent = 'Custom color / gradient';
+    bg.appendChild(ccOpt);
+    const bgExcluded = new Set(['Formula1','GlitchGR','LightFuture','NotionRain','RedDigits']);
     themes.filter(t => !t.startsWith('WeatherLive') && !bgExcluded.has(t)).forEach(t => {
       const o = document.createElement('option');
       o.value = t; o.textContent = t;
@@ -2365,6 +2367,9 @@ async function loadSettings() {
   const rgbHex = arr => arr && arr.length === 3
     ? '#' + arr.map(v => v.toString(16).padStart(2,'0')).join('')
     : '#ffffff';
+  if ($('f-custom-bg-fill'))   $('f-custom-bg-fill').value   = cfg.custom_bg_fill || 'solid';
+  if ($('f-custom-bg-color1')) $('f-custom-bg-color1').value = rgbHex(cfg.custom_bg_color1);
+  if ($('f-custom-bg-color2')) $('f-custom-bg-color2').value = rgbHex(cfg.custom_bg_color2);
   if ($('f-custom-bg')) {
     $('f-custom-bg').value = cfg.custom_bg || 'WeatherLive';
     onCustomBgChange();
@@ -2377,6 +2382,8 @@ async function loadSettings() {
   if ($('f-custom-glyph-color'))  $('f-custom-glyph-color').value  = rgbHex(cfg.custom_glyph_color);
   if ($('f-custom-shadow'))       $('f-custom-shadow').value       = cfg.custom_shadow !== false ? '1' : '0';
   if ($('f-custom-shadow-color')) $('f-custom-shadow-color').value = rgbHex(cfg.custom_shadow_color);
+  if ($('f-dm-on-color'))  $('f-dm-on-color').value  = rgbHex(cfg.dm_on_color);
+  if ($('f-dm-off-color')) $('f-dm-off-color').value = rgbHex(cfg.dm_off_color);
   {
     const _fval = cfg.custom_font || '';
     document.querySelectorAll('.ttf-font-select').forEach(_fsel => {
@@ -2528,10 +2535,6 @@ async function loadSettings() {
   onVsiteChange();    /* sync YouTube/Bilibili field visibility */
   onYtMethodChange(); /* sync API key row visibility */
   { const _vol = cfg.volume != null ? cfg.volume : 20; $('f-vol').value = _vol; $('v-vol').textContent = _vol; }
-  $('f-music').value = cfg.music_file || '';
-  $('f-bell').value = cfg.bell_file || '';
-  $('f-tone').value  = cfg.tone_file  || '';
-  $('f-timer').value = cfg.timer_file || '';
   $('f-click').value = cfg.click_file || '';
   $('f-btn-sound').checked = cfg.button_sound !== false;
   $('f-ticker-snd').value = cfg.ticker_file || '';
@@ -2542,9 +2545,6 @@ async function loadSettings() {
     $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
   if (cfg.mic_silence_gate != null && $('dbg-gate-num'))
     dbgSetGate(cfg.mic_silence_gate);
-  $('f-countdown').value    = cfg.default_countdown_time || 1;
-  $('f-pomo-work').value    = cfg.pomodoro_work  || 25;
-  $('f-pomo-break').value   = cfg.pomodoro_break || 5;
   $('f-album-switch').value = cfg.album_switch_time || 2000;
   $('f-album-shuffle').checked = !!cfg.album_shuffle;
   $('f-wx-panel').value   = Math.round((cfg.weather_panel_ms || 5000) / 1000);
@@ -2557,8 +2557,6 @@ async function loadSettings() {
   /* Enabled modes bitmask.  Default 0xFF = all modes on (Clock and Date are independent). */
   const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
   $('m-clock').checked       = !!(em & (1 << 0));
-  $('m-countdown').checked   = !!(em & (1 << 1));
-  $('m-pomodoro').checked    = !!(em & (1 << 3));
   $('m-date').checked        = !!(em & (1 << 4));
   $('m-album').checked       = !!(em & (1 << 5));
   $('m-weather').checked     = !!(em & (1 << 6));
@@ -2745,7 +2743,6 @@ function toggleCard(bodyId, arrowId) {
   const arrow = $(arrowId);
   if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
 }
-function toggleTimerCard()   { toggleCard('timer-body',   'timer-arrow'); }
 function toggleAlbumCard()   { toggleCard('album-body',   'album-arrow'); }
 function toggleWeatherCard() { toggleCard('weather-body', 'weather-arrow'); }
 function toggleSocialCard()  { toggleCard('social-body',  'social-arrow'); }
@@ -2832,8 +2829,6 @@ function applyColorToAll() {
 /* ── Read current enabled-modes bitmask from checkboxes ─────────── */
 function readEnabledModes() {
   return ($('m-clock').checked      ? (1 << 0)  : 0) |
-         ($('m-countdown').checked  ? (1 << 1)  : 0) |
-         ($('m-pomodoro').checked   ? (1 << 3)  : 0) |
          ($('m-date').checked       ? (1 << 4)  : 0) |
          ($('m-album').checked      ? (1 << 5)  : 0) |
          ($('m-weather').checked    ? (1 << 6)  : 0) |
@@ -3054,11 +3049,16 @@ async function saveSettings() {
       : $('f-wlive-anim').value === '1'),
     clock_face: $('f-theme').value === 'Custom' ? 'custom' : '',
     custom_bg: $('f-custom-bg') ? $('f-custom-bg').value : 'WeatherLive',
+    custom_bg_fill: $('f-custom-bg-fill')?.value || 'solid',
+    custom_bg_color1: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-bg-color1')?.value || '#000000').replace('#','')),
+    custom_bg_color2: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-bg-color2')?.value || '#3c3c78').replace('#','')),
     custom_font_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-font-color')?.value || '#ffffff').replace('#','')),
     custom_glyph_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-glyph-color')?.value || '#ffffff').replace('#','')),
     custom_shadow: $('f-custom-shadow') ? $('f-custom-shadow').value === '1' : true,
     custom_shadow_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-shadow-color')?.value || '#000000').replace('#','')),
     custom_font: $('f-custom-font')?.value || '',
+    dm_on_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-dm-on-color')?.value || '#ffffff').replace('#','')),
+    dm_off_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-dm-off-color')?.value || '#191919').replace('#','')),
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     spectrum_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-color').value.replace('#','')),
     spectrum_lcd_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-lcd-color').value.replace('#','')),
@@ -3087,7 +3087,7 @@ async function saveSettings() {
     /* Send empty key when relay method selected so firmware uses the relay path */
     youtube_key: ($('yt-method').value === 'relay') ? '' : $('f-ytkey').value,
     bili_uid: $('f-buid').value,
-    volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
+    volume: +$('f-vol').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked, mic_enabled: !!$('m-spectrum').checked,
     ticker_file: $('f-ticker-snd').value, ticker_sound: $('f-ticker-snd-en').checked,
     weather_enabled: $('f-weather-en').checked,
@@ -3129,9 +3129,6 @@ async function saveSettings() {
     lcd_col_offset: Array.from(document.querySelectorAll('.f-col-off')).map(el => parseInt(el.value)||0),
     lcd_row_offset: Array.from(document.querySelectorAll('.f-row-off')).map(el => parseInt(el.value)||0),
     lcd_tube_brightness: Array.from(document.querySelectorAll('.f-tube-br')).map(el => parseInt(el.value)||100),
-    default_countdown_time: +$('f-countdown').value,
-    pomodoro_work:  +$('f-pomo-work').value,
-    pomodoro_break: +$('f-pomo-break').value,
     album_switch_time: +$('f-album-switch').value,
     album_shuffle: $('f-album-shuffle').checked,
     weather_panel_ms:  Math.max(1000, +$('f-wx-panel').value * 1000),

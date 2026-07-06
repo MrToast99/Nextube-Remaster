@@ -11,9 +11,8 @@
  *   /images/themes/{theme}/MutiInfo/Temperature/{degreec,degreef,minus}.jpg
  *   /images/themes/{theme}/MutiInfo/Humidity/{degree,humidity}.jpg
  *
- * Available themes: NixieOY, FlipClock, DarkSlate, DotMatrixRG, DotMatrixY,
- *   Formula1, GlitchGR, LightFuture, NotionRain, RedDigits, RetroPaper,
- *   WireMesh
+ * Available themes: NixieOY, FlipClock, DarkSlate, Formula1, GlitchGR,
+ *   LightFuture, NotionRain, RedDigits, RetroPaper, WireMesh
  */
 #pragma once
 #include <stdint.h>
@@ -230,13 +229,6 @@ void display_busy_clear(void);
  *  custom font, etc. — appear within one tick regardless of change-detection
  *  cursor state.  Safe to call from any task. */
 void display_config_changed(void);
-
-/** Reset the countdown / pomodoro internal timer (call on mode entry). */
-void display_timer_reset(void);
-
-/** Toggle the countdown / pomodoro timer between running and paused.
- *  Safe to call from any task; uses an internal mutex. */
-void display_timer_toggle(void);
 
 /** Invalidate the album image cache.  Call after adding or removing files
  *  under /spiffs/images/album/ so the display task re-scans the directory

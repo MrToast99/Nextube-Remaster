@@ -157,16 +157,11 @@ static void on_touch(touch_pad_id_t pad)
         break;
     }
     case TOUCH_MIDDLE: {
-        /* In countdown / pomodoro: start / stop the timer.
-         * In all other modes: toggle backlight on/off. */
-        if (current_mode == APP_MODE_COUNTDOWN || current_mode == APP_MODE_POMODORO) {
-            display_timer_toggle();
-        } else {
-            const char *j = backlight_on
-                ? "{\"backlight_onoff\":\"OFF\"}"
-                : "{\"backlight_onoff\":\"ON\"}";
-            config_set_json(j, strlen(j));
-        }
+        /* Toggle backlight on/off. */
+        const char *j = backlight_on
+            ? "{\"backlight_onoff\":\"OFF\"}"
+            : "{\"backlight_onoff\":\"ON\"}";
+        config_set_json(j, strlen(j));
         break;
     }
     }

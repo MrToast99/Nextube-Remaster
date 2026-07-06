@@ -157,11 +157,11 @@ static volatile bool    s_cx_push_valid[2] = { false, false };
 static volatile uint32_t s_cx_push_seq     = 0;
 static SemaphoreHandle_t s_cx_push_mutex   = NULL;
 
-/* ── Timer / burn-in mutex ───────────────────────────────────────────────────
+/* ── Burn-in mutex ───────────────────────────────────────────────────────────
  * Declared here (before the burn-in setter functions) so the setters can use
  * it at any point in the file.  Initialised in display_task() before the first
- * render tick.  Guards both the countdown/pomodoro timer fields and the paired
- * burn-in/snow mask+end_time writes so they are never observed in a torn state. */
+ * render tick.  Guards the paired burn-in/snow mask+end_time writes so they
+ * are never observed in a torn state. */
 static SemaphoreHandle_t s_timer_mutex = NULL;
 
 /* ── Anti burn-in ────────────────────────────────────────────────────────── */
@@ -1253,6 +1253,16 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
         if (h_out) *h_out = 0;
         return NULL;
     }
+    /* "DotMatrix" ships no JPEG assets either, for the same reason — same
+     * silent-absent treatment so its many indirect img_cache_get() callers
+     * (ht_sample_theme_color's Numbers/0.jpg sampling, seed_fb_blank/
+     * cx_load_text_bg's blank.jpg, colon_box_compute, flip_prime_blank, …)
+     * take their NULL/black fallback without flooding the log. */
+    if (strstr(path, "/themes/DotMatrix/")) {
+        if (w_out) *w_out = 0;
+        if (h_out) *h_out = 0;
+        return NULL;
+    }
 
     /* ── Cache lookup ── */
     for (int i = 0; i < IMG_CACHE_ENTRIES; i++) {
@@ -1342,6 +1352,63 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
 /* Defined later (with the WeatherLive renderer): draws a theme asset
  * procedurally over black when the active theme ships no JPEG assets. */
 static void wl_render_asset(int tube, const char *path);
+/* Defined later (near wl_render_asset): the "DotMatrix" theme's analogous
+ * procedural asset dispatcher — same idea, different (dot-matrix) glyphs. */
+static void dm_render_asset(int tube, const char *path);
+/* Defined later (with the DotMatrix font block): auto-sizing multi-char
+ * dot-matrix label, used by wl_text()'s dm branch. */
+static void dm_draw_text(uint8_t *fb, int cx, int cy, const char *str,
+                          int on_r, int on_g, int on_b, int off_r, int off_g, int off_b);
+/* Defined later (with the DotMatrix font block): sunrise/sunset "HH:MM"
+ * string drawn with the dedicated small "quarter panel" digit glyphs. */
+static void dm_draw_hhmm(uint8_t *fb, int cx, int cy, const char *str, int cell, int gap,
+                          int on_r, int on_g, int on_b, int off_r, int off_g, int off_b);
+/* Defined later (with the DotMatrix font block): draws one glyph's 7x14
+ * grid, used directly by render_cx_panel()'s sunrise/sunset arrows as well
+ * as internally by dm_render_asset()/dm_draw_text_at(). */
+static void dm_draw_glyph(uint8_t *fb, int cx, int cy, int cp, int cell, int gap,
+                           bool clip_edges,
+                           int on_r, int on_g, int on_b, int off_r, int off_g, int off_b);
+/* Defined later (with the DotMatrix font block): tiles the whole 80x160
+ * canvas with off-colour cells at the given pitch, so every element drawn
+ * on top (icons, text) at that same pitch shares one continuous dot grid
+ * instead of floating on black at a mismatched density. */
+static void dm_paint_grid_bg(uint8_t *fb, int cell, int gap, int off_r, int off_g, int off_b);
+/* Defined later (with the DotMatrix font block): the pitch (2 or 1)
+ * dm_draw_text() would auto-pick for `str` on its own — exposed so a
+ * caller compositing several text elements (or text + an icon) into one
+ * tube can compute each element's own required pitch and use the smallest
+ * for all of them, rather than letting each pick independently. */
+static int dm_fit_cell(const char *str);
+/* Defined later (with the DotMatrix font block): like dm_draw_text() but
+ * with an explicit pitch instead of auto-sizing per call — for the same
+ * multi-element-sharing-one-tube case dm_fit_cell() is for. */
+static void dm_draw_text_p(uint8_t *fb, int cx, int cy, const char *str, int cell,
+                            int on_r, int on_g, int on_b, int off_r, int off_g, int off_b);
+/* Defined later (with the DotMatrix font block): "on-only" counterparts to
+ * dm_draw_glyph()/dm_draw_text_p()/dm_draw_text() — paint just the
+ * on-colour cells (off cells left untouched) with positions snapped to the
+ * pitch grid, for use over a dm_paint_grid_bg() backdrop instead of
+ * redundantly repainting the same off-colour the background already shows. */
+static void dm_draw_glyph_on(uint8_t *fb, int cx, int cy, int cp, int cell, int gap,
+                              bool clip_edges, int on_r, int on_g, int on_b);
+static void dm_draw_text_p_on(uint8_t *fb, int cx, int cy, const char *str, int cell,
+                               int on_r, int on_g, int on_b);
+static void dm_draw_text_on(uint8_t *fb, int cx, int cy, const char *str, int on_r, int on_g, int on_b);
+/* Defined later (with the DotMatrix font block): like dm_draw_glyph_on()
+ * but subdivides each of the glyph's 7x14 cells into a `scale` x `scale`
+ * block of dots at the given (cell, gap) pitch, so a large icon (e.g. the
+ * wind/humidity icons in a tube whose shared text pitch is much smaller)
+ * keeps its own bigger footprint instead of shrinking to match. */
+static void dm_draw_glyph_on_scaled(uint8_t *fb, int cx, int cy, int cp,
+                                     int cell, int gap, int scale,
+                                     bool clip_edges, int on_r, int on_g, int on_b);
+/* Sentinel code points used before the full DM_CP_* block is defined
+ * (with the rest of the DotMatrix font) — see that block for the others. */
+#define DM_CP_ARROW_UP     0x2020
+#define DM_CP_ARROW_DOWN   0x2021
+#define DM_CP_ICON_SUNRISE 0x2024
+#define DM_CP_ICON_SUNSET  0x2025
 /* Defined later: lazy-allocated PSRAM scratch buffer shared by WL renderers. */
 static uint8_t *wl_fb(void);
 /* Defined later: WeatherLive helpers used by early render functions.
@@ -1364,6 +1431,15 @@ void display_show_image(int tube, const char *path)
     if (strstr(path, "/themes/WeatherLive")) {
         if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
         wl_render_asset(tube, path);
+        return;
+    }
+    /* "DotMatrix" theme — same idea as WeatherLive above: no on-disk assets,
+     * every requested image is a procedural dot-matrix glyph instead. The
+     * trailing slash keeps this an exact match, not a prefix match, in case
+     * of any future theme sharing the "DotMatrix" name stem. */
+    if (strstr(path, "/themes/DotMatrix/")) {
+        if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
+        dm_render_asset(tube, path);
         return;
     }
     /* Skip any tube that is currently held by the colour-cycle or snow burn-in.
@@ -1890,6 +1966,25 @@ void display_show_ampm(int tube, const char *name, const char *theme)
      * (/images/system/{name}.jpg) and ARE safe to load — so for those we
      * substitute the system path, which display_show_image loads normally. */
     if (strstr(p, "/themes/WeatherLive")) {
+        if (!strcmp(name, "youtube")   || !strcmp(name, "instagram") ||
+            !strcmp(name, "tiktok")    || !strcmp(name, "mastodon")  ||
+            !strcmp(name, "wait")) {
+            if (sys_icon_has_png(name))
+                snprintf(p, sizeof(p), "/images/system/%s.png", name);
+            else
+                snprintf(p, sizeof(p), "/images/system/%s.jpg", name);
+        }
+        display_show_image(tube, p);
+        return;
+    }
+    /* "DotMatrix" ships no JPEG assets either (same reason as WeatherLive
+     * above) — must return early with the ORIGINAL "/themes/DotMatrix/..."
+     * path so display_show_image()'s intercept sees it. Falling through to
+     * the img_cache_get() probe below would silently rewrite `p` to a
+     * (nonexistent, for colon/dot/minus/etc.) /images/system/ path before
+     * ever reaching the intercept — losing the glyph (e.g. the colon just
+     * disappears) and spamming the log with cache-miss lookups every call. */
+    if (strstr(p, "/themes/DotMatrix/")) {
         if (!strcmp(name, "youtube")   || !strcmp(name, "instagram") ||
             !strcmp(name, "tiktok")    || !strcmp(name, "mastodon")  ||
             !strcmp(name, "wait")) {
@@ -2854,8 +2949,33 @@ static uint8_t s_wl_shadow_r = 0,  s_wl_shadow_g = 0,  s_wl_shadow_b = 0;
 static char    s_wl_bg_theme[32] = "";
 static char    s_wl_bg_png_cached[256] = ""; /* path of last successfully decoded PNG bg */
 static uint8_t *s_wl_bg_png_buf        = NULL; /* RGB565 cache in PSRAM for custom PNG bg */
+/* Custom face "CustomColor" background: solid fill or one of a handful of
+ * gradients, baked once into a PSRAM cache like the PNG background above,
+ * rebaked only when the fill type/colours actually change. */
+static char    s_wl_bg_fill[16] = "solid";
+static uint8_t s_wl_bg_color1_r = 0, s_wl_bg_color1_g = 0, s_wl_bg_color1_b = 0;
+static uint8_t s_wl_bg_color2_r = 60, s_wl_bg_color2_g = 60, s_wl_bg_color2_b = 120;
+static char    s_wl_bg_color_cache_key[64] = ""; /* "fill:r,g,b:r,g,b" of the currently baked buffer */
+static uint8_t *s_wl_bg_color_buf       = NULL;  /* RGB565 cache in PSRAM for solid/gradient bg */
 /* FreeType face id for the active custom digit font; -1 = no custom font (u8g2 logisoso). */
 static int s_ft_face_id = -1;
+
+/* "DotMatrix" theme's configured on/off colours — refreshed unconditionally
+ * once per display_task tick (regardless of app mode/theme) so they're
+ * always current by the time display_show_image()'s DotMatrix intercept or
+ * wl_text()'s dm branch reads them. Defaults match config_mgr's. */
+static uint8_t s_dm_on_r = 255, s_dm_on_g = 255, s_dm_on_b = 255;
+static uint8_t s_dm_off_r = 25, s_dm_off_g = 25, s_dm_off_b = 25;
+/* True only when cfg->theme == "DotMatrix"; set at the top of render_cx_panel()
+ * and gates wl_text()'s dm rendering branch (see wl_text()). */
+static bool s_wl_dm_active = false;
+
+/* DotMatrix never wants soft-shadow bloom — every cell is already a hard-
+ * edged on/off square, so a blurred drop shadow behind it makes no visual
+ * sense. Used in place of a bare `s_wl_shadow` check anywhere that raw-pixel
+ * icon drawing (range-track gauges, marker lumps, etc.) isn't already routed
+ * through an explicit is_dm fork. */
+static inline bool wl_shadow_on(void) { return s_wl_shadow && !s_wl_dm_active; }
 
 /* Desired cap height (pixels) for full-tube clock-digit glyphs.
  * Passed as px_size to fr_draw_glyph_centered; the font_render layer
@@ -3011,6 +3131,12 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
      * of reflecting the current setting.  Cheap no-op when unchanged. */
     wl_refresh_ft_face(cfg->custom_font);
 
+    /* "DotMatrix" theme: gate wl_text()'s dot-matrix branch for the duration
+     * of this render (kinds 3/6/7/8/9 below reuse wl_text() via the shared
+     * wl_*_panel() functions). Kinds 1/2/4 use their own explicit is_dm
+     * fork instead, since they don't go through wl_text() at all. */
+    s_wl_dm_active = !strcmp(cfg->theme, "DotMatrix");
+
     /* Resolve panel_id → concrete panel kind by walking the caller's enabled[].
      * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor temp+Hi/Lo,
      * 4=sunrise, 5=externally-pushed image, 6=outdoor humidity, 7=wind,
@@ -3055,7 +3181,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         }
 
     } else if (kind == 1) {
-        /* ── Week/Date panel — three stacked U8g2 lines over blank.jpg ───────
+        /* ── Week/Date panel — three stacked lines over blank.jpg ────────────
          * Mirrors the WeatherLive weekdate layout:
          *   line 1 (rows   2– 52) : weekday abbrev — "Sun" … "Sat"
          *   line 2 (rows  55–105) : day-of-month OR localised month abbrev
@@ -3063,16 +3189,11 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
          * The day/month stack ORDER follows Network › Date format:
          *   "MM/DD/YY" (US)   → month over day
          *   "DD/MM/YY" (intl) → day over month
-         * All three lines use logisoso28.  Background: theme's AMPM/blank.jpg
-         * (rows between bands keep the full theme image).  Colour: auto-sampled
-         * from Numbers/0.jpg.  Fallback: solid black fill if blank.jpg absent. */
-
-        const uint8_t *bg = cx_load_text_bg(lcd_tube, cfg);
-        if (!bg && kind != *last_kind) display_fill(lcd_tube, 0x0000);
-        uint16_t fg = (cx_is_wl_sky(cfg) && s_wl_scene_valid)
-                      ? wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b)
-                      : ht_sample_theme_color(cfg->theme);
-
+         * DotMatrix theme: all three lines drawn as dot-matrix text into the
+         * shared framebuffer instead (see is_dm below); otherwise U8g2
+         * logisoso28.  Background: theme's AMPM/blank.jpg (rows between bands
+         * keep the full theme image).  Colour: auto-sampled from Numbers/0.jpg.
+         * Fallback: solid black fill if blank.jpg absent. */
         const char *day = weekday_abbrev(cfg->language, t->tm_wday);
         const char *mon = month_abbrev(cfg->language, t->tm_mon);
         char dd[12];
@@ -3083,9 +3204,34 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         const char *line2 = us_fmt ? mon : dd;
         const char *line3 = us_fmt ? dd  : mon;
 
-        ht_draw_str_at(lcd_tube, day,   2,  50, u8g2_font_logisoso28_tf, fg, bg);
-        ht_draw_str_at(lcd_tube, line2, 55, 50, u8g2_font_logisoso28_tf, fg, bg);
-        ht_draw_str_at(lcd_tube, line3, 108, 50, u8g2_font_logisoso28_tf, fg, bg);
+        if (s_wl_dm_active) {
+            uint8_t *fb = wl_fb();
+            if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+            memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+            /* Three lines share one tube — pick whichever needs the
+             * tightest pitch (a long month/weekday name in some languages
+             * may only fit at cell=1) and use that for all three, plus the
+             * grid backdrop, so the whole tube reads as one dot density
+             * instead of three independently-sized lines. */
+            int cell = dm_fit_cell(day);
+            if (dm_fit_cell(line2) < cell) cell = dm_fit_cell(line2);
+            if (dm_fit_cell(line3) < cell) cell = dm_fit_cell(line3);
+            dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+            dm_draw_text_p_on(fb, 40, 28,  day,   cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_text_p_on(fb, 40, 80,  line2, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_text_p_on(fb, 40, 132, line3, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
+        } else {
+            const uint8_t *bg = cx_load_text_bg(lcd_tube, cfg);
+            if (!bg && kind != *last_kind) display_fill(lcd_tube, 0x0000);
+            uint16_t fg = (cx_is_wl_sky(cfg) && s_wl_scene_valid)
+                          ? wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b)
+                          : ht_sample_theme_color(cfg->theme);
+
+            ht_draw_str_at(lcd_tube, day,   2,  50, u8g2_font_logisoso28_tf, fg, bg);
+            ht_draw_str_at(lcd_tube, line2, 55, 50, u8g2_font_logisoso28_tf, fg, bg);
+            ht_draw_str_at(lcd_tube, line3, 108, 50, u8g2_font_logisoso28_tf, fg, bg);
+        }
 
     } else if (kind == 2) {
         /* ── Indoor H/T panel — U8g2 embedded font ──────────────────────── */
@@ -3101,31 +3247,48 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
             goto cx_tube6_done;
         }
 
-        const uint8_t *bg = cx_load_text_bg(lcd_tube, cfg);
-        if (!bg) display_fill(lcd_tube, 0x0000);
-        uint16_t fg = (cx_is_wl_sky(cfg) && s_wl_scene_valid)
-                      ? wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b)
-                      : ht_sample_theme_color(cfg->theme);
+        bool use_f = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
+        int  temp  = (int)lroundf(to_display_temp(s.temp_c, use_f));
+        if (temp >  99) temp =  99;
+        if (temp < -99) temp = -99;
+        int hum = (int)(s.humidity + 0.5f);
+        if (hum > 99) hum = 99;
+        if (hum <  0) hum = 0;
+        char tbuf[16], hbuf[8];
+        snprintf(tbuf, sizeof(tbuf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
+        snprintf(hbuf, sizeof(hbuf), "%d%%", hum);
 
-        ht_draw_label(lcd_tube, inout_label(cfg->language, true), 18, fg, bg);
+        if (s_wl_dm_active) {
+            uint8_t *fb = wl_fb();
+            if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+            memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+            const char *label = inout_label(cfg->language, true);
+            /* No "C"/"F" unit letter for this theme — just the number and
+             * degree mark. Separate from the shared tbuf (which non-DM
+             * themes still need the letter on). */
+            char dm_tbuf[16];
+            snprintf(dm_tbuf, sizeof(dm_tbuf), "%d\xc2\xb0", temp);
+            int cell = dm_fit_cell(label);
+            if (dm_fit_cell(dm_tbuf) < cell) cell = dm_fit_cell(dm_tbuf);
+            if (dm_fit_cell(hbuf) < cell) cell = dm_fit_cell(hbuf);
+            dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+            /* Evenly spaced: tube divided into 3 equal zones (160/3), each
+             * element centred in its own zone, rather than the old
+             * asymmetric 28/64/129 spacing. */
+            dm_draw_text_p_on(fb, 40, 27, label, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_text_p_on(fb, 40, 80, dm_tbuf, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_text_p_on(fb, 40, 133, hbuf, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
+        } else {
+            const uint8_t *bg = cx_load_text_bg(lcd_tube, cfg);
+            if (!bg) display_fill(lcd_tube, 0x0000);
+            uint16_t fg = (cx_is_wl_sky(cfg) && s_wl_scene_valid)
+                          ? wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b)
+                          : ht_sample_theme_color(cfg->theme);
 
-        {
-            bool use_f = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
-            int  temp  = (int)lroundf(to_display_temp(s.temp_c, use_f));
-            if (temp >  99) temp =  99;
-            if (temp < -99) temp = -99;
-            char buf[16];
-            snprintf(buf, sizeof(buf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
-            ht_draw_str_at(lcd_tube, buf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
-        }
-
-        {
-            int hum = (int)(s.humidity + 0.5f);
-            if (hum > 99) hum = 99;
-            if (hum <  0) hum = 0;
-            char buf[8];
-            snprintf(buf, sizeof(buf), "%d%%", hum);
-            ht_draw_str_at(lcd_tube, buf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
+            ht_draw_label(lcd_tube, inout_label(cfg->language, true), 18, fg, bg);
+            ht_draw_str_at(lcd_tube, tbuf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
+            ht_draw_str_at(lcd_tube, hbuf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
         }
 
     } else if (kind == 3) {
@@ -3164,25 +3327,50 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         float lat = 0.0f, lon = 0.0f;
         bool have_loc = weather_get_location(&lat, &lon);
 
-        {
+        char rise_str[8] = "--:--";
+        char set_str[8]  = "--:--";
+        if (have_loc) {
+            int rise_min = 0, set_min = 0;
+            solar_calc(lat, lon, t, &rise_min, &set_min);
+            if (rise_min >= 0)
+                snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
+                         (rise_min / 60) % 24, rise_min % 60);
+            if (set_min >= 0)
+                snprintf(set_str, sizeof(set_str), "%02d:%02d",
+                         (set_min / 60) % 24, set_min % 60);
+        }
+
+        if (s_wl_dm_active) {
+            /* Dedicated sunrise/sunset icons (not the Hi/Lo panel's up/down
+             * arrows — those are a separate glyph pair) above the time
+             * string in each half. Whole tube gets a uniform dot-grid
+             * backdrop at cell=1/gap=1 — the smallest pitch anything here
+             * uses — and the icon (previously cell=2/gap=1, a visibly
+             * coarser grid than the text next to it) is scaled down to
+             * match, so the icon, the time, and the empty background all
+             * read as one continuous grid instead of two dot densities
+             * stitched together over black. Time is a single "HH:MM" line
+             * (with colon) rather than the stacked hour/minute quad used
+             * elsewhere — there's no separate icon-sharing constraint here
+             * forcing that split, and a single line is more legible. */
+            uint8_t *fb = wl_fb();
+            if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+            memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+            dm_paint_grid_bg(fb, 1, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+            /* Icons keep their own larger footprint (scale=2 → each of the
+             * 7x14 cells becomes a 2x2 block of small dots) instead of
+             * shrinking down to the time text's cell=1 pitch. */
+            dm_draw_glyph_on_scaled(fb, 40, 27, DM_CP_ICON_SUNRISE, 1, 1, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_text_on(fb, 40, 68,  rise_str, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_glyph_on_scaled(fb, 40, 107, DM_CP_ICON_SUNSET, 1, 1, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_text_on(fb, 40, 148, set_str,  s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
+        } else {
             const uint8_t *bg = cx_load_text_bg(lcd_tube, cfg);
             if (!bg) display_fill(lcd_tube, 0x0000);
             uint16_t fg = (cx_is_wl_sky(cfg) && s_wl_scene_valid)
                           ? wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b)
                           : ht_sample_theme_color(cfg->theme);
-
-            char rise_str[8] = "--:--";
-            char set_str[8]  = "--:--";
-            if (have_loc) {
-                int rise_min = 0, set_min = 0;
-                solar_calc(lat, lon, t, &rise_min, &set_min);
-                if (rise_min >= 0)
-                    snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
-                             (rise_min / 60) % 24, rise_min % 60);
-                if (set_min >= 0)
-                    snprintf(set_str, sizeof(set_str), "%02d:%02d",
-                             (set_min / 60) % 24, set_min % 60);
-            }
 
             /* Top half: sunrise (y_tube=14), bottom half: sunset (y_tube=HALF+14) */
             ht_draw_suntime(lcd_tube, rise_str, /*rising=*/true,  14,        fg, bg);
@@ -3508,6 +3696,48 @@ static inline unsigned wl_hash(unsigned x)
     return x;
 }
 
+/* Bake the "CustomColor" Custom-face background into `buf` (RGB565, one
+ * LCD_WIDTH x LCD_HEIGHT frame): a solid fill, or one of four gradients
+ * between color1 and color2. `fill` is one of "solid", "linear_v"
+ * (top->bottom), "linear_h" (left->right), "diagonal" (corner->corner), or
+ * "radial" (centre->edge); anything else falls back to solid. */
+static void wl_bake_color_bg(uint8_t *buf, const char *fill,
+                              uint8_t r1, uint8_t g1, uint8_t b1,
+                              uint8_t r2, uint8_t g2, uint8_t b2)
+{
+    const int w = LCD_WIDTH, h = LCD_HEIGHT;
+    int mode = 0; /* 0=solid 1=linear_v 2=linear_h 3=diagonal 4=radial */
+    if      (!strcmp(fill, "linear_v")) mode = 1;
+    else if (!strcmp(fill, "linear_h")) mode = 2;
+    else if (!strcmp(fill, "diagonal")) mode = 3;
+    else if (!strcmp(fill, "radial"))   mode = 4;
+    const float maxd = sqrtf((float)(w * w + h * h)) / 2.0f;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            float t = 0.0f;
+            switch (mode) {
+                case 1: t = (float)y / (float)(h - 1); break;
+                case 2: t = (float)x / (float)(w - 1); break;
+                case 3: t = (float)(x + y) / (float)(w - 1 + h - 1); break;
+                case 4: {
+                    float dx = (float)x - w / 2.0f, dy = (float)y - h / 2.0f;
+                    t = sqrtf(dx * dx + dy * dy) / maxd;
+                    if (t > 1.0f) t = 1.0f;
+                    break;
+                }
+                default: break;
+            }
+            uint8_t r = (uint8_t)((float)r1 + ((float)r2 - (float)r1) * t);
+            uint8_t g = (uint8_t)((float)g1 + ((float)g2 - (float)g1) * t);
+            uint8_t b = (uint8_t)((float)b1 + ((float)b2 - (float)b1) * t);
+            uint16_t px = wl_rgb565(r, g, b);
+            uint8_t *dst = buf + ((size_t)y * w + x) * 2;
+            dst[0] = (uint8_t)(px >> 8);
+            dst[1] = (uint8_t)(px & 0xFF);
+        }
+    }
+}
+
 /* Paint the animated sky panorama (gradient + sun/moon disc + drifting clouds +
  * precipitation) for one tube into its framebuffer.  Shared by the digit tubes
  * and the tube-6 info panel. */
@@ -3518,6 +3748,31 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
      * column.  Re-armed to the gradient cache below when the procedural sky is
      * used, so the burn-in shift doesn't duplicate an edge rain streak. */
     s_wl_edge_margin_src = NULL;
+
+    /* Custom background: solid colour or gradient fill, baked once and
+     * cached like the PNG/JPEG theme background below. Checked first since
+     * "CustomColor" isn't a real theme name — the theme-image branch below
+     * would otherwise try (and fail) to load
+     * /images/themes/CustomColor/AMPM/blank.png. */
+    if (strcmp(s_wl_bg_theme, "CustomColor") == 0) {
+        char key[64];
+        snprintf(key, sizeof(key), "%s:%d,%d,%d:%d,%d,%d", s_wl_bg_fill,
+                 s_wl_bg_color1_r, s_wl_bg_color1_g, s_wl_bg_color1_b,
+                 s_wl_bg_color2_r, s_wl_bg_color2_g, s_wl_bg_color2_b);
+        if (!s_wl_bg_color_buf) s_wl_bg_color_buf = PSRAM_MALLOC((size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        if (s_wl_bg_color_buf) {
+            if (strcmp(s_wl_bg_color_cache_key, key) != 0) {
+                wl_bake_color_bg(s_wl_bg_color_buf, s_wl_bg_fill,
+                                  s_wl_bg_color1_r, s_wl_bg_color1_g, s_wl_bg_color1_b,
+                                  s_wl_bg_color2_r, s_wl_bg_color2_g, s_wl_bg_color2_b);
+                strncpy(s_wl_bg_color_cache_key, key, sizeof(s_wl_bg_color_cache_key) - 1);
+                s_wl_bg_color_cache_key[sizeof(s_wl_bg_color_cache_key) - 1] = '\0';
+            }
+            memcpy(fb, s_wl_bg_color_buf, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+            return;
+        }
+        /* PSRAM alloc failed — fall through to procedural sky as a last resort. */
+    }
 
     /* Custom background: load static blank image from the chosen theme (PNG preferred, JPG fallback). */
     if (s_wl_bg_theme[0] != '\0' && strncmp(s_wl_bg_theme, "WeatherLive", 11) != 0) {
@@ -3797,6 +4052,20 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
 static void wl_text(uint8_t *fb, int cx, int by, const uint8_t *font,
                     const char *str, int r, int g, int b, uint16_t ft_px)
 {
+    /* "DotMatrix" theme: every shared panel that calls wl_text() (outdoor
+     * temp/humidity/wind/AQI/outdoor-H-T — kinds 3/6/7/8/9 in
+     * render_cx_panel) becomes dot-matrix styled here, with zero changes to
+     * those five panel functions. Uses the theme's configured on/off colours
+     * rather than the caller's `r,g,b`, since that's whatever cx_fg_rgb8()
+     * sampled for a JPEG theme — not meaningful for this one. `by` is treated
+     * as the vertical centre rather than a true baseline: a pragmatic
+     * approximation, since these call sites were tuned for u8g2/FreeType
+     * baseline placement, not this fixed-height bitmap font. */
+    if (s_wl_dm_active) {
+        dm_draw_text(fb, cx, by, str, s_dm_on_r, s_dm_on_g, s_dm_on_b,
+                     s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        return;
+    }
     if (s_ft_face_id >= 0) {
         /* 1. Get requested size */
         uint16_t req_px = ft_px ? ft_px : ft_px_for_u8g2(font);
@@ -3832,7 +4101,7 @@ static void wl_text(uint8_t *fb, int cx, int by, const uint8_t *font,
     int top = by - asc;                                   /* fb row of buffer row 0 */
 
     /* Pass 1: dark bloom — for every lit source pixel, paint shadow neighbours */
-    if (s_wl_shadow) {
+    if (wl_shadow_on()) {
         for (int ry = 0; ry < gh; ry++) {
             int fy = top + ry;
             for (int rx = 0; rx < BUF_W && rx < LCD_WIDTH; rx++) {
@@ -3882,7 +4151,7 @@ static int wl_label_half_w(const char *str, const uint8_t *u8font, uint16_t ft_p
 static void wl_degree(uint8_t *fb, int cx, int cy, int rad, int r, int g, int b)
 {
     /* Shadow: dark ring just outside the white ring */
-    if (s_wl_shadow) {
+    if (wl_shadow_on()) {
         int si2 = rad * rad, so2 = (rad + 2) * (rad + 2);
         for (int y = cy - rad - 3; y <= cy + rad + 3; y++) {
             if (y < 0 || y >= LCD_HEIGHT) continue;
@@ -4063,6 +4332,610 @@ static void wl_glyph(uint8_t *fb, char ch)
             wl_blend_px(fb + i * 2, s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b, e->cov[i]);
         else if (shadow && e->halo && e->halo[i] > 0)
             wl_blend_px(fb + i * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, e->halo[i]);
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * "DotMatrix" theme — procedural 7x14-cell dot-matrix font.
+ *
+ * Ships with NO on-disk assets (like WeatherLive): every glyph is drawn at
+ * runtime from a 7-column x 14-row bit grid, one 9x9 (or smaller, for
+ * multi-char labels) cell per bit, 2px (or 1px) gaps between cells. Unlike
+ * wl_glyph()/wl_text(), EVERY cell is always painted — on-color where the
+ * bit is set, off-color where it isn't — matching how a real dot-matrix /
+ * scoreboard display always shows its full grid, lit or unlit, rather than
+ * lit segments floating on a transparent background.
+ *
+ * Each row byte uses its low 7 bits: bit 6 = leftmost column (col 0) ..
+ * bit 0 = rightmost column (col 6). Row 0 and row 13 are always 0 (blank) —
+ * the actual letterform lives in rows 1-12 (7x12), keeping a permanent
+ * 1-row top/bottom margin within the nominal 7x14 grid.
+ *
+ * Row data is rasterized (not hand-drawn) from the "MatrixType Display"
+ * TTF (github.com/... user-supplied reference font), styled after the
+ * user's request to match its look: each glyph rendered at a fixed
+ * reference cell (matching the font's own monospaced glyph metrics — it's
+ * a dot-matrix-style face where every character occupies the same cell
+ * footprint), area-averaged down to a 7x12 grid, thresholded at ~35%
+ * coverage per cell. Á and É aren't in that font (only Ä/Å/Ø are), so
+ * they're synthesized: the base letter (A/E) compressed by one row with a
+ * small acute-accent tick prepended — same idea as the original hand-drawn
+ * font's accent scheme, just now applied to real sampled base letterforms.
+ *
+ * Coverage: digits, A-Z, colon/dot/minus/percent/slash/degree, and the 5
+ * accented letters (Á Ä É Ø Å) actually used by weekday_abbrev()/
+ * month_abbrev()/inout_label() (display.c) across the supported languages.
+ * This is a fixed-width, constrained pixel font, not a proportional face —
+ * lowercase input folds to uppercase (dm_glyph_bits) rather than having its
+ * own letterforms. */
+static const uint8_t dm_font_digit[10][14] = {
+    { 0x00,0x00,0x00,0x1C,0x22,0x22,0x26,0x2A,0x32,0x22,0x22,0x1C,0x00,0x00 }, /* 0 */
+    { 0x00,0x00,0x00,0x08,0x18,0x08,0x08,0x08,0x08,0x08,0x08,0x1C,0x00,0x00 }, /* 1 */
+    { 0x00,0x00,0x00,0x1C,0x22,0x02,0x02,0x04,0x08,0x10,0x20,0x3E,0x00,0x00 }, /* 2 */
+    { 0x00,0x00,0x00,0x3C,0x02,0x02,0x04,0x08,0x04,0x02,0x22,0x1C,0x00,0x00 }, /* 3 */
+    { 0x00,0x00,0x00,0x04,0x0C,0x14,0x24,0x24,0x3E,0x04,0x04,0x04,0x00,0x00 }, /* 4 */
+    { 0x00,0x00,0x00,0x3E,0x20,0x20,0x3C,0x02,0x02,0x02,0x22,0x1C,0x00,0x00 }, /* 5 */
+    { 0x00,0x00,0x00,0x0C,0x10,0x20,0x20,0x3C,0x22,0x22,0x22,0x1C,0x00,0x00 }, /* 6 */
+    { 0x00,0x00,0x00,0x3E,0x02,0x02,0x04,0x04,0x08,0x10,0x10,0x10,0x00,0x00 }, /* 7 */
+    { 0x00,0x00,0x00,0x1C,0x22,0x22,0x22,0x1C,0x22,0x22,0x22,0x1C,0x00,0x00 }, /* 8 */
+    { 0x00,0x00,0x00,0x1C,0x22,0x22,0x22,0x1E,0x02,0x02,0x04,0x18,0x00,0x00 }, /* 9 */
+};
+
+static const uint8_t dm_font_letter[26][14] = {
+    { 0x00,0x00,0x00,0x1C,0x22,0x22,0x22,0x22,0x3E,0x22,0x22,0x22,0x00,0x00 }, /* A */
+    { 0x00,0x00,0x00,0x3C,0x22,0x22,0x22,0x3C,0x22,0x22,0x22,0x3C,0x00,0x00 }, /* B */
+    { 0x00,0x00,0x00,0x1C,0x22,0x20,0x20,0x20,0x20,0x20,0x22,0x1C,0x00,0x00 }, /* C */
+    { 0x00,0x00,0x00,0x3C,0x12,0x12,0x12,0x12,0x12,0x12,0x12,0x3C,0x00,0x00 }, /* D */
+    { 0x00,0x00,0x00,0x3E,0x20,0x20,0x20,0x3C,0x20,0x20,0x20,0x3E,0x00,0x00 }, /* E */
+    { 0x00,0x00,0x00,0x3E,0x20,0x20,0x20,0x3C,0x20,0x20,0x20,0x20,0x00,0x00 }, /* F */
+    { 0x00,0x00,0x00,0x1C,0x22,0x20,0x20,0x2E,0x22,0x22,0x22,0x1C,0x00,0x00 }, /* G */
+    { 0x00,0x00,0x00,0x22,0x22,0x22,0x22,0x3E,0x22,0x22,0x22,0x22,0x00,0x00 }, /* H */
+    { 0x00,0x00,0x00,0x3E,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x3E,0x00,0x00 }, /* I */
+    { 0x00,0x00,0x00,0x0E,0x04,0x04,0x04,0x04,0x04,0x04,0x24,0x18,0x00,0x00 }, /* J */
+    { 0x00,0x00,0x00,0x22,0x24,0x28,0x30,0x20,0x30,0x28,0x24,0x22,0x00,0x00 }, /* K */
+    { 0x00,0x00,0x00,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x3E,0x00,0x00 }, /* L */
+    { 0x00,0x00,0x00,0x22,0x36,0x2A,0x22,0x22,0x22,0x22,0x22,0x22,0x00,0x00 }, /* M */
+    { 0x00,0x00,0x00,0x22,0x22,0x22,0x32,0x2A,0x26,0x22,0x22,0x22,0x00,0x00 }, /* N */
+    { 0x00,0x00,0x00,0x1C,0x22,0x22,0x22,0x22,0x22,0x22,0x22,0x1C,0x00,0x00 }, /* O */
+    { 0x00,0x00,0x00,0x3C,0x22,0x22,0x22,0x3C,0x20,0x20,0x20,0x20,0x00,0x00 }, /* P */
+    { 0x00,0x00,0x00,0x1C,0x22,0x22,0x22,0x22,0x22,0x2A,0x24,0x1A,0x00,0x00 }, /* Q */
+    { 0x00,0x00,0x00,0x1C,0x22,0x22,0x22,0x24,0x38,0x28,0x24,0x22,0x22,0x00 }, /* R */
+    { 0x00,0x00,0x00,0x1E,0x20,0x20,0x20,0x1C,0x02,0x02,0x02,0x3C,0x00,0x00 }, /* S */
+    { 0x00,0x00,0x00,0x3E,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x00,0x00 }, /* T */
+    { 0x00,0x00,0x00,0x22,0x22,0x22,0x22,0x22,0x22,0x22,0x22,0x1C,0x00,0x00 }, /* U */
+    { 0x00,0x00,0x00,0x22,0x22,0x22,0x22,0x22,0x22,0x22,0x14,0x08,0x00,0x00 }, /* V */
+    { 0x00,0x00,0x00,0x22,0x22,0x22,0x22,0x22,0x22,0x2A,0x2A,0x14,0x00,0x00 }, /* W */
+    { 0x00,0x00,0x00,0x22,0x22,0x22,0x14,0x08,0x08,0x14,0x22,0x22,0x22,0x00 }, /* X */
+    { 0x00,0x00,0x00,0x22,0x22,0x22,0x14,0x08,0x08,0x08,0x08,0x08,0x08,0x00 }, /* Y */
+    { 0x00,0x00,0x00,0x3E,0x02,0x02,0x04,0x08,0x10,0x20,0x20,0x3E,0x00,0x00 }, /* Z */
+};
+
+/* Accented letters. Ä/Å/Ø are real glyphs in the reference font (its
+ * diacritics live within the same cell as the base letter, not above it —
+ * matched here). Á/É aren't in that font: synthesized as the base letter
+ * (A/E) compressed by one row with a small acute tick prepended. */
+static const uint8_t dm_font_aacute[14] = {0x00,0x08,0x10,0x00,0x1C,0x22,0x22,0x22,0x3E,0x22,0x22,0x22,0x00,0x00}; /* Á á */
+static const uint8_t dm_font_adiaer[14] = {0x00,0x00,0x14,0x00,0x1C,0x22,0x22,0x22,0x3E,0x22,0x22,0x22,0x00,0x00}; /* Ä ä */
+static const uint8_t dm_font_aring [14] = {0x00,0x08,0x14,0x08,0x00,0x1C,0x22,0x22,0x3E,0x22,0x22,0x22,0x00,0x00}; /* Å å */
+static const uint8_t dm_font_eacute[14] = {0x00,0x04,0x08,0x00,0x3E,0x20,0x20,0x3C,0x20,0x20,0x20,0x3E,0x00,0x00}; /* É é */
+static const uint8_t dm_font_oslash[14] = {0x00,0x00,0x00,0x00,0x1F,0x22,0x26,0x2A,0x32,0x22,0x62,0x3C,0x00,0x00}; /* Ø ø */
+
+static const uint8_t dm_font_colon  [14] = {0x00,0x00,0x00,0x00,0x08,0x08,0x00,0x00,0x00,0x08,0x08,0x00,0x00,0x00};
+static const uint8_t dm_font_dot    [14] = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00,0x00 };
+static const uint8_t dm_font_minus  [14] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x3E,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_percent[14] = {0x00,0x00,0x00,0x00,0x00,0x30,0x32,0x04,0x08,0x10,0x26,0x06,0x00,0x00};
+static const uint8_t dm_font_slash  [14] = {0x00,0x00,0x00,0x00,0x02,0x04,0x08,0x08,0x08,0x08,0x10,0x20,0x00,0x00};
+static const uint8_t dm_font_degree [14] = {0x00,0x00,0x00,0x18,0x24,0x24,0x18,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+
+/* Sentinel code points (well outside any real Unicode range this font
+ * otherwise handles) for glyphs that aren't ordinary characters: the
+ * decoupled AM/PM and temperature-unit glyphs, and the weather-condition
+ * icons. dm_glyph_bits() below maps these the same way it maps a real
+ * code point. */
+#define DM_CP_AM               0x2000
+#define DM_CP_PM               0x2002
+#define DM_CP_DEGREEC          0x2004
+#define DM_CP_DEGREEF          0x2005
+#define DM_CP_TEMPMINUS        0x2006
+#define DM_CP_ICON_SUN             0x2010
+#define DM_CP_ICON_FEWCLOUDS       0x2011
+#define DM_CP_ICON_OVERCASTCLOUDS  0x2012
+#define DM_CP_ICON_FOG             0x2013
+#define DM_CP_ICON_RAIN            0x2014
+#define DM_CP_ICON_SQUALLS         0x2015
+#define DM_CP_ICON_THUNDERSTORM    0x2016
+#define DM_CP_ICON_SNOW            0x2017
+#define DM_CP_ICON_TORNADO         0x2018
+#define DM_CP_ICON_SAND            0x2019
+#define DM_CP_ICON_VOLCANICASH     0x201A
+/* DM_CP_ARROW_UP / DM_CP_ARROW_DOWN / DM_CP_ICON_SUNRISE / DM_CP_ICON_SUNSET
+ * are defined earlier (near dm_draw_glyph's forward declaration) since
+ * render_cx_panel() — defined before this whole font block — needs them too. */
+#define DM_CP_ICON_HUMIDITY        0x2022
+#define DM_CP_ICON_WIND            0x2023
+#define DM_CP_UNIT_KMH             0x2026
+#define DM_CP_UNIT_MPH             0x2027
+#define DM_CP_UNIT_MS              0x2028
+#define DM_CP_QTR_0                0x2030
+#define DM_CP_QTR_1                0x2031
+#define DM_CP_QTR_2                0x2032
+#define DM_CP_QTR_3                0x2033
+#define DM_CP_QTR_4                0x2034
+#define DM_CP_QTR_5                0x2035
+#define DM_CP_QTR_6                0x2036
+#define DM_CP_QTR_7                0x2037
+#define DM_CP_QTR_8                0x2038
+#define DM_CP_QTR_9                0x2039
+
+/* AM/PM — a single glyph each (not two stacked draws): "A"/"P" compressed
+ * into the top 6 content rows, "M" compressed into the bottom 6, both at the
+ * regular 7-column width. Decoupled from the regular A/M/P letters, editable
+ * independently in the font editor tool. */
+static const uint8_t dm_font_am[14] = {0x00,0x08,0x14,0x22,0x3E,0x22,0x22,0x00,0x36,0x2A,0x22,0x22,0x22,0x00};
+static const uint8_t dm_font_pm[14] = {0x00,0x3E,0x22,0x3E,0x20,0x20,0x20,0x00,0x36,0x2A,0x22,0x22,0x22,0x00};
+
+/* Temperature unit glyphs, decoupled from the regular C/F/- letters — a
+ * compact degree mark (rows 1-2) stacked over the letter body (rows 3-11,
+ * unchanged from the current C/F shapes). "minus" seeded from the current
+ * dedicated minus glyph. */
+static const uint8_t dm_font_degreec[14]   = {0x00,0x20,0x50,0x20,0x00,0x1C,0x22,0x20,0x20,0x20,0x22,0x1C,0x00,0x00};
+static const uint8_t dm_font_degreef[14]   = {0x00,0x20,0x50,0x20,0x00,0x3C,0x20,0x20,0x38,0x20,0x20,0x20,0x00,0x00};
+static const uint8_t dm_font_tempminus[14] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x3E,0x00,0x00,0x00,0x00,0x00,0x00};
+
+/* Weather-condition icons (MutiInfo/Weather JPEG equivalents) — this theme
+ * has no icon art on disk, so wl_render_asset's "leave black" precedent
+ * would otherwise apply here too. Simple hand-drawn pictograms instead, a
+ * first draft meant to be refined in the font editor tool like every other
+ * glyph in this file. */
+static const uint8_t dm_font_icon_sun[14]            = {0x00,0x00,0x08,0x08,0x49,0x22,0x1C,0x55,0x1C,0x22,0x49,0x08,0x00,0x00};
+static const uint8_t dm_font_icon_fewclouds[14]       = {0x00,0x00,0x08,0x14,0x00,0x18,0x24,0x42,0x3F,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_overcastclouds[14]  = {0x00,0x18,0x24,0x42,0x41,0x3F,0x00,0x18,0x24,0x42,0x3F,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_fog[14]             = {0x00,0x00,0x00,0x3E,0x00,0x55,0x00,0x3E,0x00,0x55,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_rain[14]            = {0x00,0x18,0x24,0x42,0x3F,0x00,0x20,0x28,0x0A,0x02,0x20,0x28,0x0A,0x00};
+static const uint8_t dm_font_icon_squalls[14]         = {0x00,0x04,0x02,0x3C,0x00,0x00,0x1F,0x00,0x1C,0x02,0x04,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_thunderstorm[14]    = {0x00,0x18,0x24,0x42,0x3F,0x00,0x04,0x08,0x10,0x3C,0x08,0x10,0x20,0x00};
+static const uint8_t dm_font_icon_snow[14]            = {0x00,0x18,0x24,0x42,0x3F,0x00,0x2A,0x00,0x55,0x00,0x2A,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_tornado[14]         = {0x00,0x00,0x00,0x00,0x1C,0x7F,0x3C,0x1E,0x3C,0x18,0x18,0x30,0x40,0x00};
+static const uint8_t dm_font_icon_sand[14]            = {0x00,0x00,0x49,0x24,0x12,0x49,0x24,0x12,0x49,0x24,0x12,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_volcanicash[14]     = {0x00,0x49,0x49,0x22,0x14,0x6B,0x14,0x22,0x00,0x1C,0x1C,0x3E,0x7F,0x00};
+
+/* Rising/falling arrows — used by the sunrise/sunset panel (up = rise,
+ * down = set) instead of the sun-icon-plus-caret other themes draw there. */
+static const uint8_t dm_font_arrow_up[14]   = {0x00,0x00,0x08,0x1C,0x3E,0x49,0x08,0x08,0x08,0x08,0x08,0x08,0x00,0x00};
+static const uint8_t dm_font_arrow_down[14] = {0x00,0x00,0x08,0x08,0x08,0x08,0x08,0x08,0x49,0x3E,0x1C,0x08,0x00,0x00};
+
+/* Humidity-drop and wind icons — replace the raw-pixel-math droplet/streak
+ * graphics wl_humidity_panel()/wl_wind_panel() otherwise draw regardless of
+ * theme, so this theme's panels stay consistently blocky/dot-matrix instead
+ * of mixing in smooth procedural icon art. */
+static const uint8_t dm_font_icon_humiditydrop[14] = {0x00,0x08,0x08,0x14,0x14,0x22,0x32,0x51,0x41,0x22,0x22,0x1C,0x00,0x00};
+static const uint8_t dm_font_icon_wind[14]         = {0x00,0x04,0x02,0x3C,0x00,0x00,0x1F,0x00,0x1C,0x02,0x04,0x00,0x00,0x00};
+
+/* Dedicated sunrise/sunset icons — used by the sunrise/sunset panels
+ * specifically (24H_CX kind 4, and the "Weather" service's sunrise/sunset
+ * panel); the Hi/Lo panel's up/down arrows (dm_font_arrow_up/down) are a
+ * separate, unrelated pair and are NOT affected by these. Same sun +
+ * horizon silhouette as the other themes' sunrise/sunset icon (wl_suntime/
+ * ht_draw_suntime): only the caret direction below the horizon differs. */
+static const uint8_t dm_font_icon_sunrise[14] = {0x00,0x08,0x49,0x22,0x1C,0x3E,0x7F,0x7F,0x00,0x00,0x08,0x14,0x22,0x00};
+static const uint8_t dm_font_icon_sunset[14]  = {0x00,0x08,0x49,0x22,0x1C,0x3E,0x7F,0x7F,0x00,0x00,0x22,0x14,0x08,0x00};
+
+/* Wind-unit glyphs — each label ("km/h" / "mph" / "m/s") packed into a
+ * single combined glyph (two compressed lines of letterforms, same idea as
+ * dm_font_am/dm_font_pm) rather than composed from the regular alphabet at
+ * a squeezed pitch, so the wind panel's unit label stays legible and is
+ * independently editable. dm_draw_text() special-cases these three exact
+ * strings to draw the matching glyph instead of looping per character. */
+static const uint8_t dm_font_unit_kmh[14] = {0x00,0x24,0x28,0x30,0x28,0x24,0x00,0x00,0x75,0x55,0x77,0x45,0x45,0x00};
+static const uint8_t dm_font_unit_mph[14] = {0x00,0x36,0x2A,0x2A,0x22,0x22,0x00,0x00,0x75,0x55,0x77,0x45,0x45,0x00};
+static const uint8_t dm_font_unit_ms[14]  = {0x00,0x36,0x2A,0x2A,0x22,0x22,0x00,0x00,0x73,0x54,0x72,0x41,0x46,0x00};
+
+/* Dedicated "quarter panel" digit set — only the top-left 3 cols x 6 rows
+ * of the 14-byte grid are used (rows 6-13 and the rightmost 4 columns
+ * always 0/off); the rest of the standard 7x14 layout is unused so the font
+ * editor's grid still works unchanged. Used only by dm_draw_hhmm(), which
+ * draws hours over minutes as a compact 2x2 block of these tiny digits (see
+ * that function) instead of a horizontal "HH:MM" string — decoupled from
+ * dm_font_digit, which is tuned for a full 9px-cell tube digit and loses
+ * clarity at this much smaller scale. */
+static const uint8_t dm_font_qtr_digit0[14] = {0x70,0x50,0x50,0x50,0x50,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit1[14] = {0x20,0x60,0x20,0x20,0x20,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit2[14] = {0x70,0x10,0x70,0x40,0x40,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit3[14] = {0x70,0x10,0x70,0x10,0x10,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit4[14] = {0x50,0x50,0x70,0x10,0x10,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit5[14] = {0x70,0x40,0x70,0x10,0x10,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit6[14] = {0x70,0x40,0x70,0x50,0x50,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit7[14] = {0x70,0x10,0x10,0x10,0x10,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit8[14] = {0x70,0x50,0x70,0x50,0x50,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_qtr_digit9[14] = {0x70,0x50,0x70,0x10,0x10,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+
+/* END DM FONT BLOCK — marker for tools/dm_font_editor.py; keep this comment
+ * right after the last glyph table if you add more. */
+
+/* Look up the 14-row bit grid for a Unicode code point (ASCII directly, or a
+ * handful of Latin-1 Supplement accents/degree via dm_draw_text_at's UTF-8
+ * decode). Returns NULL for space/unknown — dm_draw_glyph() already treats
+ * that as "every cell off", which is exactly the desired blank/unknown-icon
+ * look (a fully off-color-painted cell, not a transparent gap). */
+static const uint8_t *dm_glyph_bits(int cp)
+{
+    if (cp >= '0' && cp <= '9') return dm_font_digit[cp - '0'];
+    if (cp >= 'a' && cp <= 'z') cp = cp - 'a' + 'A';   /* fold to uppercase */
+    if (cp >= 'A' && cp <= 'Z') return dm_font_letter[cp - 'A'];
+    switch (cp) {
+        case ':':    return dm_font_colon;
+        case '.':    return dm_font_dot;
+        case '-':    return dm_font_minus;
+        case '%':    return dm_font_percent;
+        case '/':    return dm_font_slash;
+        case 0x00B0: return dm_font_degree;                         /* °   */
+        case 0x00C1: case 0x00E1: return dm_font_aacute;            /* Á á */
+        case 0x00C4: case 0x00E4: return dm_font_adiaer;            /* Ä ä */
+        case 0x00C9: case 0x00E9: return dm_font_eacute;            /* É é */
+        case 0x00D8: case 0x00F8: return dm_font_oslash;            /* Ø ø */
+        case 0x00C5: case 0x00E5: return dm_font_aring;             /* Å å */
+        case DM_CP_AM:              return dm_font_am;
+        case DM_CP_PM:              return dm_font_pm;
+        case DM_CP_DEGREEC:         return dm_font_degreec;
+        case DM_CP_DEGREEF:         return dm_font_degreef;
+        case DM_CP_TEMPMINUS:       return dm_font_tempminus;
+        case DM_CP_ICON_SUN:            return dm_font_icon_sun;
+        case DM_CP_ICON_FEWCLOUDS:      return dm_font_icon_fewclouds;
+        case DM_CP_ICON_OVERCASTCLOUDS: return dm_font_icon_overcastclouds;
+        case DM_CP_ICON_FOG:            return dm_font_icon_fog;
+        case DM_CP_ICON_RAIN:           return dm_font_icon_rain;
+        case DM_CP_ICON_SQUALLS:        return dm_font_icon_squalls;
+        case DM_CP_ICON_THUNDERSTORM:   return dm_font_icon_thunderstorm;
+        case DM_CP_ICON_SNOW:           return dm_font_icon_snow;
+        case DM_CP_ICON_TORNADO:        return dm_font_icon_tornado;
+        case DM_CP_ICON_SAND:           return dm_font_icon_sand;
+        case DM_CP_ICON_VOLCANICASH:    return dm_font_icon_volcanicash;
+        case DM_CP_ARROW_UP:            return dm_font_arrow_up;
+        case DM_CP_ARROW_DOWN:          return dm_font_arrow_down;
+        case DM_CP_ICON_HUMIDITY:       return dm_font_icon_humiditydrop;
+        case DM_CP_ICON_WIND:           return dm_font_icon_wind;
+        case DM_CP_ICON_SUNRISE:        return dm_font_icon_sunrise;
+        case DM_CP_ICON_SUNSET:         return dm_font_icon_sunset;
+        case DM_CP_UNIT_KMH:            return dm_font_unit_kmh;
+        case DM_CP_UNIT_MPH:            return dm_font_unit_mph;
+        case DM_CP_UNIT_MS:             return dm_font_unit_ms;
+        case DM_CP_QTR_0:               return dm_font_qtr_digit0;
+        case DM_CP_QTR_1:               return dm_font_qtr_digit1;
+        case DM_CP_QTR_2:               return dm_font_qtr_digit2;
+        case DM_CP_QTR_3:               return dm_font_qtr_digit3;
+        case DM_CP_QTR_4:               return dm_font_qtr_digit4;
+        case DM_CP_QTR_5:               return dm_font_qtr_digit5;
+        case DM_CP_QTR_6:               return dm_font_qtr_digit6;
+        case DM_CP_QTR_7:               return dm_font_qtr_digit7;
+        case DM_CP_QTR_8:               return dm_font_qtr_digit8;
+        case DM_CP_QTR_9:               return dm_font_qtr_digit9;
+    }
+    return NULL;
+}
+
+/* Decode one UTF-8 code point from `s`; returns the byte length consumed
+ * (>=1) and writes the code point to *cp_out (-1 for anything beyond the
+ * Latin-1 Supplement range, which dm_glyph_bits treats as blank). Handles
+ * only what this font's callers actually produce: ASCII and 2-byte
+ * sequences (U+0080-U+07FF, which covers all Latin-1 accents). */
+static int dm_utf8_decode(const char *s, int *cp_out)
+{
+    unsigned char c0 = (unsigned char)s[0];
+    if (c0 == 0)             { *cp_out = 0;  return 0; }
+    if (c0 < 0x80)           { *cp_out = c0; return 1; }
+    if ((c0 & 0xE0) == 0xC0 && s[1]) {
+        *cp_out = ((c0 & 0x1F) << 6) | ((unsigned char)s[1] & 0x3F);
+        return 2;
+    }
+    if ((c0 & 0xF0) == 0xE0 && s[1] && s[2]) { *cp_out = -1; return 3; }
+    if ((c0 & 0xF8) == 0xF0 && s[1] && s[2] && s[3]) { *cp_out = -1; return 4; }
+    *cp_out = -1; return 1;   /* stray continuation/invalid byte */
+}
+
+/* Paint one on/off-colour cell (a `cell`x`cell` px square), bounds-checked
+ * against the 80x160 tube framebuffer. Plain overwrite, not alpha blend —
+ * dot-matrix cells are fully opaque. */
+static void dm_paint_cell(uint8_t *fb, int x, int y, int cell, int r, int g, int b)
+{
+    uint16_t v = wl_rgb565(r, g, b);
+    uint8_t hi = (uint8_t)(v >> 8), lo = (uint8_t)(v & 0xFF);
+    for (int yy = y; yy < y + cell; yy++) {
+        if (yy < 0 || yy >= LCD_HEIGHT) continue;
+        for (int xx = x; xx < x + cell; xx++) {
+            if (xx < 0 || xx >= LCD_WIDTH) continue;
+            uint8_t *px = fb + ((size_t)yy * LCD_WIDTH + xx) * 2;
+            px[0] = hi; px[1] = lo;
+        }
+    }
+}
+
+/* Tile the whole 80x160 canvas with off-colour cells at (cell, gap) pitch —
+ * a continuous "unlit grid" backdrop, not just the inside of one glyph's own
+ * bounding box. Elements drawn on top at the same pitch (icons, text) then
+ * share one uniform dot density with the background instead of looking like
+ * a different-sized element floating on black. Grid is anchored at (0,0);
+ * glyphs centred so their own cells land in phase with it read as part of
+ * the same grid, a few pixels of phase drift elsewhere is not worth chasing. */
+static void dm_paint_grid_bg(uint8_t *fb, int cell, int gap, int off_r, int off_g, int off_b)
+{
+    int pitch = cell + gap;
+    for (int y = 0; y < LCD_HEIGHT; y += pitch)
+        for (int x = 0; x < LCD_WIDTH; x += pitch)
+            dm_paint_cell(fb, x, y, cell, off_r, off_g, off_b);
+}
+
+/* Draw one glyph's full 7x14 grid centred at (cx, cy), every cell painted
+ * on-colour or off-colour. `cell`/`gap` select the pitch — 9/2 for a
+ * full-tube digit, smaller for multi-char labels (see dm_draw_text).
+ * `clip_edges`: force the top and bottom grid row always off, so the glyph
+ * itself only ever occupies the inner 7x12 rows while the overall 7x14
+ * bounding box (and its centring) is unchanged — used for full-tube clock
+ * digits only; multi-char labels pass false. */
+static void dm_draw_glyph(uint8_t *fb, int cx, int cy, int cp, int cell, int gap,
+                           bool clip_edges,
+                           int on_r, int on_g, int on_b, int off_r, int off_g, int off_b)
+{
+    const uint8_t *bits = dm_glyph_bits(cp);
+    int pitch = cell + gap;
+    int gw = 7 * cell + 6 * gap, gh = 14 * cell + 13 * gap;
+    int x0 = cx - gw / 2, y0 = cy - gh / 2;
+    for (int row = 0; row < 14; row++) {
+        bool edge_row = clip_edges && (row == 0 || row == 13);
+        uint8_t rb = (bits && !edge_row) ? bits[row] : 0;
+        int y = y0 + row * pitch;
+        for (int col = 0; col < 7; col++) {
+            bool on = (rb >> (6 - col)) & 1;
+            int x = x0 + col * pitch;
+            dm_paint_cell(fb, x, y, cell,
+                          on ? on_r : off_r, on ? on_g : off_g, on ? on_b : off_b);
+        }
+    }
+}
+
+/* Multi-character label at an explicit pitch, UTF-8 aware, centred
+ * horizontally and vertically at (cx, cy). Used both directly (fixed pitch,
+ * e.g. AM/PM) and via dm_draw_text()'s auto-sizing wrapper below. */
+static void dm_draw_text_at(uint8_t *fb, int cx, int cy, const char *str,
+                             int cell, int gap, int intergap,
+                             int on_r, int on_g, int on_b, int off_r, int off_g, int off_b)
+{
+    int glyph_w = 7 * cell + 6 * gap;
+    int n = 0;
+    for (const char *p = str; *p; ) {
+        int cp; int adv = dm_utf8_decode(p, &cp);
+        if (adv <= 0) break;
+        p += adv; n++;
+    }
+    if (n == 0) return;
+    int total_w = n * glyph_w + (n - 1) * intergap;
+    int x = cx - total_w / 2 + glyph_w / 2;   /* centre of the first glyph */
+    for (const char *p = str; *p; ) {
+        int cp; int adv = dm_utf8_decode(p, &cp);
+        if (adv <= 0) break;
+        p += adv;
+        dm_draw_glyph(fb, x, cy, cp, cell, gap, false, on_r, on_g, on_b, off_r, off_g, off_b);
+        x += glyph_w + intergap;
+    }
+}
+
+/* Auto-sizing multi-char label: tries the roomier "small" pitch first, falls
+ * back to a tighter one if the string (up to ~4 chars in some languages —
+ * "Sisä", "Auss", "Søn") would overflow the 80px tube at that size. Same
+ * self-adapting idea as u8g2's proportional-width centring, just quantised
+ * to two discrete sizes instead of continuous — a concrete default, easy to
+ * retune once it's visible on real hardware. */
+/* Maps a wind-unit label string to its dedicated combined glyph's code
+ * point (0 if `str` isn't one of the three known labels). Shared by
+ * dm_draw_text()'s compact small-pitch fallback (used wherever this label
+ * shares a tube with other content, e.g. wl_wind_panel's icon+value+label
+ * tube) and render_weather_wind()'s tube-4 full-size draw (that tube is
+ * dedicated solely to the label, so it uses the standard cell=9/gap=2
+ * full-tube pitch directly instead of routing through dm_draw_text). */
+static int dm_unit_codepoint(const char *str)
+{
+    if (!strcmp(str, "km/h")) return DM_CP_UNIT_KMH;
+    if (!strcmp(str, "mph"))  return DM_CP_UNIT_MPH;
+    if (!strcmp(str, "m/s"))  return DM_CP_UNIT_MS;
+    return 0;
+}
+
+static int dm_fit_cell(const char *str)
+{
+    int cell = 2, gap = 1, intergap = 2;
+    int n = 0;
+    for (const char *p = str; *p; ) {
+        int cp; int adv = dm_utf8_decode(p, &cp);
+        if (adv <= 0) break;
+        p += adv; n++;
+    }
+    if (n > 0) {
+        int glyph_w = 7 * cell + 6 * gap;
+        int total_w = n * glyph_w + (n - 1) * intergap;
+        if (total_w > LCD_WIDTH - 4) return 1;
+    }
+    return 2;
+}
+
+static void dm_draw_text_p(uint8_t *fb, int cx, int cy, const char *str, int cell,
+                            int on_r, int on_g, int on_b, int off_r, int off_g, int off_b)
+{
+    int gap = 1, intergap = (cell >= 2) ? 2 : 1;
+    dm_draw_text_at(fb, cx, cy, str, cell, gap, intergap, on_r, on_g, on_b, off_r, off_g, off_b);
+}
+
+static void dm_draw_text(uint8_t *fb, int cx, int cy, const char *str,
+                          int on_r, int on_g, int on_b, int off_r, int off_g, int off_b)
+{
+    /* Wind-unit labels get a single dedicated glyph instead of being
+     * composed letter-by-letter — every caller that draws one of these
+     * exact strings via this compact small-pitch path picks it up
+     * automatically. This pitch is for contexts sharing a tube with other
+     * content (e.g. wl_wind_panel's label line); a dedicated full tube for
+     * just the label (render_weather_wind's tube 4) draws directly at the
+     * standard cell=9/gap=2 pitch instead of coming through here. */
+    int unit_cp = dm_unit_codepoint(str);
+    if (unit_cp) {
+        dm_draw_glyph(fb, cx, cy, unit_cp, 2, 1, false, on_r, on_g, on_b, off_r, off_g, off_b);
+        return;
+    }
+
+    dm_draw_text_p(fb, cx, cy, str, dm_fit_cell(str), on_r, on_g, on_b, off_r, off_g, off_b);
+}
+
+/* Floor `v` to the nearest multiple of `pitch` (never negative-biased for
+ * the positive coordinates these glyphs use) — used by the "_on" variants
+ * below so a glyph's lit cells always land on the same lattice as
+ * dm_paint_grid_bg()'s background, regardless of the glyph's own arbitrary
+ * requested centre. */
+static int dm_snap(int v, int pitch)
+{
+    int r = v % pitch;
+    if (r < 0) r += pitch;
+    return v - r;
+}
+
+/* Like dm_draw_glyph(), but paints ONLY the on-colour cells — off cells are
+ * left untouched, showing whatever's already there (meant to be drawn over
+ * a dm_paint_grid_bg() backdrop, not as a standalone glyph, since nothing
+ * paints the "unlit" look otherwise). x0/y0 are snapped to the pitch grid
+ * so on-cells always align with the background's lattice. */
+static void dm_draw_glyph_on(uint8_t *fb, int cx, int cy, int cp, int cell, int gap,
+                              bool clip_edges, int on_r, int on_g, int on_b)
+{
+    const uint8_t *bits = dm_glyph_bits(cp);
+    int pitch = cell + gap;
+    int gw = 7 * cell + 6 * gap, gh = 14 * cell + 13 * gap;
+    int x0 = dm_snap(cx - gw / 2, pitch);
+    int y0 = dm_snap(cy - gh / 2, pitch);
+    for (int row = 0; row < 14; row++) {
+        bool edge_row = clip_edges && (row == 0 || row == 13);
+        uint8_t rb = (bits && !edge_row) ? bits[row] : 0;
+        int y = y0 + row * pitch;
+        for (int col = 0; col < 7; col++) {
+            if (!((rb >> (6 - col)) & 1)) continue;
+            int x = x0 + col * pitch;
+            dm_paint_cell(fb, x, y, cell, on_r, on_g, on_b);
+        }
+    }
+}
+
+/* Like dm_draw_glyph_on(), but keeps the glyph at its own larger, intended
+ * footprint instead of shrinking to match the tube's shared (smaller) dot
+ * pitch: each of the glyph's 7x14 cells is subdivided into a `scale` x
+ * `scale` block of dots at that shared (cell, gap) pitch — e.g. scale=2
+ * turns one original cell into a 2x2 block of 4 smaller dots — rather than
+ * just drawing the same 7x14 grid smaller. Icon silhouette and overall size
+ * stay put; only the dot density inside it changes to match everything else
+ * sharing the tube. Positions still snap to the shared pitch grid. */
+static void dm_draw_glyph_on_scaled(uint8_t *fb, int cx, int cy, int cp,
+                                     int cell, int gap, int scale,
+                                     bool clip_edges, int on_r, int on_g, int on_b)
+{
+    if (scale < 1) scale = 1;
+    const uint8_t *bits = dm_glyph_bits(cp);
+    int pitch = cell + gap;
+    int cols = 7 * scale, rows = 14 * scale;
+    int gw = cols * cell + (cols - 1) * gap;
+    int gh = rows * cell + (rows - 1) * gap;
+    int x0 = dm_snap(cx - gw / 2, pitch);
+    int y0 = dm_snap(cy - gh / 2, pitch);
+    for (int row = 0; row < rows; row++) {
+        int orig_row = row / scale;
+        bool edge_row = clip_edges && (orig_row == 0 || orig_row == 13);
+        uint8_t rb = (bits && !edge_row) ? bits[orig_row] : 0;
+        int y = y0 + row * pitch;
+        for (int col = 0; col < cols; col++) {
+            int orig_col = col / scale;
+            if (!((rb >> (6 - orig_col)) & 1)) continue;
+            int x = x0 + col * pitch;
+            dm_paint_cell(fb, x, y, cell, on_r, on_g, on_b);
+        }
+    }
+}
+
+/* On-only counterpart to dm_draw_text_at(). */
+static void dm_draw_text_at_on(uint8_t *fb, int cx, int cy, const char *str,
+                                int cell, int gap, int intergap, int on_r, int on_g, int on_b)
+{
+    int glyph_w = 7 * cell + 6 * gap;
+    int n = 0;
+    for (const char *p = str; *p; ) {
+        int cp; int adv = dm_utf8_decode(p, &cp);
+        if (adv <= 0) break;
+        p += adv; n++;
+    }
+    if (n == 0) return;
+    int total_w = n * glyph_w + (n - 1) * intergap;
+    int x = cx - total_w / 2 + glyph_w / 2;
+    for (const char *p = str; *p; ) {
+        int cp; int adv = dm_utf8_decode(p, &cp);
+        if (adv <= 0) break;
+        p += adv;
+        dm_draw_glyph_on(fb, x, cy, cp, cell, gap, false, on_r, on_g, on_b);
+        x += glyph_w + intergap;
+    }
+}
+
+/* On-only counterpart to dm_draw_text_p() — explicit pitch, no auto-sizing. */
+static void dm_draw_text_p_on(uint8_t *fb, int cx, int cy, const char *str, int cell,
+                               int on_r, int on_g, int on_b)
+{
+    int gap = 1, intergap = (cell >= 2) ? 2 : 1;
+    dm_draw_text_at_on(fb, cx, cy, str, cell, gap, intergap, on_r, on_g, on_b);
+}
+
+/* On-only counterpart to dm_draw_text() — auto-sizing, including the
+ * wind-unit special case. */
+static void dm_draw_text_on(uint8_t *fb, int cx, int cy, const char *str, int on_r, int on_g, int on_b)
+{
+    int unit_cp = dm_unit_codepoint(str);
+    if (unit_cp) {
+        dm_draw_glyph_on(fb, cx, cy, unit_cp, 2, 1, false, on_r, on_g, on_b);
+        return;
+    }
+    dm_draw_text_p_on(fb, cx, cy, str, dm_fit_cell(str), on_r, on_g, on_b);
+}
+
+/* Sunrise/sunset time, drawn as a single composed 7x14 virtual grid — the
+ * same overall footprint as any other glyph — built from four dedicated
+ * "quarter panel" digits (dm_font_qtr_*, 3 cols x 6 rows each): hour digits
+ * ("HH") in the top-left/top-right quadrant, minute digits ("MM") in the
+ * bottom-left/bottom-right quadrant. Columns: 3 + 1(gap) + 3 = 7. Rows:
+ * 6 + 2(gap) + 6 = 14 — a 2-row gap (not 1) is what makes the 2x2 block of
+ * 6-row digits total exactly 14, matching a full-size glyph. No ':' glyph
+ * is needed; the row gap itself reads as the separator. Same cell/gap/pitch
+ * math as dm_draw_glyph(), so `cell`/`gap` are picked per call site exactly
+ * like any other glyph — larger where this has a tube to itself, smaller
+ * where it shares a half-tube with a sunrise/sunset icon. Expects the fixed
+ * "%02d:%02d" (or "--:--") format both call sites use — str[0..1] = hours,
+ * str[2] = ':' (skipped), str[3..4] = minutes; '-' falls back to a blank
+ * cell, matching the no-data case. */
+static void dm_draw_hhmm(uint8_t *fb, int cx, int cy, const char *str, int cell, int gap,
+                          int on_r, int on_g, int on_b, int off_r, int off_g, int off_b)
+{
+    if (strlen(str) < 5) return;
+    const uint8_t *h0 = (str[0] >= '0' && str[0] <= '9') ? dm_glyph_bits(DM_CP_QTR_0 + (str[0] - '0')) : NULL;
+    const uint8_t *h1 = (str[1] >= '0' && str[1] <= '9') ? dm_glyph_bits(DM_CP_QTR_0 + (str[1] - '0')) : NULL;
+    const uint8_t *m0 = (str[3] >= '0' && str[3] <= '9') ? dm_glyph_bits(DM_CP_QTR_0 + (str[3] - '0')) : NULL;
+    const uint8_t *m1 = (str[4] >= '0' && str[4] <= '9') ? dm_glyph_bits(DM_CP_QTR_0 + (str[4] - '0')) : NULL;
+
+    uint8_t grid[14] = {0};   /* rows 6-7 stay 0: the 2-row hour/minute gap */
+    for (int i = 0; i < 6; i++) {
+        grid[i]     = (h0 ? h0[i] : 0) | ((h1 ? h1[i] : 0) >> 4);
+        grid[8 + i] = (m0 ? m0[i] : 0) | ((m1 ? m1[i] : 0) >> 4);
+    }
+
+    int pitch = cell + gap;
+    int gw = 7 * cell + 6 * gap, gh = 14 * cell + 13 * gap;
+    int x0 = cx - gw / 2, y0 = cy - gh / 2;
+    for (int row = 0; row < 14; row++) {
+        uint8_t rb = grid[row];
+        int y = y0 + row * pitch;
+        for (int col = 0; col < 7; col++) {
+            bool on = (rb >> (6 - col)) & 1;
+            int x = x0 + col * pitch;
+            dm_paint_cell(fb, x, y, cell, on ? on_r : off_r, on ? on_g : off_g, on ? on_b : off_b);
+        }
     }
 }
 
@@ -4352,7 +5225,7 @@ static void wl_draw_tube(int tube, char ch, const wl_scene_t *sc)
 }
 
 /* WeatherLive has no JPEG theme assets, so when a non-clock mode (weather,
- * follower counts, countdown, pomodoro, …) asks to show a theme image, we render
+ * follower counts, …) asks to show a theme image, we render
  * the requested asset procedurally as a glyph/number over a solid black
  * background instead.  `path` is the LittleFS asset path that was about to be
  * loaded; the basename selects the glyph.  Digits and the colon/dot/minus match
@@ -4404,6 +5277,99 @@ static void wl_render_asset(int tube, const char *path)
     display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
 }
 
+/* "DotMatrix" theme's asset dispatcher — same filename-parsing and branch set
+ * as wl_render_asset() above, but drawing dot-matrix glyphs (every cell
+ * painted on/off-colour) instead of the WeatherLive font. See the DotMatrix
+ * font block above wl_draw_tube's forward declaration for the rendering
+ * primitives. */
+static void dm_render_asset(int tube, const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    const char *bp    = slash ? slash + 1 : path;
+    char name[32];
+    size_t i = 0;
+    for (; bp[i] && bp[i] != '.' && i < sizeof(name) - 1; i++) name[i] = bp[i];
+    name[i] = '\0';
+
+    uint8_t *fb = wl_fb();
+    if (!fb) { display_fill(tube, 0x0000); return; }
+    /* wl_fb() is a shared scratch buffer reused by every procedural render —
+     * dm_paint_cell() only touches each cell's own pixels, never the 2px
+     * gutter between cells, so without this the gutters (and anything
+     * outside the glyph's bounding box) would keep showing whatever was
+     * drawn into this buffer last (a previous digit, another tube's frame).
+     * The background is always solid black, regardless of dm_off_color. */
+    memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+
+    int on_r = s_dm_on_r, on_g = s_dm_on_g, on_b = s_dm_on_b;
+    int off_r = s_dm_off_r, off_g = s_dm_off_g, off_b = s_dm_off_b;
+    const int cx = LCD_WIDTH / 2, cy = LCD_HEIGHT / 2;   /* 40, 80 */
+
+    if (name[0] >= '0' && name[0] <= '9' && name[1] == '\0') {
+        dm_draw_glyph(fb, cx, cy, name[0], 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "colon")) {
+        dm_draw_glyph(fb, cx, cy, ':', 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "dot")) {
+        dm_draw_glyph(fb, cx, cy, '.', 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "minus")) {
+        /* Only ever reached via display_path_temperature(..., "minus") — the
+         * Temperature-panel minus sign — so this is safely its own dedicated
+         * glyph, decoupled from the regular alphabet's '-'. */
+        dm_draw_glyph(fb, cx, cy, DM_CP_TEMPMINUS, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "degreec") || !strcmp(name, "degreef")) {
+        dm_draw_glyph(fb, cx, cy, (name[6] == 'f') ? DM_CP_DEGREEF : DM_CP_DEGREEC,
+                      9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "humidity")) {
+        /* Matches wl_render_asset's precedent: the "humidity" ASSET NAME is
+         * the "%" unit symbol (e.g. tube 4 in render_weather()'s humidity
+         * panel), not the droplet icon — those are two different things
+         * that happen to share a confusingly similar name. The droplet is
+         * DM_CP_ICON_HUMIDITY, wired up separately (wl_humidity_panel(),
+         * and render_weather()'s own tube-0 droplet). */
+        dm_draw_glyph(fb, cx, cy, '%', 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "am") || !strcmp(name, "pm")) {
+        /* Single combined glyph (not two stacked draws) — same 9/2 full-tube
+         * pitch as every other glyph here. Each glyph's own bitmap already
+         * has the letter and "M" compressed into its top/bottom halves. */
+        dm_draw_glyph(fb, cx, cy, (name[0] == 'a') ? DM_CP_AM : DM_CP_PM,
+                      9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "m-sub")) {
+        dm_draw_glyph(fb, cx, cy, 'M', 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "k-sub")) {
+        dm_draw_glyph(fb, cx, cy, 'K', 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "sun")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_SUN, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "fewClouds")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_FEWCLOUDS, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "overcastClouds")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_OVERCASTCLOUDS, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "fog")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_FOG, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "rain")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_RAIN, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "squalls")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_SQUALLS, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "thunderstorm")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_THUNDERSTORM, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "snow")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_SNOW, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "tornado")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_TORNADO, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "sand")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_SAND, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "volcanicAsh")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_VOLCANICASH, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else {
+        /* "blank", platform logos (youtube/instagram/etc.) → a full grid of
+         * off-colour cells (dm_glyph_bits returns NULL for an unmapped code
+         * point, which dm_draw_glyph already paints as "every cell off") —
+         * the dot-matrix equivalent of wl_render_asset's "leave black". */
+        dm_draw_glyph(fb, cx, cy, ' ', 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    }
+
+    display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+}
+
 /* Draw the asset-theme sun glyph (filled upper semicircle + horizon line +
  * three rays + a rise/set caret) and a time string into the panorama
  * framebuffer, composited over the live sky with a 1-px drop shadow.  Mirrors
@@ -4451,7 +5417,7 @@ static void wl_suntime(uint8_t *fb, int top, bool rising, const char *timestr,
      * enough to read against bright sky backgrounds. */
     const uint8_t *tile = u8g2_GetBufferPtr(&s_u8g2);
     /* Pass 1: dark bloom around every set pixel */
-    if (s_wl_shadow) {
+    if (wl_shadow_on()) {
         for (int ry = 0; ry < 56; ry++) {
             int fy = top + ry;
             for (int rx = 0; rx < BUF_W && rx < LCD_WIDTH; rx++) {
@@ -4524,6 +5490,49 @@ static void wl_draw_temp_scaled(uint8_t *fb, int temp_disp, int zone_cy,
 static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
                           int dmin_disp, int dmax_disp)
 {
+    if (s_wl_dm_active) {
+        /* DotMatrix theme: current temp + lo/hi share this tube — pick
+         * whichever needs the tightest pitch and use that for all of them,
+         * plus a matching grid backdrop. The smooth hi/lo range track and
+         * current-temp marker below (wl_cloud_lump/wl_blend_px, drawn
+         * unconditionally regardless of theme) aren't block-controlled and
+         * don't belong in this theme, so instead of that visual there's a
+         * dot-matrix equivalent below: a horizontal progress bar built from
+         * the same shared-pitch dots, filled left-to-right up to today's
+         * temperature's position between the day's lo and hi. */
+        char tnum[16];
+        snprintf(tnum, sizeof(tnum), "%d\xc2\xb0", temp_disp);
+        int cell = dm_fit_cell(tnum);
+        bool show_range = range_ok && dmax_disp > dmin_disp;
+        char lo[12] = "", hi[12] = "";
+        if (show_range) {
+            snprintf(lo, sizeof(lo), "%d", dmin_disp);
+            snprintf(hi, sizeof(hi), "%d", dmax_disp);
+            if (dm_fit_cell(lo) < cell) cell = dm_fit_cell(lo);
+            if (dm_fit_cell(hi) < cell) cell = dm_fit_cell(hi);
+        }
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        dm_draw_text_p_on(fb, 40, 45, tnum, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        if (show_range) {
+            /* Bar sits in the ~24px gap between the temp (ends ~65.5 at
+             * cell=2) and the lo/hi numbers (start ~89.5) — one row of
+             * on-colour dots at the shared pitch, filled from the left up
+             * to today's temp's proportional position in [lo, hi]. */
+            int pitch = cell + 1;
+            int bx0 = dm_snap(10, pitch), bx1 = dm_snap(70, pitch);
+            int by  = dm_snap(78, pitch);
+            int tt = temp_disp;
+            if (tt < dmin_disp) tt = dmin_disp;
+            if (tt > dmax_disp) tt = dmax_disp;
+            int fill_x = bx0 + (bx1 - bx0) * (tt - dmin_disp) / (dmax_disp - dmin_disp);
+            for (int x = bx0; x <= fill_x; x += pitch)
+                dm_paint_cell(fb, x, by, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_text_p_on(fb, 20, 110, lo, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+            dm_draw_text_p_on(fb, 60, 110, hi, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        }
+        return;
+    }
     static const int s_temp_ft_px[4]  = { 72, 56, 40, 32 };
     static const int s_temp_u8_cap[4] = { 46, 42, 28, 20 };
     wl_draw_temp_scaled(fb, temp_disp, 45, 255, 255, 255,
@@ -4531,7 +5540,7 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
     if (range_ok && dmax_disp > dmin_disp) {
         const int bx0 = 12, bx1 = 68, by = 90;
         /* Shadow under the track — follows the global shadow setting. */
-        if (s_wl_shadow) {
+        if (wl_shadow_on()) {
             for (int x = bx0; x <= bx1; x++) {
                 wl_blend_px(fb + ((by + 3) * LCD_WIDTH + x) * 2,
                             s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, 110);
@@ -4546,7 +5555,7 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
         if (tt < dmin_disp) tt = dmin_disp;
         if (tt > dmax_disp) tt = dmax_disp;
         int mx = bx0 + (bx1 - bx0) * (tt - dmin_disp) / (dmax_disp - dmin_disp);
-        if (s_wl_shadow)
+        if (wl_shadow_on())
             wl_cloud_lump(fb, mx + 1, by + 2, 7,
                           s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, 180);
         wl_cloud_lump(fb, mx, by + 1, 6, 255, 225, 120, 255);   /* current-temp marker */
@@ -4644,7 +5653,32 @@ static void wl_humidity_panel(uint8_t *fb, int hum)
         }
         s_hum_sh_init = true;
     }
-    if (s_wl_shadow) {
+    if (s_wl_dm_active) {
+        /* DotMatrix theme: dedicated drop glyph instead of the smooth
+         * procedural droplet below, so this panel stays consistently
+         * blocky. This panel only has the top-half zone (the "%" value
+         * takes the bottom half) — cell=9/gap=2 (a full clock digit's
+         * pitch, ~152px tall) badly overflowed that zone, clipping most of
+         * the glyph off-screen and leaving a black gap above what little
+         * showed. y=50 (originally 40, matching the old procedural
+         * droplet's centre; nudged 10px lower per feedback — dm_snap()
+         * inside dm_draw_glyph_on_scaled() still floors it to the nearest
+         * pitch multiple, so it stays grid-aligned) instead of bcy (54,
+         * tuned for the old shape). Grid backdrop matches whatever pitch
+         * the "%" value needs (dm_fit_cell), but the icon keeps its own
+         * larger footprint (scale=2, each 7x14 cell becomes a 2x2 block of
+         * dots at that pitch) instead of shrinking down to match the value
+         * outright. */
+        char hum_str[8];
+        snprintf(hum_str, sizeof(hum_str), "%d%%", hum);
+        int cell = dm_fit_cell(hum_str);
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        dm_draw_glyph_on_scaled(fb, cx, 50, DM_CP_ICON_HUMIDITY, cell, 1, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        dm_draw_text_p_on(fb, cx, 134, hum_str, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        return;
+    } else {
+    if (wl_shadow_on()) {
         for (int sy = tip - SH; sy <= bcy + rad + SH; sy++) {
             if (sy < 0 || sy >= LCD_HEIGHT) continue;
             int iw;
@@ -4693,6 +5727,7 @@ static void wl_humidity_panel(uint8_t *fb, int hum)
             if (dx * dx + dy * dy <= 7)
                 wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, 220, 240, 255, 180);
         }
+    }
     }
 
     /* Humidity value with "%" — centred in bottom half (rows 80-159). */
@@ -4763,9 +5798,21 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
         }
         s_cinit = true;
     }
+    if (s_wl_dm_active) {
+        /* DotMatrix theme: dedicated wind glyph instead of the curled-streak
+         * icon below, so this panel stays consistently blocky. This panel
+         * shares its tube with the wind-speed value below (no unit label in
+         * this theme), which lands on cell=2 — the grid backdrop matches
+         * that, but the icon keeps its own larger footprint (scale=2, each
+         * 7x14 cell becomes a 2x2 block of cell=2 dots) filling the zone
+         * above the value instead of shrinking down to cell=2 outright. */
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_paint_grid_bg(fb, 2, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        dm_draw_glyph_on_scaled(fb, 40, 41, DM_CP_ICON_WIND, 2, 1, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+    } else {
     /* Shadow pass: expanded geometry drawn first so the foreground sits on top.
      * Gated on the global shadow setting and uses the configured shadow colour. */
-    if (s_wl_shadow) {
+    if (wl_shadow_on()) {
         for (int s = 0; s < 3; s++) {
             int x0 = st[s][0], x1 = st[s][1], y = st[s][2], cr = st[s][3];
             /* Streak shadow: 1px wider each side, 2px taller. */
@@ -4801,6 +5848,7 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
             wl_blend_px(fb + (py * LCD_WIDTH + px) * 2, r, g, b, 255);
         }
     }
+    }
     /* Convert km/h → the configured unit, then draw the value with a small
      * unit label beneath it.  wind_kph/unit only change on a weather poll
      * (minutes apart) — memoize the conversion + snprintf so the lroundf
@@ -4828,7 +5876,9 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
     const char *label = s_wind_label;
     char *v = s_wind_v;
     /* zone: streak shadow bottom ~row 72, unit label top ~row 134, centre 103 */
-    {
+    if (s_wl_dm_active) {
+        dm_draw_text_p_on(fb, 40, 103, v, 2, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+    } else {
         int nc = (val >= 100) ? 3 : (val >= 10) ? 2 : 1;
         if (s_ft_face_id >= 0) {
             uint16_t px = (nc <= 1) ? 44 : (nc <= 2) ? 36 : 24;
@@ -4842,7 +5892,24 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
             wl_text(fb, 40, 103 + cap / 2, font, v, r, g, b, 0);
         }
     }
-    wl_text(fb, 40, 150, u8g2_font_logisoso16_tf, label, r, g, b, 0);
+    if (s_wl_dm_active) {
+        /* Unit label below the value (which itself sits below the wind
+         * glyph). Value ends at ~123.5 (cell=2, gh=41 centred at 103),
+         * leaving only ~35px before the tube's bottom edge — cell=2 (41
+         * tall, dm_fit_cell's pick for "mph"/"m/s") wouldn't fit that zone
+         * at all, so this is hardcoded to cell=1 (27 tall) regardless of
+         * which unit string is configured, unlike dm_fit_cell's per-string
+         * width-only decision. Drawn as normal horizontal text from the
+         * regular letter/slash glyphs (bypassing dm_draw_text()'s unit
+         * special case, which packs the whole label into one glyph as two
+         * stacked half-height lines — reads as vertical, not intended here).
+         * "km/h" is shown as "kph" in this theme (label only — the value is
+         * still km/h, unconverted); other themes keep "km/h". */
+        const char *dm_label = !strcmp(label, "km/h") ? "kph" : label;
+        dm_draw_text_p_on(fb, 40, 138, dm_label, 1, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+    } else {
+        wl_text(fb, 40, 150, u8g2_font_logisoso16_tf, label, r, g, b, 0);
+    }
 }
 
 /* US EPA AQI category → display colour (slightly muted so it reads over the
@@ -4877,10 +5944,6 @@ static void wl_eaqi_band_color(int aqi, int *r, int *g, int *b)
  * Mirrors the humidity/wind panels; value is resolved by weather_get_aqi(). */
 static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g, int fg_b)
 {
-    /* "AQI" label — ~2× the original (logisoso20 → logisoso42 / FT 40 px),
-     * centred in the top zone. */
-    wl_text(fb, 40, 48, u8g2_font_logisoso42_tf, "AQI", fg_r, fg_g, fg_b, 40);
-
     int r, g, b;
     if (european) wl_eaqi_band_color(aqi, &r, &g, &b);
     else          wl_aqi_band_color(aqi, &r, &g, &b);
@@ -4893,6 +5956,25 @@ static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g
         s_aqi_last = aqi;
     }
     if (aqi < 0) { r = fg_r; g = fg_g; b = fg_b; }
+
+    if (s_wl_dm_active) {
+        /* "AQI" label and the value share one tube — pick whichever needs
+         * the tighter pitch (the value is normally 1-3 digits and fits
+         * cell=2 same as "AQI", but an unclamped extreme reading could run
+         * to 4 digits) and use that for both, plus a matching grid
+         * backdrop, instead of each auto-sizing independently. */
+        int cell = dm_fit_cell("AQI");
+        if (dm_fit_cell(s_aqi_str) < cell) cell = dm_fit_cell(s_aqi_str);
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        dm_draw_text_p_on(fb, 40, 48, "AQI", cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        dm_draw_text_p_on(fb, 40, 100, s_aqi_str, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        return;
+    }
+
+    /* "AQI" label — ~2× the original (logisoso20 → logisoso42 / FT 40 px),
+     * centred in the top zone. */
+    wl_text(fb, 40, 48, u8g2_font_logisoso42_tf, "AQI", fg_r, fg_g, fg_b, 40);
 
     /* Scale the value so 1, 2 or 3 digits each sit comfortably centred in the
      * lower zone (AQI is 0-500 / EAQI 0-100+).  Indexed by digit count; the FT
@@ -4926,6 +6008,34 @@ static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g
 static void wl_outdoor_ht_panel(uint8_t *fb, const char *lang, int temp_disp, int hum, bool valid,
                                  int fg_r, int fg_g, int fg_b)
 {
+    if (s_wl_dm_active) {
+        /* Label, temperature and humidity share this tube — pick whichever
+         * needs the tightest pitch and use that for all three, plus a
+         * matching grid backdrop, instead of each auto-sizing (and, for the
+         * temperature, wl_draw_temp_scaled's own separate ft/non-ft
+         * handling) independently. */
+        const char *label = inout_label(lang, false);
+        char tbuf[16], hbuf[8];
+        if (valid) {
+            snprintf(tbuf, sizeof(tbuf), "%d\xc2\xb0", temp_disp);
+            snprintf(hbuf, sizeof(hbuf), "%d%%", hum);
+        } else {
+            snprintf(tbuf, sizeof(tbuf), "--");
+            snprintf(hbuf, sizeof(hbuf), "--%%");
+        }
+        int cell = dm_fit_cell(label);
+        if (dm_fit_cell(tbuf) < cell) cell = dm_fit_cell(tbuf);
+        if (dm_fit_cell(hbuf) < cell) cell = dm_fit_cell(hbuf);
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        /* Evenly spaced: tube divided into 3 equal zones (160/3), each
+         * element centred in its own zone, rather than the old asymmetric
+         * 28/64/129 spacing. */
+        dm_draw_text_p_on(fb, 40, 27, label, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        dm_draw_text_p_on(fb, 40, 80, tbuf, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        dm_draw_text_p_on(fb, 40, 133, hbuf, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        return;
+    }
     /* "Out" label — top zone rows 5-24. */
     wl_text(fb, 40, 28, u8g2_font_logisoso20_tf,
             inout_label(lang, false), fg_r, fg_g, fg_b, 20);
@@ -5100,6 +6210,13 @@ static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, b
  * Runs at the fast (20 Hz) display tick. */
 static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, bool demo)
 {
+    /* This path only ever runs for clock_face=="custom" or theme starting
+     * "WeatherLive" — never "DotMatrix" — so wl_text()'s dot-matrix branch
+     * must be off here regardless of whatever render_cx_panel() last set it
+     * to (render_cx_panel() isn't called on the same tick as this function,
+     * so nothing else would reset it back). */
+    s_wl_dm_active = false;
+
     /* Safe loop exit for OTA / WebUI updaters: WeatherLive's realtime animation
      * keeps the display task hot every tick.  If a cooperative park has been
      * requested (display_show_wait → s_park_req), skip the whole heavy frame so
@@ -5133,6 +6250,10 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     } else {
         s_wl_bg_theme[0] = '\0';
     }
+    strncpy(s_wl_bg_fill, cfg->custom_bg_fill[0] ? cfg->custom_bg_fill : "solid", sizeof(s_wl_bg_fill) - 1);
+    s_wl_bg_fill[sizeof(s_wl_bg_fill) - 1] = '\0';
+    s_wl_bg_color1_r = cfg->custom_bg_color1[0]; s_wl_bg_color1_g = cfg->custom_bg_color1[1]; s_wl_bg_color1_b = cfg->custom_bg_color1[2];
+    s_wl_bg_color2_r = cfg->custom_bg_color2[0]; s_wl_bg_color2_g = cfg->custom_bg_color2[1]; s_wl_bg_color2_b = cfg->custom_bg_color2[2];
 
     int64_t now_us = esp_timer_get_time();
     int mins = t->tm_hour * 60 + t->tm_min;
@@ -5542,7 +6663,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
          * to 1 Hz.  Sky gradient, sun/moon position and cloud type all change on
          * minute timescales; rebuilding them at animation rate (10–20 Hz) wastes
          * CPU and repeatedly locks the weather-fetch mutex, stalling the HTTP
-         * stack — visible as weather-data lag and countdown/pomodoro value jumps. */
+         * stack — visible as weather-data lag. */
         static int64_t s_ensure_slow_us = 0;
         int64_t s_now_us = esp_timer_get_time();
         if (s_now_us - s_ensure_slow_us < 1000000LL)
@@ -5956,61 +7077,6 @@ static void render_followers(const nextube_config_t *cfg,
 #undef WL_SUFFIX
 }
 
-static void render_countdown_display(const nextube_config_t *cfg,
-                                     int32_t remaining_s)
-{
-    /* Honour OTA park and config-save busy hint — same guard as render_weatherlive. */
-    if (s_park_req || esp_timer_get_time() < busy_until_us()) return;
-    if (remaining_s < 0) remaining_s = 0;
-    int m = remaining_s / 60, s = remaining_s % 60;
-    bool wl = cx_is_wl_sky(cfg);
-    if (wl) wl_ensure_scene(cfg);
-    wl = wl && s_wl_scene_valid;
-    if (wl) {
-        char ds[12];
-        wl_tube_sky(0);                                                        vTaskDelay(1);
-        snprintf(ds, sizeof(ds), "%d", m / 10); wl_tube_str(1, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
-        snprintf(ds, sizeof(ds), "%d", m % 10); wl_tube_str(2, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
-        wl_tube_str(3, u8g2_font_logisoso46_tf, ":", 100);                    vTaskDelay(1);
-        snprintf(ds, sizeof(ds), "%d", s / 10); wl_tube_str(4, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
-        snprintf(ds, sizeof(ds), "%d", s % 10); wl_tube_str(5, u8g2_font_logisoso46_tf, ds, 100);
-    } else {
-        display_show_ampm(0, "countdown", cfg->theme);
-        display_show_number(1, m / 10,  cfg->theme);
-        display_show_number(2, m % 10,  cfg->theme);
-        display_show_ampm  (3, "colon", cfg->theme);
-        display_show_number(4, s / 10,  cfg->theme);
-        display_show_number(5, s % 10,  cfg->theme);
-    }
-}
-
-static void render_pomodoro_display(const nextube_config_t *cfg,
-                                    int32_t remaining_s, bool in_break)
-{
-    /* Honour OTA park and config-save busy hint — same guard as render_weatherlive. */
-    if (s_park_req || esp_timer_get_time() < busy_until_us()) return;
-    if (remaining_s < 0) remaining_s = 0;
-    int m = remaining_s / 60, s = remaining_s % 60;
-    bool wl = cx_is_wl_sky(cfg);
-    if (wl) wl_ensure_scene(cfg);
-    wl = wl && s_wl_scene_valid;
-    if (wl) {
-        char ds[12];
-        wl_tube_sky(0);                                                        vTaskDelay(1);
-        snprintf(ds, sizeof(ds), "%d", m / 10); wl_tube_str(1, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
-        snprintf(ds, sizeof(ds), "%d", m % 10); wl_tube_str(2, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
-        wl_tube_str(3, u8g2_font_logisoso46_tf, ":", 100);                    vTaskDelay(1);
-        snprintf(ds, sizeof(ds), "%d", s / 10); wl_tube_str(4, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
-        wl_tube_sky(5);
-    } else {
-        display_show_ampm(0, "pomodoro", cfg->theme);
-        display_show_number(1, m / 10, cfg->theme);
-        display_show_number(2, m % 10, cfg->theme);
-        display_show_ampm  (3, "colon", cfg->theme);
-        display_show_number(4, s / 10, cfg->theme);
-        display_show_ampm  (5, in_break ? "pomodorolb" : "pomodorosb", cfg->theme);
-    }
-}
 
 
 /* ── Spectrum bar visualiser ─────────────────────────────────────────── *
@@ -6687,7 +7753,7 @@ static void wx_sun_anim_frame_buf(uint8_t *fb, bool rising, uint16_t fg)
          * pass's already-blitted fb region (fixes the visible "shadow line"
          * that appeared each time the disc crossed the pass-0/pass-1 boundary
          * at tube y=64). */
-        if (s_wl_shadow) {
+        if (wl_shadow_on()) {
             const uint8_t *tile = u8g2_GetBufferPtr(&s_u8g2);
             for (int ry = 0; ry < nrow; ry++) {
                 int fy = y0 + ry;
@@ -6727,7 +7793,7 @@ static void wx_sun_anim_frame_buf(uint8_t *fb, bool rising, uint16_t fg)
         /* Shadow bloom #2 — mountain zone (fy >= HY-20, fy < HY), pass 1 only.
          * dy starts at -1 (1px upward) to give the peaks a thin outline shadow
          * without pushing a visible band high into the open sky. */
-        if (s_wl_shadow && p == 1) {
+        if (wl_shadow_on() && p == 1) {
             int mry0 = HY - 20 - y0;
             if (mry0 < 0) mry0 = 0;
             const uint8_t *tile = u8g2_GetBufferPtr(&s_u8g2);
@@ -6793,7 +7859,7 @@ static void wx_sun_draw_time_buf(uint8_t *fb, const char *timestr, uint16_t fg)
     if (tx < 0) tx = 0;
     u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)tx, (u8g2_uint_t)ascent, timestr);
     int y0_t = (LCD_HEIGHT - glyph_h) / 2;
-    if (s_wl_shadow) {
+    if (wl_shadow_on()) {
         const uint8_t *tile = u8g2_GetBufferPtr(&s_u8g2);
         for (int ry = 0; ry < glyph_h; ry++) {
             int fy = y0_t + ry;
@@ -6870,7 +7936,8 @@ static const char *effective_bg_theme(const nextube_config_t *cfg)
     if (cfg->clock_face[0] != '\0' &&
         strcmp(cfg->clock_face, "custom") == 0 &&
         cfg->custom_bg[0] != '\0' &&
-        strncmp(cfg->custom_bg, "WeatherLive", 11) != 0)
+        strncmp(cfg->custom_bg, "WeatherLive", 11) != 0 &&
+        strcmp(cfg->custom_bg, "CustomColor") != 0)
         return cfg->custom_bg;
     return cfg->theme;
 }
@@ -6879,6 +7946,7 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
                                 bool anim_only)
 {
     const char *th = effective_bg_theme(cfg);
+    s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
     bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
     uint8_t *wl_bgfb = wl_sky ? wl_fb() : NULL;
 
@@ -6888,11 +7956,84 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
     if (wl_sky) {
         fg = wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b);
     } else {
-        fg = ht_sample_theme_color(th);
+        /* DotMatrix has no Numbers/1.jpg to sample — ht_sample_theme_color()
+         * would silently fall back to hardcoded white instead of the
+         * configured dot color (on). */
+        fg = s_wl_dm_active ? wl_rgb565(s_dm_on_r, s_dm_on_g, s_dm_on_b)
+                             : ht_sample_theme_color(th);
         snprintf(bg_path, sizeof(bg_path), "/images/themes/%s/AMPM/blank.jpg", th);
         int bg_w = 0, bg_h = 0;
         bg = img_cache_get(bg_path, &bg_w, &bg_h);
         if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
+    }
+
+    if (s_wl_dm_active) {
+        /* wx_sun_draw_time()/wx_sun_draw_time_buf() draw with raw u8g2 calls
+         * (not wl_text()), so they don't get dot-matrix text for free like
+         * most of this file's shared panels — needs its own branch here.
+         * The animation is replaced with a static up/down arrow (same as
+         * the 24H_CX sunrise/sunset panel): a continuously-moving smooth
+         * disc doesn't fit a blocky on/off grid, and animating it that way
+         * would be a much bigger undertaking for a slowly-crossing sun. */
+        uint8_t *fb = wl_fb();
+        if (!anim_only) {
+            char rise_str[8] = "--:--";
+            char set_str[8]  = "--:--";
+            float lat = 0.0f, lon = 0.0f;
+            if (weather_get_location(&lat, &lon)) {
+                int rise_min = 0, set_min = 0;
+                solar_calc(lat, lon, t, &rise_min, &set_min);
+                if (rise_min >= 0)
+                    snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
+                             (rise_min / 60) % 24, rise_min % 60);
+                if (set_min >= 0)
+                    snprintf(set_str, sizeof(set_str), "%02d:%02d",
+                             (set_min / 60) % 24, set_min % 60);
+            }
+            if (fb) {
+                memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+                /* This tube is dedicated entirely to the time (the icon
+                 * lives on its own tube 0/4) — the 7x14 grid always maps to
+                 * a full tube at the standard cell=9/gap=2 pitch, same as
+                 * every other full-tube glyph. */
+                dm_draw_hhmm(fb, 40, 80, rise_str, 9, 2, s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+                display_show_digit(1, fb, LCD_WIDTH, LCD_HEIGHT);
+            }
+            /* Full grid of off-colour cells, not a solid fill — same
+             * "blank" pattern dm_render_asset() uses (a space character,
+             * which dm_glyph_bits() maps to NULL/all-off), so these tubes
+             * show individual unlit dots like every other DotMatrix glyph
+             * instead of one flat rectangle. */
+            if (fb) {
+                memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+                dm_draw_glyph(fb, 40, 80, ' ', 9, 2, true,
+                              s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+                display_show_digit(2, fb, LCD_WIDTH, LCD_HEIGHT);
+                memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+                dm_draw_glyph(fb, 40, 80, ' ', 9, 2, true,
+                              s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+                display_show_digit(3, fb, LCD_WIDTH, LCD_HEIGHT);
+            } else {
+                display_fill(2, wl_rgb565(s_dm_off_r, s_dm_off_g, s_dm_off_b));
+                display_fill(3, wl_rgb565(s_dm_off_r, s_dm_off_g, s_dm_off_b));
+            }
+            if (fb) {
+                memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+                dm_draw_hhmm(fb, 40, 80, set_str, 9, 2, s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+                display_show_digit(5, fb, LCD_WIDTH, LCD_HEIGHT);
+            }
+        }
+        if (fb) {
+            /* Dedicated sunrise/sunset icons, not the Hi/Lo panel's up/down
+             * arrows — those are a separate, unrelated glyph pair. */
+            memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+            dm_draw_glyph(fb, 40, 80, DM_CP_ICON_SUNRISE, 9, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+            display_show_digit(0, fb, LCD_WIDTH, LCD_HEIGHT);
+            memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+            dm_draw_glyph(fb, 40, 80, DM_CP_ICON_SUNSET, 9, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+            display_show_digit(4, fb, LCD_WIDTH, LCD_HEIGHT);
+        }
+        return;
     }
 
     if (!anim_only) {
@@ -6968,6 +8109,7 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
 static void render_weather_wind(const nextube_config_t *cfg)
 {
     const char *th = effective_bg_theme(cfg);
+    s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
     const weather_data_t *w = weather_get();
     int wind_kph = (w && w->valid) ? (int)lroundf(w->wind_kph) : 0;
     const char *unit = cfg->wind_unit[0] ? cfg->wind_unit : "km/h";
@@ -7003,11 +8145,17 @@ static void render_weather_wind(const nextube_config_t *cfg)
             display_path_ampm(path, sizeof(path), th, "blank");
             seed_fb_blank(fb, path);
         }
+        if (s_wl_dm_active) {
+            /* Same dedicated wind glyph as wl_wind_panel()'s DotMatrix
+             * branch, so both wind displays match. */
+            dm_draw_glyph(fb, 40, 80, DM_CP_ICON_WIND, 9, 2, true,
+                          s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        } else {
         static const int wst[3][4] = { { 16, 50, 60, 7 },
                                         { 10, 58, 80, 8 },
                                         { 18, 46, 100, 7 } };
         /* Shadow pass: expanded geometry drawn first. */
-        if (s_wl_shadow) {
+        if (wl_shadow_on()) {
             for (int s = 0; s < 3; s++) {
                 int x0 = wst[s][0], x1 = wst[s][1], y = wst[s][2], cr = wst[s][3];
                 for (int yy = y - 2; yy <= y + 2; yy++) {
@@ -7050,6 +8198,7 @@ static void render_weather_wind(const nextube_config_t *cfg)
                         wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2, 255, 255, 255, 255);
                 }
             }
+        }
         }
         display_show_digit(glyph_tube, fb, LCD_WIDTH, LCD_HEIGHT);
     } else {
@@ -7098,7 +8247,19 @@ static void render_weather_wind(const nextube_config_t *cfg)
             display_path_ampm(path, sizeof(path), th, "blank");
             seed_fb_blank(fb, path);
         }
-        wl_text(fb, 40, 88, u8g2_font_logisoso20_tf, label, 210, 220, 235, 0);
+        if (s_wl_dm_active) {
+            /* This tube is dedicated solely to the label — the 7x14 glyph
+             * grid always maps to a full tube at the standard cell=9/gap=2
+             * pitch, drawn directly here rather than through wl_text()'s
+             * dm_draw_text() path, which uses a smaller pitch meant for
+             * labels sharing a tube with other content (wl_wind_panel's
+             * icon+value+label tube). */
+            int unit_cp = dm_unit_codepoint(label);
+            dm_draw_glyph(fb, 40, 80, unit_cp, 9, 2, false,
+                          s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        } else {
+            wl_text(fb, 40, 88, u8g2_font_logisoso20_tf, label, 210, 220, 235, 0);
+        }
         display_show_digit(4, fb, LCD_WIDTH, LCD_HEIGHT);
     } else {
         if (wl_sky) wl_tube_sky(4);
@@ -7134,6 +8295,7 @@ static temp_val_t temp_sign_magnitude(float celsius, bool use_fahrenheit)
 static void render_weather_hilo(const nextube_config_t *cfg, bool show_hi)
 {
     const char *th = effective_bg_theme(cfg);
+    s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
     const weather_data_t *w = weather_get();
     char path[128];
 
@@ -7167,10 +8329,19 @@ static void render_weather_hilo(const nextube_config_t *cfg, bool show_hi)
         uint8_t ar = show_hi ? 255 : 80,
                 ag = show_hi ?  70 : 140,
                 ab = show_hi ?  70 : 255;
+        if (s_wl_dm_active) {
+            /* Same dedicated up/down arrows as the sunrise/sunset panel —
+             * dot color (on) for both HI and LO, not the semantic red/blue
+             * every other theme uses (that's the point of "everything in
+             * this theme uses dot color"; shape alone still tells HI/LO
+             * apart). */
+            dm_draw_glyph(fb, 40, 80, show_hi ? DM_CP_ARROW_UP : DM_CP_ARROW_DOWN, 9, 2, true,
+                          s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        } else {
         /* Arrow geometry: total height 80 px centred in 160 px (y=40..120).
          * Head = 40 px tall, max half-width 20 px.  Shaft = 40 px, half-width 7 px. */
         /* Shadow pass: same arrow geometry expanded 2 px all round. */
-        if (s_wl_shadow) {
+        if (wl_shadow_on()) {
             if (show_hi) {
                 /* UP: shadow head rows 38..82, then shadow shaft rows 78..122. */
                 for (int row = 38; row <= 82; row++) {
@@ -7237,6 +8408,7 @@ static void render_weather_hilo(const nextube_config_t *cfg, bool show_hi)
                     if (x >= 0 && x < LCD_WIDTH)
                         wl_blend_px(fb + (row * LCD_WIDTH + x) * 2, ar, ag, ab, 255);
             }
+        }
         }
         display_show_digit(0, fb, LCD_WIDTH, LCD_HEIGHT);
     } else {
@@ -7307,6 +8479,7 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
 {
     if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);   /* keep anim_t current */
     const char *th = effective_bg_theme(cfg);
+    s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
     const weather_data_t *w = weather_get();
     bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
     char path[128];
@@ -7381,8 +8554,21 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
                 const int bcy = 100;
                 const int rad = 22;
 
+                if (s_wl_dm_active) {
+                    /* This icon has a whole tube to itself (value/% live on
+                     * tubes 2-4) — the 7x14 glyph grid always maps to a full
+                     * tube, at the same cell=9/gap=2 pitch every other
+                     * full-tube glyph in this theme uses (digits, AM/PM,
+                     * sunrise/sunset, arrows); don't scale it down to chase
+                     * the non-DM procedural droplet's particular geometry.
+                     * Centred on the tube itself (80), not tip/bcy/rad —
+                     * those describe the smooth droplet shape this glyph
+                     * replaces, not this glyph's own placement. */
+                    dm_draw_glyph(fb, cx, 80, DM_CP_ICON_HUMIDITY, 9, 2, true,
+                                  s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+                } else {
                 /* Shadow pass: same droplet shape expanded 2 px all round. */
-                if (s_wl_shadow) {
+                if (wl_shadow_on()) {
                     const int SH = 2;
                     for (int sy = tip - SH; sy <= bcy + rad + SH; sy++) {
                         if (sy < 0 || sy >= LCD_HEIGHT) continue;
@@ -7430,6 +8616,7 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
                         if (dx * dx + dy * dy <= 16)
                             wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, 220, 240, 255, 180);
                     }
+                }
                 }
                 display_show_digit(0, fb, LCD_WIDTH, LCD_HEIGHT);
             } else {
@@ -7512,42 +8699,6 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
     else { display_path_temperature(path, sizeof(path), th, unit); display_show_image(4, path); }
 }
 
-/* ── Timer state ────────────────────────────────────────────────────── */
-static TickType_t s_timer_start       = 0;
-static bool       s_pomo_in_break     = false;
-static bool       s_timer_paused      = false;
-static uint32_t   s_paused_elapsed_ms = 0;   /* elapsed frozen at pause moment */
-
-void display_timer_reset(void)
-{
-    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-    s_timer_start        = xTaskGetTickCount();
-    s_pomo_in_break      = false;
-    s_timer_paused       = false;
-    s_paused_elapsed_ms  = 0;
-    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
-}
-
-/* Toggle countdown / pomodoro timer between running and paused.
- * When pausing  : freeze elapsed_ms so the display stops counting.
- * When resuming : shift s_timer_start forward so elapsed resumes
- *                 from the frozen point without any jump. */
-void display_timer_toggle(void)
-{
-    if (!s_timer_mutex) return;
-    xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-    if (s_timer_paused) {
-        /* Resume: reconstruct start tick so elapsed_ms picks up from freeze */
-        s_timer_start  = xTaskGetTickCount() - pdMS_TO_TICKS(s_paused_elapsed_ms);
-        s_timer_paused = false;
-    } else {
-        /* Pause: freeze current elapsed */
-        s_paused_elapsed_ms = (uint32_t)pdTICKS_TO_MS(
-                                  xTaskGetTickCount() - s_timer_start);
-        s_timer_paused      = true;
-    }
-    xSemaphoreGive(s_timer_mutex);
-}
 
 /* ── render_ticker ───────────────────────────────────────────────────
  * Called once per 200 ms tick while an MQTT ticker is active.
@@ -7677,7 +8828,6 @@ static void display_task(void *arg)
     /* Mutexes created in display_init(); only allocate here if somehow missed. */
     if (!s_timer_mutex)   s_timer_mutex   = xSemaphoreCreateMutex();
     if (!s_cx_push_mutex) s_cx_push_mutex = xSemaphoreCreateMutex();
-    s_timer_start  = xTaskGetTickCount();
 
     /* Pre-allocate shared PSRAM buffers used by the image cache and flip
      * animation.  Doing this here (rather than in display_init) so the
@@ -7715,7 +8865,6 @@ static void display_task(void *arg)
     uint32_t      last_insta    = UINT32_MAX;
     uint32_t      last_tiktok   = UINT32_MAX;
     uint32_t      last_mastodon = UINT32_MAX;
-    int32_t       last_remain_s = INT32_MAX;  /* countdown/pomodoro change detection */
     float         last_temp_c   = -9999.0f;   /* weather change detection */
     float         last_hum      = -1.0f;
     bool          last_wx_valid = false;       /* detect when data first arrives */
@@ -7770,6 +8919,12 @@ static void display_task(void *arg)
         cfg_snap = *config_get();
         config_unlock();
         const nextube_config_t *cfg = &cfg_snap;
+        /* Keep the DotMatrix on/off colours current for every app mode, not
+         * just Clock — display_show_image()'s DotMatrix intercept runs from
+         * many call sites (weather/timer/follower-count panels too) that
+         * don't have direct access to cfg. Cheap unconditional copy. */
+        s_dm_on_r  = cfg->dm_on_color[0];  s_dm_on_g  = cfg->dm_on_color[1];  s_dm_on_b  = cfg->dm_on_color[2];
+        s_dm_off_r = cfg->dm_off_color[0]; s_dm_off_g = cfg->dm_off_color[1]; s_dm_off_b = cfg->dm_off_color[2];
         app_mode_t mode = cfg->current_mode;
         bool mode_changed  = (mode != last_mode);
         bool theme_changed = (strcmp(cfg->theme,      last_theme)      != 0) ||
@@ -7895,13 +9050,6 @@ static void display_task(void *arg)
             last_display_epoch = 0;   /* clear clock smoothing state so first fresh render
                                        * uses the true system time without clamping */
         }
-        if (mode_changed || first) {
-            /* Reset countdown/pomodoro timer only on mode switch — NOT on theme change,
-             * so a running countdown survives theme rotation. */
-            last_remain_s = INT32_MAX;
-            display_timer_reset();
-        }
-
         /* Apply backlight on/off whenever the config changes.
          * Default to primary lcd_brightness, overridden by Night Mode if enabled. */
         uint8_t target_brt = cfg->lcd_brightness;
@@ -8018,7 +9166,6 @@ static void display_task(void *arg)
             last_insta    = UINT32_MAX;
             last_tiktok   = UINT32_MAX;
             last_mastodon = UINT32_MAX;
-            last_remain_s = INT32_MAX;
             last_temp_c   = -9999.0f;
             last_hum      = -1.0f;
             last_wx_valid = false;
@@ -8168,33 +9315,6 @@ static void display_task(void *arg)
                                  && strncmp(s_wl_bg_theme, "WeatherLive", 11) != 0);
         bool wl_anim_tick = cfg->wlive_animate && wl_sky_animates && s_wl_scene_valid;
 
-        /* Pre-compute the live timer value for countdown/pomodoro so the anim
-         * block always renders the current second, not the 1-tick-stale
-         * last_remain_s.  Both loops (anim block + main switch) now see the
-         * same value, eliminating the "2 loops fighting" phase offset. */
-        int32_t cd_remain_now        = (last_remain_s == INT32_MAX) ? 0 : last_remain_s;
-        bool    cd_pomo_break_now    = s_pomo_in_break;
-        if ((mode == APP_MODE_COUNTDOWN || mode == APP_MODE_POMODORO) &&
-                !first && !mode_changed) {
-            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-            uint32_t cd_elapsed = s_timer_paused
-                ? s_paused_elapsed_ms
-                : (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start);
-            cd_pomo_break_now = s_pomo_in_break;
-            xSemaphoreGive(s_timer_mutex);
-            if (mode == APP_MODE_COUNTDOWN) {
-                int32_t total = (int32_t)cfg->countdown_minutes * 60;
-                cd_remain_now = total - (int32_t)(cd_elapsed / 1000);
-                if (cd_remain_now < 0) cd_remain_now = 0;
-            } else {
-                int32_t period = cd_pomo_break_now
-                    ? (int32_t)cfg->pomodoro_break * 60
-                    : (int32_t)cfg->pomodoro_work  * 60;
-                cd_remain_now = period - (int32_t)(cd_elapsed / 1000);
-                if (cd_remain_now < 0) cd_remain_now = 0;
-            }
-        }
-
         /* ── Continuous WeatherLive background render ────────────────────────
          * When the sky is animated this single block acts as one unified
          * background loop that renders sky + cached mode content every tick,
@@ -8258,12 +9378,6 @@ static void display_task(void *arg)
                 break;
             case APP_MODE_DATE:
                 render_date(cfg, &last_t);
-                break;
-            case APP_MODE_COUNTDOWN:
-                render_countdown_display(cfg, cd_remain_now);
-                break;
-            case APP_MODE_POMODORO:
-                render_pomodoro_display(cfg, cd_remain_now, cd_pomo_break_now);
                 break;
             case APP_MODE_WEATHER:
                 render_weather(cfg, weather_panel, false, hilo_phase);
@@ -8590,60 +9704,6 @@ static void display_task(void *arg)
                 if (!wl_anim_tick || first || mode_changed)
                     render_date(cfg, &t);
                 last_t = t;
-            }
-            break;
-        }
-
-        case APP_MODE_COUNTDOWN: {
-            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-            uint32_t elapsed_ms = s_timer_paused
-                ? s_paused_elapsed_ms
-                : (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start);
-            xSemaphoreGive(s_timer_mutex);
-            int32_t total  = (int32_t)cfg->countdown_minutes * 60;
-            int32_t remain = total - (int32_t)(elapsed_ms / 1000);
-            if (remain < 0) remain = 0;
-            if (first || mode_changed || theme_changed || remain != last_remain_s ||
-                    burnin_force_render) {
-                if (!wl_anim_tick || first || mode_changed)
-                    render_countdown_display(cfg, remain);
-                last_remain_s = remain;
-            }
-            break;
-        }
-
-        case APP_MODE_POMODORO: {
-            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-            bool     paused     = s_timer_paused;
-            uint32_t elapsed_ms = paused
-                ? s_paused_elapsed_ms
-                : (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start);
-            bool in_break = s_pomo_in_break;
-            xSemaphoreGive(s_timer_mutex);
-
-            int32_t period = in_break ? (int32_t)cfg->pomodoro_break * 60
-                                      : (int32_t)cfg->pomodoro_work  * 60;
-            int32_t remain = period - (int32_t)(elapsed_ms / 1000);
-            if (remain <= 0) {
-                if (!paused) {
-                    /* Auto-flip work↔break only while the timer is running */
-                    xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-                    s_pomo_in_break     = !s_pomo_in_break;
-                    s_timer_start       = xTaskGetTickCount();
-                    s_paused_elapsed_ms = 0;
-                    in_break            = s_pomo_in_break;
-                    xSemaphoreGive(s_timer_mutex);
-                    remain = in_break ? (int32_t)cfg->pomodoro_break * 60
-                                      : (int32_t)cfg->pomodoro_work  * 60;
-                } else {
-                    remain = 0;   /* frozen at zero while paused */
-                }
-            }
-            if (first || mode_changed || theme_changed || remain != last_remain_s ||
-                    burnin_force_render) {
-                if (!wl_anim_tick || first || mode_changed)
-                    render_pomodoro_display(cfg, remain, in_break);
-                last_remain_s = remain;
             }
             break;
         }

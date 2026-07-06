@@ -22,7 +22,6 @@
   "youtube_id": "",
   "youtube_key": "",
   "bili_uid": "1",
-  "default_countdown_time": 1,
   "alarm_time": [],
   "spectrum_RGB": [
     50,
@@ -35,10 +34,6 @@
   "time_zone": -21600,
   "City": "",
   "temperature_formate": "Celsius",
-  "music_file": "",
-  "bell_file": "/spiffs/audio/bell.wav",
-  "tone_file": "/spiffs/audio/tremolo3.wav",
-  "timer_file": "/spiffs/audio/timer.wav",
   "click_file": "/spiffs/audio/click.wav",
   "volume": 20,
   "lcd_brightness": 30,

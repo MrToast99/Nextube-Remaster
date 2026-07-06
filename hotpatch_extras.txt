@@ -28,8 +28,3 @@ fonts/JimNightshade-Regular-subset.ttf
 fonts/Roboto-Regular-subset.ttf
 fonts/Kings-Regular-subset.ttf
 fonts/IBMPlexSans-Regular-subset.ttf
-images\themes\DotMatrixRG\MutiInfo\Humidity\degree.jpg
-images\themes\DotMatrixRG\MutiInfo\Humidity\humidity.jpg
-images\themes\DotMatrixRG\MutiInfo\Temperature\degreec.jpg
-images\themes\DotMatrixRG\MutiInfo\Temperature\degreef.jpg
-images\themes\DotMatrixRG\MutiInfo\Temperature\minus.jpg

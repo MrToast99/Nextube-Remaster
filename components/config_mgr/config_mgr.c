@@ -46,11 +46,16 @@ static void set_defaults(void)
     /* Custom clock face defaults: WeatherLive sky, white glyphs/text, shadow on */
     s_cfg.clock_face[0]         = '\0';
     strncpy(s_cfg.custom_bg, "WeatherLive", sizeof(s_cfg.custom_bg) - 1);
+    strncpy(s_cfg.custom_bg_fill, "solid", sizeof(s_cfg.custom_bg_fill) - 1);
+    s_cfg.custom_bg_color1[0]   = 0;   s_cfg.custom_bg_color1[1]   = 0;   s_cfg.custom_bg_color1[2]   = 0;
+    s_cfg.custom_bg_color2[0]   = 60;  s_cfg.custom_bg_color2[1]   = 60;  s_cfg.custom_bg_color2[2]   = 120;
     s_cfg.custom_font_color[0]  = 255; s_cfg.custom_font_color[1]  = 255; s_cfg.custom_font_color[2]  = 255;
     s_cfg.custom_glyph_color[0] = 255; s_cfg.custom_glyph_color[1] = 255; s_cfg.custom_glyph_color[2] = 255;
     s_cfg.custom_shadow         = true;
     s_cfg.custom_shadow_color[0]= 0;   s_cfg.custom_shadow_color[1]= 0;   s_cfg.custom_shadow_color[2]= 0;
     s_cfg.custom_font[0]        = '\0';
+    s_cfg.dm_on_color[0]  = 255; s_cfg.dm_on_color[1]  = 255; s_cfg.dm_on_color[2]  = 255;
+    s_cfg.dm_off_color[0] = 25;  s_cfg.dm_off_color[1] = 25;  s_cfg.dm_off_color[2] = 25;
     /* All modes enabled by default. Clock and Date are independent — both
      * can be active simultaneously in the touch cycle. */
     s_cfg.enabled_modes   = 0xFFF;   /* all 12 modes (bits 0–11) */
@@ -126,10 +131,6 @@ static void set_defaults(void)
     strncpy(s_cfg.youtube_key, "", sizeof(s_cfg.youtube_key) - 1);
     strncpy(s_cfg.bili_uid, "1", sizeof(s_cfg.bili_uid) - 1);
 
-    strncpy(s_cfg.music_file, "", sizeof(s_cfg.music_file) - 1);
-    strncpy(s_cfg.bell_file, "/spiffs/audio/bell.wav", sizeof(s_cfg.bell_file) - 1);
-    strncpy(s_cfg.tone_file, "/spiffs/audio/tremolo3.wav", sizeof(s_cfg.tone_file) - 1);
-    strncpy(s_cfg.timer_file, "/spiffs/audio/timer.wav", sizeof(s_cfg.timer_file) - 1);
     strncpy(s_cfg.click_file, "/spiffs/audio/click.wav", sizeof(s_cfg.click_file) - 1);
     s_cfg.button_sound  = true;
     strncpy(s_cfg.ticker_file, "/spiffs/audio/bell.wav", sizeof(s_cfg.ticker_file) - 1);
@@ -182,9 +183,6 @@ static void set_defaults(void)
     s_cfg.wled_sync_enabled = false;
     s_cfg.wled_sync_port    = 21324;
 
-    s_cfg.countdown_minutes = 1;
-    s_cfg.pomodoro_work     = 25;
-    s_cfg.pomodoro_break    = 5;
     s_cfg.album_switch_ms   = 2000;
     s_cfg.album_shuffle     = false;
     s_cfg.weather_panel_ms  = 5000;  /* 5 s between temp and humidity panels */
@@ -330,9 +328,9 @@ static void parse_json(const char *json, size_t len)
         char app_name[32] = {0};
         json_read_str(app0, "app", app_name, sizeof(app_name));
         if      (strcmp(app_name, "Clock")      == 0) s_cfg.current_mode = APP_MODE_CLOCK;
-        else if (strcmp(app_name, "Countdown")   == 0) s_cfg.current_mode = APP_MODE_COUNTDOWN;
+        else if (strcmp(app_name, "Countdown")  == 0) s_cfg.current_mode = APP_MODE_CLOCK; /* removed mode → fall back to Clock */
         else if (strcmp(app_name, "Scoreboard")  == 0) s_cfg.current_mode = APP_MODE_CLOCK; /* removed mode → fall back to Clock */
-        else if (strcmp(app_name, "Pomodoro")    == 0) s_cfg.current_mode = APP_MODE_POMODORO;
+        else if (strcmp(app_name, "Pomodoro")    == 0) s_cfg.current_mode = APP_MODE_CLOCK; /* removed mode → fall back to Clock */
         else if (strcmp(app_name, "YouTube")     == 0) s_cfg.current_mode = APP_MODE_YOUTUBE;
         else if (strcmp(app_name, "Date")        == 0) s_cfg.current_mode = APP_MODE_DATE;
         else if (strcmp(app_name, "CustomClock") == 0) s_cfg.current_mode = APP_MODE_DATE; /* legacy alias */
@@ -344,6 +342,13 @@ static void parse_json(const char *json, size_t len)
         else if (strcmp(app_name, "Mastodon")    == 0) s_cfg.current_mode = APP_MODE_MASTODON;
 
         json_read_str(app0, "theme", s_cfg.theme, sizeof(s_cfg.theme));
+        /* Removed baked-JPEG themes → migrate to their procedural
+         * successor rather than leaving a config pointed at assets that no
+         * longer exist on disk. */
+        if (strcmp(s_cfg.theme, "DotMatrixRG") == 0 || strcmp(s_cfg.theme, "DotMatrixY") == 0) {
+            strncpy(s_cfg.theme, "DotMatrix", sizeof(s_cfg.theme) - 1);
+            s_cfg.theme[sizeof(s_cfg.theme) - 1] = '\0';
+        }
         json_read_str(app0, "type",  s_cfg.time_type, sizeof(s_cfg.time_type));
         json_read_str(app0, "clock_tube5", s_cfg.clock_tube5, sizeof(s_cfg.clock_tube5));
         if (s_cfg.clock_tube5[0] == '\0') strncpy(s_cfg.clock_tube5, "blank", sizeof(s_cfg.clock_tube5) - 1);
@@ -371,10 +376,6 @@ static void parse_json(const char *json, size_t len)
     json_read_str(root, "wind_unit",           s_cfg.wind_unit,   sizeof(s_cfg.wind_unit));
     json_read_str(root, "date_format",         s_cfg.date_format, sizeof(s_cfg.date_format));
     json_read_str(root, "language",            s_cfg.language,    sizeof(s_cfg.language));
-    json_read_str(root, "music_file",       s_cfg.music_file,      sizeof(s_cfg.music_file));
-    json_read_str(root, "bell_file",        s_cfg.bell_file,       sizeof(s_cfg.bell_file));
-    json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
-    json_read_str(root, "timer_file",       s_cfg.timer_file,      sizeof(s_cfg.timer_file));
     json_read_str(root, "click_file",       s_cfg.click_file,      sizeof(s_cfg.click_file));
     json_read_str(root, "ticker_file",      s_cfg.ticker_file,     sizeof(s_cfg.ticker_file));
     json_read_str(root, "hostname",        s_cfg.hostname,        sizeof(s_cfg.hostname));
@@ -541,15 +542,21 @@ static void parse_json(const char *json, size_t len)
     json_read_str(root, "clock_face", s_cfg.clock_face, sizeof(s_cfg.clock_face));
     json_read_str(root, "custom_bg",  s_cfg.custom_bg,  sizeof(s_cfg.custom_bg));
     if (s_cfg.custom_bg[0] == '\0') strncpy(s_cfg.custom_bg, "WeatherLive", sizeof(s_cfg.custom_bg) - 1);
+    json_read_str(root, "custom_bg_fill", s_cfg.custom_bg_fill, sizeof(s_cfg.custom_bg_fill));
+    if (s_cfg.custom_bg_fill[0] == '\0') strncpy(s_cfg.custom_bg_fill, "solid", sizeof(s_cfg.custom_bg_fill) - 1);
     {
         cJSON *v = cJSON_GetObjectItem(root, "custom_shadow");
         if (cJSON_IsBool(v)) s_cfg.custom_shadow = cJSON_IsTrue(v);
     }
     json_read_str(root, "custom_font", s_cfg.custom_font, sizeof(s_cfg.custom_font));
     {
-        static const char *const color_keys[3] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color" };
-        uint8_t *const color_ptrs[3] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color };
-        for (int ci = 0; ci < 3; ci++) {
+        static const char *const color_keys[7] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
+                                                    "dm_on_color", "dm_off_color",
+                                                    "custom_bg_color1", "custom_bg_color2" };
+        uint8_t *const color_ptrs[7] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
+                                          s_cfg.dm_on_color, s_cfg.dm_off_color,
+                                          s_cfg.custom_bg_color1, s_cfg.custom_bg_color2 };
+        for (int ci = 0; ci < 7; ci++) {
             cJSON *arr = cJSON_GetObjectItem(root, color_keys[ci]);
             if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= 3) {
                 for (int ch = 0; ch < 3; ch++) {
@@ -575,12 +582,6 @@ static void parse_json(const char *json, size_t len)
     json_read_u8(root, "night_end_hour",   &s_cfg.night_end_hour);
     if (s_cfg.night_end_hour > 23) s_cfg.night_end_hour = 23;
 
-    json_read_u16(root, "default_countdown_time", &s_cfg.countdown_minutes);
-    if (s_cfg.countdown_minutes < 1) s_cfg.countdown_minutes = 1;
-    json_read_u16(root, "pomodoro_work",          &s_cfg.pomodoro_work);
-    if (s_cfg.pomodoro_work < 1) s_cfg.pomodoro_work = 1;
-    json_read_u16(root, "pomodoro_break",         &s_cfg.pomodoro_break);
-    if (s_cfg.pomodoro_break < 1) s_cfg.pomodoro_break = 1;
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
     if (s_cfg.album_switch_ms < 500) s_cfg.album_switch_ms = 2000; /* 0/tiny would thrash SPIFFS JPEG reads every frame */
     { cJSON *v = cJSON_GetObjectItem(root, "album_shuffle");
@@ -1185,10 +1186,6 @@ char *config_to_json(bool include_password)
     cJSON_AddStringToObject(root, "wind_unit",           s_cfg.wind_unit);
     cJSON_AddStringToObject(root, "date_format",         s_cfg.date_format);
     cJSON_AddStringToObject(root, "language",            s_cfg.language);
-    cJSON_AddStringToObject(root, "music_file",       s_cfg.music_file);
-    cJSON_AddStringToObject(root, "bell_file",        s_cfg.bell_file);
-    cJSON_AddStringToObject(root, "tone_file",        s_cfg.tone_file);
-    cJSON_AddStringToObject(root, "timer_file",       s_cfg.timer_file);
     cJSON_AddStringToObject(root, "click_file",       s_cfg.click_file);
     cJSON_AddStringToObject(root, "ticker_file",      s_cfg.ticker_file);
     cJSON_AddStringToObject(root, "hostname",        s_cfg.hostname);
@@ -1244,12 +1241,17 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "wlive_animate",        s_cfg.wlive_animate);
     cJSON_AddStringToObject(root, "clock_face",           s_cfg.clock_face);
     cJSON_AddStringToObject(root, "custom_bg",            s_cfg.custom_bg);
+    cJSON_AddStringToObject(root, "custom_bg_fill",       s_cfg.custom_bg_fill);
     cJSON_AddBoolToObject  (root, "custom_shadow",        s_cfg.custom_shadow);
     cJSON_AddStringToObject(root, "custom_font",          s_cfg.custom_font);
     {
-        const char *const keys[3]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color" };
-        const uint8_t *const ptrs[3] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color };
-        for (int ci = 0; ci < 3; ci++) {
+        const char *const keys[7]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
+                                        "dm_on_color", "dm_off_color",
+                                        "custom_bg_color1", "custom_bg_color2" };
+        const uint8_t *const ptrs[7] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
+                                          s_cfg.dm_on_color, s_cfg.dm_off_color,
+                                          s_cfg.custom_bg_color1, s_cfg.custom_bg_color2 };
+        for (int ci = 0; ci < 7; ci++) {
             cJSON *arr = cJSON_CreateArray();
             for (int ch = 0; ch < 3; ch++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(ptrs[ci][ch]));
             cJSON_AddItemToObject(root, keys[ci], arr);
@@ -1261,9 +1263,6 @@ char *config_to_json(bool include_password)
     cJSON_AddNumberToObject(root, "led_night_brightness", s_cfg.led_night_brightness);
     cJSON_AddNumberToObject(root, "night_start_hour", s_cfg.night_start_hour);
     cJSON_AddNumberToObject(root, "night_end_hour",   s_cfg.night_end_hour);
-    cJSON_AddNumberToObject(root, "default_countdown_time", s_cfg.countdown_minutes);
-    cJSON_AddNumberToObject(root, "pomodoro_work",          s_cfg.pomodoro_work);
-    cJSON_AddNumberToObject(root, "pomodoro_break",         s_cfg.pomodoro_break);
     cJSON_AddNumberToObject(root, "album_switch_time",      s_cfg.album_switch_ms);
     cJSON_AddBoolToObject  (root, "album_shuffle",          s_cfg.album_shuffle);
     cJSON_AddNumberToObject(root, "weather_panel_ms",       s_cfg.weather_panel_ms);
@@ -1460,9 +1459,8 @@ const char *app_mode_name(app_mode_t mode)
 {
     static const char *const names[APP_MODE_MAX] = {
         [APP_MODE_CLOCK]        = "Clock",
-        [APP_MODE_COUNTDOWN]    = "Countdown",
-        /* index 2 unused — was Scoreboard */
-        [APP_MODE_POMODORO]     = "Pomodoro",
+        /* index 1 unused — was Countdown; index 2 unused — was Scoreboard;
+         * index 3 unused — was Pomodoro */
         [APP_MODE_YOUTUBE]      = "YouTube",
         [APP_MODE_DATE] = "Date",
         [APP_MODE_ALBUM]        = "Album",

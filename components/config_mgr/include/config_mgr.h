@@ -22,10 +22,10 @@ extern "C" {
 /* ── App mode identifiers ──────────────────────────────────────────── */
 typedef enum {
     APP_MODE_CLOCK      = 0,
-    APP_MODE_COUNTDOWN  = 1,
-    /* bit 2 is unused — was APP_MODE_SCOREBOARD; kept as a gap so that saved
-     * enabled_modes bitmasks from older firmware are not silently misread. */
-    APP_MODE_POMODORO   = 3,
+    /* bit 1 is unused — was APP_MODE_COUNTDOWN; bit 2 is unused — was
+     * APP_MODE_SCOREBOARD; bit 3 is unused — was APP_MODE_POMODORO. All
+     * three kept as gaps so that saved enabled_modes bitmasks from older
+     * firmware are not silently misread. */
     APP_MODE_DATE       = 4,
     APP_MODE_ALBUM      = 5,
     APP_MODE_WEATHER    = 6,
@@ -71,7 +71,12 @@ typedef struct {
      * asset-theme clock faces (clock_face == ""), EXCEPT custom_font below,
      * which also drives the 24H_CX asset-theme info panels.                */
     char             clock_face[16];      /* "" = use theme, "custom" = Custom clock face */
-    char             custom_bg[32];       /* background: "WeatherLive" = animated sky, else theme name */
+    char             custom_bg[32];       /* background: "WeatherLive" = animated sky, "CustomColor" =
+                                            * solid/gradient fill below, else theme name */
+    char             custom_bg_fill[16];  /* "solid","linear_v","linear_h","diagonal","radial" —
+                                            * only used when custom_bg == "CustomColor" */
+    uint8_t          custom_bg_color1[3]; /* solid fill colour, or gradient start colour */
+    uint8_t          custom_bg_color2[3]; /* gradient end colour (ignored for "solid") */
     uint8_t          custom_font_color[3];   /* info-panel / label text RGB */
     uint8_t          custom_glyph_color[3];  /* clock digit glyph RGB */
     bool             custom_shadow;          /* shadow on/off for glyphs and text */
@@ -79,6 +84,11 @@ typedef struct {
     char             custom_font[64];        /* TTF filename in /spiffs/fonts/; "" = logisoso (u8g2 fallback).
                                                * Also applies to 24H_CX asset-theme Outdoor Temp/Humidity/Wind/
                                                * AQI/combined-H-T panels (they share wl_text() with WeatherLive). */
+    /* "DotMatrix" theme — procedural 7x14-cell dot-matrix glyphs (ships with
+     * no on-disk assets, like WeatherLive).  Every cell in a glyph's grid is
+     * always painted, on or off, so both colours are independently set. */
+    uint8_t          dm_on_color[3];         /* lit-dot RGB */
+    uint8_t          dm_off_color[3];        /* unlit-dot RGB */
     uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
     uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
     bool             spectrum_lcd_wled;     /* true = LCD bars follow the WLED primary colour
@@ -130,10 +140,6 @@ typedef struct {
     char             bili_uid[24];
 
     /* Audio */
-    char             music_file[64];
-    char             bell_file[64];
-    char             tone_file[64];
-    char             timer_file[64];
     char             click_file[64];     /* sound played on physical button press */
     bool             button_sound;       /* enable/disable button click sound */
     char             ticker_file[64];    /* sound played when MQTT/HA ticker text arrives */
@@ -207,11 +213,6 @@ typedef struct {
      * Select backlight_mode = BL_MODE_WLED to activate synchronisation.      */
     bool             wled_sync_enabled;  /* start UDP listener task at boot     */
     uint16_t         wled_sync_port;     /* WLED Notifier port, default 21324   */
-
-    /* Countdown / Pomodoro */
-    uint16_t         countdown_minutes;
-    uint16_t         pomodoro_work;
-    uint16_t         pomodoro_break;
 
     /* Album */
     uint16_t         album_switch_ms;

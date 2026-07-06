@@ -2646,6 +2646,10 @@ static esp_err_t api_themes(httpd_req_t *r)
      * weather condition for showcasing. */
     strlcpy(names[count++], "WeatherLive", THEME_NAME_MAX);
     strlcpy(names[count++], "WeatherLive Demo", THEME_NAME_MAX);
+    /* "DotMatrix" — procedural 7x14-cell dot-matrix glyphs (display.c's
+     * dm_render_asset()/dm_draw_text()), independently on/off colourable.
+     * Also ships with no asset folder, for the same reason. */
+    strlcpy(names[count++], "DotMatrix", THEME_NAME_MAX);
 
     DIR *dp = opendir("/spiffs/images/themes");
     if (dp) {
