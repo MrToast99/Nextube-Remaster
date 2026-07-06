@@ -48,6 +48,7 @@ Like the work? Help keep me Caffeinated! <br>
 - [Themes](#themes)
   - [Built-in Themes](#built-in-themes)
   - [WeatherLive theme](#weatherlive-theme)
+  - [DotMatrix theme](#dotmatrix-theme)
   - [Custom Face](#custom-face)
   - [Adding a Custom Theme](#adding-a-custom-theme)
   - [Image Converter Helper](#image-converter-helper)
@@ -1303,6 +1304,27 @@ All built-in themes include the complete required asset set: digits, AMPM indica
 Notes:
 - WeatherLive renders a **subset** of the 24H Custom panels procedurally and **ignores** the Weather-icon and Pushed-image panels (those need JPEG assets / asset themes); in the web UI the Weather-icon panel option is hidden while WeatherLive is selected.
 - In non-Clock modes (weather, follower counts, …) WeatherLive has no JPEG assets, so digits/symbols are drawn as procedural glyphs on a black background; the social-media platform logos still load from the built-in system assets.
+
+### DotMatrix theme
+
+**DotMatrix** is a second built-in **procedural** theme (no JPEG assets, like WeatherLive) — every glyph is drawn at runtime from a 7×14 dot grid, so the whole display reads like a classic scoreboard or departure-board panel instead of photo-realistic digit art.
+
+**Settings:** when DotMatrix is selected, two colour pickers appear under the theme picker:
+- **Dot colour (on)** — colour of lit dots.
+- **Dot colour (off)** — colour of unlit dots. Every cell in a glyph is always painted one or the other, never left transparent, so the display always shows a full lit/unlit grid rather than glyphs floating on black.
+
+**Coverage:**
+- Clock digits, AM/PM, colon/dot/minus, and the °C/°F unit mark all render from the dot-matrix font.
+- Weather-condition icons (sun, clouds, rain, snow, …), the humidity and wind panel icons, and the sunrise/sunset icons are dedicated hand-drawn dot-matrix pictograms rather than JPEG art.
+- **24H Custom info panels** (tube 5/6): weekdate, indoor/outdoor temperature & humidity, wind, air quality, and sunrise/sunset all render in this theme's blocky style, each panel sharing one consistent dot pitch across its elements (larger icons are drawn at a coarser sub-grid so they don't look mismatched against smaller text) over a tiled unlit-dot background instead of a black one.
+- Wind speed is labelled **kph** (not km/h), **mph**, or **m/s**.
+- The Outdoor Temperature panel shows a dot-matrix progress bar between today's low and high instead of the smooth gradient track used by other themes.
+- Hi/Lo and sunrise/sunset icons always use the configured **dot colour (on)** rather than the semantic red/blue or sun-crossing-horizon animation other themes use.
+- This theme never applies drop shadows, regardless of the Custom Face shadow setting.
+
+Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image panel options — Weather Icon uses the same dot-matrix condition pictograms as the other weather panels, and Pushed Image shows the raw pushed JPG/PNG as-is (unaffected by theme, same as any asset theme). In non-Clock modes (weather, follower counts, …) social-media platform logos still load from the built-in system assets; anything else with no dedicated dot-matrix glyph falls back to a plain unlit grid.
+
+**Font editing:** every glyph (digits, letters, icons) lives in a compact bitmap table in `components/display/display.c`. A standalone local Python tool (kept outside this source tree) renders each glyph as a clickable pixel grid and patches the table directly — useful if you want to redraw an icon or tweak a letterform without hand-editing hex byte arrays.
 
 ### Custom Face
 
