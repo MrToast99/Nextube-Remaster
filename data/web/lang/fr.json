@@ -226,7 +226,7 @@
   "sys.upload_folder": "Téléverser un dossier",
   "sys.fs_recovery": "Récupération LittleFS",
   "sys.fs_recovery_help": "Flashe une image <strong>nextube-littlefs-v*.bin</strong> complète. À utiliser uniquement lorsque les notes de version l'exigent explicitement, ou pour récupérer un système de fichiers corrompu.",
-  "sys.fs_recovery_warn": "⚠️ <strong>Cela efface toute la partition LittleFS</strong> — tous les thèmes personnalisés, images d'album et fichiers audio seront perdus. Sauvegardez ce que vous souhaitez conserver via le navigateur de fichiers LittleFS ci-dessus, et téléchargez votre configuration via Sauvegarde et restauration avant de continuer.",
+  "sys.fs_recovery_warn": "⚠️ <strong>Cela efface toute la partition LittleFS</strong> — tous les thèmes personnalisés, images d'album et fichiers audio seront perdus. Sauvegardez ce que vous souhaitez conserver via le navigateur de fichiers LittleFS ci-dessus.<br>Vos paramètres (Wi-Fi, thème, luminosité, etc.) sont automatiquement sauvegardés dans la NVS avant l'effacement et restaurés au prochain démarrage — aucune sauvegarde manuelle de la configuration n'est nécessaire pour cette étape.",
   "sys.logs": "Journaux de l'appareil",
   "sys.logs_help": "Sortie de journal en direct — mise en mémoire tampon en RAM depuis le démarrage, non écrite en flash. 200 dernières lignes. Utilisez l'actualisation automatique pour suivre en temps réel.",
   "sys.auto_refresh": "Actualisation auto",

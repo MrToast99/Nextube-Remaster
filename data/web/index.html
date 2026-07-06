@@ -1197,7 +1197,7 @@ select option{background:var(--accent);color:var(--text)}
     <h2 data-i18n="sys.fs_recovery">LittleFS Recovery</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.fs_recovery_help">Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.</p>
     <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5" data-i18n-html="sys.fs_recovery_warn">
-      ⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above, and download your config using Backup &amp; Restore before proceeding.
+      ⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above.<br>Your settings (Wi-Fi, theme, brightness, etc.) are backed up to NVS automatically before the erase and restored on the next boot — no manual config backup needed for this step.
     </div>
     <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
     <div class="progress ota" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
@@ -1705,7 +1705,7 @@ Object.assign(I18N.en, {
   "sys.browse":"Browse","sys.refresh":"Refresh","sys.new_folder":"New Folder","sys.upload_files":"Upload File(s)","sys.upload_folder":"Upload Folder",
   "sys.fs_recovery":"LittleFS Recovery",
   "sys.fs_recovery_help":"Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.",
-  "sys.fs_recovery_warn":"⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above, and download your config using Backup & Restore before proceeding.",
+  "sys.fs_recovery_warn":"⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above.<br>Your settings (Wi-Fi, theme, brightness, etc.) are backed up to NVS automatically before the erase and restored on the next boot — no manual config backup needed for this step.",
   "sys.logs":"Device Logs",
   "sys.logs_help":"Live device log output — buffered in RAM from boot, not written to flash. Last 200 lines. Use auto-refresh to watch in real time.",
   "sys.auto_refresh":"Auto-refresh","sys.clear":"Clear",
@@ -2956,7 +2956,10 @@ function buildThemeRotList(selectedNames) {
   const prev = selectedNames !== undefined ? selectedNames
     : [...wrap.querySelectorAll('input')].filter(c => c.checked).map(c => c.dataset.theme);
   wrap.innerHTML = '';
-  s_themes.forEach(t => {
+  /* "WeatherLive Demo" is a showcase-only theme (accelerated day/night,
+   * auto-cycles every weather condition) — not meant for real-world
+   * automated rotation, so it's excluded from the selectable list here. */
+  s_themes.filter(t => t !== 'WeatherLive Demo').forEach(t => {
     const label = document.createElement('label');
     label.style.cssText = 'display:flex;align-items:center;gap:.35rem;font-size:.85rem;cursor:pointer;white-space:nowrap';
     const cb = document.createElement('input');

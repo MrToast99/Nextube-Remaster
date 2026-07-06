@@ -226,7 +226,7 @@
   "sys.upload_folder": "Last opp mappe",
   "sys.fs_recovery": "LittleFS-gjenoppretting",
   "sys.fs_recovery_help": "Flasher et komplett <strong>nextube-littlefs-v*.bin</strong>-bilde. Bruk kun når versjonsmerknadene uttrykkelig krever det, eller for å gjenopprette et skadet filsystem.",
-  "sys.fs_recovery_warn": "⚠️ <strong>Dette sletter hele LittleFS-partisjonen</strong> — alle egendefinerte temaer, albumbilder og lydfiler går tapt. Sikkerhetskopier det du vil beholde via LittleFS-filleseren over, og last ned konfigurasjonen via Sikkerhetskopiering og gjenoppretting før du fortsetter.",
+  "sys.fs_recovery_warn": "⚠️ <strong>Dette sletter hele LittleFS-partisjonen</strong> — alle egendefinerte temaer, albumbilder og lydfiler går tapt. Sikkerhetskopier det du vil beholde via LittleFS-filleseren over.<br>Innstillingene dine (Wi-Fi, tema, lysstyrke osv.) sikkerhetskopieres automatisk til NVS før slettingen og gjenopprettes ved neste oppstart — ingen manuell konfigurasjonssikkerhetskopi er nødvendig for dette trinnet.",
   "sys.logs": "Enhetslogger",
   "sys.logs_help": "Sanntids loggutdata — bufret i RAM fra oppstart, ikke skrevet til flash. Siste 200 linjer. Bruk automatisk oppdatering for å følge i sanntid.",
   "sys.auto_refresh": "Auto-oppdater",

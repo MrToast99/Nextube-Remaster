@@ -226,7 +226,7 @@
   "sys.upload_folder": "Subir carpeta",
   "sys.fs_recovery": "Recuperación de LittleFS",
   "sys.fs_recovery_help": "Flashea una imagen <strong>nextube-littlefs-v*.bin</strong> completa. Úsalo solo cuando las notas de la versión lo requieran explícitamente, o para recuperar un sistema de archivos dañado.",
-  "sys.fs_recovery_warn": "⚠️ <strong>Esto borra toda la partición LittleFS</strong> — se perderán todos los temas personalizados, imágenes de álbum y archivos de audio. Haz una copia de lo que quieras conservar con el explorador de archivos LittleFS de arriba, y descarga tu configuración con Copia de seguridad y restauración antes de continuar.",
+  "sys.fs_recovery_warn": "⚠️ <strong>Esto borra toda la partición LittleFS</strong> — se perderán todos los temas personalizados, imágenes de álbum y archivos de audio. Haz una copia de lo que quieras conservar con el explorador de archivos LittleFS de arriba.<br>Tu configuración (Wi-Fi, tema, brillo, etc.) se respalda automáticamente en NVS antes del borrado y se restaura en el siguiente arranque — no necesitas hacer una copia de la configuración manualmente para este paso.",
   "sys.logs": "Registros del dispositivo",
   "sys.logs_help": "Salida de registro en vivo — almacenada en RAM desde el arranque, no escrita en flash. Últimas 200 líneas. Usa la actualización automática para verlo en tiempo real.",
   "sys.auto_refresh": "Auto-actualizar",

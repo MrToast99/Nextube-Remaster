@@ -7361,6 +7361,21 @@ static void advance_theme(const char *current_theme,
     /* 1. Collect all installed theme directory names */
     char all[MAX_THEMES_ROT][THEME_NAME_MAX_ROT];
     int  total = 0;
+    /* Built-in procedural themes ship with no /images/themes/ asset folder —
+     * same special-case list api_themes() in web_server.c injects for the
+     * web UI's theme dropdown. Without this, one of these could be checked
+     * in Theme Rotation but never actually reached: the pool below is built
+     * by intersecting the user's selection against this disk scan, so a
+     * theme absent from the scan can never appear in the pool regardless of
+     * what's selected. "WeatherLive Demo" is deliberately NOT included here
+     * — it's a showcase-only theme (accelerated day/night, auto-cycles every
+     * weather condition), never meant for real-world rotation, and this is
+     * also what the sel_count==0 ("rotate all installed themes") branch
+     * below draws from, so leaving it out here keeps it out of that case too. */
+    strncpy(all[total], "WeatherLive", THEME_NAME_MAX_ROT - 1);
+    all[total][THEME_NAME_MAX_ROT - 1] = '\0'; total++;
+    strncpy(all[total], "DotMatrix", THEME_NAME_MAX_ROT - 1);
+    all[total][THEME_NAME_MAX_ROT - 1] = '\0'; total++;
     DIR *dp = opendir("/spiffs/images/themes");
     if (dp) {
         struct dirent *e;

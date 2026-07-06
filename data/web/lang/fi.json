@@ -226,7 +226,7 @@
   "sys.upload_folder": "Lataa kansio",
   "sys.fs_recovery": "LittleFS-palautus",
   "sys.fs_recovery_help": "Flashaa täydellisen <strong>nextube-littlefs-v*.bin</strong>-vedoksen. Käytä vain, kun julkaisutiedot sitä nimenomaisesti vaativat, tai vioittuneen tiedostojärjestelmän palauttamiseen.",
-  "sys.fs_recovery_warn": "⚠️ <strong>Tämä tyhjentää koko LittleFS-osion</strong> — kaikki mukautetut teemat, albumikuvat ja äänitiedostot menetetään. Varmuuskopioi säilytettävät tiedostot yllä olevalla LittleFS-tiedostoselaimella ja lataa kokoonpanosi Varmuuskopiointi ja palautus -kohdasta ennen jatkamista.",
+  "sys.fs_recovery_warn": "⚠️ <strong>Tämä tyhjentää koko LittleFS-osion</strong> — kaikki mukautetut teemat, albumikuvat ja äänitiedostot menetetään. Varmuuskopioi säilytettävät tiedostot yllä olevalla LittleFS-tiedostoselaimella.<br>Asetuksesi (Wi-Fi, teema, kirkkaus jne.) varmuuskopioidaan automaattisesti NVS:ään ennen tyhjennystä ja palautetaan seuraavassa käynnistyksessä — manuaalista asetusten varmuuskopiointia ei tarvita tätä vaihetta varten.",
   "sys.logs": "Laitteen lokit",
   "sys.logs_help": "Reaaliaikainen lokituloste — puskuroitu RAM-muistiin käynnistyksestä, ei kirjoitettu flashiin. Viimeiset 200 riviä. Käytä automaattista päivitystä reaaliaikaiseen seurantaan.",
   "sys.auto_refresh": "Autom. päivitys",

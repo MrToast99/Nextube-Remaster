@@ -226,7 +226,7 @@
   "sys.upload_folder": "Map uploaden",
   "sys.fs_recovery": "LittleFS-herstel",
   "sys.fs_recovery_help": "Flasht een volledige <strong>nextube-littlefs-v*.bin</strong>-image. Gebruik alleen wanneer de release-opmerkingen dit expliciet vereisen, of om een beschadigd bestandssysteem te herstellen.",
-  "sys.fs_recovery_warn": "⚠️ <strong>Dit wist de hele LittleFS-partitie</strong> — alle eigen thema's, albumafbeeldingen en audiobestanden gaan verloren. Maak een back-up van wat je wilt behouden via de LittleFS-bestandsbrowser hierboven, en download je configuratie via Back-up en herstel voordat je doorgaat.",
+  "sys.fs_recovery_warn": "⚠️ <strong>Dit wist de hele LittleFS-partitie</strong> — alle eigen thema's, albumafbeeldingen en audiobestanden gaan verloren. Maak een back-up van wat je wilt behouden via de LittleFS-bestandsbrowser hierboven.<br>Je instellingen (wifi, thema, helderheid, enz.) worden automatisch geback-upt naar NVS vóór het wissen en hersteld bij de volgende opstart — een handmatige configuratieback-up is voor deze stap niet nodig.",
   "sys.logs": "Apparaatlogboeken",
   "sys.logs_help": "Live logboekuitvoer — gebufferd in RAM vanaf het opstarten, niet naar flash geschreven. Laatste 200 regels. Gebruik automatisch vernieuwen om in realtime mee te kijken.",
   "sys.auto_refresh": "Auto-vernieuwen",

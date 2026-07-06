@@ -226,7 +226,7 @@
   "sys.upload_folder": "Ordner hochladen",
   "sys.fs_recovery": "LittleFS-Wiederherstellung",
   "sys.fs_recovery_help": "Flasht ein vollständiges <strong>nextube-littlefs-v*.bin</strong>-Image. Nur verwenden, wenn die Versionshinweise ausdrücklich ein vollständiges LittleFS-Reflash verlangen oder zur Wiederherstellung eines beschädigten Dateisystems.",
-  "sys.fs_recovery_warn": "⚠️ <strong>Dies löscht die gesamte LittleFS-Partition</strong> — alle eigenen Designs, Albumbilder und Audiodateien gehen verloren. Sichern Sie alles, was Sie behalten möchten, über den LittleFS-Dateibrowser oben und laden Sie Ihre Konfiguration unter „Sichern & Wiederherstellen“ herunter, bevor Sie fortfahren.",
+  "sys.fs_recovery_warn": "⚠️ <strong>Dies löscht die gesamte LittleFS-Partition</strong> — alle eigenen Designs, Albumbilder und Audiodateien gehen verloren. Sichern Sie alles, was Sie behalten möchten, über den LittleFS-Dateibrowser oben.<br>Ihre Einstellungen (WLAN, Design, Helligkeit usw.) werden vor dem Löschen automatisch in NVS gesichert und beim nächsten Start wiederhergestellt — für diesen Schritt ist keine manuelle Konfigurationssicherung nötig.",
   "sys.logs": "Geräteprotokolle",
   "sys.logs_help": "Live-Protokollausgabe des Geräts — im RAM ab dem Start gepuffert, nicht in den Flash geschrieben. Letzte 200 Zeilen. Nutzen Sie die automatische Aktualisierung für die Echtzeitansicht.",
   "sys.auto_refresh": "Auto-Aktualisierung",
