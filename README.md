@@ -1324,8 +1324,6 @@ Notes:
 
 Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image panel options — Weather Icon uses the same dot-matrix condition pictograms as the other weather panels, and Pushed Image shows the raw pushed JPG/PNG as-is (unaffected by theme, same as any asset theme). In non-Clock modes (weather, follower counts, …) social-media platform logos still load from the built-in system assets; anything else with no dedicated dot-matrix glyph falls back to a plain unlit grid.
 
-**Font editing:** every glyph (digits, letters, icons) lives in a compact bitmap table in `components/display/display.c`. A standalone local Python tool (kept outside this source tree) renders each glyph as a clickable pixel grid and patches the table directly — useful if you want to redraw an icon or tweak a letterform without hand-editing hex byte arrays.
-
 ### Custom Face
 
 **Custom Face** layers a TrueType font over any installed theme's selected background artwork. Configure it under **Display → Custom Face**.
