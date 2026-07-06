@@ -1326,14 +1326,27 @@ Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image
 
 ### Custom Face
 
-**Custom Face** layers a TrueType font over any installed theme's selected background artwork. Configure it under **Display → Custom Face**.
+**Custom Face** layers a TrueType font over a background of your choosing. Configure it under **Display → Custom Face**.
 
 | Setting | Description |
 |---|---|
+| **Background** | **WeatherLive (animated sky)** — the fully procedural animated sky described above; **Custom color / gradient** — a solid fill or gradient you configure yourself (see below); or any installed **theme name** — that theme's static background artwork with no animation. |
 | **Digit font** | Any `.ttf` uploaded to `/fonts/` on the device, or **Logisoso (built-in)**. Click **↺** to refresh the list after uploading a new font. |
 | **Font colour** | Colour applied to clock digits rendered by the TTF engine. |
 | **Glyph colour** | Colour for weather-panel glyphs and info-panel text rendered with the TTF engine. |
 | **Shadow** | Toggle drop shadow on/off and pick its colour. Applies to clock digits, panel text, and the graphical weather elements (Hi/Lo range bar, current-temperature marker, and humidity teardrop). |
+
+**Custom color / gradient background:** when selected, a **Fill style** dropdown and one or two colour pickers appear:
+
+| Fill style | Result |
+|---|---|
+| **Solid color** | One flat colour fills the background. Only **Fill color** is shown. |
+| **Linear gradient (vertical)** | Fades top → bottom between **Fill color** (start) and **Gradient end color**. |
+| **Linear gradient (horizontal)** | Fades left → right between the two colours. |
+| **Linear gradient (diagonal)** | Fades corner → corner between the two colours. |
+| **Radial gradient** | Fades centre → edge between the two colours. |
+
+The background is rendered once and shared identically across every tube, the same as the procedural WeatherLive sky and a static theme background — not recomputed per tube.
 
 **How it interacts with themes:**
 
