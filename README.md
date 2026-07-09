@@ -504,6 +504,8 @@ Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) aut
 
 > **Note:** Web Serial requires Chrome or Edge. Firefox is not supported. Use USB-A to USB-C, C-C cables don't seem to work.
 
+> **macOS:** this method works fine on macOS, but only in **Chrome** — Safari does not support Web Serial. You may need to install the [CP210x / CH34x USB-serial driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers) for the port to show up.
+
 ### Option B — First-time / Full Flash (esptool CLI)
 
 Use the merged binary for a clean install — this writes all partitions in one shot:
