@@ -53,6 +53,13 @@ static void set_defaults(void)
     s_cfg.custom_glyph_color[0] = 255; s_cfg.custom_glyph_color[1] = 255; s_cfg.custom_glyph_color[2] = 255;
     s_cfg.custom_shadow         = true;
     s_cfg.custom_shadow_color[0]= 0;   s_cfg.custom_shadow_color[1]= 0;   s_cfg.custom_shadow_color[2]= 0;
+    /* Night color set: disabled; colors mirror the day defaults so enabling
+     * it is a no-op until the user actually picks night colors. */
+    s_cfg.custom_night_colors   = false;
+    s_cfg.custom_font_color_night[0]  = 255; s_cfg.custom_font_color_night[1]  = 255; s_cfg.custom_font_color_night[2]  = 255;
+    s_cfg.custom_glyph_color_night[0] = 255; s_cfg.custom_glyph_color_night[1] = 255; s_cfg.custom_glyph_color_night[2] = 255;
+    s_cfg.custom_shadow_night         = true;
+    s_cfg.custom_shadow_color_night[0]= 0;   s_cfg.custom_shadow_color_night[1]= 0;   s_cfg.custom_shadow_color_night[2]= 0;
     s_cfg.custom_font[0]        = '\0';
     s_cfg.dm_on_color[0]  = 255; s_cfg.dm_on_color[1]  = 255; s_cfg.dm_on_color[2]  = 255;
     s_cfg.dm_off_color[0] = 25;  s_cfg.dm_off_color[1] = 25;  s_cfg.dm_off_color[2] = 25;
@@ -547,16 +554,24 @@ static void parse_json(const char *json, size_t len)
     {
         cJSON *v = cJSON_GetObjectItem(root, "custom_shadow");
         if (cJSON_IsBool(v)) s_cfg.custom_shadow = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "custom_night_colors");
+        if (cJSON_IsBool(v)) s_cfg.custom_night_colors = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "custom_shadow_night");
+        if (cJSON_IsBool(v)) s_cfg.custom_shadow_night = cJSON_IsTrue(v);
     }
     json_read_str(root, "custom_font", s_cfg.custom_font, sizeof(s_cfg.custom_font));
     {
-        static const char *const color_keys[7] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
+        static const char *const color_keys[10] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
                                                     "dm_on_color", "dm_off_color",
-                                                    "custom_bg_color1", "custom_bg_color2" };
-        uint8_t *const color_ptrs[7] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
+                                                    "custom_bg_color1", "custom_bg_color2",
+                                                    "custom_font_color_night", "custom_glyph_color_night",
+                                                    "custom_shadow_color_night" };
+        uint8_t *const color_ptrs[10] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
                                           s_cfg.dm_on_color, s_cfg.dm_off_color,
-                                          s_cfg.custom_bg_color1, s_cfg.custom_bg_color2 };
-        for (int ci = 0; ci < 7; ci++) {
+                                          s_cfg.custom_bg_color1, s_cfg.custom_bg_color2,
+                                          s_cfg.custom_font_color_night, s_cfg.custom_glyph_color_night,
+                                          s_cfg.custom_shadow_color_night };
+        for (int ci = 0; ci < 10; ci++) {
             cJSON *arr = cJSON_GetObjectItem(root, color_keys[ci]);
             if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= 3) {
                 for (int ch = 0; ch < 3; ch++) {
@@ -1243,15 +1258,21 @@ char *config_to_json(bool include_password)
     cJSON_AddStringToObject(root, "custom_bg",            s_cfg.custom_bg);
     cJSON_AddStringToObject(root, "custom_bg_fill",       s_cfg.custom_bg_fill);
     cJSON_AddBoolToObject  (root, "custom_shadow",        s_cfg.custom_shadow);
+    cJSON_AddBoolToObject  (root, "custom_night_colors",  s_cfg.custom_night_colors);
+    cJSON_AddBoolToObject  (root, "custom_shadow_night",  s_cfg.custom_shadow_night);
     cJSON_AddStringToObject(root, "custom_font",          s_cfg.custom_font);
     {
-        const char *const keys[7]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
+        const char *const keys[10]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
                                         "dm_on_color", "dm_off_color",
-                                        "custom_bg_color1", "custom_bg_color2" };
-        const uint8_t *const ptrs[7] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
+                                        "custom_bg_color1", "custom_bg_color2",
+                                        "custom_font_color_night", "custom_glyph_color_night",
+                                        "custom_shadow_color_night" };
+        const uint8_t *const ptrs[10] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
                                           s_cfg.dm_on_color, s_cfg.dm_off_color,
-                                          s_cfg.custom_bg_color1, s_cfg.custom_bg_color2 };
-        for (int ci = 0; ci < 7; ci++) {
+                                          s_cfg.custom_bg_color1, s_cfg.custom_bg_color2,
+                                          s_cfg.custom_font_color_night, s_cfg.custom_glyph_color_night,
+                                          s_cfg.custom_shadow_color_night };
+        for (int ci = 0; ci < 10; ci++) {
             cJSON *arr = cJSON_CreateArray();
             for (int ch = 0; ch < 3; ch++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(ptrs[ci][ch]));
             cJSON_AddItemToObject(root, keys[ci], arr);

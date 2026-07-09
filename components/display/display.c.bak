@@ -157,11 +157,11 @@ static volatile bool    s_cx_push_valid[2] = { false, false };
 static volatile uint32_t s_cx_push_seq     = 0;
 static SemaphoreHandle_t s_cx_push_mutex   = NULL;
 
-/* ── Burn-in mutex ───────────────────────────────────────────────────────────
+/* ── Timer / burn-in mutex ───────────────────────────────────────────────────
  * Declared here (before the burn-in setter functions) so the setters can use
  * it at any point in the file.  Initialised in display_task() before the first
- * render tick.  Guards the paired burn-in/snow mask+end_time writes so they
- * are never observed in a torn state. */
+ * render tick.  Guards both the countdown/pomodoro timer fields and the paired
+ * burn-in/snow mask+end_time writes so they are never observed in a torn state. */
 static SemaphoreHandle_t s_timer_mutex = NULL;
 
 /* ── Anti burn-in ────────────────────────────────────────────────────────── */
@@ -4466,6 +4466,10 @@ static const uint8_t dm_font_degree [14] = {0x00,0x00,0x00,0x18,0x24,0x24,0x18,0
 #define DM_CP_QTR_7                0x2037
 #define DM_CP_QTR_8                0x2038
 #define DM_CP_QTR_9                0x2039
+#define DM_CP_ICON_COUNTDOWN       0x203B
+#define DM_CP_ICON_POMODORO        0x203C
+#define DM_CP_ICON_POMODORO_WORK   0x203D
+#define DM_CP_ICON_POMODORO_BREAK  0x203E
 
 /* AM/PM — a single glyph each (not two stacked draws): "A"/"P" compressed
  * into the top 6 content rows, "M" compressed into the bottom 6, both at the
@@ -4549,6 +4553,17 @@ static const uint8_t dm_font_qtr_digit7[14] = {0x70,0x10,0x10,0x10,0x10,0x10,0x0
 static const uint8_t dm_font_qtr_digit8[14] = {0x70,0x50,0x70,0x50,0x50,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
 static const uint8_t dm_font_qtr_digit9[14] = {0x70,0x50,0x70,0x10,0x10,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
 
+/* Countdown / Pomodoro mode-label icons (AMPM/*.jpg equivalents) — this
+ * theme has no icon art on disk, so wl_render_asset's "leave black"
+ * precedent would otherwise apply here too, same as the weather icons.
+ * countdown = hourglass; pomodoro = the classic tomato-timer icon (also
+ * used for the Pomodoro work-session state); pomodoro_break is a distinct
+ * cup icon for the break state, so the two states read differently at a
+ * glance on tube 5. First-draft pictograms, refine in the font editor. */
+static const uint8_t dm_font_icon_countdown[14]      = {0x00,0x7F,0x3E,0x1C,0x08,0x08,0x1C,0x3E,0x7F,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_pomodoro[14]       = {0x00,0x08,0x1C,0x3E,0x7F,0x7F,0x7F,0x7F,0x3E,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_pomodoro_work[14]  = {0x00,0x08,0x1C,0x3E,0x7F,0x7F,0x7F,0x7F,0x3E,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t dm_font_icon_pomodoro_break[14] = {0x00,0x00,0x3E,0x22,0x22,0x22,0x22,0x1C,0x00,0x00,0x00,0x00,0x00,0x00};
 /* END DM FONT BLOCK — marker for tools/dm_font_editor.py; keep this comment
  * right after the last glyph table if you add more. */
 
@@ -4609,6 +4624,10 @@ static const uint8_t *dm_glyph_bits(int cp)
         case DM_CP_QTR_7:               return dm_font_qtr_digit7;
         case DM_CP_QTR_8:               return dm_font_qtr_digit8;
         case DM_CP_QTR_9:               return dm_font_qtr_digit9;
+        case DM_CP_ICON_COUNTDOWN:      return dm_font_icon_countdown;
+        case DM_CP_ICON_POMODORO:       return dm_font_icon_pomodoro;
+        case DM_CP_ICON_POMODORO_WORK:  return dm_font_icon_pomodoro_work;
+        case DM_CP_ICON_POMODORO_BREAK: return dm_font_icon_pomodoro_break;
     }
     return NULL;
 }
@@ -5225,7 +5244,7 @@ static void wl_draw_tube(int tube, char ch, const wl_scene_t *sc)
 }
 
 /* WeatherLive has no JPEG theme assets, so when a non-clock mode (weather,
- * follower counts, …) asks to show a theme image, we render
+ * follower counts, countdown, pomodoro, …) asks to show a theme image, we render
  * the requested asset procedurally as a glyph/number over a solid black
  * background instead.  `path` is the LittleFS asset path that was about to be
  * loaded; the basename selects the glyph.  Digits and the colon/dot/minus match
@@ -5359,6 +5378,14 @@ static void dm_render_asset(int tube, const char *path)
         dm_draw_glyph(fb, cx, cy, DM_CP_ICON_SAND, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
     } else if (!strcmp(name, "volcanicAsh")) {
         dm_draw_glyph(fb, cx, cy, DM_CP_ICON_VOLCANICASH, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "countdown")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_COUNTDOWN, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "pomodoro")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_POMODORO, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "pomodorosb")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_POMODORO_WORK, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "pomodorolb")) {
+        dm_draw_glyph(fb, cx, cy, DM_CP_ICON_POMODORO_BREAK, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
     } else {
         /* "blank", platform logos (youtube/instagram/etc.) → a full grid of
          * off-colour cells (dm_glyph_bits returns NULL for an unmapped code
@@ -6233,36 +6260,16 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
      * faces use the user's color/shadow prefs; only Custom can override the
      * background (WeatherLive always uses the animated sky). */
     s_wl_is_custom = (strcmp(cfg->clock_face, "custom") == 0);
-    /* Night color set (issue #73): crossfade day→night colors by the scene's
-     * twilight-aware darkness (wl_scene_t.night, 0..255, driven by the real
-     * geocoded sunrise/sunset — the same value that fades the stars in).
-     * WL-sky background only — static theme-image / CustomColor backgrounds
-     * keep the day set, which also keeps the colon-frame cache path (only
-     * used for those backgrounds) free of time-varying colors. Uses the
-     * PREVIOUS frame's scene; twilight spans ~55 min, so one frame of lag is
-     * invisible. nt==0 (feature off / day / non-WL bg) makes every blend
-     * below collapse to exactly the day values. */
-    {
-        bool wl_sky_bg = !s_wl_is_custom ||
-                         strncmp(cfg->custom_bg, "WeatherLive", 11) == 0;
-        int nt = (cfg->custom_night_colors && wl_sky_bg && s_wl_scene_valid)
-                 ? s_wl_last_scene.night : 0;
-        int day[3], nite[3], out[3];
-        for (int i = 0; i < 3; i++) { day[i] = cfg->custom_glyph_color[i];
-                                      nite[i] = cfg->custom_glyph_color_night[i]; }
-        wl_lerp3(day, nite, nt, out);
-        s_wl_glyph_r = (uint8_t)out[0]; s_wl_glyph_g = (uint8_t)out[1]; s_wl_glyph_b = (uint8_t)out[2];
-        for (int i = 0; i < 3; i++) { day[i] = cfg->custom_font_color[i];
-                                      nite[i] = cfg->custom_font_color_night[i]; }
-        wl_lerp3(day, nite, nt, out);
-        s_wl_font_r = (uint8_t)out[0]; s_wl_font_g = (uint8_t)out[1]; s_wl_font_b = (uint8_t)out[2];
-        for (int i = 0; i < 3; i++) { day[i] = cfg->custom_shadow_color[i];
-                                      nite[i] = cfg->custom_shadow_color_night[i]; }
-        wl_lerp3(day, nite, nt, out);
-        s_wl_shadow_r = (uint8_t)out[0]; s_wl_shadow_g = (uint8_t)out[1]; s_wl_shadow_b = (uint8_t)out[2];
-        /* Boolean can't blend — flip at mid-twilight. */
-        s_wl_shadow = (nt >= 128) ? cfg->custom_shadow_night : cfg->custom_shadow;
-    }
+    s_wl_glyph_r  = cfg->custom_glyph_color[0];
+    s_wl_glyph_g  = cfg->custom_glyph_color[1];
+    s_wl_glyph_b  = cfg->custom_glyph_color[2];
+    s_wl_font_r   = cfg->custom_font_color[0];
+    s_wl_font_g   = cfg->custom_font_color[1];
+    s_wl_font_b   = cfg->custom_font_color[2];
+    s_wl_shadow   = cfg->custom_shadow;
+    s_wl_shadow_r  = cfg->custom_shadow_color[0];
+    s_wl_shadow_g  = cfg->custom_shadow_color[1];
+    s_wl_shadow_b  = cfg->custom_shadow_color[2];
     wl_refresh_ft_face(cfg->custom_font);
     if (s_wl_is_custom) {
         strncpy(s_wl_bg_theme, cfg->custom_bg, sizeof(s_wl_bg_theme) - 1);
@@ -6683,7 +6690,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
          * to 1 Hz.  Sky gradient, sun/moon position and cloud type all change on
          * minute timescales; rebuilding them at animation rate (10–20 Hz) wastes
          * CPU and repeatedly locks the weather-fetch mutex, stalling the HTTP
-         * stack — visible as weather-data lag. */
+         * stack — visible as weather-data lag and countdown/pomodoro value jumps. */
         static int64_t s_ensure_slow_us = 0;
         int64_t s_now_us = esp_timer_get_time();
         if (s_now_us - s_ensure_slow_us < 1000000LL)
@@ -7097,6 +7104,61 @@ static void render_followers(const nextube_config_t *cfg,
 #undef WL_SUFFIX
 }
 
+static void render_countdown_display(const nextube_config_t *cfg,
+                                     int32_t remaining_s)
+{
+    /* Honour OTA park and config-save busy hint — same guard as render_weatherlive. */
+    if (s_park_req || esp_timer_get_time() < busy_until_us()) return;
+    if (remaining_s < 0) remaining_s = 0;
+    int m = remaining_s / 60, s = remaining_s % 60;
+    bool wl = cx_is_wl_sky(cfg);
+    if (wl) wl_ensure_scene(cfg);
+    wl = wl && s_wl_scene_valid;
+    if (wl) {
+        char ds[12];
+        wl_tube_sky(0);                                                        vTaskDelay(1);
+        snprintf(ds, sizeof(ds), "%d", m / 10); wl_tube_str(1, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
+        snprintf(ds, sizeof(ds), "%d", m % 10); wl_tube_str(2, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
+        wl_tube_str(3, u8g2_font_logisoso46_tf, ":", 100);                    vTaskDelay(1);
+        snprintf(ds, sizeof(ds), "%d", s / 10); wl_tube_str(4, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
+        snprintf(ds, sizeof(ds), "%d", s % 10); wl_tube_str(5, u8g2_font_logisoso46_tf, ds, 100);
+    } else {
+        display_show_ampm(0, "countdown", cfg->theme);
+        display_show_number(1, m / 10,  cfg->theme);
+        display_show_number(2, m % 10,  cfg->theme);
+        display_show_ampm  (3, "colon", cfg->theme);
+        display_show_number(4, s / 10,  cfg->theme);
+        display_show_number(5, s % 10,  cfg->theme);
+    }
+}
+
+static void render_pomodoro_display(const nextube_config_t *cfg,
+                                    int32_t remaining_s, bool in_break)
+{
+    /* Honour OTA park and config-save busy hint — same guard as render_weatherlive. */
+    if (s_park_req || esp_timer_get_time() < busy_until_us()) return;
+    if (remaining_s < 0) remaining_s = 0;
+    int m = remaining_s / 60, s = remaining_s % 60;
+    bool wl = cx_is_wl_sky(cfg);
+    if (wl) wl_ensure_scene(cfg);
+    wl = wl && s_wl_scene_valid;
+    if (wl) {
+        char ds[12];
+        wl_tube_sky(0);                                                        vTaskDelay(1);
+        snprintf(ds, sizeof(ds), "%d", m / 10); wl_tube_str(1, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
+        snprintf(ds, sizeof(ds), "%d", m % 10); wl_tube_str(2, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
+        wl_tube_str(3, u8g2_font_logisoso46_tf, ":", 100);                    vTaskDelay(1);
+        snprintf(ds, sizeof(ds), "%d", s / 10); wl_tube_str(4, u8g2_font_logisoso46_tf, ds, 100); vTaskDelay(1);
+        wl_tube_sky(5);
+    } else {
+        display_show_ampm(0, "pomodoro", cfg->theme);
+        display_show_number(1, m / 10, cfg->theme);
+        display_show_number(2, m % 10, cfg->theme);
+        display_show_ampm  (3, "colon", cfg->theme);
+        display_show_number(4, s / 10, cfg->theme);
+        display_show_ampm  (5, in_break ? "pomodorolb" : "pomodorosb", cfg->theme);
+    }
+}
 
 
 /* ── Spectrum bar visualiser ─────────────────────────────────────────── *
@@ -7381,21 +7443,6 @@ static void advance_theme(const char *current_theme,
     /* 1. Collect all installed theme directory names */
     char all[MAX_THEMES_ROT][THEME_NAME_MAX_ROT];
     int  total = 0;
-    /* Built-in procedural themes ship with no /images/themes/ asset folder —
-     * same special-case list api_themes() in web_server.c injects for the
-     * web UI's theme dropdown. Without this, one of these could be checked
-     * in Theme Rotation but never actually reached: the pool below is built
-     * by intersecting the user's selection against this disk scan, so a
-     * theme absent from the scan can never appear in the pool regardless of
-     * what's selected. "WeatherLive Demo" is deliberately NOT included here
-     * — it's a showcase-only theme (accelerated day/night, auto-cycles every
-     * weather condition), never meant for real-world rotation, and this is
-     * also what the sel_count==0 ("rotate all installed themes") branch
-     * below draws from, so leaving it out here keeps it out of that case too. */
-    strncpy(all[total], "WeatherLive", THEME_NAME_MAX_ROT - 1);
-    all[total][THEME_NAME_MAX_ROT - 1] = '\0'; total++;
-    strncpy(all[total], "DotMatrix", THEME_NAME_MAX_ROT - 1);
-    all[total][THEME_NAME_MAX_ROT - 1] = '\0'; total++;
     DIR *dp = opendir("/spiffs/images/themes");
     if (dp) {
         struct dirent *e;
@@ -8734,6 +8781,42 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
     else { display_path_temperature(path, sizeof(path), th, unit); display_show_image(4, path); }
 }
 
+/* ── Timer state ────────────────────────────────────────────────────── */
+static TickType_t s_timer_start       = 0;
+static bool       s_pomo_in_break     = false;
+static bool       s_timer_paused      = false;
+static uint32_t   s_paused_elapsed_ms = 0;   /* elapsed frozen at pause moment */
+
+void display_timer_reset(void)
+{
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    s_timer_start        = xTaskGetTickCount();
+    s_pomo_in_break      = false;
+    s_timer_paused       = false;
+    s_paused_elapsed_ms  = 0;
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
+}
+
+/* Toggle countdown / pomodoro timer between running and paused.
+ * When pausing  : freeze elapsed_ms so the display stops counting.
+ * When resuming : shift s_timer_start forward so elapsed resumes
+ *                 from the frozen point without any jump. */
+void display_timer_toggle(void)
+{
+    if (!s_timer_mutex) return;
+    xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    if (s_timer_paused) {
+        /* Resume: reconstruct start tick so elapsed_ms picks up from freeze */
+        s_timer_start  = xTaskGetTickCount() - pdMS_TO_TICKS(s_paused_elapsed_ms);
+        s_timer_paused = false;
+    } else {
+        /* Pause: freeze current elapsed */
+        s_paused_elapsed_ms = (uint32_t)pdTICKS_TO_MS(
+                                  xTaskGetTickCount() - s_timer_start);
+        s_timer_paused      = true;
+    }
+    xSemaphoreGive(s_timer_mutex);
+}
 
 /* ── render_ticker ───────────────────────────────────────────────────
  * Called once per 200 ms tick while an MQTT ticker is active.
@@ -8863,6 +8946,7 @@ static void display_task(void *arg)
     /* Mutexes created in display_init(); only allocate here if somehow missed. */
     if (!s_timer_mutex)   s_timer_mutex   = xSemaphoreCreateMutex();
     if (!s_cx_push_mutex) s_cx_push_mutex = xSemaphoreCreateMutex();
+    s_timer_start  = xTaskGetTickCount();
 
     /* Pre-allocate shared PSRAM buffers used by the image cache and flip
      * animation.  Doing this here (rather than in display_init) so the
@@ -8900,6 +8984,7 @@ static void display_task(void *arg)
     uint32_t      last_insta    = UINT32_MAX;
     uint32_t      last_tiktok   = UINT32_MAX;
     uint32_t      last_mastodon = UINT32_MAX;
+    int32_t       last_remain_s = INT32_MAX;  /* countdown/pomodoro change detection */
     float         last_temp_c   = -9999.0f;   /* weather change detection */
     float         last_hum      = -1.0f;
     bool          last_wx_valid = false;       /* detect when data first arrives */
@@ -9085,6 +9170,13 @@ static void display_task(void *arg)
             last_display_epoch = 0;   /* clear clock smoothing state so first fresh render
                                        * uses the true system time without clamping */
         }
+        if (mode_changed || first) {
+            /* Reset countdown/pomodoro timer only on mode switch — NOT on theme change,
+             * so a running countdown survives theme rotation. */
+            last_remain_s = INT32_MAX;
+            display_timer_reset();
+        }
+
         /* Apply backlight on/off whenever the config changes.
          * Default to primary lcd_brightness, overridden by Night Mode if enabled. */
         uint8_t target_brt = cfg->lcd_brightness;
@@ -9201,6 +9293,7 @@ static void display_task(void *arg)
             last_insta    = UINT32_MAX;
             last_tiktok   = UINT32_MAX;
             last_mastodon = UINT32_MAX;
+            last_remain_s = INT32_MAX;
             last_temp_c   = -9999.0f;
             last_hum      = -1.0f;
             last_wx_valid = false;
@@ -9350,6 +9443,33 @@ static void display_task(void *arg)
                                  && strncmp(s_wl_bg_theme, "WeatherLive", 11) != 0);
         bool wl_anim_tick = cfg->wlive_animate && wl_sky_animates && s_wl_scene_valid;
 
+        /* Pre-compute the live timer value for countdown/pomodoro so the anim
+         * block always renders the current second, not the 1-tick-stale
+         * last_remain_s.  Both loops (anim block + main switch) now see the
+         * same value, eliminating the "2 loops fighting" phase offset. */
+        int32_t cd_remain_now        = (last_remain_s == INT32_MAX) ? 0 : last_remain_s;
+        bool    cd_pomo_break_now    = s_pomo_in_break;
+        if ((mode == APP_MODE_COUNTDOWN || mode == APP_MODE_POMODORO) &&
+                !first && !mode_changed) {
+            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+            uint32_t cd_elapsed = s_timer_paused
+                ? s_paused_elapsed_ms
+                : (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start);
+            cd_pomo_break_now = s_pomo_in_break;
+            xSemaphoreGive(s_timer_mutex);
+            if (mode == APP_MODE_COUNTDOWN) {
+                int32_t total = (int32_t)cfg->countdown_minutes * 60;
+                cd_remain_now = total - (int32_t)(cd_elapsed / 1000);
+                if (cd_remain_now < 0) cd_remain_now = 0;
+            } else {
+                int32_t period = cd_pomo_break_now
+                    ? (int32_t)cfg->pomodoro_break * 60
+                    : (int32_t)cfg->pomodoro_work  * 60;
+                cd_remain_now = period - (int32_t)(cd_elapsed / 1000);
+                if (cd_remain_now < 0) cd_remain_now = 0;
+            }
+        }
+
         /* ── Continuous WeatherLive background render ────────────────────────
          * When the sky is animated this single block acts as one unified
          * background loop that renders sky + cached mode content every tick,
@@ -9413,6 +9533,12 @@ static void display_task(void *arg)
                 break;
             case APP_MODE_DATE:
                 render_date(cfg, &last_t);
+                break;
+            case APP_MODE_COUNTDOWN:
+                render_countdown_display(cfg, cd_remain_now);
+                break;
+            case APP_MODE_POMODORO:
+                render_pomodoro_display(cfg, cd_remain_now, cd_pomo_break_now);
                 break;
             case APP_MODE_WEATHER:
                 render_weather(cfg, weather_panel, false, hilo_phase);
@@ -9739,6 +9865,60 @@ static void display_task(void *arg)
                 if (!wl_anim_tick || first || mode_changed)
                     render_date(cfg, &t);
                 last_t = t;
+            }
+            break;
+        }
+
+        case APP_MODE_COUNTDOWN: {
+            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+            uint32_t elapsed_ms = s_timer_paused
+                ? s_paused_elapsed_ms
+                : (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start);
+            xSemaphoreGive(s_timer_mutex);
+            int32_t total  = (int32_t)cfg->countdown_minutes * 60;
+            int32_t remain = total - (int32_t)(elapsed_ms / 1000);
+            if (remain < 0) remain = 0;
+            if (first || mode_changed || theme_changed || remain != last_remain_s ||
+                    burnin_force_render) {
+                if (!wl_anim_tick || first || mode_changed)
+                    render_countdown_display(cfg, remain);
+                last_remain_s = remain;
+            }
+            break;
+        }
+
+        case APP_MODE_POMODORO: {
+            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+            bool     paused     = s_timer_paused;
+            uint32_t elapsed_ms = paused
+                ? s_paused_elapsed_ms
+                : (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start);
+            bool in_break = s_pomo_in_break;
+            xSemaphoreGive(s_timer_mutex);
+
+            int32_t period = in_break ? (int32_t)cfg->pomodoro_break * 60
+                                      : (int32_t)cfg->pomodoro_work  * 60;
+            int32_t remain = period - (int32_t)(elapsed_ms / 1000);
+            if (remain <= 0) {
+                if (!paused) {
+                    /* Auto-flip work↔break only while the timer is running */
+                    xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+                    s_pomo_in_break     = !s_pomo_in_break;
+                    s_timer_start       = xTaskGetTickCount();
+                    s_paused_elapsed_ms = 0;
+                    in_break            = s_pomo_in_break;
+                    xSemaphoreGive(s_timer_mutex);
+                    remain = in_break ? (int32_t)cfg->pomodoro_break * 60
+                                      : (int32_t)cfg->pomodoro_work  * 60;
+                } else {
+                    remain = 0;   /* frozen at zero while paused */
+                }
+            }
+            if (first || mode_changed || theme_changed || remain != last_remain_s ||
+                    burnin_force_render) {
+                if (!wl_anim_tick || first || mode_changed)
+                    render_pomodoro_display(cfg, remain, in_break);
+                last_remain_s = remain;
             }
             break;
         }

@@ -1299,6 +1299,8 @@ All built-in themes include the complete required asset set: digits, AMPM indica
 - **Realtime (animated)** — re-renders every tick (~20 Hz) for smooth motion.
 - **Static (updates ~10 min)** — a still snapshot redrawn only on clock/data changes (near-zero CPU).
 
+**Night color set:** because the sky darkens dramatically at night, a color set tuned for the day sky can be illegible after dark (and vice versa). Enable **Night color set** under **Display → Custom Face** to configure a second Font color / Digit color / Shadow set that the clock **crossfades to through twilight**, tracking the scene's real geocoded sunrise/sunset (the same signal that fades the stars in) — not the Night Brightness hour window. Colors blend smoothly over the ~55-minute twilight ramp; the shadow on/off flag flips once at mid-twilight. Only active while the WeatherLive sky is the background — static theme-image and Custom color/gradient backgrounds always use the day set. Tip: **WeatherLive Demo**'s accelerated 60-second day cycle previews the full crossfade in one minute.
+
 **WeatherLive Demo** is a sibling theme that accelerates the day/night cycle (full day every 60 s) and auto-cycles every weather condition (10 s each) to preview the whole repertoire unattended.
 
 Notes:
@@ -1335,6 +1337,7 @@ Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image
 | **Font colour** | Colour applied to clock digits rendered by the TTF engine. |
 | **Glyph colour** | Colour for weather-panel glyphs and info-panel text rendered with the TTF engine. |
 | **Shadow** | Toggle drop shadow on/off and pick its colour. Applies to clock digits, panel text, and the graphical weather elements (Hi/Lo range bar, current-temperature marker, and humidity teardrop). |
+| **Night color set** | A second Font colour / Digit colour / Shadow set the display crossfades to through twilight, tracking the WeatherLive sky's real sunrise/sunset. Only active on the WeatherLive background — see the note in [WeatherLive theme](#weatherlive-theme). |
 
 **Custom color / gradient background:** when selected, a **Fill style** dropdown and one or two colour pickers appear:
 
