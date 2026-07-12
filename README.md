@@ -1210,6 +1210,8 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | Publish | `nextube/<hostname>/ntp/rtc_err/state` | Worst single-minute clock error (ms) the PCF8563 discipline allowed since the previous sync (retained; PCF-slave mode only) |
 | Publish | `nextube/<hostname>/health/state` | *(optional group)* `{"rssi":-53,"heap":51234,"uptime_min":185}` every 60 s |
 | Publish | `nextube/<hostname>/button/state` | *(optional group)* `left` / `middle` / `right` on each touch press |
+| Publish | `nextube/<hostname>/update/state` | `ON` or `OFF` (retained) — a newer firmware release is available |
+| Publish | `nextube/<hostname>/update/latest_version/state` | `1.18.0` (retained) — latest release tag found |
 | Publish | `homeassistant/sensor/<hostname>_temp/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/sensor/<hostname>_hum/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/select/<hostname>_mode/config` | HA discovery JSON (retained) |
@@ -1220,6 +1222,8 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | Publish | `homeassistant/switch/<hostname>_ticker_sound/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/sensor/<hostname>_xtal_drift/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/sensor/<hostname>_rtc_err/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/binary_sensor/<hostname>_update/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/sensor/<hostname>_update_ver/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/sensor/<hostname>_{rssi,heap,uptime}/config` | HA discovery JSON (retained; health group only) |
 | Publish | `homeassistant/device_automation/<hostname>_btn_{left,middle,right}/config` | HA device-trigger discovery (retained; buttons group only) |
 
@@ -1231,6 +1235,7 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 - **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
 - **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
 - **Multiple devices** — each Nextube uses its hostname as the unique ID. Give each device a different hostname in **Network Settings** to avoid topic collisions.
+- **Update check runs on-device** — independent of MQTT and of whether the web UI is ever open, the firmware itself checks GitHub for a newer release once on boot and every 24 hours after, entirely on its own. `Nextube Update Available` and `Nextube Latest Version` simply report that check's result over MQTT. This is on by default; it respects the same **Update Repo Override** (System → hidden debug panel) the web UI's own checker uses, so both always agree on which repo they're watching.
 
 ### Ticker
 

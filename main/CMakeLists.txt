@@ -15,6 +15,7 @@ idf_component_register(
         web_server
         ntp_time
         weather
+        update_check
         subscribers
         app_update
         ha_mqtt

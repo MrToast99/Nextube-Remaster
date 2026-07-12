@@ -160,6 +160,7 @@ static void set_defaults(void)
     /* Background-feature toggles (boot-time gates).  Default true so
      * existing behaviour is preserved on upgrade. */
     s_cfg.weather_enabled = true;
+    s_cfg.update_check_enabled = true;
     s_cfg.social_enabled           = false; /* opt-in: user must enable explicitly */
     s_cfg.youtube_enabled          = false; /* opt-in: user must enable explicitly */
     s_cfg.sub_poll_interval_min    = 60;   /* 1 hour default */
@@ -407,6 +408,10 @@ static void parse_json(const char *json, size_t len)
     {
         cJSON *we = cJSON_GetObjectItem(root, "weather_enabled");
         if (cJSON_IsBool(we)) s_cfg.weather_enabled = cJSON_IsTrue(we);
+    }
+    {
+        cJSON *uce = cJSON_GetObjectItem(root, "update_check_enabled");
+        if (cJSON_IsBool(uce)) s_cfg.update_check_enabled = cJSON_IsTrue(uce);
     }
     {
         cJSON *se = cJSON_GetObjectItem(root, "social_enabled");
@@ -1216,6 +1221,7 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);
     cJSON_AddBoolToObject  (root, "weather_enabled",   s_cfg.weather_enabled);
+    cJSON_AddBoolToObject  (root, "update_check_enabled", s_cfg.update_check_enabled);
     cJSON_AddBoolToObject  (root, "social_enabled",    s_cfg.social_enabled);
     cJSON_AddBoolToObject  (root, "youtube_enabled",         s_cfg.youtube_enabled);
     cJSON_AddNumberToObject(root, "sub_poll_interval_min",   s_cfg.sub_poll_interval_min);

@@ -21,6 +21,9 @@
  *                                            (optional group: mqtt_pub_health)
  *   nextube/<host>/button/state              "left"/"middle"/"right" per press
  *                                            (optional group: mqtt_pub_buttons)
+ *   nextube/<host>/update/state              "ON" or "OFF" — newer firmware release
+ *                                            available (retained; from update_check task)
+ *   nextube/<host>/update/latest_version/state "1.18.0" (retained)
  *
  * Subscribed:
  *   nextube/<host>/mode/set                  "Weather"
@@ -46,6 +49,8 @@
  *   homeassistant/switch/<host>_ticker_sound/config
  *   homeassistant/sensor/<host>_xtal_drift/config
  *   homeassistant/sensor/<host>_rtc_err/config
+ *   homeassistant/binary_sensor/<host>_update/config
+ *   homeassistant/sensor/<host>_update_ver/config
  *
  * Firmware version:
  *   nextube/<host>/firmware/state              "1.10.0"  (retained)
@@ -58,6 +63,7 @@
 #include "weather.h"     /* air-quality sensor (weather_get_aqi)        */
 #include "wifi_manager.h"
 #include "display.h"
+#include "update_check.h" /* autonomous GitHub release check → update binary sensor */
 #include "audio.h"       /* ticker notification chime (audio_play_file) */
 #include "ntp_time.h"    /* NTP sync-stats listener → HA sensors        */
 #include "esp_wifi.h"    /* RSSI for the optional health sensors        */
@@ -316,6 +322,42 @@ static void publish_discovery(void)
              s_hostname, fw_state, dev);
     publish(topic, payload, 1);
 
+    /* ── Update available binary sensor ── */
+    char upd_state[TOPIC_MAXLEN];
+    make_topic(upd_state, sizeof(upd_state), "update/state");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/binary_sensor/%s_update/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Update Available\","
+             "\"unique_id\":\"%s_update\","
+             "\"state_topic\":\"%s\","
+             "\"payload_on\":\"ON\","
+             "\"payload_off\":\"OFF\","
+             "\"device_class\":\"update\","
+             "\"entity_category\":\"diagnostic\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, upd_state, dev);
+    publish(topic, payload, 1);
+
+    /* ── Latest available version sensor (diagnostic) ── */
+    char upd_ver_state[TOPIC_MAXLEN];
+    make_topic(upd_ver_state, sizeof(upd_ver_state), "update/latest_version/state");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/%s_update_ver/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Latest Version\","
+             "\"unique_id\":\"%s_update_ver\","
+             "\"state_topic\":\"%s\","
+             "\"entity_category\":\"diagnostic\","
+             "\"icon\":\"mdi:cloud-download\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, upd_ver_state, dev);
+    publish(topic, payload, 1);
+
     ESP_LOGI(TAG, "HA auto-discovery payloads published");
 }
 
@@ -355,6 +397,23 @@ static void publish_rotation(bool enabled)
     char topic[TOPIC_MAXLEN];
     make_topic(topic, sizeof(topic), "rotation/state");
     publish(topic, enabled ? "ON" : "OFF", 0);
+}
+
+/* Retained — unlike the frequently-changing fields above, "an update is
+ * pending" is a slow-changing status the user wants visible immediately on
+ * HA reconnect, same treatment as firmware/state. */
+static void publish_update_available(bool avail)
+{
+    char topic[TOPIC_MAXLEN];
+    make_topic(topic, sizeof(topic), "update/state");
+    publish(topic, avail ? "ON" : "OFF", 1);
+}
+
+static void publish_update_version(const char *ver)
+{
+    char topic[TOPIC_MAXLEN];
+    make_topic(topic, sizeof(topic), "update/latest_version/state");
+    publish(topic, ver, 1);
 }
 
 static void publish_ticker_speed(int px)
@@ -1112,6 +1171,9 @@ static void ha_mqtt_task(void *arg)
     uint8_t    last_brightness = 255;   /* sentinel — forces publish on first tick */
     bool       last_rotation   = false;
     char       last_theme[32]  = {0};   /* empty = sentinel, forces publish on first tick */
+    int        last_update_avail = -1;  /* impossible bool value — forces publish on first tick,
+                                            same trick as last_mode above (0/1 are both real values) */
+    char       last_update_ver[16] = {0};
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(60000));
@@ -1176,6 +1238,22 @@ static void ha_mqtt_task(void *arg)
         if (cur_rot != last_rotation) {
             publish_rotation(cur_rot);
             last_rotation = cur_rot;
+        }
+
+        /* Update available — publish when changed (fed by update_check task) */
+        char cur_update_ver[16] = {0};
+        bool cur_update_avail = update_check_get_status(cur_update_ver, sizeof(cur_update_ver));
+        if (cur_update_avail != last_update_avail) {
+            publish_update_available(cur_update_avail);
+            last_update_avail = cur_update_avail;
+        }
+        /* Publish whenever we have a known latest tag at all — not gated on
+         * cur_update_avail, so the diagnostic sensor reads a real value even
+         * when already up to date (or ahead of the latest release), instead
+         * of staying "unknown" until an update happens to be pending. */
+        if (cur_update_ver[0] && strcmp(cur_update_ver, last_update_ver) != 0) {
+            publish_update_version(cur_update_ver);
+            strncpy(last_update_ver, cur_update_ver, sizeof(last_update_ver) - 1);
         }
     }
 }

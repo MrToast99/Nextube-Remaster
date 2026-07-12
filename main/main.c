@@ -50,6 +50,7 @@
 #include "web_server.h"
 #include "ntp_time.h"
 #include "weather.h"
+#include "update_check.h"
 #include "subscribers.h"
 #include "microphone.h"
 #include "fw_version.h"
@@ -373,6 +374,7 @@ void app_main(void)
      * audio_enabled / volume / mic_* are NOT read here — the deferred audio
      * task reads them fresh from config at start time (see audio_mic_deferred_start). */
     bool    boot_weather_enabled;
+    bool    boot_update_check_enabled;
     bool    boot_social_enabled;
     bool    boot_mqtt_enabled;
     bool    boot_wled_sync_enabled;
@@ -387,6 +389,7 @@ void app_main(void)
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
     boot_weather_enabled    = cfg_boot->weather_enabled;
+    boot_update_check_enabled = cfg_boot->update_check_enabled;
     boot_social_enabled     = cfg_boot->social_enabled;
     boot_mqtt_enabled       = cfg_boot->mqtt_enabled && cfg_boot->mqtt_broker[0] != '\0';
     boot_wled_sync_enabled  = cfg_boot->wled_sync_enabled;
@@ -450,6 +453,15 @@ void app_main(void)
         weather_start();
     } else {
         ESP_LOGI(TAG, "Weather disabled in config — task not started");
+    }
+    /* Update check — periodic GitHub release poll that drives the tube-6
+     * update indicator and the Home Assistant "Nextube Update Available"
+     * topic autonomously (no browser tab required). Same gate pattern as
+     * weather_enabled. */
+    if (boot_update_check_enabled) {
+        update_check_start();
+    } else {
+        ESP_LOGI(TAG, "Update check disabled in config — task not started");
     }
     /* Social counter task — only started when the user has opted in via the
      * "Enable Social Media Counters" toggle.  Requires a reboot to take effect

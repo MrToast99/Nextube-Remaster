@@ -184,6 +184,9 @@ typedef struct {
      * the periodic polling — useful for users who don't want weather data,
      * subscriber counts, or LAN-side mDNS advertisement. */
     bool             weather_enabled;    /* gate weather_task creation */
+    bool             update_check_enabled; /* gate update_check_task — periodic GitHub release
+                                               check that drives the tube-6 update indicator and
+                                               the Home Assistant "Nextube Update Available" topic */
     bool             social_enabled;     /* master gate — if false, subscribers_task never starts */
     bool             youtube_enabled;       /* gate subscribers_task YouTube fetch */
     uint16_t         sub_poll_interval_min; /* social counter re-poll interval in minutes (default 30, min 5) */

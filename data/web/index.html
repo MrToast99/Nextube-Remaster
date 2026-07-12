@@ -10,62 +10,105 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text x='0' y='14' font-size='14'>%F0%9F%95%90</text></svg>">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#1a1a2e;--card:#16213e;--accent:#0f3460;--hi:#e94560;--text:#eee;--dim:#999;--ok:#4ecca3}
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-header{background:var(--accent);padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}
-#sticky-shell{position:sticky;top:0;z-index:100;background:var(--bg);box-shadow:0 2px 8px rgba(0,0,0,.3)}
-header h1{font-size:1.2rem;font-weight:600;letter-spacing:.5px}
+:root{
+  --bg:#13152a;--bg2:#1c2036;--card:#1b1e36;--accent:#262c4c;
+  --hi:#ef4565;--hi-rgb:239,69,101;--ok:#4ecca3;--warn:#e8a23a;
+  --text:#eef0f6;--fg:#eef0f6;--dim:#8d94ac;
+  --border:rgba(255,255,255,.08);--border-soft:rgba(255,255,255,.05);
+  --radius-sm:6px;--radius:10px;--radius-lg:14px;
+  --shadow-sm:0 1px 3px rgba(0,0,0,.3);--shadow:0 6px 20px rgba(0,0,0,.32);--shadow-lg:0 14px 44px rgba(0,0,0,.48);
+  --ease:cubic-bezier(.4,0,.2,1);
+}
+html{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background-color:rgba(255,255,255,.14);border-radius:8px;border:2px solid var(--bg);background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background-color:rgba(255,255,255,.22)}
+::selection{background:rgba(var(--hi-rgb),.35);color:#fff}
+:focus-visible{outline:2px solid var(--hi);outline-offset:2px;border-radius:2px}
+input[type=checkbox]{accent-color:var(--hi)}
+header{background:var(--card);border-bottom:1px solid var(--border);padding:1.1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}
+#sticky-shell{position:sticky;top:0;z-index:100;background:var(--bg);box-shadow:var(--shadow)}
+header h1{font-size:1.15rem;font-weight:700;letter-spacing:.2px}
 header h1 span{color:var(--hi)}
-.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-.status-dot.ok{background:var(--ok)}.status-dot.err{background:var(--hi)}
-nav{display:flex;gap:4px;background:var(--card);padding:4px;border-radius:8px;margin:1rem;flex-wrap:wrap}
-nav button{background:none;border:none;color:var(--dim);padding:.5rem 1rem;border-radius:6px;cursor:pointer;font-size:.85rem;transition:.2s}
-nav button.active{background:var(--accent);color:var(--text)}
-nav button:hover{color:var(--text)}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;box-shadow:0 0 0 3px transparent;transition:box-shadow .3s var(--ease)}
+.status-dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(78,204,163,.16)}
+.status-dot.err{background:var(--hi);box-shadow:0 0 0 3px rgba(var(--hi-rgb),.16)}
+nav{display:flex;gap:4px;background:var(--card);border:1px solid var(--border);padding:5px;border-radius:var(--radius);margin:1rem;flex-wrap:wrap}
+nav button{display:inline-flex;align-items:center;gap:.5rem;background:none;border:none;color:var(--dim);padding:.55rem 1.1rem;border-radius:var(--radius-sm);cursor:pointer;font-size:.85rem;font-weight:500;transition:background .18s var(--ease),color .18s var(--ease)}
+nav button.active{background:var(--hi);color:#fff;box-shadow:var(--shadow-sm)}
+nav button:hover:not(.active){color:var(--text);background:rgba(255,255,255,.06)}
+nav button::before{content:"";width:15px;height:15px;flex:0 0 auto;background-color:var(--dim);-webkit-mask-size:contain;mask-size:contain;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-position:center;mask-position:center;transition:background-color .18s var(--ease)}
+nav button.active::before{background-color:#fff}
+nav button:hover:not(.active)::before{background-color:var(--text)}
+nav button[data-tab="dashboard"]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='7' height='7' rx='1.5'/%3E%3Crect x='14' y='3' width='7' height='7' rx='1.5'/%3E%3Crect x='3' y='14' width='7' height='7' rx='1.5'/%3E%3Crect x='14' y='14' width='7' height='7' rx='1.5'/%3E%3C/svg%3E");mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='7' height='7' rx='1.5'/%3E%3Crect x='14' y='3' width='7' height='7' rx='1.5'/%3E%3Crect x='3' y='14' width='7' height='7' rx='1.5'/%3E%3Crect x='14' y='14' width='7' height='7' rx='1.5'/%3E%3C/svg%3E")}
+nav button[data-tab="display"]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='4' width='20' height='13' rx='2'/%3E%3Cline x1='8' y1='21' x2='16' y2='21'/%3E%3Cline x1='12' y1='17' x2='12' y2='21'/%3E%3C/svg%3E");mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='4' width='20' height='13' rx='2'/%3E%3Cline x1='8' y1='21' x2='16' y2='21'/%3E%3Cline x1='12' y1='17' x2='12' y2='21'/%3E%3C/svg%3E")}
+nav button[data-tab="network"]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Crect x='2' y='16' width='4' height='6' rx='1'/%3E%3Crect x='10' y='11' width='4' height='11' rx='1'/%3E%3Crect x='18' y='5' width='4' height='17' rx='1'/%3E%3C/svg%3E");mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Crect x='2' y='16' width='4' height='6' rx='1'/%3E%3Crect x='10' y='11' width='4' height='11' rx='1'/%3E%3Crect x='18' y='5' width='4' height='17' rx='1'/%3E%3C/svg%3E")}
+nav button[data-tab="services"]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='5'/%3E%3Ccircle cx='16' cy='8' r='5'/%3E%3Ccircle cx='12' cy='15.5' r='5'/%3E%3C/svg%3E");mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='5'/%3E%3Ccircle cx='16' cy='8' r='5'/%3E%3Ccircle cx='12' cy='15.5' r='5'/%3E%3C/svg%3E")}
+nav button[data-tab="hardware"]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Crect x='6' y='6' width='12' height='12' rx='1.5'/%3E%3Cline x1='9' y1='2' x2='9' y2='6'/%3E%3Cline x1='15' y1='2' x2='15' y2='6'/%3E%3Cline x1='9' y1='18' x2='9' y2='22'/%3E%3Cline x1='15' y1='18' x2='15' y2='22'/%3E%3Cline x1='2' y1='9' x2='6' y2='9'/%3E%3Cline x1='2' y1='15' x2='6' y2='15'/%3E%3Cline x1='18' y1='9' x2='22' y2='9'/%3E%3Cline x1='18' y1='15' x2='22' y2='15'/%3E%3C/svg%3E");mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Crect x='6' y='6' width='12' height='12' rx='1.5'/%3E%3Cline x1='9' y1='2' x2='9' y2='6'/%3E%3Cline x1='15' y1='2' x2='15' y2='6'/%3E%3Cline x1='9' y1='18' x2='9' y2='22'/%3E%3Cline x1='15' y1='18' x2='15' y2='22'/%3E%3Cline x1='2' y1='9' x2='6' y2='9'/%3E%3Cline x1='2' y1='15' x2='6' y2='15'/%3E%3Cline x1='18' y1='9' x2='22' y2='9'/%3E%3Cline x1='18' y1='15' x2='22' y2='15'/%3E%3C/svg%3E")}
+nav button[data-tab="system"]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cline x1='4' y1='6' x2='20' y2='6'/%3E%3Ccircle cx='15' cy='6' r='2' fill='black' stroke='none'/%3E%3Cline x1='4' y1='12' x2='20' y2='12'/%3E%3Ccircle cx='9' cy='12' r='2' fill='black' stroke='none'/%3E%3Cline x1='4' y1='18' x2='20' y2='18'/%3E%3Ccircle cx='17' cy='18' r='2' fill='black' stroke='none'/%3E%3C/svg%3E");mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cline x1='4' y1='6' x2='20' y2='6'/%3E%3Ccircle cx='15' cy='6' r='2' fill='black' stroke='none'/%3E%3Cline x1='4' y1='12' x2='20' y2='12'/%3E%3Ccircle cx='9' cy='12' r='2' fill='black' stroke='none'/%3E%3Cline x1='4' y1='18' x2='20' y2='18'/%3E%3Ccircle cx='17' cy='18' r='2' fill='black' stroke='none'/%3E%3C/svg%3E")}
 main{padding:0 1rem 2rem}
-.card{background:var(--card);border-radius:10px;padding:1.2rem;margin-bottom:1rem}
-.card h2{font-size:1rem;margin-bottom:.8rem;color:var(--hi);border-bottom:1px solid rgba(255,255,255,.05);padding-bottom:.5rem}
+.select,select.select{padding:.4rem .6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--accent);color:var(--text);font-size:.85rem}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1.3rem;margin-bottom:1rem;box-shadow:var(--shadow-sm);transition:box-shadow .2s var(--ease),border-color .2s var(--ease)}
+.card:hover{box-shadow:var(--shadow);border-color:rgba(255,255,255,.14)}
+.card h2{font-size:.95rem;font-weight:600;letter-spacing:.01em;margin-bottom:1rem;padding-bottom:.7rem;color:var(--text);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.55rem}
+.card h2::before{content:"";width:3px;height:1rem;border-radius:2px;background:var(--hi);flex:0 0 auto}
+#debug-hero-h2{justify-content:center;border-bottom:none;padding-bottom:0}
+#debug-hero-h2::before{display:none}
 .field{margin-bottom:.8rem}
-.field label{display:block;font-size:.8rem;color:var(--dim);margin-bottom:4px}
-.field input,.field select{width:100%;padding:.5rem;border:1px solid rgba(255,255,255,.1);border-radius:6px;background:var(--accent);color:var(--text);font-size:.9rem}
-.field input:focus,.field select:focus{outline:none;border-color:var(--hi)}
+.field label{display:block;font-size:.8rem;font-weight:500;color:var(--dim);margin-bottom:5px}
+.field input[type=checkbox]+label{display:inline;color:var(--text);font-weight:400;margin-bottom:0}
+.field input,.field select{width:100%;padding:.6rem .7rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--accent);color:var(--text);font-size:.9rem;transition:border-color .15s var(--ease),box-shadow .15s var(--ease)}
+.field input:focus,.field select:focus{outline:none;border-color:var(--hi);box-shadow:0 0 0 3px rgba(var(--hi-rgb),.18)}
 select option{background:var(--accent);color:var(--text)}
 .field input[type=range]{padding:0;height:6px;-webkit-appearance:none;background:rgba(255,255,255,.1);border:none;border-radius:3px}
-.field input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--hi);cursor:pointer}
+.field input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--hi);cursor:pointer;box-shadow:var(--shadow-sm);transition:transform .12s var(--ease)}
+.field input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.1)}
+.field input[type=range]::-moz-range-thumb{width:16px;height:16px;border:none;border-radius:50%;background:var(--hi);cursor:pointer;box-shadow:var(--shadow-sm)}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
-.btn{display:inline-block;padding:.6rem 1.2rem;border:none;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:500;transition:.2s}
-.btn-primary{background:var(--hi);color:#fff}.btn-primary:hover{filter:brightness(1.15)}
-.btn-outline{background:none;border:1px solid var(--dim);color:var(--dim)}.btn-outline:hover{border-color:var(--text);color:var(--text)}
-.btn-danger{background:#c0392b;color:#fff}
+.btn{display:inline-block;padding:.65rem 1.25rem;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:.85rem;font-weight:600;letter-spacing:.01em;transition:filter .15s var(--ease),transform .1s var(--ease)}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--hi);color:#fff;box-shadow:var(--shadow-sm)}.btn-primary:hover{filter:brightness(1.12)}
+.btn-outline{background:none;border:1px solid var(--border);color:var(--dim)}.btn-outline:hover{border-color:var(--text);color:var(--text)}
+.btn-danger{background:#c0392b;color:#fff}.btn-danger:hover{filter:brightness(1.12)}
 .btn-group{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.8rem}
 .meter{display:flex;align-items:center;gap:1rem}
 .meter span{min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
 .grid-3{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5rem}
-.color-swatch{width:40px;height:40px;border-radius:8px;border:2px solid rgba(255,255,255,.1);cursor:pointer}
-.toast{display:none;background:var(--ok);color:#000;padding:.6rem 1.2rem;border-radius:8px;font-size:.85rem;opacity:0;transform:translateY(10px);transition:opacity .3s,transform .3s}
+.color-swatch{width:40px;height:40px;border-radius:var(--radius-sm);border:2px solid var(--border);cursor:pointer;transition:transform .15s var(--ease),border-color .15s var(--ease)}
+.color-swatch:hover{transform:scale(1.06);border-color:var(--text)}
+input.chk{width:15px;height:15px;flex:0 0 auto;cursor:pointer}
+label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-weight:400;color:var(--text);cursor:pointer}
+.hint{color:var(--dim);font-size:.78rem}
+.toast{display:none;background:var(--ok);color:#08201a;padding:.7rem 1.3rem;border-radius:var(--radius);font-size:.85rem;font-weight:500;opacity:0;transform:translateY(10px);transition:opacity .3s var(--ease),transform .3s var(--ease);box-shadow:var(--shadow)}
 .toast.show{opacity:1;transform:translateY(0)}
 .toast.err{background:var(--hi);color:#fff}
-.toast.warn{background:#c07820;color:#fff}
-.toast.warn .toast-btn{background:#fff3;border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:5px;padding:.2rem .65rem;font-size:.8rem;font-weight:600;cursor:pointer;margin-left:.9rem;white-space:nowrap}
-.toast.warn .toast-btn:hover{background:#fff5}
-.tab-content{display:none}.tab-content.active{display:block}
-#unsaved-banner{display:none;width:100%;background:rgba(160,100,50,.22);border-top:1px solid rgba(180,120,60,.65);color:#d4a57a;padding:.5rem 1rem;margin-top:.5rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
+.toast.warn{background:var(--warn);color:#241300}
+.toast.warn .toast-btn{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);color:#fff;border-radius:var(--radius-sm);padding:.25rem .7rem;font-size:.8rem;font-weight:600;cursor:pointer;margin-left:.9rem;white-space:nowrap;transition:background .15s var(--ease)}
+.toast.warn .toast-btn:hover{background:rgba(255,255,255,.3)}
+.tab-content{display:none}.tab-content.active{display:block;animation:tab-fade-in .22s var(--ease)}
+@keyframes tab-fade-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+#unsaved-banner{display:none;width:100%;background:rgba(232,162,58,.14);border-top:1px solid rgba(232,162,58,.5);color:#e8c896;padding:.55rem 1.1rem;margin-top:.5rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
 #unsaved-banner.show{display:flex}
-#reboot-banner{display:none;width:100%;background:rgba(180,50,50,.22);border-top:1px solid rgba(210,70,70,.55);color:#e89a9a;padding:.5rem 1rem;margin-top:.3rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
+#reboot-banner{display:none;width:100%;background:rgba(var(--hi-rgb),.14);border-top:1px solid rgba(var(--hi-rgb),.45);color:#f0a8b4;padding:.55rem 1.1rem;margin-top:.3rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
 #reboot-banner.show{display:flex}
-.wifi-item{display:flex;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.wifi-item{display:flex;justify-content:space-between;padding:.5rem .2rem;border-bottom:1px solid var(--border-soft);border-radius:var(--radius-sm);transition:background .15s var(--ease)}
+.wifi-item:hover{background:rgba(255,255,255,.03)}
 .wifi-item .ssid{font-weight:500}.wifi-item .rssi{color:var(--dim);font-size:.8rem}
-.progress{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin-top:.5rem}
-.progress-bar{height:100%;background:var(--hi);transition:width .3s,background .5s}
+.progress{height:4px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden;margin-top:.5rem}
+.progress-bar{height:100%;background:var(--hi);transition:width .3s var(--ease),background .5s var(--ease)}
 .progress.ota{height:8px;border-radius:4px;margin-top:.6rem}
 @keyframes ota-pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .progress-bar.pulsing,.au-bar.pulsing{animation:ota-pulse 1.1s ease-in-out infinite}
-.file-row{display:flex;justify-content:space-between;align-items:center;padding:.35rem .7rem;border-bottom:1px solid rgba(255,255,255,.05)}
+.file-row{display:flex;justify-content:space-between;align-items:center;padding:.4rem .7rem;border-bottom:1px solid var(--border-soft);border-radius:var(--radius-sm);transition:background .15s var(--ease)}
 .file-row:last-child{border-bottom:none}
 .file-row:hover{background:rgba(255,255,255,.04)}
-.stat{text-align:center;padding:.5rem}
-.stat .val{font-size:1.6rem;font-weight:700;color:var(--hi)}
-.stat .lbl{font-size:.75rem;color:var(--dim);margin-top:2px}
+.stat{text-align:center;padding:.9rem .6rem;background:rgba(255,255,255,.02);border:1px solid var(--border-soft);border-radius:var(--radius);transition:transform .15s var(--ease),border-color .15s var(--ease),background .15s var(--ease)}
+.stat:hover{transform:translateY(-2px);border-color:var(--border);background:rgba(255,255,255,.04)}
+.stat .val{font-size:1.7rem;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+#s-wifi{font-size:1.1rem;letter-spacing:-.01em;word-break:break-word;line-height:1.25}
+.stat .lbl{font-size:.75rem;color:var(--dim);margin-top:3px;text-transform:uppercase;letter-spacing:.04em}
 </style>
 </head>
 <body>
@@ -233,9 +276,9 @@ select option{background:var(--accent);color:var(--text)}
         <input type="color" id="f-custom-shadow-color" value="#5c5c5c" onchange="markDirty()" style="height:2rem;cursor:pointer">
       </div>
       <div class="field">
-        <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer">
-          <input type="checkbox" id="f-custom-night-en" onchange="onCustomNightChange()" style="width:14px;height:14px">
-          Night color set <span style="color:var(--dim);font-size:.82rem">(follows the WeatherLive sky's real sunrise/sunset; blends through twilight)</span>
+        <label class="chk-row">
+          <input type="checkbox" id="f-custom-night-en" onchange="onCustomNightChange()" class="chk">
+          Night color set <span class="hint">(follows the WeatherLive sky's real sunrise/sunset; blends through twilight)</span>
         </label>
       </div>
       <div id="custom-night-wrap" style="display:none;border-left:2px solid rgba(255,255,255,.12);padding-left:.8rem;margin-bottom:.5rem">
@@ -317,24 +360,24 @@ select option{background:var(--accent);color:var(--text)}
     <div id="tube6cx-section" style="display:none;border:1px solid var(--accent);padding:.8rem;border-radius:8px;margin-bottom:1rem">
       <div style="font-size:.85rem;font-weight:600;margin-bottom:.6rem">Tube 6 Info Panels <span style="color:var(--dim);font-weight:normal;font-size:.8rem">(24H Custom — rotate when enabled)</span></div>
       <div id="f-cx-font-row" class="field" style="display:none;margin-bottom:.7rem">
-        <label style="font-size:.85rem">Info panel font <span style="color:var(--dim);font-size:.78rem">(Outdoor Temperature, Humidity, Wind, Air Quality &amp; Outdoor Temp/Humidity panels; TTF from /spiffs/fonts/ — does not affect the clock digits)</span></label>
+        <label style="font-size:.85rem">Info panel font <span class="hint">(Outdoor Temperature, Humidity, Wind, Air Quality &amp; Outdoor Temp/Humidity panels; TTF from /spiffs/fonts/ — does not affect the clock digits)</span></label>
         <div style="display:flex;gap:8px;align-items:center;margin-top:.3rem">
           <select id="f-cx-font" class="ttf-font-select" style="flex:1" onchange="onFontSelectChange(this)"><option value="">Logisoso (built-in)</option></select>
           <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadFontList(true)" title="Scan for TTF files on device">↺</button>
         </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.7rem">
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weekdate" style="width:14px;height:14px"> Day &amp; Date <span style="color:var(--dim);font-size:.78rem">(day name / MM-DD)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-ht" style="width:14px;height:14px"> Indoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(SHT30 sensor)</span></label>
-        <label id="f-cx-weather-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem">(Currrent outside conditions)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem">(current temp + today's Hi/Lo)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-sunrise" style="width:14px;height:14px"> Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(calculated from weather location)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-humidity" style="width:14px;height:14px"> Humidity <span style="color:var(--dim);font-size:.78rem">(outdoor humidity — drop symbol + value)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-wind" style="width:14px;height:14px"> Wind <span style="color:var(--dim);font-size:.78rem">(wind speed km/h — wind symbol + value)</span></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-aqi" style="width:14px;height:14px"> Air Quality <span style="color:var(--dim);font-size:.78rem">(AQI — Open-Meteo, no key)</span></label>
+        <label class="chk-row"><input type="checkbox" id="f-cx-weekdate" class="chk"> Day &amp; Date <span class="hint">(day name / MM-DD)</span></label>
+        <label class="chk-row"><input type="checkbox" id="f-cx-ht" class="chk"> Indoor Temp &amp; Humidity <span class="hint">(SHT30 sensor)</span></label>
+        <label id="f-cx-weather-row" class="chk-row"><input type="checkbox" id="f-cx-weather" class="chk"> Weather Icon <span class="hint">(Currrent outside conditions)</span></label>
+        <label class="chk-row"><input type="checkbox" id="f-cx-temp" class="chk"> Outdoor Temperature <span class="hint">(current temp + today's Hi/Lo)</span></label>
+        <label class="chk-row"><input type="checkbox" id="f-cx-sunrise" class="chk"> Sunrise &amp; Sunset <span class="hint">(calculated from weather location)</span></label>
+        <label class="chk-row"><input type="checkbox" id="f-cx-humidity" class="chk"> Humidity <span class="hint">(outdoor humidity — drop symbol + value)</span></label>
+        <label class="chk-row"><input type="checkbox" id="f-cx-wind" class="chk"> Wind <span class="hint">(wind speed km/h — wind symbol + value)</span></label>
+        <label class="chk-row"><input type="checkbox" id="f-cx-aqi" class="chk"> Air Quality <span class="hint">(AQI — Open-Meteo, no key)</span></label>
         <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem">AQI scale <select id="f-aqistd" style="font-size:.8rem;background:var(--accent);border:1px solid var(--dim);color:var(--text);border-radius:4px;padding:1px 4px"><option value="auto">Auto (by location)</option><option value="us">US AQI (0–500)</option><option value="eu">European AQI (0–100)</option></select></label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-outdoor-ht" style="width:14px;height:14px"> Outdoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(combined panel)</span></label>
-        <label id="f-cx-push-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx-push" style="width:14px;height:14px"> Pushed Image <span style="color:var(--dim);font-size:.78rem">(JPG via POST /api/cx_image?tube=6)</span></label>
+        <label class="chk-row"><input type="checkbox" id="f-cx-outdoor-ht" class="chk"> Outdoor Temp &amp; Humidity <span class="hint">(combined panel)</span></label>
+        <label id="f-cx-push-row" class="chk-row"><input type="checkbox" id="f-cx-push" class="chk"> Pushed Image <span class="hint">(JPG via POST /api/cx_image?tube=6)</span></label>
       </div>
       <div style="display:flex;align-items:center;gap:.6rem;font-size:.85rem">
         <label for="f-cx-panel-ms" style="white-space:nowrap;margin:0">Panel duration</label>
@@ -342,20 +385,20 @@ select option{background:var(--accent);color:var(--text)}
                style="width:60px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 6px;border-radius:4px">
         <span style="color:var(--dim)">s</span>
       </div>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;margin-top:.7rem;font-weight:600"><input type="checkbox" id="f-cx-dual" style="width:14px;height:14px" onchange="onCxDualChange()"> Dual info panels <span style="color:var(--dim);font-weight:normal;font-size:.78rem">(panels on tubes 5 &amp; 6 — drops the colon, shows H H M M)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;margin-top:.7rem;font-weight:600"><input type="checkbox" id="f-cx-dual" class="chk" onchange="onCxDualChange()"> Dual info panels <span style="color:var(--dim);font-weight:normal;font-size:.78rem">(panels on tubes 5 &amp; 6 — drops the colon, shows H H M M)</span></label>
       <div id="tube5cx-group" style="display:none;margin-top:.6rem;padding-top:.6rem;border-top:1px solid var(--dim)">
         <div style="font-size:.85rem;font-weight:600;margin-bottom:.6rem">Tube 5 Info Panels <span style="color:var(--dim);font-weight:normal;font-size:.8rem">(independent rotation)</span></div>
         <div style="display:flex;flex-direction:column;gap:.35rem">
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-weekdate" style="width:14px;height:14px"> Day &amp; Date <span style="color:var(--dim);font-size:.78rem">(day name / MM-DD)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-ht" style="width:14px;height:14px"> Indoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(SHT30 sensor)</span></label>
-          <label id="f-cx5-weather-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-weather" style="width:14px;height:14px"> Weather Icon <span style="color:var(--dim);font-size:.78rem">(current outside conditions)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-temp" style="width:14px;height:14px"> Outdoor Temperature <span style="color:var(--dim);font-size:.78rem">(current temp + today's Hi/Lo)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-sunrise" style="width:14px;height:14px"> Sunrise &amp; Sunset <span style="color:var(--dim);font-size:.78rem">(calculated from weather location)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-humidity" style="width:14px;height:14px"> Humidity <span style="color:var(--dim);font-size:.78rem">(outdoor humidity — drop symbol + value)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-wind" style="width:14px;height:14px"> Wind <span style="color:var(--dim);font-size:.78rem">(wind speed km/h — wind symbol + value)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-aqi" style="width:14px;height:14px"> Air Quality <span style="color:var(--dim);font-size:.78rem">(AQI — Open-Meteo, no key)</span></label>
-          <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-outdoor-ht" style="width:14px;height:14px"> Outdoor Temp &amp; Humidity <span style="color:var(--dim);font-size:.78rem">(combined panel — saves a rotation slot)</span></label>
-          <label id="f-cx5-push-row" style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer"><input type="checkbox" id="f-cx5-push" style="width:14px;height:14px"> Pushed Image <span style="color:var(--dim);font-size:.78rem">(JPG via POST /api/cx_image?tube=5)</span></label>
+          <label class="chk-row"><input type="checkbox" id="f-cx5-weekdate" class="chk"> Day &amp; Date <span class="hint">(day name / MM-DD)</span></label>
+          <label class="chk-row"><input type="checkbox" id="f-cx5-ht" class="chk"> Indoor Temp &amp; Humidity <span class="hint">(SHT30 sensor)</span></label>
+          <label id="f-cx5-weather-row" class="chk-row"><input type="checkbox" id="f-cx5-weather" class="chk"> Weather Icon <span class="hint">(current outside conditions)</span></label>
+          <label class="chk-row"><input type="checkbox" id="f-cx5-temp" class="chk"> Outdoor Temperature <span class="hint">(current temp + today's Hi/Lo)</span></label>
+          <label class="chk-row"><input type="checkbox" id="f-cx5-sunrise" class="chk"> Sunrise &amp; Sunset <span class="hint">(calculated from weather location)</span></label>
+          <label class="chk-row"><input type="checkbox" id="f-cx5-humidity" class="chk"> Humidity <span class="hint">(outdoor humidity — drop symbol + value)</span></label>
+          <label class="chk-row"><input type="checkbox" id="f-cx5-wind" class="chk"> Wind <span class="hint">(wind speed km/h — wind symbol + value)</span></label>
+          <label class="chk-row"><input type="checkbox" id="f-cx5-aqi" class="chk"> Air Quality <span class="hint">(AQI — Open-Meteo, no key)</span></label>
+          <label class="chk-row"><input type="checkbox" id="f-cx5-outdoor-ht" class="chk"> Outdoor Temp &amp; Humidity <span class="hint">(combined panel — saves a rotation slot)</span></label>
+          <label id="f-cx5-push-row" class="chk-row"><input type="checkbox" id="f-cx5-push" class="chk"> Pushed Image <span class="hint">(JPG via POST /api/cx_image?tube=5)</span></label>
         </div>
       </div>
     </div>
@@ -604,7 +647,7 @@ select option{background:var(--accent);color:var(--text)}
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-date" onchange="markDirty()"> <span data-i18n="mode.date">Date</span> <span style="font-size:.73rem;color:var(--dim)" data-i18n="disp.hint_full_date">(full date)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album" onchange="markDirty()"> <span data-i18n="mode.album">Album</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather" onchange="markDirty()"> <span data-i18n="mode.weather">Weather</span></label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum" onchange="markDirty();markRestartNeeded()"> <span data-i18n="mode.spectrum">Spectrum</span> <span style="color:var(--dim);font-size:.78rem" data-i18n="disp.hint_mic_restart">(mic — restart required)</span></label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-spectrum" onchange="markDirty();markRestartNeeded()"> <span data-i18n="mode.spectrum">Spectrum</span> <span class="hint" data-i18n="disp.hint_mic_restart">(mic — restart required)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-youtube" onchange="markDirty()"> YouTube</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-instagram" onchange="markDirty()"> Instagram</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-tiktok" onchange="markDirty()"> TikTok</label>
@@ -837,25 +880,25 @@ select option{background:var(--accent);color:var(--text)}
     </div>
     <div class="field"><label data-i18n="svc.display_panels">Display Panels</label>
       <div style="display:flex;flex-direction:column;gap:.35rem;margin-top:.35rem">
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
-          <input type="checkbox" id="f-wx-p0" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p0')" checked>
-          <span data-i18n="svc.wx_temperature">Temperature</span> <span style="color:var(--dim);font-size:.78rem">(panel 0)</span>
+        <label class="chk-row">
+          <input type="checkbox" id="f-wx-p0" class="chk" onchange="onWxPanelToggle('f-wx-p0')" checked>
+          <span data-i18n="svc.wx_temperature">Temperature</span> <span class="hint">(panel 0)</span>
         </label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
-          <input type="checkbox" id="f-wx-p1" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p1')" checked>
-          <span data-i18n="svc.wx_humidity">Humidity</span> <span style="color:var(--dim);font-size:.78rem">(panel 1)</span>
+        <label class="chk-row">
+          <input type="checkbox" id="f-wx-p1" class="chk" onchange="onWxPanelToggle('f-wx-p1')" checked>
+          <span data-i18n="svc.wx_humidity">Humidity</span> <span class="hint">(panel 1)</span>
         </label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
-          <input type="checkbox" id="f-wx-p2" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p2')">
-          <span data-i18n="svc.wx_sunrise">Sunrise &amp; Sunset</span> <span style="color:var(--dim);font-size:.78rem">(panel 2)</span>
+        <label class="chk-row">
+          <input type="checkbox" id="f-wx-p2" class="chk" onchange="onWxPanelToggle('f-wx-p2')">
+          <span data-i18n="svc.wx_sunrise">Sunrise &amp; Sunset</span> <span class="hint">(panel 2)</span>
         </label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
-          <input type="checkbox" id="f-wx-p3" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p3')">
-          <span data-i18n="svc.wx_wind">Wind Speed</span> <span style="color:var(--dim);font-size:.78rem">(panel 3)</span>
+        <label class="chk-row">
+          <input type="checkbox" id="f-wx-p3" class="chk" onchange="onWxPanelToggle('f-wx-p3')">
+          <span data-i18n="svc.wx_wind">Wind Speed</span> <span class="hint">(panel 3)</span>
         </label>
-        <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
-          <input type="checkbox" id="f-wx-p4" style="width:14px;height:14px" onchange="onWxPanelToggle('f-wx-p4')">
-          <span data-i18n="svc.wx_hilo">Daily Hi / Lo</span> <span style="color:var(--dim);font-size:.78rem">(panel 4 — red ↑ Hi then blue ↓ Lo)</span>
+        <label class="chk-row">
+          <input type="checkbox" id="f-wx-p4" class="chk" onchange="onWxPanelToggle('f-wx-p4')">
+          <span data-i18n="svc.wx_hilo">Daily Hi / Lo</span> <span class="hint">(panel 4 — red ↑ Hi then blue ↓ Lo)</span>
         </label>
       </div>
       <small style="color:var(--dim);margin-top:.3rem;display:block" data-i18n="svc.wx_one_panel">At least one panel must remain enabled.</small>
@@ -1297,7 +1340,7 @@ select option{background:var(--accent);color:var(--text)}
   <div id="debug-panel" style="display:none">
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06);text-align:center;padding:1rem 1.2rem">
       <div style="font-size:2rem;margin-bottom:.4rem">🧰</div>
-      <h2 style="color:#ffa000;margin-bottom:.3rem">Oh, you found my hidden stash of switches and levers!</h2>
+      <h2 id="debug-hero-h2" style="color:#ffa000;margin-bottom:.3rem">Oh, you found my hidden stash of switches and levers!</h2>
       <p style="font-size:.82rem;color:var(--dim);margin:0">These are experimental/developer tools. Poke around, but don't blame me if something goes sideways.</p>
     </div>
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
@@ -2101,8 +2144,7 @@ $('f-ab-en').onclick = () => {
  * user changes a tube's panel profile dropdown.
  * Standard = 14 (0x0E) — original Green-Tab Nextube panels.
  * Vivid    = 40 (0x28) — conservative starting point for ST7735S replacements;
- *            tune up toward 60 if still washed, down toward 25 if over-saturated.
- * The user can fine-tune the VCOM number before saving. */
+ *            tune up toward 60 if still washed, down toward 25 if over-saturated. */
 function onProfileChange(sel) {
   const tube   = +sel.dataset.tube;
   const vcom   = sel.value === '1' ? 40 : 14;
@@ -2172,8 +2214,7 @@ const DEFAULT_THEMES = [
 ];
 let s_themes = DEFAULT_THEMES.slice();  /* kept in sync by loadThemes() */
 
-/* Update visibility of clock-face-dependent controls when the Clock Face
- * dropdown changes or the page loads. */
+/* Called on Clock Face dropdown change and on page load. */
 function updateClockFaceControls() {
   const face  = ($('f-theme').value || '');
   const isCustom = face === 'Custom';
@@ -4535,7 +4576,6 @@ let _bootstrapped = false;
 async function onAuthSucceeded() {
   if (_bootstrapped) return;     /* idempotent — login can fire twice on token refresh */
   _bootstrapped = true;
-  /* Render the auth management card in the System tab with the current state. */
   updateAuthCard(g_adminSet);
   /* Await both in parallel: loadSettings sets UPDATE_API_URL (update_repo override),
    * refreshStatus populates s-fwver.  checkForUpdates needs both to be done or it
@@ -4556,10 +4596,11 @@ async function onAuthSucceeded() {
 }
 #au-overlay.open { display:flex; }
 #au-box {
-  background:var(--bg2,#1e1e1e);color:var(--fg,#eee);border-radius:12px;
-  padding:1.5rem;max-width:480px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.6);
+  background:var(--bg2,#1e2238);color:var(--fg,#eef0f6);border-radius:var(--radius-lg,14px);
+  border:1px solid var(--border,rgba(255,255,255,.1));
+  padding:1.5rem;max-width:480px;width:100%;box-shadow:var(--shadow-lg,0 14px 44px rgba(0,0,0,.48));
 }
-#au-box h3 { margin:0 0 .75rem;font-size:1.1rem; }
+#au-box h3 { margin:0 0 .75rem;font-size:1.1rem;font-weight:700; }
 .au-step {
   display:flex;align-items:center;gap:.6rem;padding:.35rem 0;
   font-size:.88rem;opacity:.45;transition:opacity .2s;
@@ -4569,7 +4610,7 @@ async function onAuthSucceeded() {
 .au-step.error   { opacity:1;color:#f66; }
 .au-icon { font-size:1rem;width:1.2rem;text-align:center; }
 .au-bar-wrap { background:rgba(255,255,255,.1);border-radius:4px;height:6px;margin:.6rem 0 .3rem;overflow:hidden; }
-.au-bar      { height:100%;background:var(--hi,#4eccab);width:0%;transition:width .4s; border-radius:4px; }
+.au-bar      { height:100%;background:var(--hi,#ef4565);width:0%;transition:width .4s; border-radius:4px; }
 #au-notes { margin-top:.8rem;max-height:160px;overflow-y:auto;font-size:.78rem;
   opacity:.8;border-top:1px solid rgba(255,255,255,.1);padding-top:.6rem; }
 #au-notes h1,#au-notes h2,#au-notes h3 { font-size:.9rem;margin:.4rem 0 .2rem; }
@@ -5030,28 +5071,33 @@ async function startAutoUpdate() {
   }
   .auth-overlay.show { display: flex; }
   .auth-card {
-    background: var(--bg, #18181b); color: var(--fg, #f5f5f5);
-    border: 1px solid rgba(255,255,255,.12);
-    border-radius: 10px;
+    background: var(--bg2, #1e2238); color: var(--fg, #eef0f6);
+    border: 1px solid var(--border, rgba(255,255,255,.1));
+    border-radius: var(--radius-lg, 14px);
     padding: 1.5rem 1.75rem;
     max-width: 360px; width: 100%;
-    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    box-shadow: var(--shadow-lg, 0 14px 44px rgba(0,0,0,.48));
   }
-  .auth-card h3 { margin: 0 0 .25rem 0; font-size: 1.15rem; }
-  .auth-card p  { margin: .25rem 0 1rem 0; color: var(--dim,#9ca3af); font-size: .85rem; line-height: 1.4; }
+  .auth-card h3 { margin: 0 0 .25rem 0; font-size: 1.15rem; font-weight: 700; }
+  .auth-card p  { margin: .25rem 0 1rem 0; color: var(--dim,#8d94ac); font-size: .85rem; line-height: 1.4; }
   .auth-card input[type=password] {
-    width: 100%; padding: .55rem .75rem; margin-bottom: .65rem;
-    background: rgba(255,255,255,.05); color: inherit;
-    border: 1px solid rgba(255,255,255,.15); border-radius: 6px;
-    font-size: .95rem;
+    width: 100%; padding: .6rem .75rem; margin-bottom: .65rem;
+    background: var(--accent, rgba(255,255,255,.05)); color: inherit;
+    border: 1px solid var(--border, rgba(255,255,255,.15)); border-radius: var(--radius-sm, 6px);
+    font-size: .95rem; transition: border-color .15s var(--ease,ease), box-shadow .15s var(--ease,ease);
+  }
+  .auth-card input[type=password]:focus {
+    outline: none; border-color: var(--hi,#ef4565);
+    box-shadow: 0 0 0 3px rgba(var(--hi-rgb,239,69,101),.18);
   }
   .auth-card button {
-    width: 100%; padding: .6rem; margin-top: .35rem;
-    background: var(--accent,#4ecca3); color: #000; border: none;
-    border-radius: 6px; cursor: pointer; font-weight: 600;
-    font-size: .95rem;
+    width: 100%; padding: .65rem; margin-top: .35rem;
+    background: var(--hi,#ef4565); color: #fff; border: none;
+    border-radius: var(--radius-sm, 6px); cursor: pointer; font-weight: 600;
+    font-size: .95rem; transition: filter .15s var(--ease,ease);
   }
-  .auth-card button:disabled { opacity: .8; cursor: default; }
+  .auth-card button:hover:not(:disabled) { filter: brightness(1.12); }
+  .auth-card button:disabled { opacity: .7; cursor: default; }
   .auth-err { color: #f87171; font-size: .82rem; min-height: 1.2em; margin-top: .35rem; }
 
   /* In-button spinner shown while a request is in flight.  Sits inline
@@ -5061,8 +5107,8 @@ async function startAutoUpdate() {
   .nx-spinner {
     display: inline-block;
     width: 14px; height: 14px;
-    border: 2px solid rgba(0,0,0,.20);
-    border-top-color: rgba(0,0,0,.85);
+    border: 2px solid rgba(255,255,255,.35);
+    border-top-color: #fff;
     border-radius: 50%;
     animation: nx-spin .7s linear infinite;
     margin-right: .55em;
