@@ -1499,7 +1499,7 @@ A browser UI opens at **http://localhost:5000**. Features:
 - Interactive crop editor with aspect-ratio-locked drag box and live 80×160 preview
 - Auto center-crop and stretch modes
 - JPEG or PNG output
-- **Folder upload preserves the source directory structure and original filenames** in the output ZIP — ready to drag straight into the LittleFS file browser
+- **Folder upload preserves the source directory structure and original filenames** in the output ZIP — ready to be decompressed and uploaded straight into the LittleFS file browser using 'upload folder'.
 
 **`.zipper` theme import:**
 - Drag-and-drop a `.zipper` file onto the drop zone (or click **📦 Import .zipper Theme**) to import a theme package created by the original Nextube desktop software
