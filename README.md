@@ -1461,18 +1461,12 @@ All paths are relative to `/images/themes/{ThemeName}/`.
 │   │   └── minus.jpg    ← negative temperature sign
 │   ├── Humidity/
 │   │   └── humidity.jpg ← % symbol
-│   ├── Weather/
-│   │   ├── sun.jpg           overcastClouds.jpg   fewClouds.jpg
-│   │   ├── fog.jpg           rain.jpg             snow.jpg
-│   │   ├── squalls.jpg       thunderstorm.jpg     sand.jpg
-│   │   └── tornado.jpg       volcanicAsh.jpg
-│   └── WeekDate/
-│       ├── week/
-│       │   └── sunday.jpg  monday.jpg  tuesday.jpg  wednesday.jpg
-│       │       thursday.jpg  friday.jpg  saturday.jpg
-│       └── date/
-│           └── 0.jpg  1.jpg  2.jpg  3.jpg  4.jpg
-│               5.jpg  6.jpg  7.jpg  8.jpg  9.jpg
+│   └── Weather/
+│       ├── sun.jpg           overcastClouds.jpg   fewClouds.jpg
+│       ├── fog.jpg           rain.jpg             snow.jpg
+│       ├── squalls.jpg       thunderstorm.jpg     sand.jpg
+│       └── tornado.jpg       volcanicAsh.jpg
+│   
 └── FlipClock/            ← required only for FlipClock theme
     └── (same Numbers + AMPM sub-structure, used for split-flap animation)
 ```
