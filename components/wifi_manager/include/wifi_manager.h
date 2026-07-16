@@ -11,6 +11,37 @@ bool wifi_manager_is_connected(void);
 const char *wifi_manager_get_ip(void);
 void wifi_manager_scan_start(void);
 
+/* ──────— disconnect/reconnect diagnostics ──────────────────────────
+ * Session-scoped counters (reset on reboot), fed by the WIFI_EVENT_STA_
+ * DISCONNECTED / IP_EVENT_STA_GOT_IP handlers. */
+
+/* Number of STA disconnect events observed since boot. */
+uint32_t wifi_manager_get_disconnect_count(void);
+
+/* wifi_err_reason_t of the most recent disconnect, or 0 if none yet this
+ * session.  Raw code — map to a human string in the caller (web UI). */
+int8_t wifi_manager_get_last_disconnect_reason(void);
+
+/* esp_timer_get_time() timestamp of the current connection's GOT_IP event,
+ * or 0 if not currently connected. */
+int64_t wifi_manager_get_connected_since_us(void);
+
+/* Snapshot of the current STA network configuration/link details.
+ * Returns false (out left unmodified) when not connected. */
+typedef struct {
+    char    mac[18];
+    char    bssid[18];
+    uint8_t channel;
+    int8_t  rssi;    /* dBm, typically -30 excellent to -90 unusable; 0 if unavailable */
+    char    netmask[16];
+    char    gateway[16];
+    char    dns1[16];
+    char    dns2[16];
+    bool    phy_11b, phy_11g, phy_11n, phy_lr;
+} wifi_manager_net_info_t;
+
+bool wifi_manager_get_net_info(wifi_manager_net_info_t *out);
+
 /* Bring the setup AP ("Nextube-Setup") up on demand, regardless of STA state.
  * Triggered by the LEFT+RIGHT touch-pad hotkey (held 15 s).  Idempotent —
  * a no-op if the AP is already broadcasting.  The AP closes automatically

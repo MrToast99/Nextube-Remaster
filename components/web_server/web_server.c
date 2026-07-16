@@ -857,6 +857,43 @@ static esp_err_t api_status(httpd_req_t *r)
     return ret;
 }
 
+/* GET /api/network_info — WiFi diagnostics: disconnect/reconnect log +
+ * link-level details.  Split out from /api/status (which is polled
+ * frequently by the dashboard) since this data changes rarely; the web UI
+ * fetches it only when the Network Info panel is expanded.  Auth-open, same
+ * tier as /api/status (REQUIRE_AUTH is reserved for mutation handlers). */
+static esp_err_t api_network_info(httpd_req_t *r)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "disconnect_count", wifi_manager_get_disconnect_count());
+    cJSON_AddNumberToObject(root, "last_disconnect_reason", wifi_manager_get_last_disconnect_reason());
+    /* Duration, not a timestamp: connected_since_us is esp_timer_get_time()
+     * (monotonic, boot-relative), not wall-clock epoch time, so it can't be
+     * diffed against the browser's Date.now() — compute the elapsed seconds
+     * here instead, on the device's own clock. -1 = not connected. */
+    {
+        int64_t since = wifi_manager_get_connected_since_us();
+        double conn_secs = since ? (double)(esp_timer_get_time() - since) / 1e6 : -1;
+        cJSON_AddNumberToObject(root, "connected_duration_s", conn_secs);
+    }
+    wifi_manager_net_info_t ni;
+    if (wifi_manager_get_net_info(&ni)) {
+        cJSON_AddStringToObject(root, "mac",     ni.mac);
+        cJSON_AddStringToObject(root, "bssid",   ni.bssid);
+        cJSON_AddNumberToObject(root, "channel", ni.channel);
+        cJSON_AddNumberToObject(root, "rssi",    ni.rssi);
+        cJSON_AddStringToObject(root, "netmask", ni.netmask);
+        cJSON_AddStringToObject(root, "gateway", ni.gateway);
+        cJSON_AddStringToObject(root, "dns1",    ni.dns1);
+        cJSON_AddStringToObject(root, "dns2",    ni.dns2);
+        cJSON_AddBoolToObject(root,   "phy_11n", ni.phy_11n);
+    }
+    char *json = cJSON_PrintUnformatted(root);
+    esp_err_t ret = send_json(r, json);
+    free(json); cJSON_Delete(root);
+    return ret;
+}
+
 /* ── OTA task suspension ─────────────────────────────────────────────────────
  * Suspend every non-essential background task before any flash write so we
  * reduce CPU/bus contention during esp_ota_write()'s sector erase+program
@@ -3669,6 +3706,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/weather",         api_post_weather),
     R(HTTP_POST, "/api/cx_image",        api_cx_image),
     R(HTTP_GET,  "/api/status",          api_status),
+    R(HTTP_GET,  "/api/network_info",    api_network_info),
     R(HTTP_POST, "/api/update_firmware", api_ota),
     R(HTTP_POST, "/api/update_fs",          api_fs_ota),
     R(HTTP_POST, "/api/update_spiffs",      api_fs_ota),       /* backward-compat alias */

@@ -17,6 +17,8 @@
 #include "microphone.h"
 #include "wled_sync.h"
 #include "ntp_time.h"   /* ntp_is_night_window — shared LCD/LED night-brightness window */
+#include "weather.h"    /* weather_get_location() — Follow Sun/Moon LED mode */
+#include "sun_calc.h"   /* sun_calc_solar / sun_calc_moon_phase — shared with display.c */
 #include "esp_log.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
@@ -24,6 +26,7 @@
 #include "freertos/task.h"
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 static const char *TAG = "leds";
 
@@ -197,6 +200,55 @@ void leds_effect_rainbow(void)
     leds_update();
 }
 
+/* ── Follow Sun/Moon: sun/moon position ──────────────────────────────────
+ * Independent copy of display.c's render_weatherlive() day/night branch
+ * (SUNRISE/SUNSET fallback, moon transit/up-window math), built on the
+ * shared sun_calc_solar()/sun_calc_moon_phase() primitives so this mode
+ * works regardless of which clock face is selected, rather than depending
+ * on WeatherLive's per-frame render cache.
+ *
+ * Returns true when a sun or moon position is currently valid.
+ *   is_moon — false = sun (day), true = moon (night, above horizon)
+ *   frac    — 0.0 (just risen) .. 1.0 (about to set) across the visible
+ *             body's up-window — same semantics as WeatherLive's frac/mfrac.
+ * Returns false when it's night but the moon is below the horizon (e.g.
+ * near new moon) — matches WeatherLive's "empty night sky" case. */
+static bool get_celestial_frac(bool *is_moon, float *frac)
+{
+    time_t now = time(NULL);
+    struct tm t;
+    localtime_r(&now, &t);
+    int mins = t.tm_hour * 60 + t.tm_min;
+
+    int SUNRISE = 360, SUNSET = 1140;   /* fallback 6:00-19:00, matches display.c */
+    float lat = 0.0f, lon = 0.0f;
+    bool have_loc = weather_get_location(&lat, &lon);
+    if (have_loc) {
+        int rise = -1, set = -1;
+        sun_calc_solar(lat, lon, &t, &rise, &set);
+        if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
+    }
+
+    if (mins >= SUNRISE && mins < SUNSET) {
+        *is_moon = false;
+        *frac = (float)(mins - SUNRISE) / (float)(SUNSET - SUNRISE);
+        return true;
+    }
+
+    float phase = sun_calc_moon_phase(&t);
+    int solar_noon = (SUNRISE + SUNSET) / 2;
+    int transit = (solar_noon + (int)(phase * 1440.0f)) % 1440;
+    const int HALF_UP = 372;   /* ~6.2 h either side, matches display.c */
+    int mrise = (transit - HALF_UP + 1440) % 1440;
+    int since = (mins - mrise + 1440) % 1440;
+    if (since < 2 * HALF_UP) {
+        *is_moon = true;
+        *frac = (float)since / (float)(2 * HALF_UP);
+        return true;
+    }
+    return false;   /* moon below horizon (e.g. near new moon) */
+}
+
 /* ── Effect task ────────────────────────────────────────────────────── */
 static void led_task(void *arg)
 {
@@ -275,6 +327,8 @@ static void led_task(void *arg)
         uint8_t spectrum_led_source;
         backlight_mode_t backlight_mode;
         uint8_t backlight_rgb[LED_COUNT][3];
+        uint8_t sunmoon_sun_rgb[3];
+        uint8_t sunmoon_moon_rgb[3];
 
         config_lock();
         const nextube_config_t *cfg = config_get();
@@ -287,6 +341,8 @@ static void led_task(void *arg)
         spectrum_led_source = cfg->spectrum_led_source;
         backlight_mode      = cfg->backlight_mode;
         memcpy(backlight_rgb, cfg->backlight_rgb, sizeof(backlight_rgb));
+        memcpy(sunmoon_sun_rgb,  cfg->sunmoon_sun_rgb,  sizeof(sunmoon_sun_rgb));
+        memcpy(sunmoon_moon_rgb, cfg->sunmoon_moon_rgb, sizeof(sunmoon_moon_rgb));
         config_unlock();
 
         /* led_brightness is 0=off, 100=full bright — use directly. */
@@ -396,6 +452,34 @@ static void led_task(void *arg)
             }
             leds_update();
             vTaskDelay(pdMS_TO_TICKS(50));
+            break;
+        }
+        case BL_MODE_SUNMOON: {
+            /* Mostly-off ambient tracker: only the tube(s) nearest the sun's
+             * (day) or moon's (night) current position glow, cross-fading
+             * linearly as it passes between two adjacent tubes.
+             *
+             * 5 s tick (vs. Breath's 100 ms): this samples a real, slowly-
+             * changing astronomical position rather than animating a
+             * synthetic waveform, so periodic resampling alone looks smooth
+             * — no interpolation needed between ticks. */
+            bool is_moon; float frac;
+            if (!get_celestial_frac(&is_moon, &frac)) {
+                for (int i = 0; i < LED_COUNT; i++) leds_set_color(i, 0, 0, 0);
+            } else {
+                const uint8_t *c = is_moon ? sunmoon_moon_rgb : sunmoon_sun_rgb;
+                float pos = frac * (float)(LED_COUNT - 1);   /* 0.0 (tube 0) .. 5.0 (tube 5) */
+                for (int i = 0; i < LED_COUNT; i++) {
+                    float dist = fabsf((float)i - pos);
+                    float k = dist >= 1.0f ? 0.0f : (1.0f - dist);   /* linear proximity falloff */
+                    leds_set_color(i,
+                        (uint8_t)((float)c[0] * k),
+                        (uint8_t)((float)c[1] * k),
+                        (uint8_t)((float)c[2] * k));
+                }
+            }
+            leds_update();
+            vTaskDelay(pdMS_TO_TICKS(5000));
             break;
         }
         case BL_MODE_WLED:

@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Skaliert Pixel jeder Röhre relativ zur LCD-Gesamthelligkeit. Verwenden wenn ein Ersatzpanel merklich heller oder dunkler ist (100 = keine Änderung).",
   "spec.led_src": "LED-Quelle",
   "spec.led_src_custom": "Benutzerdefinierte Glühfarbe (amplitudenmoduliert)",
-  "spec.led_src_follow": "Akzentmodus folgen (Statisch / Atem / Regenbogen / Aus)",
+  "spec.led_src_follow": "Akzentmodus folgen (Statisch / Atem / Regenbogen / Aus / WLED)",
   "spec.led_color_label": "LED-Glühfarbe",
   "spec.led_color_hint": "Amplitudenmodulierte LED-Ringfarbe im Spektrum-Modus",
   "spec.lcd_color_label": "LCD-Balkenfarbe",

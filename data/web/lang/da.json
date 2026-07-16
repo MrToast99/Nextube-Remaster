@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Skalerer hvert rørs pixels i forhold til den samlede LCD-lysstyrke. Brug når et erstatningspanel er mærkbart lysere eller mørkere (100 = ingen ændring).",
   "spec.led_src": "LED-kilde",
   "spec.led_src_custom": "Tilpasset glødfarve (amplitudemoduleret)",
-  "spec.led_src_follow": "Følg akcenttilstand (Statisk / Vejrtrækning / Regnbue / Slukket)",
+  "spec.led_src_follow": "Følg akcenttilstand (Statisk / Vejrtrækning / Regnbue / Slukket / WLED)",
   "spec.led_color_label": "LED Glødfarve",
   "spec.led_color_hint": "Amplitudemoduleret LED-ringfarve i Spektrumtilstand",
   "spec.lcd_color_label": "LCD Søjlefarve",

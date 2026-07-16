@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Skaalaa kunkin putken pikselit suhteessa yleiseen LCD-kirkkauteen. Käytä, kun jokin vaihtopaneeli on selvästi kirkkaampi tai tummempi (100 = ei muutosta).",
   "spec.led_src": "LED-lähde",
   "spec.led_src_custom": "Mukautettu hehkuväri (amplitudimoduloitu)",
-  "spec.led_src_follow": "Seuraa korostustilaa (Staattinen / Hengitys / Sateenkaari / Pois)",
+  "spec.led_src_follow": "Seuraa korostustilaa (Staattinen / Hengitys / Sateenkaari / Pois / WLED)",
   "spec.led_color_label": "LED Hehkuväri",
   "spec.led_color_hint": "Amplitudimoduloitu LED-rengasväri Spektrumtilassa",
   "spec.lcd_color_label": "LCD Palkkiväri",

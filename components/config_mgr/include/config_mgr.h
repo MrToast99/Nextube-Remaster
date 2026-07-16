@@ -44,6 +44,7 @@ typedef enum {
     BL_MODE_RAINBOW,
     BL_MODE_OFF,
     BL_MODE_WLED = 4,  /* Follow WLED strips via UDP Notifier broadcast */
+    BL_MODE_SUNMOON = 5,  /* Follow Sun/Moon — track the sun (day) / moon (night) across the 6 tubes */
 } backlight_mode_t;
 
 /* ── Configuration structure ───────────────────────────────────────── */
@@ -64,6 +65,8 @@ typedef struct {
     backlight_mode_t backlight_mode;
     bool             backlight_on;
     uint8_t          backlight_rgb[6][3];
+    uint8_t          sunmoon_sun_rgb[3];    /* Follow Sun/Moon mode — sun glow colour */
+    uint8_t          sunmoon_moon_rgb[3];   /* Follow Sun/Moon mode — moon glow colour */
     uint8_t          led_effect_speed;  /* Breath / Rainbow animation speed 1 (slow) – 10 (fast); default 5 */
     bool             led_weather_override; /* let weather events (e.g. thunderstorm lightning) flash the accent LEDs */
     bool             wlive_animate;        /* WeatherLive: true = realtime animation, false = static (redraw only on clock change) */
@@ -121,6 +124,12 @@ typedef struct {
     char             ssid[64];
     char             password[64];
     char             hostname[32];
+    bool             static_ip_enabled;   /* false = DHCP (default) */
+    char             static_ip[16];       /* dotted-quad; applied at boot only */
+    char             static_netmask[16];
+    char             static_gateway[16];
+    char             static_dns1[16];
+    char             static_dns2[16];     /* optional — empty = skip */
 
     /* Time */
     char             timezone[64];       /* POSIX TZ string e.g. "EST5EDT,M3.2.0,M11.1.0" */

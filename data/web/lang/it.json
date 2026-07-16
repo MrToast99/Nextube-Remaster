@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Scala i pixel di ogni tubo rispetto alla luminosità LCD generale. Usa quando un pannello di ricambio è nettamente più chiaro o scuro (100 = nessuna modifica).",
   "spec.led_src": "Sorgente LED",
   "spec.led_src_custom": "Colore bagliore personalizzato (modulato in ampiezza)",
-  "spec.led_src_follow": "Seguire modalità accentuazione (Statico / Respirazione / Arcobaleno / Spento)",
+  "spec.led_src_follow": "Seguire modalità accentuazione (Statico / Respirazione / Arcobaleno / Spento / WLED)",
   "spec.led_color_label": "Colore Bagliore LED",
   "spec.led_color_hint": "Colore anello LED modulato in modalità Spettro",
   "spec.lcd_color_label": "Colore Barre LCD",

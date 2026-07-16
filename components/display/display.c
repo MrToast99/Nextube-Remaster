@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "weather.h"
+#include "sun_calc.h"           /* sun_calc_solar / sun_calc_moon_phase — shared with leds.c */
 #include "leds.h"               /* leds_weather_flash() — WeatherLive lightning */
 #include "sht30.h"              /* sht30_get() — indoor H/T for 24H_CX panel */
 #include "wifi_manager.h"       /* AP PIN visibility (S1) */
@@ -2752,60 +2753,6 @@ static void ht_draw_str(const char *str, int dst_y, uint16_t fg)
  * lat_deg / lon_deg: WGS-84 decimal degrees (N/E positive).
  * t: local struct tm for the desired date; uses tm_year/mon/mday/gmtoff.
  * Returns -1 for both outputs on polar day/night (sun never crosses horizon). */
-static void solar_calc(float lat_deg, float lon_deg, const struct tm *t,
-                       int *rise_min, int *set_min)
-{
-    int Y = t->tm_year + 1900, M = t->tm_mon + 1, D = t->tm_mday;
-    /* Gregorian-to-JDN: months Jan/Feb treated as 13/14 of the previous year. */
-    if (M <= 2) { Y--; M += 12; }
-    int A = Y / 100;
-    double JD = (int)(365.25*(Y+4716)) + (int)(30.6001*(M+1)) + D
-              + (2 - A + A/4) - 1524.5;
-    double JC  = (JD - 2451545.0) / 36525.0;
-    double L0  = fmod(280.46646 + JC*(36000.76983 + JC*0.0003032), 360.0);
-    double M0  = 357.52911 + JC*(35999.05029 - 0.0001537*JC);
-    double Mr  = M0 * M_PI / 180.0;
-    double e   = 0.016708634 - JC*(0.000042037 + 0.0000001267*JC);
-    double C   = sin(Mr)*(1.914602 - JC*(0.004817 + 0.000014*JC))
-               + sin(2*Mr)*(0.019993 - 0.000101*JC) + sin(3*Mr)*0.000289;
-    double om  = 125.04 - 1934.136*JC;
-    double lam = (L0 + C) - 0.00569 - 0.00478*sin(om*M_PI/180.0);
-    double eps = (23.0 + (26.0 + (21.448 - JC*(46.815 + JC*(0.00059 - JC*0.001813)))/60.0)/60.0)
-               + 0.00256*cos(om*M_PI/180.0);
-    double decl = asin(sin(eps*M_PI/180.0)*sin(lam*M_PI/180.0));
-    double yy   = tan((eps/2.0)*M_PI/180.0); yy *= yy;
-    double L0r  = L0*M_PI/180.0, M0r = M0*M_PI/180.0;
-    double eot  = 4.0*180.0/M_PI*(yy*sin(2*L0r) - 2*e*sin(M0r)
-                + 4*e*yy*sin(M0r)*cos(2*L0r) - 0.5*yy*yy*sin(4*L0r)
-                - 1.25*e*e*sin(2*M0r));
-    double latr  = lat_deg * M_PI / 180.0;
-    double cosHA = cos(90.833*M_PI/180.0) / (cos(latr)*cos(decl))
-                 - tan(latr)*tan(decl);
-    if (cosHA < -1.0 || cosHA > 1.0) { *rise_min = -1; *set_min = -1; return; }
-    double HA   = acos(cosHA) * 180.0 / M_PI;
-    double noon = 720.0 - 4.0*lon_deg - eot;
-    /* UTC offset in minutes (east = positive), computed portably without
-     * tm_gmtoff (GNU/BSD) or the 'timezone' global (not exported by ESP-IDF
-     * newlib).  We compare localtime and gmtime for the same instant:
-     *   tz_m = (local_hour*60 + local_min) - (utc_hour*60 + utc_min)
-     *          + day_diff * 1440
-     * tm_yday avoids month-boundary issues; multiplying by tm_year*365
-     * handles the single edge case of a UTC offset spanning a year end.    */
-    {
-        time_t ts = time(NULL);
-        struct tm ltm, utm;
-        localtime_r(&ts, &ltm);
-        gmtime_r(&ts, &utm);
-        int day_diff = (ltm.tm_yday + ltm.tm_year * 365)
-                     - (utm.tm_yday + utm.tm_year * 365);
-        double tz_m = (double)(day_diff * 1440
-                               + (ltm.tm_hour - utm.tm_hour) * 60
-                               + (ltm.tm_min  - utm.tm_min));
-        *rise_min = (int)(noon - HA*4.0 + tz_m + 0.5);
-        *set_min  = (int)(noon + HA*4.0 + tz_m + 0.5);
-    }
-}
-
 /* ── ht_draw_suntime ─────────────────────────────────────────────────────────
  * Renders one half of the Sunrise/Sunset panel onto tube 5 using U8g2 primitives.
  *
@@ -3331,7 +3278,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         char set_str[8]  = "--:--";
         if (have_loc) {
             int rise_min = 0, set_min = 0;
-            solar_calc(lat, lon, t, &rise_min, &set_min);
+            sun_calc_solar(lat, lon, t, &rise_min, &set_min);
             if (rise_min >= 0)
                 snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
                          (rise_min / 60) % 24, rise_min % 60);
@@ -3589,23 +3536,6 @@ static void wl_sky_palette(int mins, int sunrise, int sunset, int top[3], int ho
         int t = (mins - sunset) * 255 / (ssB - sunset);
         wl_lerp3(DUSK, NIGHT, t, top); wl_lerp3(H_DUSK, H_NIGHT, t, hor);
     }
-}
-
-/* Moon phase as a fraction of the synodic cycle: 0 = new, 0.25 = first quarter,
- * 0.5 = full, 0.75 = last quarter.  Date-based low precision (ignores timezone),
- * which is ample for a stylised moon shape. */
-static float wl_moon_phase(const struct tm *t)
-{
-    int Y = t->tm_year + 1900, M = t->tm_mon + 1, D = t->tm_mday;
-    if (M <= 2) { Y -= 1; M += 12; }
-    int A = Y / 100, B = 2 - A + A / 4;             /* Gregorian correction */
-    double jd = (double)(int)(365.25 * (Y + 4716))
-              + (double)(int)(30.6001 * (M + 1))
-              + D + B - 1524.5
-              + (t->tm_hour - 12) / 24.0 + t->tm_min / 1440.0;
-    double ph = fmod((jd - 2451550.1) / 29.530588853, 1.0);  /* since a known new moon */
-    if (ph < 0) ph += 1.0;
-    return (float)ph;
 }
 
 /* Alpha-blend an RGB colour over an existing big-endian RGB565 pixel. */
@@ -6227,7 +6157,16 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
      * The same early-out also honours a short-lived busy hint (display_busy_hint)
      * raised around CPU/flash-bound web operations such as a config save, so the
      * httpd task on the same core isn't starved by this every-tick render. */
-    if (s_park_req || esp_timer_get_time() < busy_until_us()) return;
+    if (s_park_req || esp_timer_get_time() < busy_until_us()) {
+        /* Diagnostic for the "static custom face doesn't repaint until the
+         * next minute" report: this early-return is the one place a forced
+         * post-save redraw could be silently swallowed. Enable "display" at
+         * DEBUG level (System → hidden debug panel → Logging) and reproduce
+         * to see whether/how often this fires right after a settings save. */
+        ESP_LOGD(TAG, "render_weatherlive: early-return (park=%d, busy_remaining_us=%lld)",
+                 s_park_req, (long long)(busy_until_us() - esp_timer_get_time()));
+        return;
+    }
 
     /* Configure per-frame render state from cfg. Both WeatherLive and Custom
      * faces use the user's color/shadow prefs; only Custom can override the
@@ -6298,7 +6237,7 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
 
     wl_scene_t sc;
 
-    /* Geocoded sunrise/sunset (NOAA solar_calc), fallback 6:00/19:00 until a
+    /* Geocoded sunrise/sunset (NOAA sun_calc_solar), fallback 6:00/19:00 until a
      * location is known or on polar day/night.  Drives BOTH the sky palette and
      * the sun/moon arc, so the day length tracks the real season/location.
      * (In demo mode `mins` is the accelerated virtual clock, but the sun events
@@ -6308,7 +6247,7 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     bool  have_loc = weather_get_location(&lat, &lon);
     if (have_loc) {
         int rise = -1, set = -1;
-        solar_calc(lat, lon, t, &rise, &set);
+        sun_calc_solar(lat, lon, t, &rise, &set);
         if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
     }
 
@@ -6359,7 +6298,7 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
          * A full moon transits at solar midnight (opposite the sun); a new moon
          * transits near noon (so it's absent from the night sky); the quarters
          * transit near dusk/dawn.  Moonrise/set ≈ transit ± 6.2 h. */
-        float phase = wl_moon_phase(t);
+        float phase = sun_calc_moon_phase(t);
         sc.moon_term   = cosf(2.0f * (float)M_PI * phase);
         sc.moon_waxing = (phase <= 0.5f);
         if (lat < 0.0f) sc.moon_waxing = !sc.moon_waxing;   /* S-hemisphere mirror */
@@ -6679,7 +6618,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
         if (cfg->wlive_animate)
             s_wl_last_scene.anim_t = (float)esp_timer_get_time() / 1000000.0f;
 
-        /* Throttle the expensive rebuild (solar_calc, sky palette, weather_get)
+        /* Throttle the expensive rebuild (sun_calc_solar, sky palette, weather_get)
          * to 1 Hz.  Sky gradient, sun/moon position and cloud type all change on
          * minute timescales; rebuilding them at animation rate (10–20 Hz) wastes
          * CPU and repeatedly locks the weather-fetch mutex, stalling the HTTP
@@ -6701,7 +6640,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
         float lat = 0.0f, lon = 0.0f;
         if (weather_get_location(&lat, &lon)) {
             int rise = -1, set = -1;
-            solar_calc(lat, lon, &lt, &rise, &set);
+            sun_calc_solar(lat, lon, &lt, &rise, &set);
             if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
         }
 
@@ -6734,7 +6673,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
             s_wl_last_scene.body_y = HORIZON_Y - arc;
             s_wl_last_scene.br = 255; s_wl_last_scene.bg = 228; s_wl_last_scene.bb = 120;
         } else {
-            float phase = wl_moon_phase(&lt);
+            float phase = sun_calc_moon_phase(&lt);
             s_wl_last_scene.moon_term   = cosf(2.0f * (float)M_PI * phase);
             s_wl_last_scene.moon_waxing = (phase <= 0.5f);
             if (lat < 0.0f) s_wl_last_scene.moon_waxing = !s_wl_last_scene.moon_waxing;
@@ -6781,7 +6720,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
     float lat = 0.0f, lon = 0.0f;
     if (weather_get_location(&lat, &lon)) {
         int rise = -1, set = -1;
-        solar_calc(lat, lon, &lt, &rise, &set);
+        sun_calc_solar(lat, lon, &lt, &rise, &set);
         if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
     }
 
@@ -6814,7 +6753,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
         sc.body_y = HORIZON_Y - arc;
         sc.br = 255; sc.bg = 228; sc.bb = 120;
     } else {
-        float phase = wl_moon_phase(&lt);
+        float phase = sun_calc_moon_phase(&lt);
         sc.moon_term   = cosf(2.0f * (float)M_PI * phase);
         sc.moon_waxing = (phase <= 0.5f);
         if (lat < 0.0f) sc.moon_waxing = !sc.moon_waxing;
@@ -8017,7 +7956,7 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
             float lat = 0.0f, lon = 0.0f;
             if (weather_get_location(&lat, &lon)) {
                 int rise_min = 0, set_min = 0;
-                solar_calc(lat, lon, t, &rise_min, &set_min);
+                sun_calc_solar(lat, lon, t, &rise_min, &set_min);
                 if (rise_min >= 0)
                     snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
                              (rise_min / 60) % 24, rise_min % 60);
@@ -8078,7 +8017,7 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
         float lat = 0.0f, lon = 0.0f;
         if (weather_get_location(&lat, &lon)) {
             int rise_min = 0, set_min = 0;
-            solar_calc(lat, lon, t, &rise_min, &set_min);
+            sun_calc_solar(lat, lon, t, &rise_min, &set_min);
             if (rise_min >= 0)
                 snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
                          (rise_min / 60) % 24, rise_min % 60);
@@ -8895,6 +8834,13 @@ static void display_task(void *arg)
     bool          last_custom_shadow          = false;
     uint8_t       last_custom_shadow_color[3] = {0};
     char          last_custom_font[64]        = {0};
+    /* Night color set (issue #73) — tracked separately so custom_changed
+     * fires immediately for these too, not just the day-set fields above. */
+    uint8_t       last_custom_glyph_color_night[3]  = {0};
+    uint8_t       last_custom_font_color_night[3]   = {0};
+    bool          last_custom_shadow_night          = false;
+    uint8_t       last_custom_shadow_color_night[3] = {0};
+    bool          last_custom_night_colors          = false;
     char          last_time_type[8]   = {0};
     uint32_t      last_subs     = UINT32_MAX;
     uint32_t      last_insta    = UINT32_MAX;
@@ -8971,7 +8917,12 @@ static void display_task(void *arg)
                               (memcmp(cfg->custom_font_color,   last_custom_font_color,   3) != 0) ||
                               (cfg->custom_shadow              != last_custom_shadow)           ||
                               (memcmp(cfg->custom_shadow_color, last_custom_shadow_color, 3) != 0) ||
-                              (strcmp(cfg->custom_font,         last_custom_font)         != 0);
+                              (strcmp(cfg->custom_font,         last_custom_font)         != 0)    ||
+                              (memcmp(cfg->custom_glyph_color_night,  last_custom_glyph_color_night,  3) != 0) ||
+                              (memcmp(cfg->custom_font_color_night,   last_custom_font_color_night,   3) != 0) ||
+                              (cfg->custom_shadow_night         != last_custom_shadow_night)     ||
+                              (memcmp(cfg->custom_shadow_color_night, last_custom_shadow_color_night, 3) != 0) ||
+                              (cfg->custom_night_colors         != last_custom_night_colors);
 
         /* ── Forced full repaint ─────────────────────────────────────────────
          * display_invalidate() (called automatically by display_apply_tube_offsets
@@ -9010,6 +8961,7 @@ static void display_task(void *arg)
         if (s_settings_saved) {
             s_settings_saved = false;
             mode_changed  = true;
+            ESP_LOGD(TAG, "settings save consumed: forcing mode_changed this tick");
         }
 
         /* ── Mode rotation ───────────────────────────────────────────
@@ -9951,6 +9903,11 @@ static void display_task(void *arg)
             memcpy(last_custom_shadow_color, cfg->custom_shadow_color, 3);
             strncpy(last_custom_font, cfg->custom_font, sizeof(last_custom_font) - 1);
             last_custom_font[sizeof(last_custom_font) - 1] = '\0';
+            memcpy(last_custom_glyph_color_night,  cfg->custom_glyph_color_night,  3);
+            memcpy(last_custom_font_color_night,   cfg->custom_font_color_night,   3);
+            last_custom_shadow_night = cfg->custom_shadow_night;
+            memcpy(last_custom_shadow_color_night, cfg->custom_shadow_color_night, 3);
+            last_custom_night_colors = cfg->custom_night_colors;
         }
         /* ── Anti burn-in: colour-cycle masked tubes ───────────────────────
          * Runs after normal mode render; unmasked tubes show live content.

@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Skalar varje rörs pixlar relativt den allmänna LCD-ljusstyrkan. Använd när en ersättningspanel är märkbart ljusare eller mörkare (100 = ingen ändring).",
   "spec.led_src": "LED-källa",
   "spec.led_src_custom": "Anpassad glodfärg (amplitudmodulerad)",
-  "spec.led_src_follow": "Följ accentläge (Statiskt / Andning / Regnbåge / Av)",
+  "spec.led_src_follow": "Följ accentläge (Statiskt / Andning / Regnbåge / Av / WLED)",
   "spec.led_color_label": "LED Glodfärg",
   "spec.led_color_hint": "Amplitudmodulerad LED-ringfärg i Spektrumläge",
   "spec.lcd_color_label": "LCD-stapelfärg",

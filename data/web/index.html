@@ -564,7 +564,7 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
   <div class="card">
     <h2 data-i18n="disp.led_accent">LED Accent Lighting</h2>
     <div class="field"><label data-i18n="disp.mode">Mode</label>
-      <select id="f-blmode" onchange="onBlModeChange()"><option value="Static" data-i18n="opt.static">Static</option><option value="Breath" data-i18n="opt.breath">Breath</option><option value="Rainbow" data-i18n="opt.rainbow">Rainbow</option><option value="Off" data-i18n="opt.off">Off</option><option value="WLED" data-i18n="opt.wled">WLED Controller</option></select>
+      <select id="f-blmode" onchange="onBlModeChange()"><option value="Static" data-i18n="opt.static">Static</option><option value="Breath" data-i18n="opt.breath">Breath</option><option value="Rainbow" data-i18n="opt.rainbow">Rainbow</option><option value="Off" data-i18n="opt.off">Off</option><option value="WLED" data-i18n="opt.wled">WLED Controller</option><option value="SunMoon" data-i18n="opt.sunmoon">Follow Sun/Moon</option></select>
     </div>
     <div class="field meter" id="led-speed-section">
       <label data-i18n="disp.effect_speed">Effect speed</label>
@@ -590,6 +590,29 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       then configure your WLED device: <strong>Config → Sync Interfaces → UDP Sync → Send on direct change ✓</strong>.
       No target IP needed — WLED broadcasts to the whole subnet.
     </div>
+    <div class="field" id="sunmoon-color-section" style="display:none">
+      <label data-i18n="disp.sunmoon_colours">Sun / Moon Colours</label>
+      <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;margin-top:.4rem">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <span style="font-size:.75rem;color:var(--dim);white-space:nowrap" data-i18n="disp.sunmoon_sun">Sun</span>
+          <input type="color" id="f-sunmoon-sun-color" value="#ffd52e" class="color-swatch"
+                 style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px"
+                 onchange="markDirty()">
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <span style="font-size:.75rem;color:var(--dim);white-space:nowrap" data-i18n="disp.sunmoon_moon">Moon</span>
+          <input type="color" id="f-sunmoon-moon-color" value="#e6eaf8" class="color-swatch"
+                 style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px"
+                 onchange="markDirty()">
+        </div>
+      </div>
+    </div>
+    <div id="sunmoon-mode-hint" style="display:none;margin-top:.6rem;padding:.6rem .8rem;border:1px solid var(--accent);border-radius:6px;font-size:.82rem;color:var(--dim)" data-i18n-html="disp.sunmoon_hint">
+      <strong style="color:var(--text)">Follow Sun/Moon mode:</strong>
+      Only the tube(s) nearest the sun's (day) or moon's (night) current position glow, fading smoothly
+      as it crosses between tubes. For accurate timing, set a location under <em>Weather</em> (Services
+      tab) — without one, a fixed 6 AM–7 PM approximation is used instead.
+    </div>
     <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;margin-top:.7rem;cursor:pointer">
       <input type="checkbox" id="f-led-weather" onchange="markDirty()" style="width:16px;height:16px;cursor:pointer">
       <span data-i18n="disp.led_weather_override">Weather event override — flash LEDs on thunderstorm (WeatherLive theme)</span>
@@ -602,7 +625,7 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <label data-i18n="spec.led_src">LED Source</label>
       <select id="f-spec-led-src" onchange="specLedSrcChange()" style="grid-column:2/4;height:36px;background:var(--surface);color:var(--text);border:1px solid #444;border-radius:6px;padding:0 .5rem;font-size:.9rem">
         <option value="0" data-i18n="spec.led_src_custom">Custom glow colour (amplitude-modulated)</option>
-        <option value="1" data-i18n="spec.led_src_follow">Follow accent mode (Static / Breath / Rainbow / Off)</option>
+        <option value="1" data-i18n="spec.led_src_follow">Follow accent mode (Static / Breath / Rainbow / Off / WLED)</option>
       </select>
       <label id="spec-color-label" data-i18n="spec.led_color_label">LED Glow Colour</label>
       <input type="color" id="f-spec-color" style="width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
@@ -670,6 +693,8 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <div id="rot-interval-wrap" style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;opacity:0.4">
         <label for="rot-interval" style="white-space:nowrap" data-i18n="disp.interval_per_mode">Interval per mode:</label>
         <select id="rot-interval" class="select">
+          <option value="5" data-i18n="opt.5s">5 seconds</option>
+          <option value="10" data-i18n="opt.10s">10 seconds</option>
           <option value="15" data-i18n="opt.15s">15 seconds</option>
           <option value="30" data-i18n="opt.30s">30 seconds</option>
           <option value="60" selected data-i18n="opt.1min">1 minute</option>
@@ -785,12 +810,44 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
         <strong>Restart required.</strong>
       </p>
     </div>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-static-ip-en" style="width:16px;height:16px;cursor:pointer" onchange="markDirty();markRestartNeeded();onStaticIpChange()">
+        <label for="f-static-ip-en" style="cursor:pointer" data-i18n="net.static_ip">Use static IP</label>
+      </div>
+      <div id="static-ip-fields" style="display:none;margin:.6rem 0 0 24px">
+        <div class="field"><label data-i18n="net.static_ip_addr">IP address</label><input id="f-static-ip" type="text" placeholder="192.168.1.50" oninput="markDirty();markRestartNeeded()"></div>
+        <div class="field"><label data-i18n="net.static_netmask">Subnet mask</label><input id="f-static-netmask" type="text" placeholder="255.255.255.0" oninput="markDirty();markRestartNeeded()"></div>
+        <div class="field"><label data-i18n="net.static_gateway">Gateway</label><input id="f-static-gateway" type="text" placeholder="192.168.1.1" oninput="markDirty();markRestartNeeded()"></div>
+        <div class="field"><label data-i18n="net.static_dns1">DNS 1</label><input id="f-static-dns1" type="text" placeholder="1.1.1.1" oninput="markDirty();markRestartNeeded()"></div>
+        <div class="field"><label data-i18n="net.static_dns2">DNS 2 (optional)</label><input id="f-static-dns2" type="text" placeholder="8.8.8.8" oninput="markDirty();markRestartNeeded()"></div>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0" data-i18n-html="net.static_ip_hint">
+          Misconfiguring these can make the device unreachable on your network. If that happens, hold the LEFT+RIGHT touch pads for 15 seconds to bring up the "Nextube-Setup" recovery WiFi network, then reconnect and fix these settings. <strong>Restart required.</strong>
+        </p>
+      </div>
+    </div>
+
+    <!-- ── Network Info ─────────────────────────────────────────── -->
+    <div style="border:1px solid var(--accent);border-radius:8px;margin-bottom:1rem">
+      <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none;padding:.75rem 1rem" onclick="toggleNetInfo()">
+        <span id="net-info-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
+        <span style="font-size:.95rem;font-weight:600;letter-spacing:.02em;color:var(--hi)" data-i18n="net.info_panel">Network Info</span>
+      </div>
+      <div id="net-info-body" style="display:none;padding:.75rem 1rem;border-top:1px solid var(--accent)">
+        <div id="net-info-content" style="font-size:.85rem;color:var(--text)">
+          <p style="color:var(--dim)" data-i18n="net.info_loading">Loading…</p>
+        </div>
+        <button class="btn btn-outline" style="margin-top:.7rem;padding:.35rem .8rem;font-size:.82rem" onclick="loadNetworkInfo()">↺ <span data-i18n="sys.refresh">Refresh</span></button>
+      </div>
+    </div>
+
     <div class="btn-group">
       <button class="btn btn-primary" onclick="saveSettings()" data-i18n="net.save_connect">Save & Connect</button>
       <button class="btn btn-outline" onclick="scanWifi()" data-i18n="net.scan">Scan Networks</button>
     </div>
     <div id="wifi-list" style="margin-top:.8rem"></div>
   </div>
+
   <div class="card">
     <h2 data-i18n="net.date">Date</h2>
     <div class="field">
@@ -1233,7 +1290,7 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
     <h2 data-i18n="sys.backup">Backup &amp; Restore</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem" data-i18n="sys.backup_help">Download your current configuration to a file or restore it from a backup. Recommended before any LittleFS recovery flash.</p>
     <div class="btn-group">
-      <button class="btn btn-outline" onclick="exportSettings()" data-i18n="sys.download_config">Download config.json</button>
+      <button id="btn-download-config" class="btn btn-outline" onclick="exportSettings()" data-i18n="sys.download_config">Download config.json</button>
       <button class="btn btn-outline" onclick="$('f-import').click()" data-i18n="sys.restore_file">Restore from File</button>
       <input type="file" id="f-import" accept=".json" style="display:none" onchange="importSettings(this)">
     </div>
@@ -1654,12 +1711,13 @@ Object.assign(I18N.en, {
   "disp.theme_rotation":"Theme Rotation",
   "disp.theme_rotation_desc":"Automatically cycles through themes on a timer. Choose which themes to include, or leave all checked to rotate every installed theme.",
   "disp.enable_theme_rotation":"Enable Theme Rotation","disp.interval_per_theme":"Interval per theme:","disp.themes_to_include":"Themes to include:",
-  "opt.15s":"15 seconds","opt.30s":"30 seconds","opt.1min":"1 minute","opt.2min":"2 minutes","opt.5min":"5 minutes",
+  "opt.5s":"5 seconds","opt.10s":"10 seconds","opt.15s":"15 seconds","opt.30s":"30 seconds","opt.1min":"1 minute","opt.2min":"2 minutes","opt.5min":"5 minutes",
   "opt.10min":"10 minutes","opt.30min":"30 minutes","opt.1hour":"1 hour","opt.2hours":"2 hours","opt.4hours":"4 hours",
   "btn.all":"All","btn.none":"None",
   "disp.led_accent":"LED Accent Lighting","disp.mode":"Mode",
-  "opt.static":"Static","opt.breath":"Breath","opt.rainbow":"Rainbow","opt.off":"Off","opt.wled":"WLED Controller",
+  "opt.static":"Static","opt.breath":"Breath","opt.rainbow":"Rainbow","opt.off":"Off","opt.wled":"WLED Controller","opt.sunmoon":"Follow Sun/Moon",
   "disp.effect_speed":"Effect speed","disp.led_colours":"LED Colours (click to change)","disp.set_all_tubes":"Set all tubes:","disp.apply_to_all":"Apply to All",
+  "disp.sunmoon_colours":"Sun / Moon Colours","disp.sunmoon_sun":"Sun","disp.sunmoon_moon":"Moon",
   "disp.led_weather_override":"Weather event override — flash LEDs on thunderstorm (WeatherLive theme)",
   "disp.spectrum_mode":"Spectrum Mode",
   "disp.spectrum_desc":"Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left → treble right).",
@@ -1679,6 +1737,11 @@ Object.assign(I18N.en, {
   "net.requires_reboot":"Requires reboot to take effect.",
   "net.mdns":"Advertise via mDNS (.local)",
   "net.mdns_hint":"When off, device is reachable by IP only — no <code>nextube-remaster.local</code> resolution. <strong>Restart required.</strong>",
+  "net.static_ip":"Use static IP",
+  "net.static_ip_addr":"IP address","net.static_netmask":"Subnet mask","net.static_gateway":"Gateway",
+  "net.static_dns1":"DNS 1","net.static_dns2":"DNS 2 (optional)",
+  "net.static_ip_hint":"Misconfiguring these can make the device unreachable on your network. If that happens, hold the LEFT+RIGHT touch pads for 15 seconds to bring up the \"Nextube-Setup\" recovery WiFi network, then reconnect and fix these settings. <strong>Restart required.</strong>",
+  "net.info_panel":"Network Info","net.info_loading":"Loading…",
   "net.save_connect":"Save & Connect","net.scan":"Scan Networks",
   "net.date":"Date","net.date_format":"Date format",
   "net.datefmt_dmy":"DD/MM/YY  (day / month / year)","net.datefmt_mdy":"MM/DD/YY  (month / day / year)",
@@ -1809,7 +1872,7 @@ Object.assign(I18N.en, {
 Object.assign(I18N.en, {
   "spec.led_src":"LED Source",
   "spec.led_src_custom":"Custom glow colour (amplitude-modulated)",
-  "spec.led_src_follow":"Follow accent mode (Static / Breath / Rainbow / Off)",
+  "spec.led_src_follow":"Follow accent mode (Static / Breath / Rainbow / Off / WLED)",
   "spec.led_color_label":"LED Glow Colour","spec.led_color_hint":"Amplitude-modulated LED ring colour in Spectrum mode",
   "spec.lcd_color_label":"LCD Bar Colour","spec.lcd_color_hint":"Bar colour for the LCD spectrum display",
   "spec.lcd_wled":"Follow WLED primary colour (requires WLED Sync service; falls back to the colour above when no WLED data)",
@@ -1823,6 +1886,7 @@ Object.assign(I18N.en, {
 /* ── Translation batch: WLED hint + Mode Rotation weight + Burn-in scheduled ── */
 Object.assign(I18N.en, {
   "disp.wled_hint":"<strong style=\"color:var(--text)\">WLED Controller mode:</strong> Accent LEDs will mirror the primary colour and brightness of any WLED device on your network. Enable the <em>WLED Sync</em> service (Services tab) so the listener task starts on next boot, then configure your WLED device: <strong>Config → Sync Interfaces → UDP Sync → Send on direct change ✓</strong>. No target IP needed — WLED broadcasts to the whole subnet.",
+  "disp.sunmoon_hint":"<strong style=\"color:var(--text)\">Follow Sun/Moon mode:</strong> Only the tube(s) nearest the sun's (day) or moon's (night) current position glow, fading smoothly as it crosses between tubes. For accurate timing, set a location under <em>Weather</em> (Services tab) — without one, a fixed 6 AM–7 PM approximation is used instead.",
   "disp.rot_weight_help":"The <strong style=\"color:var(--text)\">×</strong> value is a dwell multiplier applied to the base interval above. A weight of <strong style=\"color:var(--text)\">10</strong> keeps that mode on-screen 10× longer than a weight-1 mode. Example: Clock&nbsp;×20, others&nbsp;×1 with a 1&nbsp;min interval → Clock shows for 20&nbsp;min between each 1&nbsp;min peek at other modes.",
   "disp.bi_enable":"Enable Scheduled Anti Burn-in / LCD Refresh",
   "disp.bi_schedule":"Schedule:","disp.bi_weekly":"Weekly — every Sunday","disp.bi_monthly":"Monthly — 1st of month",
@@ -2166,6 +2230,73 @@ function toggleAdvDisplay() {
   const open = body.style.display === 'none';
   body.style.display = open ? '' : 'none';
   if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
+}
+
+function onStaticIpChange() {
+  const en = $('f-static-ip-en').checked;
+  $('static-ip-fields').style.display = en ? '' : 'none';
+}
+
+let _netInfoLoaded = false;
+function toggleNetInfo() {
+  const body  = $('net-info-body');
+  const arrow = $('net-info-arrow');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
+  if (open && !_netInfoLoaded) loadNetworkInfo();
+}
+
+/* Common wifi_err_reason_t codes worth naming; everything else just shows
+ * the raw number — mapping all ~50 in firmware would bloat flash for codes
+ * that rarely fire. */
+const WIFI_DISCONNECT_REASONS = {
+  2: 'Auth expired', 3: 'Disconnected by AP', 4: 'Inactivity', 5: 'AP full',
+  6: 'Auth fail', 15: '4-way handshake timeout', 200: 'Beacon timeout',
+  201: 'No AP found', 202: 'Auth fail', 203: 'Assoc fail', 205: 'Handshake timeout',
+  206: 'Connection failed', 210: 'Assoc expire', 232: 'Roaming',
+};
+function wifiReasonText(code) {
+  if (!code) return '—';
+  return (WIFI_DISCONNECT_REASONS[code] || ('Code ' + code)) + ' (' + code + ')';
+}
+
+function formatDuration(secs) {
+  if (secs == null || secs < 0) return '—';
+  secs = Math.floor(secs);
+  const h = Math.floor(secs / 3600); secs -= h * 3600;
+  const m = Math.floor(secs / 60); secs -= m * 60;
+  if (h > 0) return `${h}h ${m}m ago`;
+  if (m > 0) return `${m}m ${secs}s ago`;
+  return `${secs}s ago`;
+}
+
+async function loadNetworkInfo() {
+  const el = $('net-info-content');
+  try {
+    const r = await secureFetch('/api/network_info');
+    if (!r.ok) { el.innerHTML = '<p style="color:var(--dim)">Could not load network info</p>'; return; }
+    const d = await r.json();
+    _netInfoLoaded = true;
+    const rows = [
+      ['Connected since', formatDuration(d.connected_duration_s)],
+      ['Disconnects (session)', d.disconnect_count ?? 0],
+      ['Last disconnect reason', wifiReasonText(d.last_disconnect_reason)],
+      ['Signal', d.rssi ? d.rssi + ' dBm' : '—'],
+      ['MAC', d.mac || '—'],
+      ['BSSID', d.bssid || '—'],
+      ['Channel', d.channel || '—'],
+      ['Netmask', d.netmask || '—'],
+      ['Gateway', d.gateway || '—'],
+      ['DNS', [d.dns1, d.dns2].filter(x => x && x !== '0.0.0.0').join(', ') || '—'],
+    ];
+    el.innerHTML = rows.map(([k, v]) =>
+      `<div style="display:flex;justify-content:space-between;padding:.25rem 0;border-bottom:1px solid var(--accent)"><span style="color:var(--dim)">${k}</span><span>${v}</span></div>`
+    ).join('');
+  } catch (e) {
+    el.innerHTML = '<p style="color:var(--dim)">Could not load network info</p>';
+  }
 }
 
 /* ── Auth ──────────────────────────────────────────────────────────
@@ -2546,6 +2677,10 @@ async function loadSettings() {
   $('f-blmode').value = cfg.backlight_mode || 'Breath';
   const spd = cfg.led_effect_speed != null ? cfg.led_effect_speed : 5; $('f-blspeed').value = spd; $('v-blspeed').textContent = spd;
   $('f-led-weather').checked = !!cfg.led_weather_override;
+  const sunmoonSun = cfg.sunmoon_sun_RGB || [255, 213, 46];
+  $('f-sunmoon-sun-color').value = '#' + sunmoonSun.map(v => v.toString(16).padStart(2,'0')).join('');
+  const sunmoonMoon = cfg.sunmoon_moon_RGB || [230, 234, 248];
+  $('f-sunmoon-moon-color').value = '#' + sunmoonMoon.map(v => v.toString(16).padStart(2,'0')).join('');
   onBlModeChange();
   $('f-ssid').value = cfg.ssid || '';
   /* Show password as plain text on first entry (no saved password) so the user
@@ -2560,6 +2695,13 @@ async function loadSettings() {
     $('f-pass').placeholder = tr('js.enter_pw_ph');
   }
   $('f-hostname').value = cfg.hostname || 'nextube-remaster';
+  $('f-static-ip-en').checked = cfg.static_ip_enabled === true;
+  $('f-static-ip').value      = cfg.static_ip       || '';
+  $('f-static-netmask').value = cfg.static_netmask  || '';
+  $('f-static-gateway').value = cfg.static_gateway  || '';
+  $('f-static-dns1').value    = cfg.static_dns1     || '';
+  $('f-static-dns2').value    = cfg.static_dns2     || '';
+  onStaticIpChange();
   /* Background-feature toggles — default true if key absent so devices
    * upgrading from older firmware (no key in config.json yet) keep their
    * current behaviour until the user chooses to disable. */
@@ -2903,6 +3045,11 @@ function onBlModeChange() {
   /* Show the WLED hint when WLED Controller is selected */
   const wledHint = $('wled-mode-hint');
   if (wledHint) wledHint.style.display = (mode === 'WLED') ? '' : 'none';
+  /* Show the sun/moon colour pickers + hint when Follow Sun/Moon is selected */
+  const showSunMoon = (mode === 'SunMoon');
+  $('sunmoon-color-section').style.display = showSunMoon ? '' : 'none';
+  const sunmoonHint = $('sunmoon-mode-hint');
+  if (sunmoonHint) sunmoonHint.style.display = showSunMoon ? '' : 'none';
   markDirty();
 }
 
@@ -3107,6 +3254,29 @@ async function saveSettings() {
     return;
   }
 
+  if ($('f-static-ip-en').checked) {
+    const ipv4 = /^(\d{1,3}\.){3}\d{1,3}$/;
+    const octetsOk = s => s.split('.').every(o => +o >= 0 && +o <= 255);
+    const required = [['f-static-ip', $('f-static-ip').value.trim()],
+                       ['f-static-netmask', $('f-static-netmask').value.trim()],
+                       ['f-static-gateway', $('f-static-gateway').value.trim()]];
+    for (const [id, v] of required) {
+      if (!ipv4.test(v) || !octetsOk(v)) {
+        toast('Enter a valid IPv4 address for all static IP fields');
+        $(id).focus();
+        return;
+      }
+    }
+    for (const id of ['f-static-dns1', 'f-static-dns2']) {
+      const v = $(id).value.trim();
+      if (v && (!ipv4.test(v) || !octetsOk(v))) {
+        toast('Enter a valid IPv4 address for all static IP fields');
+        $(id).focus();
+        return;
+      }
+    }
+  }
+
   const colors = [...document.querySelectorAll('#color-swatches input')].map(el => {
     const h = el.value.replace('#','');
     return [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)];
@@ -3156,6 +3326,8 @@ async function saveSettings() {
     dm_on_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-dm-on-color')?.value || '#ffffff').replace('#','')),
     dm_off_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-dm-off-color')?.value || '#191919').replace('#','')),
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
+    sunmoon_sun_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-sunmoon-sun-color')?.value || '#ffd52e').replace('#','')),
+    sunmoon_moon_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-sunmoon-moon-color')?.value || '#e6eaf8').replace('#','')),
     spectrum_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-color').value.replace('#','')),
     spectrum_lcd_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-lcd-color').value.replace('#','')),
     spectrum_lcd_wled: $('f-spec-lcd-wled').checked,
@@ -3174,6 +3346,12 @@ async function saveSettings() {
       return checked.length === all.length ? [] : checked;
     })(),
     ssid: $('f-ssid').value, ...($('f-pass').value ? {password: $('f-pass').value} : {}), hostname: $('f-hostname').value,
+    static_ip_enabled: $('f-static-ip-en').checked,
+    static_ip:       $('f-static-ip').value.trim(),
+    static_netmask:  $('f-static-netmask').value.trim(),
+    static_gateway:  $('f-static-gateway').value.trim(),
+    static_dns1:     $('f-static-dns1').value.trim(),
+    static_dns2:     $('f-static-dns2').value.trim(),
     timezone: $('f-tz').value,
     ntp_servers: [$('f-ntp0').value, $('f-ntp1').value, $('f-ntp2').value, $('f-ntp3').value],
     date_format: $('f-datefmt').value,
@@ -4467,15 +4645,33 @@ async function checkForUpdates(silent = false) {
 }
 
 /* ── Backup & Restore ──────────────────────────────── */
+/* /api/backup can take a few seconds on a busy or slow-WiFi device; without
+ * feedback the button just looks unresponsive until the save dialog
+ * suddenly appears (reported as a "delay"). _btnBusy() covers that.
+ *
+ * The beforeunload guard covers a real, separate risk: navigating away
+ * (reload, close tab, type a new URL) while the fetch is still in flight
+ * aborts it, so the download never happens. It's only needed up to the
+ * a.click() call — once that fires, the browser has taken ownership of the
+ * blob: URL download independently of the page's lifecycle, so navigating
+ * away after that point is already safe. */
 async function exportSettings() {
-  const r = await secureFetch('/api/backup');
-  if (!r.ok) return toast('Could not fetch settings', true);
-  const c = await r.json();
-  const blob = new Blob([JSON.stringify(c, null, 2)], {type: 'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = 'nextube-config.json'; a.click();
-  toast('Settings downloaded!');
+  const release = _btnBusy('btn-download-config', 'Downloading…');
+  const guardUnload = (e) => { e.preventDefault(); e.returnValue = ''; };
+  window.addEventListener('beforeunload', guardUnload);
+  try {
+    const r = await secureFetch('/api/backup');
+    if (!r.ok) return toast('Could not fetch settings', true);
+    const c = await r.json();
+    const blob = new Blob([JSON.stringify(c, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'nextube-config.json'; a.click();
+    toast('Settings downloaded!');
+  } finally {
+    window.removeEventListener('beforeunload', guardUnload);
+    release();
+  }
 }
 
 async function importSettings(input) {

@@ -21,6 +21,16 @@ static char s_ip_str[20] = "0.0.0.0";
 static esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif  = NULL;
 
+/* Disconnect/reconnect diagnostics — session-scoped (reset on reboot).
+ * s_connected_since_us is 64-bit and read/written from both the event-loop
+ * task (writer) and the httpd task (reader via the getter), so it's guarded
+ * by a spinlock — 32-bit Xtensa doesn't guarantee atomic 64-bit access
+ * across tasks, same rationale as display.c's busy_until_us(). */
+static uint32_t     s_disconnect_count = 0;
+static int8_t       s_last_disconnect_reason = 0;
+static int64_t      s_connected_since_us = 0;
+static portMUX_TYPE s_net_mux = portMUX_INITIALIZER_UNLOCKED;
+
 /* mDNS state — set once in wifi_manager_start() based on config.
  *
  * s_mdns_on:       true when mDNS was enabled at boot.  Avoids touching the
@@ -246,7 +256,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         case WIFI_EVENT_STA_START:
             esp_wifi_connect();
             break;
-        case WIFI_EVENT_STA_DISCONNECTED:
+        case WIFI_EVENT_STA_DISCONNECTED: {
+            wifi_event_sta_disconnected_t *dev = data;
+            s_disconnect_count++;
+            s_last_disconnect_reason = (int8_t)dev->reason;
+            portENTER_CRITICAL(&s_net_mux);
+            s_connected_since_us = 0;
+            portEXIT_CRITICAL(&s_net_mux);
             xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
             /* Cancel any pending AP-disable — STA is no longer "up". */
             if (s_ap_disable_timer) esp_timer_stop(s_ap_disable_timer);
@@ -254,13 +270,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 /* wifi_manager_reconnect_sta() already called esp_wifi_connect()
                  * directly — skip the auto-reconnect here to avoid a second
                  * concurrent association attempt. */
-                ESP_LOGI(TAG, "STA disconnected (manual reconnect in progress)");
+                ESP_LOGI(TAG, "STA disconnected (manual reconnect in progress, reason=%d)", dev->reason);
                 s_manual_reconnect = false;
             } else {
-                ESP_LOGW(TAG, "STA disconnected, retrying...");
+                ESP_LOGW(TAG, "STA disconnected (reason=%d), retrying...", dev->reason);
                 esp_wifi_connect();
             }
             break;
+        }
         case WIFI_EVENT_AP_STACONNECTED: {
             wifi_event_ap_staconnected_t *ev = data;
             s_ap_client_count++;
@@ -280,6 +297,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = data;
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
+        portENTER_CRITICAL(&s_net_mux);
+        s_connected_since_us = esp_timer_get_time();
+        portEXIT_CRITICAL(&s_net_mux);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "STA IP: %s", s_ip_str);
         esp_wifi_set_ps(WIFI_PS_NONE);
@@ -344,6 +364,8 @@ void wifi_manager_start(void)
 {
     char ssid[64], password[64];
     bool mdns_on;
+    bool static_ip_enabled;
+    char static_ip[16], static_netmask[16], static_gateway[16], static_dns1[16], static_dns2[16];
     config_lock();
     const nextube_config_t *cfg = config_get();
     strncpy(ssid,     cfg->ssid,     sizeof(ssid)     - 1); ssid[sizeof(ssid)         - 1] = '\0';
@@ -357,12 +379,48 @@ void wifi_manager_start(void)
     }
     s_hostname[sizeof(s_hostname) - 1] = '\0';
     mdns_on = cfg->mdns_enabled;
+    static_ip_enabled = cfg->static_ip_enabled;
+    strncpy(static_ip,      cfg->static_ip,      sizeof(static_ip)      - 1); static_ip[sizeof(static_ip)-1]           = '\0';
+    strncpy(static_netmask, cfg->static_netmask, sizeof(static_netmask) - 1); static_netmask[sizeof(static_netmask)-1] = '\0';
+    strncpy(static_gateway, cfg->static_gateway, sizeof(static_gateway) - 1); static_gateway[sizeof(static_gateway)-1] = '\0';
+    strncpy(static_dns1,    cfg->static_dns1,    sizeof(static_dns1)    - 1); static_dns1[sizeof(static_dns1)-1]       = '\0';
+    strncpy(static_dns2,    cfg->static_dns2,    sizeof(static_dns2)    - 1); static_dns2[sizeof(static_dns2)-1]       = '\0';
     config_unlock();
 
     s_wifi_events = xEventGroupCreate();
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
     s_ap_netif  = esp_netif_create_default_wifi_ap();
+
+    /* Static IP — must run before esp_wifi_start() below, since the DHCP
+     * client auto-starts on WIFI_EVENT_STA_START (fired from inside
+     * esp_wifi_start()).  esp_netif_dhcpc_stop() here pre-empts that.
+     * Changes to these fields require a reboot to take effect (same
+     * convention as hostname, above) — wifi_manager_reconnect_sta() (the
+     * no-reboot credential-save path) intentionally does not touch this. */
+    if (static_ip_enabled && static_ip[0] && static_netmask[0] && static_gateway[0]) {
+        esp_netif_dhcpc_stop(s_sta_netif);
+        esp_netif_ip_info_t ip_info = {0};
+        esp_netif_str_to_ip4(static_ip,      &ip_info.ip);
+        esp_netif_str_to_ip4(static_netmask, &ip_info.netmask);
+        esp_netif_str_to_ip4(static_gateway, &ip_info.gw);
+        esp_netif_set_ip_info(s_sta_netif, &ip_info);
+        if (static_dns1[0]) {
+            esp_netif_dns_info_t d = {0};
+            d.ip.type = ESP_IPADDR_TYPE_V4;
+            esp_netif_str_to_ip4(static_dns1, &d.ip.u_addr.ip4);
+            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &d);
+        }
+        if (static_dns2[0]) {
+            esp_netif_dns_info_t d = {0};
+            d.ip.type = ESP_IPADDR_TYPE_V4;
+            esp_netif_str_to_ip4(static_dns2, &d.ip.u_addr.ip4);
+            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &d);
+        }
+        ESP_LOGI(TAG, "Static IP configured: %s / %s gw %s", static_ip, static_netmask, static_gateway);
+    } else if (static_ip_enabled) {
+        ESP_LOGW(TAG, "Static IP enabled but IP/netmask/gateway incomplete — falling back to DHCP");
+    }
 
     /* Set the correct hostname on both netifs BEFORE esp_wifi_start().
      * The DHCP client sends the hostname in DISCOVER/REQUEST packets which
@@ -543,6 +601,68 @@ bool wifi_manager_is_connected(void)
 }
 
 const char *wifi_manager_get_ip(void) { return s_ip_str; }
+
+uint32_t wifi_manager_get_disconnect_count(void) { return s_disconnect_count; }
+
+int8_t wifi_manager_get_last_disconnect_reason(void) { return s_last_disconnect_reason; }
+
+int64_t wifi_manager_get_connected_since_us(void)
+{
+    portENTER_CRITICAL(&s_net_mux);
+    int64_t v = s_connected_since_us;
+    portEXIT_CRITICAL(&s_net_mux);
+    return v;
+}
+
+bool wifi_manager_get_net_info(wifi_manager_net_info_t *out)
+{
+    if (!wifi_manager_is_connected()) return false;
+
+    uint8_t mac[6] = {0};
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+    snprintf(out->mac, sizeof(out->mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    wifi_ap_record_t ap = {0};
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        snprintf(out->bssid, sizeof(out->bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 ap.bssid[0], ap.bssid[1], ap.bssid[2], ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+        out->channel  = ap.primary;
+        out->rssi     = ap.rssi;
+        out->phy_11b  = ap.phy_11b;
+        out->phy_11g  = ap.phy_11g;
+        out->phy_11n  = ap.phy_11n;
+        out->phy_lr   = ap.phy_lr;
+    } else {
+        out->bssid[0] = '\0';
+        out->channel  = 0;
+        out->rssi     = 0;
+        out->phy_11b = out->phy_11g = out->phy_11n = out->phy_lr = false;
+    }
+
+    esp_netif_ip_info_t ip_info = {0};
+    if (s_sta_netif && esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK) {
+        snprintf(out->netmask, sizeof(out->netmask), IPSTR, IP2STR(&ip_info.netmask));
+        snprintf(out->gateway, sizeof(out->gateway), IPSTR, IP2STR(&ip_info.gw));
+    } else {
+        out->netmask[0] = '\0';
+        out->gateway[0] = '\0';
+    }
+
+    esp_netif_dns_info_t dns = {0};
+    if (s_sta_netif && esp_netif_get_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
+        snprintf(out->dns1, sizeof(out->dns1), IPSTR, IP2STR(&dns.ip.u_addr.ip4));
+    } else {
+        out->dns1[0] = '\0';
+    }
+    if (s_sta_netif && esp_netif_get_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &dns) == ESP_OK) {
+        snprintf(out->dns2, sizeof(out->dns2), IPSTR, IP2STR(&dns.ip.u_addr.ip4));
+    } else {
+        out->dns2[0] = '\0';
+    }
+
+    return true;
+}
 
 void wifi_manager_apply_sta_credentials(void)
 {

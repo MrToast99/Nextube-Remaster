@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Schaalt de pixels van elke buis ten opzichte van de algemene LCD-helderheid. Gebruik wanneer een vervangpaneel merkbaar helderder of donkerder is (100 = geen wijziging).",
   "spec.led_src": "LED-bron",
   "spec.led_src_custom": "Aangepaste glanskleur (amplitudegemoduleerd)",
-  "spec.led_src_follow": "Accentmodus volgen (Statisch / Ademhaling / Regenboog / Uit)",
+  "spec.led_src_follow": "Accentmodus volgen (Statisch / Ademhaling / Regenboog / Uit / WLED)",
   "spec.led_color_label": "LED Glanskleur",
   "spec.led_color_hint": "Amplitudegemoduleerde LED-ringkleur in Spectrummodus",
   "spec.lcd_color_label": "LCD Balkkleur",

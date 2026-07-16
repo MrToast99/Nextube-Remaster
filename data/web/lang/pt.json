@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Dimensiona os píxeis de cada tubo em relação ao brilho LCD geral. Use quando um painel de substituição for visivelmente mais claro ou escuro (100 = sem alteração).",
   "spec.led_src": "Fonte LED",
   "spec.led_src_custom": "Cor de brilho personalizada (modulada em amplitude)",
-  "spec.led_src_follow": "Seguir modo acento (Estático / Respiração / Arco-íris / Desligado)",
+  "spec.led_src_follow": "Seguir modo acento (Estático / Respiração / Arco-íris / Desligado / WLED)",
   "spec.led_color_label": "Cor de Brilho LED",
   "spec.led_color_hint": "Cor anel LED modulada em modo Espectro",
   "spec.lcd_color_label": "Cor das Barras LCD",

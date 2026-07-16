@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Escala los píxeles de cada tubo respecto al brillo LCD general. Úsalo cuando un panel de repuesto sea notablemente más claro u oscuro (100 = sin cambios).",
   "spec.led_src": "Fuente LED",
   "spec.led_src_custom": "Color de brillo personalizado (modulado en amplitud)",
-  "spec.led_src_follow": "Seguir modo acento (Estático / Respiración / Arcoíris / Apagado)",
+  "spec.led_src_follow": "Seguir modo acento (Estático / Respiración / Arcoíris / Apagado / WLED)",
   "spec.led_color_label": "Color de Brillo LED",
   "spec.led_color_hint": "Color anillo LED modulado en modo Espectro",
   "spec.lcd_color_label": "Color de Barras LCD",

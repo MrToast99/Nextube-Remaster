@@ -35,6 +35,7 @@ Like the work? Help keep me Caffeinated! <br>
   - [Admin Authentication](#admin-authentication-optional)
   - [Web UI Language](#web-ui-language)
   - [Setup AP (WiFi Provisioning and First Setup)](#setup-ap-wifi-provisioning)
+  - [Static IP & Network Diagnostics](#static-ip--network-diagnostics)
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
 - [Modes](#modes)
 - [Weather](#weather)
@@ -44,6 +45,7 @@ Like the work? Help keep me Caffeinated! <br>
 - [Social Media Counters](#social-media-counters)
   - [Local Relay (`social_relay.py`)](#local-relay-social_relaypy)
 - [Home Assistant MQTT](#home-assistant-mqtt)
+- [Follow Sun/Moon LED Mode](#follow-sunmoon-led-mode)
 - [WLED Sync](#wled-sync)
 - [Themes](#themes)
   - [Built-in Themes](#built-in-themes)
@@ -678,11 +680,11 @@ The web UI provides:
 - **Display**
   - Theme — populated dynamically from LittleFS; add a folder to `/images/themes/` and it appears in the dropdown automatically
   - **Custom Face** — select a TrueType font as the clockface digit renderer and weather-panel text font; choose from any `.ttf` uploaded to `/fonts/` on the device; selecting **None** reverts to the theme's JPEG digit artwork. Configure drop shadow colour and toggle under this section (see [Custom TTF Fonts](#custom-ttf-fonts))
-  - Brightness; LED accent lighting (Static / Breath / Rainbow / Off) with per-tube colour pickers
+  - Brightness; LED accent lighting (Static / Breath / Rainbow / Off / **Follow Sun/Moon**) with per-tube colour pickers — see [Follow Sun/Moon LED mode](#follow-sunmoon-led-mode)
   - Enabled mode toggles; auto mode rotation; auto theme rotation (cycle all or selected themes on a timer)
   - Spectrum settings — LED source (amplitude-modulated glow colour **or** follow accent mode), LCD bar colour (fixed **or** follow live WLED primary), Noise Floor threshold
   - **Advanced Display** — per-tube gamma, VCOM, panel profile, brightness trim, colour inversion, window offsets, anti-burn-in (see below)
-- **Network** — WiFi SSID/password, hostname, timezone, NTP server. Only reconnects when credentials actually change, preserving the live connection for all other saves.
+- **Network** — WiFi SSID/password, hostname, timezone, NTP server, optional static IP (see [Static IP & Network Diagnostics](#static-ip--network-diagnostics)). Only reconnects when credentials actually change, preserving the live connection for all other saves.
 - **Services**
   - Weather (source, city, units, panel rotation interval, per-panel enable/disable)
   - Social Media Counters (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters))
@@ -698,6 +700,20 @@ The web UI provides:
   - WiFi Setup AP PIN management (show / regenerate)
   - Factory reset (settings-only or full)
   - About (shows firmware + web UI versions independently)
+
+### Static IP & Network Diagnostics
+
+**Network → WiFi Configuration** includes an optional **Use static IP** toggle. When enabled, set the IP address, subnet mask, gateway, and DNS (a second DNS server is optional). DHCP is used whenever this is off (the default) or any required field is left blank on boot.
+
+> **Requires reboot to take effect**, same as the Hostname field above. If you enter settings that make the device unreachable (wrong gateway/subnet), hold the **LEFT** and **RIGHT** touch pads for 15 seconds to bring up the `Nextube-Setup` recovery network (see [Setup AP](#setup-ap-wifi-provisioning) above) and fix the settings from there — misconfigured static IP doesn't prevent the device from associating to your WiFi, so this recovery path always works.
+
+Below the WiFi Configuration card, a collapsible **Network Info** panel shows read-only diagnostics, fetched on demand when expanded:
+- **Connected since** — time since the current WiFi association was established
+- **Disconnects (session)** — count of STA disconnect events since the last reboot
+- **Last disconnect reason** — the most recent `wifi_err_reason_t` code, with common ones (beacon timeout, auth failure, handshake timeout, etc.) shown as human-readable text
+- **Signal** — RSSI of the current AP association, in dBm
+- **MAC / BSSID / Channel** — link-level details of the current AP association
+- **Netmask / Gateway / DNS** — the STA interface's active IP configuration, whether obtained via DHCP or set statically
 
 ### Advanced Display (LCD Calibration)
 
@@ -1260,6 +1276,23 @@ mosquitto_pub -h <broker> -t "nextube/nextube-remaster/ticker/set" -m "Good morn
 
 In Home Assistant, the **Nextube Ticker** appears as a `text` entity on the Nextube device card — type your message and press Enter. The **Nextube XTAL Drift** and **Nextube RTC Max Error** telemetry sensors update after every NTP sync, giving graphable long-term history of the crystal's drift and the RTC discipline's hold accuracy.
 
+## Follow Sun/Moon LED Mode
+
+The accent LEDs can track the sun during the day and the moon at night instead of running a fixed animation. Select **Follow Sun/Moon** under **Display → LED Accent Lighting**. The LEDs are mostly off — only the tube(s) nearest the sun/moon's current position across the sky glow, fading smoothly as it passes between two adjacent tubes (e.g. the sun sitting exactly between tube 2 and tube 3 lights both at half intensity; as it drifts toward tube 3, tube 2 fades out while tube 3 brightens). Sun and moon each get their own configurable colour. The moon default (pale blue-white), while tThe sun default is a saturated warm yellow tuned for the LEDs specifically,.
+
+Position is computed from the same real geocoded sunrise/sunset the WeatherLive theme uses (see [Time-of-day sky](#weatherlive-theme)), independently of which clock face is actually selected — Follow Sun/Moon LEDs work with any theme. Set a location under **Services → Weather** for accurate timing; without one, a fixed 6 AM–7 PM approximation is used instead. Moon position (and whether it's visible at all — it isn't shown near new moon) uses the same phase-based approximation as WeatherLive's on-screen moon, not a precise lunar-position calculation.
+
+### Notes
+
+| Behaviour | Detail |
+|---|---|
+| **Update rate** | Recomputed every 5 s — plenty responsive for a value that moves across the sky over hours, without the RMT burst overhead of a fast animation mode. |
+| **Brightness** | Respects the normal LED Brightness and Night Brightness sliders like every other accent mode — no separate brightness setting. |
+| **No location, no weather** | Falls back to a fixed 6 AM–7 PM sun window; the moon's window is still derived from that fallback and its phase. |
+| **Takes effect immediately** | No reboot needed — like Static/Breath/Rainbow, switching to or from Follow Sun/Moon applies on the next tick after Save. |
+
+---
+
 ## WLED Sync
 
 The accent LEDs can mirror a WLED-controlled LED strip on your LAN in real time. When enabled, Nextube listens on the WLED UDP Notifier broadcast port and applies the primary colour + brightness to all 6 WS2812B accent LEDs whenever WLED changes state — no target IP or extra configuration on the WLED side.
@@ -1632,6 +1665,7 @@ POST /api/wifi/regen_pin     → generate and persist a new AP PIN → {"pin":"�
 # Status (open)
 GET  /api/ping               → {"status":"ok"}
 GET  /api/status             → live status: time, wifi, weather, heap, firmware, admin_set, auth_enabled, ap_active
+GET  /api/network_info       → WiFi diagnostics: disconnect_count, last_disconnect_reason, connected_duration_s, mac, bssid, channel, rssi, netmask, gateway, dns1, dns2, phy_11n
 
 # Settings (requires auth)
 GET  /api/settings           → full configuration JSON

@@ -78,6 +78,10 @@ static void set_defaults(void)
     s_cfg.spectrum_lcd_rgb[2] = 30;
     s_cfg.spectrum_lcd_wled   = false;  /* opt-in: bars follow WLED primary colour */
 
+    /* Follow Sun/Moon LED mode defaults. */
+    s_cfg.sunmoon_sun_rgb[0] = 255; s_cfg.sunmoon_sun_rgb[1] = 213; s_cfg.sunmoon_sun_rgb[2] = 46;
+    s_cfg.sunmoon_moon_rgb[0] = 230; s_cfg.sunmoon_moon_rgb[1] = 234; s_cfg.sunmoon_moon_rgb[2] = 248;
+
     /* Spectrum LED source — 0 = custom glow colour (amplitude-modulated),
      * 1 = follow configured accent mode. Default 0 for backward compatibility. */
     s_cfg.spectrum_led_source = 0;
@@ -116,6 +120,7 @@ static void set_defaults(void)
     memcpy(s_cfg.backlight_rgb, defaults, sizeof(defaults));
 
     strncpy(s_cfg.hostname, "nextube-remaster", sizeof(s_cfg.hostname) - 1);
+    s_cfg.static_ip_enabled = false;   /* DHCP by default */
     strncpy(s_cfg.timezone, "UTC0", sizeof(s_cfg.timezone) - 1);
     strncpy(s_cfg.ntp_servers[0], "0.pool.ntp.org", sizeof(s_cfg.ntp_servers[0]) - 1);
     strncpy(s_cfg.ntp_servers[1], "1.pool.ntp.org", sizeof(s_cfg.ntp_servers[1]) - 1);
@@ -387,6 +392,15 @@ static void parse_json(const char *json, size_t len)
     json_read_str(root, "click_file",       s_cfg.click_file,      sizeof(s_cfg.click_file));
     json_read_str(root, "ticker_file",      s_cfg.ticker_file,     sizeof(s_cfg.ticker_file));
     json_read_str(root, "hostname",        s_cfg.hostname,        sizeof(s_cfg.hostname));
+    {
+        cJSON *v = cJSON_GetObjectItem(root, "static_ip_enabled");
+        if (cJSON_IsBool(v)) s_cfg.static_ip_enabled = cJSON_IsTrue(v);
+    }
+    json_read_str(root, "static_ip",       s_cfg.static_ip,       sizeof(s_cfg.static_ip));
+    json_read_str(root, "static_netmask",  s_cfg.static_netmask,  sizeof(s_cfg.static_netmask));
+    json_read_str(root, "static_gateway",  s_cfg.static_gateway,  sizeof(s_cfg.static_gateway));
+    json_read_str(root, "static_dns1",     s_cfg.static_dns1,     sizeof(s_cfg.static_dns1));
+    json_read_str(root, "static_dns2",     s_cfg.static_dns2,     sizeof(s_cfg.static_dns2));
     {
         cJSON *bs = cJSON_GetObjectItem(root, "button_sound");
         if (cJSON_IsBool(bs)) s_cfg.button_sound = cJSON_IsTrue(bs);
@@ -706,6 +720,30 @@ static void parse_json(const char *json, size_t len)
     else if (strcmp(bl_mode, "Rainbow") == 0) s_cfg.backlight_mode = BL_MODE_RAINBOW;
     else if (strcmp(bl_mode, "Off")     == 0) s_cfg.backlight_mode = BL_MODE_OFF;
     else if (strcmp(bl_mode, "WLED")    == 0) s_cfg.backlight_mode = BL_MODE_WLED;
+    else if (strcmp(bl_mode, "SunMoon") == 0) s_cfg.backlight_mode = BL_MODE_SUNMOON;
+
+    /* sunmoon_sun_RGB / sunmoon_moon_RGB — Follow Sun/Moon mode colours,
+     * [R,G,B] arrays following the spectrum_RGB pattern. */
+    {
+        cJSON *sun_arr = cJSON_GetObjectItem(root, "sunmoon_sun_RGB");
+        if (cJSON_IsArray(sun_arr) && cJSON_GetArraySize(sun_arr) >= 3) {
+            for (int i = 0; i < 3; i++) {
+                cJSON *v = cJSON_GetArrayItem(sun_arr, i);
+                if (cJSON_IsNumber(v) && v->valueint >= 0 && v->valueint <= 255)
+                    s_cfg.sunmoon_sun_rgb[i] = (uint8_t)v->valueint;
+            }
+        }
+    }
+    {
+        cJSON *moon_arr = cJSON_GetObjectItem(root, "sunmoon_moon_RGB");
+        if (cJSON_IsArray(moon_arr) && cJSON_GetArraySize(moon_arr) >= 3) {
+            for (int i = 0; i < 3; i++) {
+                cJSON *v = cJSON_GetArrayItem(moon_arr, i);
+                if (cJSON_IsNumber(v) && v->valueint >= 0 && v->valueint <= 255)
+                    s_cfg.sunmoon_moon_rgb[i] = (uint8_t)v->valueint;
+            }
+        }
+    }
 
     char bl_onoff[8] = {0};
     json_read_str(root, "backlight_onoff", bl_onoff, sizeof(bl_onoff));
@@ -1209,6 +1247,12 @@ char *config_to_json(bool include_password)
     cJSON_AddStringToObject(root, "click_file",       s_cfg.click_file);
     cJSON_AddStringToObject(root, "ticker_file",      s_cfg.ticker_file);
     cJSON_AddStringToObject(root, "hostname",        s_cfg.hostname);
+    cJSON_AddBoolToObject  (root, "static_ip_enabled", s_cfg.static_ip_enabled);
+    cJSON_AddStringToObject(root, "static_ip",        s_cfg.static_ip);
+    cJSON_AddStringToObject(root, "static_netmask",   s_cfg.static_netmask);
+    cJSON_AddStringToObject(root, "static_gateway",   s_cfg.static_gateway);
+    cJSON_AddStringToObject(root, "static_dns1",      s_cfg.static_dns1);
+    cJSON_AddStringToObject(root, "static_dns2",      s_cfg.static_dns2);
     cJSON_AddStringToObject(root, "timezone",        s_cfg.timezone);
     {
         cJSON *ntp_arr = cJSON_AddArrayToObject(root, "ntp_servers");
@@ -1322,7 +1366,7 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "tube5_panel_outdoor_ht", s_cfg.tube5_panel_outdoor_ht);
     cJSON_AddStringToObject(root, "aqi_standard",           s_cfg.aqi_standard);
 
-    const char *bl_modes[] = {"Static","Breath","Rainbow","Off","WLED"};
+    const char *bl_modes[] = {"Static","Breath","Rainbow","Off","WLED","SunMoon"};
     unsigned bl_idx = (unsigned)s_cfg.backlight_mode;
     if (bl_idx >= sizeof(bl_modes) / sizeof(bl_modes[0])) bl_idx = 0;
     cJSON_AddStringToObject(root, "backlight_mode",  bl_modes[bl_idx]);
@@ -1366,6 +1410,14 @@ char *config_to_json(bool include_password)
         cJSON *sp = cJSON_AddArrayToObject(root, "spectrum_RGB");
         for (int i = 0; i < 3; i++)
             cJSON_AddItemToArray(sp, cJSON_CreateNumber(s_cfg.spectrum_rgb[i]));
+    }
+    {
+        cJSON *sun_arr = cJSON_AddArrayToObject(root, "sunmoon_sun_RGB");
+        for (int i = 0; i < 3; i++)
+            cJSON_AddItemToArray(sun_arr, cJSON_CreateNumber(s_cfg.sunmoon_sun_rgb[i]));
+        cJSON *moon_arr = cJSON_AddArrayToObject(root, "sunmoon_moon_RGB");
+        for (int i = 0; i < 3; i++)
+            cJSON_AddItemToArray(moon_arr, cJSON_CreateNumber(s_cfg.sunmoon_moon_rgb[i]));
     }
 
     {

@@ -265,7 +265,7 @@
   "adv.brightness_trim_desc": "Met à l'échelle les pixels de chaque tube. Utiliser quand un panneau est plus lumineux ou sombre (100 = pas de changement).",
   "spec.led_src": "Source LED",
   "spec.led_src_custom": "Couleur de lueur personnalisée (modulée en amplitude)",
-  "spec.led_src_follow": "Suivre le mode accentuation (Statique / Respiration / Arc-en-ciel / Éteint)",
+  "spec.led_src_follow": "Suivre le mode accentuation (Statique / Respiration / Arc-en-ciel / Éteint / WLED)",
   "spec.led_color_label": "Couleur de Lueur LED",
   "spec.led_color_hint": "Couleur anneau LED modulée en mode Spectre",
   "spec.lcd_color_label": "Couleur des Barres LCD",
