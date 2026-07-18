@@ -1340,6 +1340,22 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <button class="btn btn-outline" onclick="refreshLogs()" data-i18n="sys.refresh">Refresh</button>
       <button class="btn btn-outline" onclick="clearLogs()" data-i18n="sys.clear">Clear</button>
     </div>
+    <div style="margin-top:1rem;padding-top:.8rem;border-top:1px solid var(--accent)">
+      <div style="display:flex;align-items:center;gap:.7rem;cursor:pointer;user-select:none" onclick="toggleDebugLogging()">
+        <span id="debug-logging-arrow" style="display:inline-block;transition:transform .25s;font-size:.85rem;color:var(--dim)">▶</span>
+        <span style="font-size:.95rem;font-weight:600;letter-spacing:.02em;color:var(--hi)" data-i18n="sys.debug_logging">Debug logging (verbose)</span>
+      </div>
+      <div id="log-subsystems" style="display:none;margin-top:.6rem">
+        <p style="font-size:.8rem;color:var(--dim);margin-bottom:.6rem" data-i18n-html="sys.logging_subsystems_hint">
+          Check a subsystem to raise it to DEBUG (verbose, e.g. request timing); uncheck to return it to normal INFO logging. <strong>These take effect immediately — no Save needed.</strong>
+        </p>
+        <div id="log-toggles" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:.3rem .8rem;margin-bottom:.7rem"></div>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+          <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="logAllOn()">All on</button>
+          <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="logAllOff()">All off</button>
+        </div>
+      </div>
+    </div>
   </div>
   <!-- ── Setup AP ──────────────────────────────────────────────── -->
   <div class="card">
@@ -1399,18 +1415,6 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <div style="font-size:2rem;margin-bottom:.4rem">🧰</div>
       <h2 id="debug-hero-h2" style="color:#ffa000;margin-bottom:.3rem">Oh, you found my hidden stash of switches and levers!</h2>
       <p style="font-size:.82rem;color:var(--dim);margin:0">These are experimental/developer tools. Poke around, but don't blame me if something goes sideways.</p>
-    </div>
-    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
-      <h2 style="color:#ffa000">&#x1F4DD; Logging</h2>
-      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.6rem">
-        Enable/disable serial logging per subsystem at runtime (not saved — resets on reboot).
-        Use <strong>NTP only</strong> to capture a clean long drift log without other chatter.
-      </p>
-      <div id="log-toggles" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:.3rem .8rem;margin-bottom:.7rem"></div>
-      <div style="display:flex;gap:.5rem;flex-wrap:wrap">
-        <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="logQuietNtp()">NTP only</button>
-        <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="logAllOn()">All on</button>
-      </div>
     </div>
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
       <h2 style="color:#ffa000">&#x23F1;&#xFE0F; Time Disciplining (experimental)</h2>
@@ -1842,6 +1846,9 @@ Object.assign(I18N.en, {
   "sys.logs":"Device Logs",
   "sys.logs_help":"Live device log output — buffered in RAM from boot, not written to flash. Last 200 lines. Use auto-refresh to watch in real time.",
   "sys.auto_refresh":"Auto-refresh","sys.clear":"Clear",
+  "sys.debug_logging":"Debug logging (verbose)",
+  "sys.debug_logging_hint":"Shows per-subsystem verbosity controls below. Not saved — resets on reboot.",
+  "sys.logging_subsystems_hint":"Check a subsystem to raise it to DEBUG (verbose, e.g. request timing); uncheck to return it to normal INFO logging. <strong>These take effect immediately — no Save needed.</strong>",
   "sys.setup_ap":"Setup AP",
   "sys.setup_ap_help":"8-digit PIN for the <strong>Nextube-Setup</strong> WiFi network. Visible on the LCD tubes whenever the AP is broadcasting.",
   "sys.show":"Show","sys.regenerate":"Regenerate",
@@ -2181,8 +2188,8 @@ function clearDirty() {
   dirty = false;
   document.getElementById('unsaved-banner').classList.remove('show');
 }
-document.querySelector('main').addEventListener('input',  e => { if (e.target.type !== 'file') markDirty(); });
-document.querySelector('main').addEventListener('change', e => { if (e.target.type !== 'file') markDirty(); });
+document.querySelector('main').addEventListener('input',  e => { if (e.target.type !== 'file' && !e.target.dataset.noDirty) markDirty(); });
+document.querySelector('main').addEventListener('change', e => { if (e.target.type !== 'file' && !e.target.dataset.noDirty) markDirty(); });
 
 /* ── Tabs ──────────────────────────────────────────── */
 document.querySelectorAll('#tabs button').forEach(b => {
@@ -3899,7 +3906,6 @@ function dbgTap() {
 function dbgShow() {
   $('debug-panel').style.display = '';
   $('debug-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  buildLogToggles();
   /* Sync controls to current config */
   if (cfg && cfg.mic_adc_channel != null)
     $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
@@ -3953,6 +3959,10 @@ function saveDiscipline() {
  * Runtime only — not persisted; resets on reboot. */
 const LOG_TAGS = ['ntp','weather','sht30','subscribers','mic','leds','display',
                   'audio','ha_mqtt','wled_sync','wifi_mgr','rtc','config','touch','web_srv'];
+/* Per-subsystem checkboxes are a direct DEBUG/INFO switch — checked = level
+ * 4 (DEBUG), unchecked = level 3 (INFO). No dependency on the master
+ * "Debug logging" checkbox's own state; each box is its own source of
+ * truth, so there's no ordering/interaction bug between the two controls. */
 function buildLogToggles() {
   const box = $('log-toggles');
   if (!box || box.dataset.built) return;
@@ -3961,38 +3971,53 @@ function buildLogToggles() {
     const lbl = document.createElement('label');
     lbl.style.cssText = 'display:flex;align-items:center;gap:.4rem;font-size:.8rem;cursor:pointer';
     const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.checked = true; cb.id = 'log-' + tag;
+    cb.type = 'checkbox'; cb.checked = false; cb.id = 'log-' + tag;
+    cb.dataset.noDirty = '1';
     cb.style.cssText = 'width:14px;height:14px';
-    cb.onchange = () => setLogLevel(tag, cb.checked);
+    cb.onchange = () => setLogLevelRaw(tag, cb.checked ? 4 : 3);
     lbl.appendChild(cb);
     lbl.appendChild(document.createTextNode(tag));
     box.appendChild(lbl);
   });
 }
-function setLogLevel(tag, enabled) {
+function setLogLevelRaw(tag, level) {
   return secureFetch('/api/debug/loglevel', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ tag, enabled })
+    body:    JSON.stringify({ tag, level })
   }).catch(() => toast('Log toggle failed', true));
 }
-async function logQuietNtp() {
-  /* "*" sets the global default level → silences EVERY tag, including IDF
-   * internals (heap, esp-x509-crt-bundle, wifi, …), not just our own.
-   * Awaited sequentially — the ESP32 httpd queue is shallow (default 5),
-   * so firing all POSTs concurrently can silently drop requests. */
-  await setLogLevel('*',   false);
-  await setLogLevel('ntp', true);
-  LOG_TAGS.forEach(tag => { const cb = $('log-' + tag); if (cb) cb.checked = (tag === 'ntp'); });
-  toast('Logging: NTP only');
-}
 async function logAllOn() {
-  await setLogLevel('*', true);   /* restore default for IDF-internal tags too */
+  /* Awaited sequentially — the ESP32 httpd queue is shallow (default 5),
+   * so firing all POSTs concurrently can silently drop requests. Deliberately
+   * doesn't touch "*" (the ESP-IDF default level): that would also raise
+   * every IDF-internal component tag (httpd_parse, httpd_txrx, nvs,
+   * mqtt_client, …) which are extremely chatty and flood the log with noise
+   * unrelated to this app's own subsystems. */
   for (const tag of LOG_TAGS) {
     const cb = $('log-' + tag); if (cb) cb.checked = true;
-    await setLogLevel(tag, true); /* clear any explicit per-tag override */
+    await setLogLevelRaw(tag, 4);
   }
-  toast('Logging: all on');
+  toast('Logging: all on (debug)');
+}
+async function logAllOff() {
+  for (const tag of LOG_TAGS) {
+    const cb = $('log-' + tag); if (cb) cb.checked = false;
+    await setLogLevelRaw(tag, 3);
+  }
+  toast('Logging: all off (info)');
+}
+/* "Debug logging" collapsible — purely reveals/hides the per-subsystem
+ * panel, same arrow-toggle pattern as toggleAdvDisplay()/toggleNetInfo().
+ * Doesn't touch any log level itself; each checkbox in that panel is its
+ * own DEBUG/INFO switch (see buildLogToggles() above). */
+function toggleDebugLogging() {
+  const body  = $('log-subsystems');
+  const arrow = $('debug-logging-arrow');
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
 }
 
 function dbgHide() {
@@ -4778,6 +4803,7 @@ async function onAuthSucceeded() {
    * either hits the wrong repo URL or returns early on a '--' firmware version.  */
   await Promise.all([loadSettings(), refreshStatus()]);
   checkForUpdates(true);
+  buildLogToggles();
   setInterval(refreshStatus, 5000);
   setInterval(() => checkForUpdates(true), 86400000);  /* re-check every 24 h */
 }

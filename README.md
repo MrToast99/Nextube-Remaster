@@ -694,7 +694,7 @@ The web UI provides:
 - **System**
   - OTA firmware update and web UI / LittleFS update
   - LittleFS file browser (browse / upload / delete / new folder / rename)
-  - Device log viewer
+  - Device log viewer — live RAM-buffered log (last 200 lines), auto-refresh, per-subsystem enable/disable toggles, and a **Debug logging** checkbox that raises the runtime log level to DEBUG for diagnostic-only lines (not saved, resets on reboot)
   - Firmware update check (automatic on page load and every 24 h; dismissable toast; compares against latest GitHub release)
   - Lock Webui (enable/disable password protection, change password, sign out)
   - WiFi Setup AP PIN management (show / regenerate)

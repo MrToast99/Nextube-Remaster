@@ -27,7 +27,7 @@ static esp_netif_t *s_ap_netif  = NULL;
  * by a spinlock — 32-bit Xtensa doesn't guarantee atomic 64-bit access
  * across tasks, same rationale as display.c's busy_until_us(). */
 static uint32_t     s_disconnect_count = 0;
-static int8_t       s_last_disconnect_reason = 0;
+static uint8_t      s_last_disconnect_reason = 0;
 static int64_t      s_connected_since_us = 0;
 static portMUX_TYPE s_net_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -259,7 +259,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         case WIFI_EVENT_STA_DISCONNECTED: {
             wifi_event_sta_disconnected_t *dev = data;
             s_disconnect_count++;
-            s_last_disconnect_reason = (int8_t)dev->reason;
+            s_last_disconnect_reason = (uint8_t)dev->reason;
             portENTER_CRITICAL(&s_net_mux);
             s_connected_since_us = 0;
             portEXIT_CRITICAL(&s_net_mux);
@@ -604,7 +604,7 @@ const char *wifi_manager_get_ip(void) { return s_ip_str; }
 
 uint32_t wifi_manager_get_disconnect_count(void) { return s_disconnect_count; }
 
-int8_t wifi_manager_get_last_disconnect_reason(void) { return s_last_disconnect_reason; }
+uint8_t wifi_manager_get_last_disconnect_reason(void) { return s_last_disconnect_reason; }
 
 int64_t wifi_manager_get_connected_since_us(void)
 {

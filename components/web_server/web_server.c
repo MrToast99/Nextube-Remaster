@@ -45,6 +45,28 @@ static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
 static bool s_server_restart_pending = false;   /* set when a WiFi reconnect stops the server */
 
+/* LittleFS usage stats (fs_total/fs_used in /api/status) — cached until
+ * explicitly invalidated. esp_littlefs_info() walks every block in the
+ * filesystem to compute used space (no cheap counter API exists), which
+ * measured ~2.7s on this device's file count (issue #82) — recomputing it
+ * on every /api/status poll (every 5s from the dashboard) meant the
+ * single-threaded httpd task spent roughly half its life blocked in this
+ * one call, unable to accept any other connection.
+ *
+ * Computed lazily (first /api/status call — effectively "once at boot",
+ * since that's the first request the device serves) and only recomputed
+ * when fs_usage_invalidate() is called after an operation that can actually
+ * change free space: file upload, file delete, hotpatch. A full LittleFS
+ * OTA (api_fs_ota) always ends in esp_restart(), which resets this cache
+ * for free — no explicit invalidation needed there. mkdir/rename are NOT
+ * invalidation points: they don't meaningfully change used bytes (a stale
+ * reading there is off by, at most, a few bytes of directory metadata).
+ * Only ever touched from the httpd task, so no lock is needed. */
+static bool    s_fs_cache_valid   = false;
+static size_t  s_fs_total_cached  = 0;
+static size_t  s_fs_used_cached   = 0;
+static void fs_usage_invalidate(void) { s_fs_cache_valid = false; }
+
 /* Forward declaration — defined in the static-file section below */
 static const char *content_type(const char *p);
 
@@ -741,6 +763,16 @@ static esp_err_t api_reboot(httpd_req_t *r)
 
 static esp_err_t api_status(httpd_req_t *r)
 {
+    /* Timing instrumentation — issue #82 (community-reported multi-second
+     * /api/status latency, captured via PCAPdroid: consistently ~5s, while
+     * the much larger static GET / is ~2s). The payload-size mismatch argues
+     * against a pure network/TCP-ACK cause and points at server-side time in
+     * this handler; these checkpoints narrow down which section is slow.
+     * DEBUG level — silent by default, silent even under the System tab's
+     * per-subsystem "enabled" checkboxes (those only reach INFO). Visible
+     * once the "Debug logging" checkbox in System → Device Logs is checked,
+     * which raises the runtime default to DEBUG via /api/debug/loglevel. */
+    int64_t t0 = esp_timer_get_time();
     cJSON *root = cJSON_CreateObject();
     struct tm t; ntp_get_local(&t);
     char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &t);
@@ -749,6 +781,7 @@ static esp_err_t api_status(httpd_req_t *r)
     cJSON_AddBoolToObject(root, "rtc_battery_ok",  ntp_rtc_battery_ok());
     cJSON_AddBoolToObject(root, "wifi_connected", wifi_manager_is_connected());
     cJSON_AddStringToObject(root, "ip", wifi_manager_get_ip());
+    int64_t t_wifi = esp_timer_get_time();
     const weather_data_t *w = weather_get();
     if (w && w->valid) {
         cJSON *wj = cJSON_AddObjectToObject(root, "weather");
@@ -756,12 +789,14 @@ static esp_err_t api_status(httpd_req_t *r)
         cJSON_AddNumberToObject(wj, "humidity", w->humidity);
         cJSON_AddStringToObject(wj, "condition", w->condition);
     }
+    int64_t t_weather = esp_timer_get_time();
     sht30_reading_t sensor;
     if (sht30_get(&sensor)) {
         cJSON *sj = cJSON_AddObjectToObject(root, "sensor");
         cJSON_AddNumberToObject(sj, "temp_c",   sensor.temp_c);
         cJSON_AddNumberToObject(sj, "humidity", sensor.humidity);
     }
+    int64_t t_sht30 = esp_timer_get_time();
     const sub_count_t *s = subscribers_get();
     if (s && s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
     const sub_count_t *insta = instagram_get();
@@ -770,6 +805,7 @@ static esp_err_t api_status(httpd_req_t *r)
     if (tt && tt->valid) cJSON_AddNumberToObject(root, "tiktok_followers", tt->subscriber_count);
     const sub_count_t *mt = mastodon_get();
     if (mt && mt->valid) cJSON_AddNumberToObject(root, "mastodon_followers", mt->subscriber_count);
+    int64_t t_subs = esp_timer_get_time();
     /* Heap / PSRAM telemetry — surfaced in the System tab so a slowly leaking
      * build is visible long before allocations actually start failing.
      * heap_*    = INTERNAL SRAM specifically (~320 KB total on ESP32-WROVER).
@@ -789,12 +825,16 @@ static esp_err_t api_status(httpd_req_t *r)
                             (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddNumberToObject(root, "psram_largest",
                             (double)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    int64_t t_heap = esp_timer_get_time();
     {
-        size_t fs_total = 0, fs_used = 0;
-        esp_littlefs_info("littlefs", &fs_total, &fs_used);
-        cJSON_AddNumberToObject(root, "fs_total", (double)fs_total);
-        cJSON_AddNumberToObject(root, "fs_used",  (double)fs_used);
+        if (!s_fs_cache_valid) {
+            esp_littlefs_info("littlefs", &s_fs_total_cached, &s_fs_used_cached);
+            s_fs_cache_valid = true;
+        }
+        cJSON_AddNumberToObject(root, "fs_total", (double)s_fs_total_cached);
+        cJSON_AddNumberToObject(root, "fs_used",  (double)s_fs_used_cached);
     }
+    int64_t t_fsinfo = esp_timer_get_time();
     cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
     /* expected_fs: the LittleFS version this firmware binary was built against.
      * Baked in at compile time from version.json → fs_version.
@@ -817,6 +857,7 @@ static esp_err_t api_status(httpd_req_t *r)
         fclose(vf);
     }
     cJSON_AddStringToObject(root, "fs_version", fs_ver);
+    int64_t t_fsver = esp_timer_get_time();
     app_mode_t status_mode;
     bool       status_mic_cal;
     config_lock();
@@ -824,6 +865,7 @@ static esp_err_t api_status(httpd_req_t *r)
     status_mode    = scfg->current_mode;
     status_mic_cal = scfg->mic_calibration_saved;
     config_unlock();
+    int64_t t_config = esp_timer_get_time();
     cJSON_AddStringToObject(root, "mode", app_mode_name(status_mode));
     cJSON_AddBoolToObject(root, "mic_calibration_saved", status_mic_cal);
     /* —— auth state.  The web UI gates its first-boot setup flow on these.
@@ -851,8 +893,25 @@ static esp_err_t api_status(httpd_req_t *r)
         }
         cJSON_AddBoolToObject(root, "ota_rollback", rollback);
     }
+    int64_t t_ota = esp_timer_get_time();
     char *json = cJSON_PrintUnformatted(root);
+    int64_t t_json = esp_timer_get_time();
     esp_err_t ret = send_json(r, json);
+    int64_t t_send = esp_timer_get_time();
+    ESP_LOGD(TAG, "api_status timing (ms): wifi=%lld weather=%lld sht30=%lld subs=%lld "
+             "heap=%lld fsinfo=%lld fsver=%lld config=%lld ota=%lld json=%lld send=%lld total=%lld",
+             (long long)((t_wifi   - t0)      / 1000),
+             (long long)((t_weather- t_wifi)  / 1000),
+             (long long)((t_sht30  - t_weather)/1000),
+             (long long)((t_subs   - t_sht30) / 1000),
+             (long long)((t_heap   - t_subs)  / 1000),
+             (long long)((t_fsinfo - t_heap)  / 1000),
+             (long long)((t_fsver  - t_fsinfo)/1000),
+             (long long)((t_config - t_fsver) / 1000),
+             (long long)((t_ota    - t_config)/1000),
+             (long long)((t_json   - t_ota)   / 1000),
+             (long long)((t_send   - t_json)  / 1000),
+             (long long)((t_send   - t0)      / 1000));
     free(json); cJSON_Delete(root);
     return ret;
 }
@@ -1611,6 +1670,7 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
     free(zip);
     hp_drop_stale_index();
     display_theme_cache_flush();   /* re-probe PNG format on next render */
+    fs_usage_invalidate();
     ESP_LOGI(TAG, "hotpatch complete: %d written, %d skipped, %d failed",
              ok, skipped, failed);
 
@@ -2835,6 +2895,7 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     free(buf); fclose(f);
 
     if (n < 0) { remove(spiffs_path); return ESP_FAIL; }
+    fs_usage_invalidate();
     ESP_LOGI(TAG, "Uploaded: %s (%d bytes)", spiffs_path, received);
     if (strncmp(p, "/images/album/", 14) == 0)
         display_album_invalidate();
@@ -2948,6 +3009,7 @@ static esp_err_t api_file_delete(httpd_req_t *r)
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
     if (fs_remove_recursive(spiffs_path) != 0)
         return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found or delete failed"), ESP_FAIL;
+    fs_usage_invalidate();
     ESP_LOGI(TAG, "Deleted: %s", spiffs_path);
     if (strncmp(p, "/images/album/", 14) == 0)
         display_album_invalidate();

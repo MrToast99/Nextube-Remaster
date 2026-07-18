@@ -20,7 +20,7 @@ uint32_t wifi_manager_get_disconnect_count(void);
 
 /* wifi_err_reason_t of the most recent disconnect, or 0 if none yet this
  * session.  Raw code — map to a human string in the caller (web UI). */
-int8_t wifi_manager_get_last_disconnect_reason(void);
+uint8_t wifi_manager_get_last_disconnect_reason(void);
 
 /* esp_timer_get_time() timestamp of the current connection's GOT_IP event,
  * or 0 if not currently connected. */
