@@ -409,7 +409,8 @@ Note the connector when purchasing
 
 | Part number | Notes | Source |
 |---|---|---|
-| **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working | [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
+| **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (Invert Required)| [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
+| **LY096X1608TBBIG09C08** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (No Invert Required) | [Alibaba listing](https://www.alibaba.com/product-detail/TFT-LCD-0-96-Inch-80X160_1600462526823.html) |
 
 ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colours on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
 
