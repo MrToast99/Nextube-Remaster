@@ -34,7 +34,7 @@ Like the work? Help keep me Caffeinated! <br>
 - [Web Management UI](#web-management-ui)
   - [Admin Authentication](#admin-authentication-optional)
   - [Web UI Language](#web-ui-language)
-  - [Setup AP (WiFi Provisioning and First Setup)](#setup-ap-wifi-provisioning)
+  - [Setup AP (WiFi Provisioning and First Setup)](#setup-ap-wifi-provisioning-and-first-connection)
   - [Static IP & Network Diagnostics](#static-ip--network-diagnostics)
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
 - [Modes](#modes)
@@ -311,6 +311,7 @@ supply-coupled noise via its finite PSRR), plus an occasional very faint 1 Hz
 tick from capacitive pickup of the per-second redraw on the floating DAC trace.
 For complete silence a hardware modification is required:
 
+> [!TIP]
 > **Hardware mod:** Cut the SD pull-up resistor and wire the SD pin to a free
 > ESP32 GPIO. `gpio_set_level(PIN_AMP_SHDN, 0)` will draw the amp's shutdown
 > current to < 0.5 µA — complete silence. Define `PIN_AMP_SHDN` in
@@ -399,7 +400,8 @@ Readings appear on the **Dashboard** under *Local Sensor* (temperature and humid
 
 ### Replacement LCD Panels
 
-> ⚠️ **LCD replacement support requires firmware v1.8 or later.** Earlier versions lack the per-tube calibration settings (VCOM, gamma, column/row offsets, panel profile) needed to configure ST7735S replacement panels correctly.
+> [!IMPORTANT]
+> **LCD replacement support requires firmware v1.8 or later.** Earlier versions lack the per-tube calibration settings (VCOM, gamma, column/row offsets, panel profile) needed to configure ST7735S replacement panels correctly.
 
 The six original displays are **80×160 px ST7735 "Green Tab" IPS panels**. If one or more tubes fail they can be replaced with compatible ST7735S modules — the most common drop-in replacement confirmed to work with this firmware is:
 
@@ -409,12 +411,13 @@ Note the connector when purchasing
 
 | Part number | Notes | Source |
 |---|---|---|
-| **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (Invert Required)| [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
+| **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (Requires Invert Set)| [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
 | **LY096X1608TBBIG09C08** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (No Invert Required) | [Alibaba listing](https://www.alibaba.com/product-detail/TFT-LCD-0-96-Inch-80X160_1600462526823.html) |
 
 ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colours on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
 
-> 📹 **LCD swap guide:** For a step-by-step video walkthrough of the physical panel replacement process, see the [community discussion thread](https://github.com/MrToast99/Nextube-Remaster/discussions/35).
+> [!TIP]
+> **LCD swap guide:** For a step-by-step video walkthrough of the physical panel replacement process, see the [community discussion thread](https://github.com/MrToast99/Nextube-Remaster/discussions/35).
 
 #### Quick-start for LH096NT-IF09W replacement panels
 
@@ -503,7 +506,8 @@ Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) aut
 6. Once flashing is complete, click **Disconnect** in ESPConnect to release the serial port
 7. **Unplug the USB cable, wait 3 seconds, then plug it back in** (or use the power switch if you have one)
 
-> ⚠️ **Steps 6 and 7 are required.** The Nextube cannot start its WiFi setup network while ESPConnect is still connected to the serial port. After power-cycling you will see the display light up and the `Nextube-Setup` WiFi network will appear within about 10 seconds. If the network does not appear, unplug and replug the USB cable once more.
+> [!IMPORTANT]
+> **Steps 6 and 7 are required.** The Nextube cannot start its WiFi setup network while ESPConnect is still connected to the serial port. After power-cycling you will see the display light up and the `Nextube-Setup` WiFi network will appear within about 10 seconds. If the network does not appear, unplug and replug the USB cable once more.
 
 > **Note:** Web Serial requires Chrome or Edge. Firefox is not supported. Use USB-A to USB-C, C-C cables don't seem to work.
 
@@ -644,9 +648,12 @@ To switch languages manually, use the **Language** dropdown at the top of any pa
 
 **Tube display language** (the day-of-week abbreviation shown on clock and date panels — e.g. *Mon*, *Lun*, *Mo*) is a separate **device-wide** setting stored in firmware config. Configure it under **Network → Date & Time → Language**. It defaults to English and does not follow the web UI language — this lets the physical clock show one language while the management interface is in another.
 
-### Setup AP (WiFi Provisioning)
+### Setup AP (WiFi Provisioning) and First connection
 
 The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi provisioning. The password is an **8-digit PIN** unique to each device, generated on first boot and stored in NVS.
+
+> [!IMPORTANT]
+> **The WiFi password is the PIN scrolling on the tubes** — there is no fixed or default password. Watch the display for the 8-digit code (it starts scrolling automatically once the device boots into setup mode), then type those digits into the password field when you connect to `Nextube-Setup`.
 
 **Finding the PIN:**
 - **LCD tubes** — while the setup AP is active and no client is connected, the PIN scrolls across the tubes as a repeating marquee: 3 blank tubes followed by all 8 digits, cycling continuously. Read the digits as they scroll past — the 3-blank gap gives your eye a clear reset point between repetitions.
@@ -655,10 +662,11 @@ The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi prov
 
 **Connecting to the setup AP:**
 1. The tubes display the 8-digit PIN (or find it in the serial log).
-2. On your phone or laptop, connect to **Nextube-Setup** and enter the PIN when prompted.
+2. On your phone or laptop, connect to **Nextube-Setup** and enter the PIN **as the WiFi password** when prompted.
 3. Navigate to **http://192.168.4.1**.
 4. Set your admin password (first boot only), then enter your home WiFi credentials under **Network**.
 
+> [!TIP]
 > **No laptop nearby?** A smartphone works perfectly for initial setup. Connect your phone to **Nextube-Setup**, open a browser, and go to **http://192.168.4.1** to complete the WiFi configuration. Once the Nextube joins your home network, manage it from any device on the same network.
 
 **AP lifecycle:**
@@ -706,7 +714,8 @@ The web UI provides:
 
 **Network → WiFi Configuration** includes an optional **Use static IP** toggle. When enabled, set the IP address, subnet mask, gateway, and DNS (a second DNS server is optional). DHCP is used whenever this is off (the default) or any required field is left blank on boot.
 
-> **Requires reboot to take effect**, same as the Hostname field above. If you enter settings that make the device unreachable (wrong gateway/subnet), hold the **LEFT** and **RIGHT** touch pads for 15 seconds to bring up the `Nextube-Setup` recovery network (see [Setup AP](#setup-ap-wifi-provisioning) above) and fix the settings from there — misconfigured static IP doesn't prevent the device from associating to your WiFi, so this recovery path always works.
+> [!IMPORTANT]
+> **Requires reboot to take effect**, same as the Hostname field above. If you enter settings that make the device unreachable (wrong gateway/subnet), hold the **LEFT** and **RIGHT** touch pads for 15 seconds to bring up the `Nextube-Setup` recovery network (see [Setup AP](#setup-ap-wifi-provisioning-and-first-connection) above) and fix the settings from there — misconfigured static IP doesn't prevent the device from associating to your WiFi, so this recovery path always works.
 
 Below the WiFi Configuration card, a collapsible **Network Info** panel shows read-only diagnostics, fetched on demand when expanded:
 - **Connected since** — time since the current WiFi association was established
@@ -886,6 +895,7 @@ All fields are **optional** — any field you omit keeps its current value (part
 | `weather_code` | number | [WMO weather code](https://open-meteo.com/en/docs#weathervariables). Fills `icon`/`condition` automatically when those are absent — so Open-Meteo-style data works directly. |
 | `lat` / `lon` | number | Optional. Used **on-device** for the Sunrise & Sunset panel (no extra API call). Send both or neither. |
 
+> [!IMPORTANT]
 > **Temperature units:** send your reading in **only one** format — `temp_c` *or* `temp_f` — using whichever unit your source produces. The firmware stores everything in Celsius internally and converts `temp_f` on the way in. What the clock *displays* (°C or °F) is controlled separately by **Services → Weather → Units**, independent of which format you POST.
 
 **Built-in icon names:** `sun`, `fewClouds`, `overcastClouds`, `fog`, `rain`, `snow`, `squalls`, `thunderstorm`.
@@ -1088,6 +1098,7 @@ Both keys are entirely optional. Leave the field blank to use the default keyles
 
 ### Local Relay (`social_relay.py`)
 
+> [!TIP]
 > **Do you need the relay?**
 > - **No interest in social counters** — skip this section entirely. The relay is not required for any other feature.
 > - **YouTube with an API key** — skip the relay. Enter your [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) key in the web UI and the device fetches counts directly.
@@ -1516,7 +1527,8 @@ All tube images must be exactly **80 × 160 pixels** (portrait), saved as JPEG. 
 | Format | JPEG (any quality; 80–90 % is a good balance of size vs. artefacts) |
 | Colour space | RGB (no CMYK) |
 
-> **Tip:** Keep individual JPEGs under ~15 KB where possible. A full theme with all required images typically sits between 500 KB and 2 MB, well within the 7 MB LittleFS partition.
+> [!TIP]
+> Keep individual JPEGs under ~15 KB where possible. A full theme with all required images typically sits between 500 KB and 2 MB, well within the 7 MB LittleFS partition.
 
 ### Image Converter Helper
 
@@ -1637,6 +1649,7 @@ for f in *.ttf; do
 done
 ```
 
+> [!IMPORTANT]
 > **Build dependency:** `stb_truetype.h` (a single-header C library from [github.com/nothings/stb](https://github.com/nothings/stb)) must be placed at `components/font_render/stb_truetype.h` before building. It is not bundled with the repo — copy it once after cloning and it is picked up automatically by the build system.
 
 ---
