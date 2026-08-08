@@ -16,13 +16,11 @@ Like the work? Help keep me Caffeinated! <br>
 
 - [What is this?](#what-is-this)
 - [Features](#features)
-- [Hardware](#hardware)
-  - [Audio / DAC Notes](#audio--dac-notes)
-  - [Microphone Notes](#microphone-notes)
-  - [SHT30 Temperature / Humidity Sensor](#sht30-temperature--humidity-sensor)
-  - [Replacement LCD Panels](#replacement-lcd-panels)
-  - [Flash Layout](#flash-layout-16mb)
 - [Building](#building)
+  - [Prerequisites](#prerequisites)
+  - [Local Build](#local-build)
+  - [Versioning](#versioning)
+  - [CI Build](#ci-build)
 - [Flashing](#flashing)
   - [Option A — Browser / ESPConnect](#option-a--browser-based-no-tools-required)
   - [Option B — esptool full flash](#option-b--first-time--full-flash-esptool-cli)
@@ -32,21 +30,39 @@ Like the work? Help keep me Caffeinated! <br>
     - [Automatic Update Checks](#automatic-update-checks)
     - [Returning to factory firmware](#returning-to-the-original-factory-firmware)
 - [Web Management UI](#web-management-ui)
+  - [Setup AP (WiFi Provisioning and First Setup)](#setup-ap-wifi-provisioning-and-first-connection)
   - [Admin Authentication](#admin-authentication-optional)
   - [Web UI Language](#web-ui-language)
-  - [Setup AP (WiFi Provisioning and First Setup)](#setup-ap-wifi-provisioning-and-first-connection)
   - [Static IP & Network Diagnostics](#static-ip--network-diagnostics)
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
 - [Modes](#modes)
+  - [Mode Rotation](#mode-rotation)
+  - [Theme Rotation](#theme-rotation)
+  - [Touch Buttons](#touch-buttons)
 - [Weather](#weather)
+  - [City format](#city-format)
+  - [Live city verification](#live-city-verification)
+  - [External weather (push your own data)](#external-weather-push-your-own-data)
 - [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)
 - [Air Quality panel](#air-quality-panel)
 - [NTP & Clock Accuracy](#ntp--clock-accuracy)
+  - [How synchronisation works](#how-synchronisation-works)
+  - [Time discipline modes](#time-discipline-modes)
+  - [NTP sync log](#ntp-sync-log)
 - [Social Media Counters](#social-media-counters)
+  - [Optional API Keys](#optional-api-keys)
   - [Local Relay (`social_relay.py`)](#local-relay-social_relaypy)
 - [Home Assistant MQTT](#home-assistant-mqtt)
+  - [What gets exposed](#what-gets-exposed)
+  - [Setup](#setup)
+  - [MQTT topics](#mqtt-topics)
+  - [Notes](#notes)
+  - [Ticker](#ticker)
 - [Follow Sun/Moon LED Mode](#follow-sunmoon-led-mode)
 - [WLED Sync](#wled-sync)
+  - [Setup (Nextube side)](#setup-nextube-side)
+  - [Setup (WLED side)](#setup-wled-side)
+  - [Notes](#notes-2)
 - [Themes](#themes)
   - [Built-in Themes](#built-in-themes)
   - [WeatherLive theme](#weatherlive-theme)
@@ -55,10 +71,21 @@ Like the work? Help keep me Caffeinated! <br>
   - [Adding a Custom Theme](#adding-a-custom-theme)
   - [Image Converter Helper](#image-converter-helper)
 - [Custom TTF Fonts](#custom-ttf-fonts)
+  - [How it works](#how-it-works)
+  - [Shadow](#shadow)
+  - [Uploading a font](#uploading-a-font)
+  - [Reducing font file size](#reducing-font-file-size-with-pyftsubset)
 - [REST API](#rest-api)
+- [Hardware](#hardware)
+  - [Audio / DAC Notes](#audio--dac-notes)
+  - [Microphone Notes](#microphone-notes)
+  - [SHT30 Temperature / Humidity Sensor](#sht30-temperature--humidity-sensor)
+  - [Replacement LCD Panels](#replacement-lcd-panels)
+  - [Flash Layout](#flash-layout-16mb)
 - [Project Structure](#project-structure)
 - [License](#license)
 - [Community](#community)
+- [Acknowledgements](#acknowledgements)
 
 ---
 
@@ -116,335 +143,10 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Multilingual web UI — 11 languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI) with per-browser preference | ✅ Working |
 | Tube display localisation — day-of-week abbreviation in 11 languages on clock/date panels | ✅ Working |
 | Custom TrueType fonts for clock digits and panel text (stb_truetype, PSRAM-cached glyph renderer, configurable drop shadow) | ✅ Working |
-
-## Hardware
-
-Reverse-engineered from PCB Rev **1.31** (2022/01/19):
-
-| Component | Part | Pins |
-|---|---|---|
-| **MCU** | ESP32-WROVER-E (ESP32-D0WD-V3) | 16MB Flash, 8MB PSRAM (only 4MB assignable) |
-| **Displays** | 6× ST7735 80×160 IPS | SPI: SCK=12, MOSI=13, DC=14, RST=27, BL=19(PWM) |
-| | | CS: 33, 26, 21, 0, 5, 18 (left→right) |
-| **LEDs** | 6× WS2812B RGB | Data=GPIO32 |
-| **Touch** | 3× capacitive pads | LEFT=GPIO4(pad0), MIDDLE=GPIO2(pad2), RIGHT=GPIO15(pad3) |
-| **RTC** | PCF8563 + CR1220 coin cell | I²C: SCL=22, SDA=23 (addr 0x51) |
-| **Temp/Humidity** | SHT30 | I²C: SCL=22, SDA=23 (addr 0x44) |
-| **Audio** | LTK8002D amplifier | DAC=GPIO25 |
-| **Microphone** | Unmarked 4 mm SMT electret capsule (≈−42 dBV/Pa, see [Microphone Notes](#microphone-notes)) + LMV321IDBVR op-amp preamp | ADC=GPIO35 (ADC1_CH7, input-only) |
-
-> **RTC battery:** The PCF8563 is backed by a **CR1220** coin cell on the underside of the PCB. Without a charged battery the RTC loses its time on every power-cycle. The firmware detects this condition (seed epoch < 2024-01-01) and blanks the clock tubes until the first NTP sync completes, rather than displaying the incorrect epoch-0 time.
-
-> **Note on GPIO2 (MIDDLE touch):** GPIO2 is a boot-strapping pin with an internal pull-down. The ESP32 requires GPIO2 LOW to enter download mode — holding the middle touch pad during a serial flash attempt can prevent the chip entering download mode even when GPIO0 is correctly held low. This has no effect during normal operation.
-
-### Audio / DAC Notes
-
-#### Signal chain
-
-```
-ESP32 GPIO25 (DAC1, 8-bit)
-    → [0.1 µF AC coupling cap]
-    → [1 kΩ series resistor (Ri)]
-    → LTK8002D Pin 3 (+IN)
-    → LTK8002D internal BTL amplifier (3 W, ~3× gain)
-    → Pins 5 / 8 (VO1 / VO2, bridge-tied load)
-    → 4 Ω speaker
-```
-
-The LTK8002D is a **pure analog** Class-AB BTL amplifier — it has no I²S,
-PDM, or any other digital audio interface. The ESP32's built-in 8-bit DAC
-on GPIO25 is the only audio source.
-
-#### DAC driver — `dac_continuous`, brought up **per-clip** (ESP-IDF v5)
-
-The firmware uses `dac_continuous_new_channels()` from ESP-IDF v5, which
-internally configures the I²S0 peripheral in **DAC mode** (`i2s_set_dac_mode`
-equivalent). The I²S peripheral clocks 8-bit unsigned PCM samples from a DMA
-ring buffer directly into the DAC register at **32 kHz**.
-
-Crucially, the DAC is **not** left running between sounds. It is created and
-enabled **per clip** by the playback task (`dac_restart()`), and torn down again
-(`dac_teardown()`) the moment the clip — plus its fade-out — finishes. This
-mirrors how the stock firmware behaved: silence means *nothing is clocked*.
-Tearing down also lets the GPIO25 pad return to the isolated idle state between
-clips (the decisive noise factor — see below), and avoids keeping the I²S0
-engine, APLL, and a live DAC output buffer running for no benefit.
-
-**Idle state (no clip playing), in *both* the enabled and disabled cases:**
-the GPIO25 pad is **isolated** via `rtc_gpio_isolate()` — input and output
-buffers off, no pulls, pad disconnected from the digital domain. This is the
-exact state the stock firmware's `dac_output_disable()` (IDF 3.3.5) left the
-pad in, and it is the critical detail for a silent idle: any *driven* idle
-state (output LOW was tried, as was digital Hi-Z input) connects the amp's
-AC-coupled input to the ESP32's digital ground/supply through the pin driver,
-and every current transient on the die — the 1 kHz FreeRTOS tick, flash read
-bursts, the per-second clock redraw — couples into the amp as a constant
-static floor, activity hiss, and a 1 Hz tick. With the pad isolated the idle
-is near-silent.
-(The earlier `dac_oneshot` idle was dropped: the `dac_oneshot → dac_continuous`
-transition is unreliable on the original ESP32 — the I²S0 controller does not
-always release state after one-shot use, which then blocks
-`dac_continuous_new_channels()` — so the firmware never mixes the two drivers.)
-
-| Parameter | Value |
-|---|---|
-| Sample rate | 32 000 Hz (fixed) |
-| Bit depth | 8-bit unsigned PCM (0–255) |
-| Channels | Mono (DAC channel 0, GPIO25) |
-| Playback operating point | **128** (= VDD/2 ≈ 1.65 V) — the centre the ring is fed around |
-| Idle (between clips, either enabled or disabled) | GPIO25 pad **isolated** (`rtc_gpio_isolate` — stock firmware's idle state), no DMA, no clock |
-| Per-clip fade in/out | **120 ms** cosine S-curve (`PLAY_FADE_MS`) |
-| DMA buffers | 4 × 1024 bytes (allocated per clip, freed on teardown; ring is silence-primed before each clip — onset latency ≈ fade-in + 128 ms) |
-
-#### Silence level — why 128, not 0
-
-The coupling capacitor between the DAC output and the amplifier input charges
-to the DC level of the DAC at idle. Because the cap blocks DC, the amplifier
-sees `V_DAC − V_cap`. At steady state `V_cap = V_DAC_idle`, so the amplifier
-input sits at 0 V differential — perfect silence — **regardless** of what the
-idle DAC voltage actually is.
-
-The pipeline uses **128** because:
-- 128 ÷ 255 × 3.3 V ≈ VDD/2 — the centre of the DAC's linear range
-- All WAV samples are decoded as signed 16-bit, volume-scaled, then offset by
-  128 before writing to the DMA buffer
-- If the idle level were anything other than 128, the coupling cap would charge
-  to a different voltage, and the next sound would start from the wrong
-  operating point, producing an audible pop as the cap re-centres
-
-#### Pop prevention — per-clip fade in/out
-
-Each time the DAC ring is brought up for a clip, the output would otherwise
-step from 0 V (the DAC starts at code 0) to 128 (the playback centre). Through the coupling
-cap that step looks like a DC transient — an audible thump. The firmware
-prevents it at **both ends of every clip** with a **cosine S-curve fade** over
-**120 ms** (`PLAY_FADE_MS`):
-
-```c
-fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * M_PI)));  // 0..128
-```
-
-- **Fade-in (0 → 128)** is written immediately after `dac_continuous_enable()`,
-  before the clip's samples.
-- **Fade-out (128 → 0)** is queued after the clip's last sample; the task then
-  waits out the ring depth before `dac_teardown()` so the fade actually reaches
-  the speaker (otherwise `del_channels()` would cut it off).
-
-This keeps `dV/dt` low enough that the AC-coupled amp sees a gentle ramp rather
-than a step at the start and end of each sound.
-
-#### APLL cold-start delay
-
-The first-ever call to `dac_continuous_new_channels()` after power-on triggers
-ESP32 APLL lock and I²S peripheral initialisation — a one-time ~1.6 s stall.
-Because the DAC is now brought up **per clip** (not at boot), this one-time lock
-is paid on the **first sound played** in a boot session rather than during
-startup. Subsequent clips re-create the channel quickly (APLL already locked).
-When audio output is disabled, the continuous DAC / I²S0 peripheral is never
-touched at all, so the APLL lock and the ~16 KB DMA ring allocation never occur.
-
-#### LTK8002D hardware limitations
-
-| Limitation | Detail |
-|---|---|
-| **No digital interface** | Analog input only — no I²S, no PDM, no volume register |
-| **No software shutdown** | SD pin (pin 1) is pulled to VDD_5V via 100 kΩ — amp is permanently enabled; no ESP32 GPIO controls it |
-| **Always-on noise floor** | Because the amp is always powered, it amplifies its own thermal noise and any supply noise with no audio playing |
-| **Fixed gain** | ~3× (9.5 dB) set by internal resistors — not adjustable in software |
-
-The firmware's **software volume control** (`audio_set_volume`) works by
-scaling PCM sample values before writing to the DMA buffer — the amplifier
-gain itself is fixed.
-
-#### `Audio → Enable audio output` toggle
-
-Audio output is **disabled by default**. The toggle takes effect on the **next reboot** — when the web UI saves a change to this setting it triggers a restart so the audio subsystem comes up cleanly in the chosen state.
-
-**Boot with audio disabled (default):** `audio_init(false)` is called. The continuous DAC, I²S0 peripheral, APLL, and DMA ring are never started. The GPIO25 pad stays **isolated** (`rtc_gpio_isolate()`, applied once at the top of `app_main`) — disconnected from the digital domain, no DMA, no clock. The ~16 KB DMA heap and the ~1.6 s APLL cold-start delay are avoided entirely.
-
-**Boot with audio enabled:** `audio_init(true)` only sets the enabled flag; the pad stays isolated. The DAC is **not** brought up at boot — it is created per clip by the playback task (`dac_restart()` → fade-in → clip → fade-out → `dac_teardown()`, which re-isolates the pad), so idle is identical to the disabled case. This is the key difference from earlier builds, which left the ring running at 128 between sounds.
-
-**Note:** the LTK8002D itself remains powered (SD pin tied high) in both cases, so its thermal self-noise floor is still present at a very low level.
-
-> **Why isolation beats a driven idle:** earlier builds drove GPIO25 LOW at idle (after digital Hi-Z was found to pick up SPI chirping). A staged-bring-up bisection later showed the LOW clamp itself was the dominant noise path: the pin's pull-down FET references the amp input to the digital ground, so the FreeRTOS tick produced a constant static floor, flash reads were audible as hiss, panel init as beeps, and the per-second redraw as a 1 Hz tick — independent of CPU speed, SPI clock, PSRAM use, or which tasks ran. `rtc_gpio_isolate()` removes the conduction path entirely and the idle is near-silent, matching stock.
-
-#### Idle noise — RESOLVED (history and current state)
-
-The idle noise floor (constant static, hiss during flash/SPI activity, and a
-1 Hz tick) was fully root-caused by a staged-bring-up bisection: the dominant
-path was the **GPIO25 idle drive state** conducting the ESP32's ground/supply
-transients into the amplifier — not any individual peripheral.  Suspected
-sources that were tested and **ruled out** along the way: FreeRTOS tick rate,
-ISR/stack placement, PSRAM traffic, touch sensing, the WS2812 LED strip and
-its internal ~400 Hz PWM, SPI clock speed, the display task, backlight PWM,
-and CPU frequency.  `rtc_gpio_isolate()` on GPIO25 (the stock firmware's idle
-pad state) removed the conduction path; the idle is now measured equivalent
-to stock.  The mitigations below remain in place — they reduce rail transients
-and per-second SPI/CPU load, which still matter for the small capacitive
-residual and for general efficiency:
-
-| Mitigation | Effect |
-|---|---|
-| GPIO25 pad **isolated** at idle (`rtc_gpio_isolate`, between clips, enabled *and* disabled) | No I²S/DMA/clock running, and the pad is disconnected from the digital domain — no conduction path for ground/supply transients into the amp (see toggle section) |
-| DAC created/destroyed **per clip** (`dac_restart` / `dac_teardown`) | The DMA/I²S engine only runs while a sound is actually playing, then is fully torn down — matching the stock firmware's silent idle |
-| `WIFI_PS_NONE` (radio always on) | MIN_MODEM was used while GPIO25 was clamped LOW, because the radio's continuous current was audible through that clamp's ground path. With the pad isolated the noise cost is gone — and MIN_MODEM's ~80% radio sleep was dropping downlink frames (MQTT `No PING_RESP` every keepalive, esp-tls `select() timeout` on handshakes), so the receiver now stays on |
-| Bulk LCD pixel pushes use `spi_device_transmit()` (interrupt/DMA) instead of `spi_device_polling_transmit()` | The DMA path **yields the CPU** while each chunk clocks out, instead of busy-waiting with interrupts hot. This lowered the SPI-induced switching component of the noise floor during every clock-face/ticker redraw. Small command/parameter writes (≤8 bytes) stay on the polling path, where DMA setup would cost more than it saves |
-| Colon-blink **partial push** (diff-box) | The once-per-second colon blink rewrites only the two changed colon-dot rectangles instead of repainting the whole tube — far less per-second SPI traffic (and CPU) on the shared rail |
-| RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
-| Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
-
-**Optional hardware hardening** (no longer required for quiet idle): a
-**100 µF + 100 nF** decoupling cap close to the ESP32 `VDD3P3_RTC` pin further
-reduces supply transients reaching the DAC's analog domain during playback.
-
-#### Residual noise floor with everything off
-
-Even with audio output disabled, LEDs off, and LCD brightness at 0, a very
-faint baseline hiss may still be audible. Root cause: the LTK8002D SD pin is
-tied to VDD_5V with no GPIO control — the amp remains fully powered and
-amplifies its own thermal noise (~3× gain into a 4 Ω speaker).
-
-Isolating the GPIO25 pad at idle (`rtc_gpio_isolate()`, with the DAC torn down
-so no DMA or clock is running) gives a near-silent idle — measured equivalent
-to the stock firmware. The remaining hiss is the amp's own thermal noise (and
-supply-coupled noise via its finite PSRR), plus an occasional very faint 1 Hz
-tick from capacitive pickup of the per-second redraw on the floating DAC trace.
-For complete silence a hardware modification is required:
-
-> [!TIP]
-> **Hardware mod:** Cut the SD pull-up resistor and wire the SD pin to a free
-> ESP32 GPIO. `gpio_set_level(PIN_AMP_SHDN, 0)` will draw the amp's shutdown
-> current to < 0.5 µA — complete silence. Define `PIN_AMP_SHDN` in
-> `board_pins.h` and assert it whenever audio is disabled.
-
-### Microphone Notes
-
-#### Signal chain
-
-```
-4 mm SMT electret capsule (unmarked — see candidates below)
-    → LMV321IDBVR single op-amp (SOT-23-5) — hardware preamp / bias stage
-    → GPIO35 (ADC1_CH7, input-only)
-    → ESP32 ADC1, 12-bit, 12 dB attenuation (0–3.3 V full scale)
-```
-
-The capsule on PCB Rev 1.31 (near the top edge of the board) carries **no markings**; identification is by package size/style only. Visual candidates: **CUI CMC-4015-25T**, **CUI CMC-4013-02S-423**, or **MIC-4013-6-G00** — dimensionally similar 4 mm SMT electrets. Measured ADC signal levels (raw-frame captures: ~±20 counts ≈ 16 mV for moderate room-level tones after the LMV321 stage) are more consistent with a standard **≈ −42 dBV/Pa** capsule than the −25 dBV/Pa the 4015-25T datasheet specifies, slightly favouring the 4013-class candidates. Functionally it does not matter: the firmware's analysis is fully relative (per-frame normalisation + adaptive noise floor), so capsule sensitivity only shifts where the floor settles. The **LMV321IDBVR** op-amp (marked `RC1F` on the PCB, located adjacent to the mic) provides the preamp stage between capsule and ADC. Both are analog-only components — no I²S or PDM interface. The correct ADC input is **GPIO35 / ADC1_CH7** (input-only pin). GPIO36 / ADC1_CH0 (`SENSOR_VP`) is **not** connected to the microphone on this hardware revision.
-
-#### Sampling driver — `adc_continuous` (I²S0 DMA, hardware-clocked)
-
-Capture is driven by the ESP32's **digital ADC controller via I²S0 DMA** (`adc_continuous`): the SAR is clocked in hardware at **32 kHz** (the digital controller's minimum is 20 kHz) and DMA delivers complete frames; the mic task averages every 4 samples down to the **8 kHz** analysis rate (the averaging doubles as an anti-alias filter and adds ~1 bit of effective resolution). Exact sample spacing, near-zero CPU per sample.
-
-**Why hardware clocking is non-negotiable** (every software-timed approach was tried and failed):
-- `esp_timer` + `adc_oneshot_read()` at 125 µs: each read costs **300–600 µs** (driver mutex, per-read reconfiguration), so the timer ran in permanent catch-up — the *real* sample rate was ~1.7 kHz, making every band above the true ~850 Hz Nyquist **aliased noise** (measured ~78 % of Core 0 for the privilege).
-- Register-level SAR reads fixed the rate and cut CPU to ~16 %, but RTOS preemption produced **sampling jitter** (esp_timer catch-up clusters samples back-to-back, then they're treated as uniform) — a swept-tone test showed high-frequency energy smeared into the low bands and nothing detected above ~450 Hz.
-
-**I²S0 sharing with audio:** `dac_continuous` (audio playback) uses the same peripheral. Audio claims it via `mic_set_audio_active(true)` before each clip and releases it after teardown — the spectrum freezes for the duration of a button click or alarm and resumes automatically (same pattern as the LED pause during playback).
-
-| Parameter | Value |
-|---|---|
-| Hardware rate | 32 000 Hz (I²S0-clocked, DMA) ÷ 4 → 8 000 Hz effective |
-| Frame size | 128 samples (16 ms per Goertzel frame, ~62 fps) |
-| Bit depth | 12-bit, ADC_ATTEN_DB_12 |
-| Window | Hann (suppresses off-band leakage — a loud bass note no longer splatters across all bands) |
-| CPU cost | Near-zero acquisition (DMA); ~4–5 % of Core 0 for Goertzel analysis.  Capture is gated to Spectrum mode (all other modes pay zero) and httpd is pinned to Core 1 (task-WDT history).  **Note:** noise baselines captured on firmware ≤ v1.13.x were measured under the old aliased sampling — re-capture (or Reset to Auto) after updating. |
-
-#### Frequency bands
-
-**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Each band is the **sum of all 62.5 Hz analysis bins inside its frequency range** (~60 bins across 250–3937 Hz, mapped to bands by geometric band edges), not a single bin at the band centre — a single bin only hears ±125 Hz, and the log-spaced centres above ~1 kHz sit 200–400 Hz apart, so tones between centres would fall into spectral cracks and vanish (a tone-sweep test measured literal zero at 3.2 kHz before this fix). Bands are logarithmically spaced across 280 Hz–3800 Hz (safely below the 4 kHz Nyquist limit), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. The table below lists the band centres. This layout avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
-
-| Tube | Bar 0 | Bar 1 | Bar 2 | Bar 3 | Range |
-|---|---|---|---|---|---|
-| 0 | 280 Hz | 315 Hz | 350 Hz | 395 Hz | Low bass |
-| 1 | 440 Hz | 495 Hz | 555 Hz | 620 Hz | Upper bass |
-| 2 | 695 Hz | 780 Hz | 870 Hz | 975 Hz | Lower mid |
-| 3 | 1095 Hz | 1225 Hz | 1370 Hz | 1535 Hz | Midrange |
-| 4 | 1720 Hz | 1925 Hz | 2160 Hz | 2420 Hz | Presence |
-| 5 | 2710 Hz | 3030 Hz | 3395 Hz | 3800 Hz | Treble |
-
-Ratio between adjacent bands ≈ 1.12× per step. The display reads left-to-right from bass (tube 0) to treble (tube 5).
-
-#### Noise floor and peak-hold
-
-Because the LMV321 preamp amplifies broadband electrical noise alongside audio, a **two-phase adaptive noise floor estimator** runs per band:
-
-- **Phase 1 (first ~4 s, 250 frames):** fast convergence (α = 0.02, no signal guard) locks the per-band noise floor from zero.
-- **Phase 2 (steady state):** slow drift tracking (α = 0.002) only when the current bin is below 4× the estimated floor — prevents audio signals from biasing the floor upward.
-
-Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** threshold (`mic_silence_gate` in config, adjustable under **Display → Spectrum Mode → Noise Floor**) blanks all bands when the **sum of post-floor band power** falls below the set value — a *spectral* gate, self-calibrating because the adaptive floor has already absorbed electrical noise. Silence sums to <10; even quiet real audio exceeds 50. **Default 25; 0 disables.** *(Semantics changed: the old gate compared time-domain RMS² with a default of 250 — it was volume-calibrated rather than correctness-calibrated, blanking clearly-detected mid-frequency tones at listening level while letting loud sub-bass open the display onto nothing but speaker-distortion hash. Users upgrading should re-tune the slider, starting at 25.)*
-
-Display dynamics: band power is smoothed with a short EMA (τ ≈ 45 ms) so tones near a band boundary hold a steady bar instead of flickering between neighbours, then peak-hold applies instant attack with exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
-
-#### Spectrum LED Control
-
-The LED ring behaviour in Spectrum mode is independently configurable under **Display → Spectrum Mode → LED Source**:
-
-| Source | Behaviour |
-|---|---|
-| **Custom glow colour** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. The colour is set by the **LED Glow Colour** picker and is the same for all LEDs. |
-| **Follow accent mode** | The LEDs ignore the audio entirely and animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colours from the LED settings. The LCD bars still respond to the microphone normally. |
-
-The **LCD Bar Colour** picker is separate from the LED source and always applies — it controls the colour of the frequency bars drawn on the LCDs regardless of which LED source is selected.
-
-### SHT30 Temperature / Humidity Sensor
-
-The **SHT30** is fitted on the Nextube PCB and shares the I²C bus with the PCF8563 RTC.
-
-| Parameter | Value |
-|---|---|
-| I²C address | 0x44 (ADDR pin low) |
-| Bus | Shared with PCF8563 RTC — SCL=GPIO22, SDA=GPIO23 |
-| Poll interval | Every 30 seconds (background FreeRTOS task) |
-| Detection | Probed at boot via `i2c_master_probe()`; if the probe fails the driver disables itself silently |
-
-Readings appear on the **Dashboard** under *Local Sensor* (temperature and humidity) and are included in the `/api/status` response as `sensor.temp_c` and `sensor.humidity`. The displayed temperature respects the **Units** setting (Celsius / Fahrenheit).
-
-### Replacement LCD Panels
-
-> [!IMPORTANT]
-> **LCD replacement support requires firmware v1.8 or later.** Earlier versions lack the per-tube calibration settings (VCOM, gamma, column/row offsets, panel profile) needed to configure ST7735S replacement panels correctly.
-
-The six original displays are **80×160 px ST7735 "Green Tab" IPS panels**. If one or more tubes fail they can be replaced with compatible ST7735S modules — the most common drop-in replacement confirmed to work with this firmware is:
-
- <img width="335" height="100" alt="image" src="https://github.com/user-attachments/assets/8837cff8-df31-41ae-81ee-644e3794f72e" />
-
-Note the connector when purchasing
-
-| Part number | Notes | Source |
-|---|---|---|
-| **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (Requires Invert Set)| [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
-| **LY096X1608TBBIG09C08** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (No Invert Required) | [Alibaba listing](https://www.alibaba.com/product-detail/TFT-LCD-0-96-Inch-80X160_1600462526823.html) |
-
-ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colours on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
-
-> [!TIP]
-> **LCD swap guide:** For a step-by-step video walkthrough of the physical panel replacement process, see the [community discussion thread](https://github.com/MrToast99/Nextube-Remaster/discussions/35).
-
-#### Quick-start for LH096NT-IF09W replacement panels
-
-1. Flash firmware, open the web UI
-2. Go to **Display → Advanced Display → Panel Profile**
-3. For each replaced tube set **Profile → Vivid** and **VCOM → 40** as a starting point
-4. Click **Save** and evaluate — if colours are still washed raise VCOM toward 50–60; if they look over-saturated or too dark lower it toward 25–30
-5. If colours remain washed even at high VCOM, raise **Gamma Correction** for that tube to **1.8–2.2**
-6. If colours are inverted (white background appears black), tick **Colour Inversion** for that tube
-7. If there is a 1-pixel static border on the right or bottom edge, set **Column Offset → +2** and **Row Offset → +1** for that tube
-8. Click **Save** — changes take effect immediately without a reboot
-
-> **Note on window offsets:** The LH096NT-IF09W ST7735S variant uses a frame-buffer that is 2 px wider than the visible area. Without the +2 column offset, the rightmost column of uninitialized frame-buffer appears as a thin static line. Row offset of +1 corrects the same issue at the bottom edge.
-
----
-
-### Flash Layout (16MB)
-
-| Offset | Size | Partition |
-|---|---|---|
-| 0x001000 | — | Bootloader |
-| 0x008000 | — | Partition table |
-| 0x009000 | 20K | NVS |
-| 0x00E000 | 8K | OTA data |
-| 0x010000 | 4.5M | app0 (OTA slot 0) |
-| 0x490000 | 4.5M | app1 (OTA slot 1) |
-| 0x910000 | 7M | LittleFS |
+| Follow Sun/Moon LED mode — accent LEDs track the sun by day, moon by night | ✅ Working |
+| Static IP configuration (optional, DHCP remains default) | ✅ Working |
+| Network Info panel — disconnect/reconnect log, signal strength, link details | ✅ Working |
+| Debug logging controls — per-subsystem verbosity, no serial connection required | ✅ Working |
 
 ## Building
 
@@ -608,46 +310,6 @@ The release includes `Stock Recovery Firmware/full_bak-used_flash_0x0.bin` — a
 
 ## Web Management UI
 
-### Admin Authentication (optional)
-
-Authentication is **disabled by default** — the web UI is fully accessible to anyone on your network without a password, matching the behaviour of all previous firmware versions.
-
-To enable password protection, go to **System → Lock Webui** and check **Require admin password to change settings**. On first enable you will be prompted to set a password (minimum 6 characters). The password is stored as a PBKDF2-SHA256 hash in NVS — it survives firmware OTA and is never visible in any API response. It is cleared only by a **Full factory reset**.
-
-Once enabled:
-- Every visit shows a login prompt. Sessions are stored in your browser's `localStorage` and remain valid for 7 days (sliding window).
-- Five wrong password attempts in a row trigger a **60-second lockout**.
-- All mutation endpoints and any endpoint that returns secrets (settings, AP PIN) require a valid bearer token.
-- `/api/status`, static files, and the login endpoints remain open so the UI can always load and authenticate.
-
-Authentication can be disabled again at any time from the same **Lock Webui** card (requires a valid session to turn off). You can also change the password there, or sign out to clear your local session.
-
-Sessions are **RAM-only** and lost on reboot — you will be asked to log in once after each restart.
-
-### Web UI Language
-
-The web interface is available in **11 languages**:
-
-| Code | Language |
-|---|---|
-| `en` | English *(default, always inline — no file load needed)* |
-| `de` | German |
-| `fr` | French |
-| `es` | Spanish |
-| `it` | Italian |
-| `pt` | Portuguese |
-| `nl` | Dutch |
-| `sv` | Swedish |
-| `no` | Norwegian |
-| `da` | Danish |
-| `fi` | Finnish |
-
-On first load the UI auto-detects your **browser's preferred language**. If a matching translation is available it is fetched from `/lang/<code>.json` on the device and applied; otherwise the UI falls back to English. Your selection is saved in `localStorage` and persists across reloads and browser restarts.
-
-To switch languages manually, use the **Language** dropdown at the top of any page.
-
-**Tube display language** (the day-of-week abbreviation shown on clock and date panels — e.g. *Mon*, *Lun*, *Mo*) is a separate **device-wide** setting stored in firmware config. Configure it under **Network → Date & Time → Language**. It defaults to English and does not follow the web UI language — this lets the physical clock show one language while the management interface is in another.
-
 ### Setup AP (WiFi Provisioning) and First connection
 
 The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi provisioning. The password is an **8-digit PIN** unique to each device, generated on first boot and stored in NVS.
@@ -709,6 +371,46 @@ The web UI provides:
   - WiFi Setup AP PIN management (show / regenerate)
   - Factory reset (settings-only or full)
   - About (shows firmware + web UI versions independently)
+
+### Admin Authentication (optional)
+
+Authentication is **disabled by default** — the web UI is fully accessible to anyone on your network without a password, matching the behaviour of all previous firmware versions.
+
+To enable password protection, go to **System → Lock Webui** and check **Require admin password to change settings**. On first enable you will be prompted to set a password (minimum 6 characters). The password is stored as a PBKDF2-SHA256 hash in NVS — it survives firmware OTA and is never visible in any API response. It is cleared only by a **Full factory reset**.
+
+Once enabled:
+- Every visit shows a login prompt. Sessions are stored in your browser's `localStorage` and remain valid for 7 days (sliding window).
+- Five wrong password attempts in a row trigger a **60-second lockout**.
+- All mutation endpoints and any endpoint that returns secrets (settings, AP PIN) require a valid bearer token.
+- `/api/status`, static files, and the login endpoints remain open so the UI can always load and authenticate.
+
+Authentication can be disabled again at any time from the same **Lock Webui** card (requires a valid session to turn off). You can also change the password there, or sign out to clear your local session.
+
+Sessions are **RAM-only** and lost on reboot — you will be asked to log in once after each restart.
+
+### Web UI Language
+
+The web interface is available in **11 languages**:
+
+| Code | Language |
+|---|---|
+| `en` | English *(default, always inline — no file load needed)* |
+| `de` | German |
+| `fr` | French |
+| `es` | Spanish |
+| `it` | Italian |
+| `pt` | Portuguese |
+| `nl` | Dutch |
+| `sv` | Swedish |
+| `no` | Norwegian |
+| `da` | Danish |
+| `fi` | Finnish |
+
+On first load the UI auto-detects your **browser's preferred language**. If a matching translation is available it is fetched from `/lang/<code>.json` on the device and applied; otherwise the UI falls back to English. Your selection is saved in `localStorage` and persists across reloads and browser restarts.
+
+To switch languages manually, use the **Language** dropdown at the top of any page.
+
+**Tube display language** (the day-of-week abbreviation shown on clock and date panels — e.g. *Mon*, *Lun*, *Mo*) is a separate **device-wide** setting stored in firmware config. Configure it under **Network → Date & Time → Language**. It defaults to English and does not follow the web UI language — this lets the physical clock show one language while the management interface is in another.
 
 ### Static IP & Network Diagnostics
 
@@ -1732,6 +1434,309 @@ GET  /api/debug/micbands     → per-band spectrum state for all 24 Goertzel ban
                                raw energy, noise floor, post-floor power, and display value;
                                updated even on silence-gated frames
 ```
+
+## Hardware
+
+Reverse-engineered from PCB Rev **1.31** (2022/01/19):
+
+| Component | Part | Pins |
+|---|---|---|
+| **MCU** | ESP32-WROVER-E (ESP32-D0WD-V3) | 16MB Flash, 8MB PSRAM (only 4MB assignable) |
+| **Displays** | 6× ST7735 80×160 IPS | SPI: SCK=12, MOSI=13, DC=14, RST=27, BL=19(PWM) |
+| | | CS: 33, 26, 21, 0, 5, 18 (left→right) |
+| **LEDs** | 6× WS2812B RGB | Data=GPIO32 |
+| **Touch** | 3× capacitive pads | LEFT=GPIO4(pad0), MIDDLE=GPIO2(pad2), RIGHT=GPIO15(pad3) |
+| **RTC** | PCF8563 + CR1220 coin cell | I²C: SCL=22, SDA=23 (addr 0x51) |
+| **Temp/Humidity** | SHT30 | I²C: SCL=22, SDA=23 (addr 0x44) |
+| **Audio** | LTK8002D amplifier | DAC=GPIO25 |
+| **Microphone** | Unmarked 4 mm SMT electret capsule (≈−42 dBV/Pa, see [Microphone Notes](#microphone-notes)) + LMV321IDBVR op-amp preamp | ADC=GPIO35 (ADC1_CH7, input-only) |
+
+> **RTC battery:** The PCF8563 is backed by a **CR1220** coin cell on the underside of the PCB. Without a charged battery the RTC loses its time on every power-cycle. The firmware detects this condition (seed epoch < 2024-01-01) and blanks the clock tubes until the first NTP sync completes, rather than displaying the incorrect epoch-0 time.
+
+> **Note on GPIO2 (MIDDLE touch):** GPIO2 is a boot-strapping pin with an internal pull-down. The ESP32 requires GPIO2 LOW to enter download mode — holding the middle touch pad during a serial flash attempt can prevent the chip entering download mode even when GPIO0 is correctly held low. This has no effect during normal operation.
+
+### Audio / DAC Notes
+
+#### Signal chain
+
+```
+ESP32 GPIO25 (DAC1, 8-bit)
+    → [0.1 µF AC coupling cap]
+    → [1 kΩ series resistor (Ri)]
+    → LTK8002D Pin 3 (+IN)
+    → LTK8002D internal BTL amplifier (3 W, ~3× gain)
+    → Pins 5 / 8 (VO1 / VO2, bridge-tied load)
+    → 4 Ω speaker
+```
+
+The LTK8002D is a **pure analog** Class-AB BTL amplifier — it has no I²S,
+PDM, or any other digital audio interface. The ESP32's built-in 8-bit DAC
+on GPIO25 is the only audio source.
+
+#### DAC driver — `dac_continuous`, brought up **per-clip** (ESP-IDF v5)
+
+The firmware uses `dac_continuous_new_channels()` from ESP-IDF v5, which
+internally configures the I²S0 peripheral in **DAC mode** (`i2s_set_dac_mode`
+equivalent). The I²S peripheral clocks 8-bit unsigned PCM samples from a DMA
+ring buffer directly into the DAC register at **32 kHz**.
+
+Crucially, the DAC is **not** left running between sounds. It is created and
+enabled **per clip** by the playback task (`dac_restart()`), and torn down again
+(`dac_teardown()`) the moment the clip — plus its fade-out — finishes. This
+mirrors how the stock firmware behaved: silence means *nothing is clocked*.
+Tearing down also lets the GPIO25 pad return to the isolated idle state between
+clips (the decisive noise factor — see below), and avoids keeping the I²S0
+engine, APLL, and a live DAC output buffer running for no benefit.
+
+**Idle state (no clip playing), in *both* the enabled and disabled cases:**
+the GPIO25 pad is **isolated** via `rtc_gpio_isolate()` — input and output
+buffers off, no pulls, pad disconnected from the digital domain. This is the
+exact state the stock firmware's `dac_output_disable()` (IDF 3.3.5) left the
+pad in, and it is the critical detail for a silent idle: any *driven* idle
+state (output LOW was tried, as was digital Hi-Z input) connects the amp's
+AC-coupled input to the ESP32's digital ground/supply through the pin driver,
+and every current transient on the die — the 1 kHz FreeRTOS tick, flash read
+bursts, the per-second clock redraw — couples into the amp as a constant
+static floor, activity hiss, and a 1 Hz tick. With the pad isolated the idle
+is near-silent.
+(The earlier `dac_oneshot` idle was dropped: the `dac_oneshot → dac_continuous`
+transition is unreliable on the original ESP32 — the I²S0 controller does not
+always release state after one-shot use, which then blocks
+`dac_continuous_new_channels()` — so the firmware never mixes the two drivers.)
+
+| Parameter | Value |
+|---|---|
+| Sample rate | 32 000 Hz (fixed) |
+| Bit depth | 8-bit unsigned PCM (0–255) |
+| Channels | Mono (DAC channel 0, GPIO25) |
+| Playback operating point | **128** (= VDD/2 ≈ 1.65 V) — the centre the ring is fed around |
+| Idle (between clips, either enabled or disabled) | GPIO25 pad **isolated** (`rtc_gpio_isolate` — stock firmware's idle state), no DMA, no clock |
+| Per-clip fade in/out | **120 ms** cosine S-curve (`PLAY_FADE_MS`) |
+| DMA buffers | 4 × 1024 bytes (allocated per clip, freed on teardown; ring is silence-primed before each clip — onset latency ≈ fade-in + 128 ms) |
+
+#### Silence level — why 128, not 0
+
+The coupling capacitor between the DAC output and the amplifier input charges
+to the DC level of the DAC at idle. Because the cap blocks DC, the amplifier
+sees `V_DAC − V_cap`. At steady state `V_cap = V_DAC_idle`, so the amplifier
+input sits at 0 V differential — perfect silence — **regardless** of what the
+idle DAC voltage actually is.
+
+The pipeline uses **128** because:
+- 128 ÷ 255 × 3.3 V ≈ VDD/2 — the centre of the DAC's linear range
+- All WAV samples are decoded as signed 16-bit, volume-scaled, then offset by
+  128 before writing to the DMA buffer
+- If the idle level were anything other than 128, the coupling cap would charge
+  to a different voltage, and the next sound would start from the wrong
+  operating point, producing an audible pop as the cap re-centres
+
+#### Pop prevention — per-clip fade in/out
+
+Each time the DAC ring is brought up for a clip, the output would otherwise
+step from 0 V (the DAC starts at code 0) to 128 (the playback centre). Through the coupling
+cap that step looks like a DC transient — an audible thump. The firmware
+prevents it at **both ends of every clip** with a **cosine S-curve fade** over
+**120 ms** (`PLAY_FADE_MS`):
+
+```c
+fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * M_PI)));  // 0..128
+```
+
+- **Fade-in (0 → 128)** is written immediately after `dac_continuous_enable()`,
+  before the clip's samples.
+- **Fade-out (128 → 0)** is queued after the clip's last sample; the task then
+  waits out the ring depth before `dac_teardown()` so the fade actually reaches
+  the speaker (otherwise `del_channels()` would cut it off).
+
+This keeps `dV/dt` low enough that the AC-coupled amp sees a gentle ramp rather
+than a step at the start and end of each sound.
+
+#### APLL cold-start delay
+
+The first-ever call to `dac_continuous_new_channels()` after power-on triggers
+ESP32 APLL lock and I²S peripheral initialisation — a one-time ~1.6 s stall.
+Because the DAC is now brought up **per clip** (not at boot), this one-time lock
+is paid on the **first sound played** in a boot session rather than during
+startup. Subsequent clips re-create the channel quickly (APLL already locked).
+When audio output is disabled, the continuous DAC / I²S0 peripheral is never
+touched at all, so the APLL lock and the ~16 KB DMA ring allocation never occur.
+
+#### LTK8002D hardware limitations
+
+| Limitation | Detail |
+|---|---|
+| **No digital interface** | Analog input only — no I²S, no PDM, no volume register |
+| **No software shutdown** | SD pin (pin 1) is pulled to VDD_5V via 100 kΩ — amp is permanently enabled; no ESP32 GPIO controls it |
+| **Always-on noise floor** | Because the amp is always powered, it amplifies its own thermal noise and any supply noise with no audio playing |
+| **Fixed gain** | ~3× (9.5 dB) set by internal resistors — not adjustable in software |
+
+The firmware's **software volume control** (`audio_set_volume`) works by
+scaling PCM sample values before writing to the DMA buffer — the amplifier
+gain itself is fixed.
+
+#### `Audio → Enable audio output` toggle
+
+Audio output is **disabled by default**. The toggle takes effect on the **next reboot** — when the web UI saves a change to this setting it triggers a restart so the audio subsystem comes up cleanly in the chosen state.
+
+**Boot with audio disabled (default):** `audio_init(false)` is called. The continuous DAC, I²S0 peripheral, APLL, and DMA ring are never started. The GPIO25 pad stays **isolated** (`rtc_gpio_isolate()`, applied once at the top of `app_main`) — disconnected from the digital domain, no DMA, no clock. The ~16 KB DMA heap and the ~1.6 s APLL cold-start delay are avoided entirely.
+
+**Boot with audio enabled:** `audio_init(true)` only sets the enabled flag; the pad stays isolated. The DAC is **not** brought up at boot — it is created per clip by the playback task (`dac_restart()` → fade-in → clip → fade-out → `dac_teardown()`, which re-isolates the pad), so idle is identical to the disabled case. This is the key difference from earlier builds, which left the ring running at 128 between sounds.
+
+**Note:** the LTK8002D itself remains powered (SD pin tied high) in both cases, so its thermal self-noise floor is still present at a very low level.
+
+> **Why isolation beats a driven idle:** a driven-LOW pad conducts ground/supply transients into the amp input through its pull-down FET. `rtc_gpio_isolate()` removes that conduction path entirely, so idle is near-silent, matching stock.
+
+#### Idle noise — RESOLVED
+
+Root cause: the **GPIO25 idle drive state** was conducting the ESP32's
+ground/supply transients into the amplifier. `rtc_gpio_isolate()` on GPIO25
+(the stock firmware's idle pad state) removes the conduction path; idle is
+now measured equivalent to stock. The mitigations below remain in place —
+they reduce rail transients and per-second SPI/CPU load, which still matter
+for the small capacitive residual and for general efficiency:
+
+| Mitigation | Effect |
+|---|---|
+| GPIO25 pad **isolated** at idle (`rtc_gpio_isolate`, between clips, enabled *and* disabled) | No I²S/DMA/clock running, and the pad is disconnected from the digital domain — no conduction path for ground/supply transients into the amp (see toggle section) |
+| DAC created/destroyed **per clip** (`dac_restart` / `dac_teardown`) | The DMA/I²S engine only runs while a sound is actually playing, then is fully torn down — matching the stock firmware's silent idle |
+| `WIFI_PS_NONE` (radio always on) | MIN_MODEM was used while GPIO25 was clamped LOW, because the radio's continuous current was audible through that clamp's ground path. With the pad isolated the noise cost is gone — and MIN_MODEM's ~80% radio sleep was dropping downlink frames (MQTT `No PING_RESP` every keepalive, esp-tls `select() timeout` on handshakes), so the receiver now stays on |
+| Bulk LCD pixel pushes use `spi_device_transmit()` (interrupt/DMA) instead of `spi_device_polling_transmit()` | The DMA path **yields the CPU** while each chunk clocks out, instead of busy-waiting with interrupts hot. This lowered the SPI-induced switching component of the noise floor during every clock-face/ticker redraw. Small command/parameter writes (≤8 bytes) stay on the polling path, where DMA setup would cost more than it saves |
+| Colon-blink **partial push** (diff-box) | The once-per-second colon blink rewrites only the two changed colon-dot rectangles instead of repainting the whole tube — far less per-second SPI traffic (and CPU) on the shared rail |
+| RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
+| Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
+
+**Optional hardware hardening** (no longer required for quiet idle): a
+**100 µF + 100 nF** decoupling cap close to the ESP32 `VDD3P3_RTC` pin further
+reduces supply transients reaching the DAC's analog domain during playback.
+
+### Microphone Notes
+
+#### Signal chain
+
+```
+4 mm SMT electret capsule (unmarked — see candidates below)
+    → LMV321IDBVR single op-amp (SOT-23-5) — hardware preamp / bias stage
+    → GPIO35 (ADC1_CH7, input-only)
+    → ESP32 ADC1, 12-bit, 12 dB attenuation (0–3.3 V full scale)
+```
+
+The capsule on PCB Rev 1.31 (near the top edge of the board) carries **no markings**; identification is by package size/style only. Visual candidates: **CUI CMC-4015-25T**, **CUI CMC-4013-02S-423**, or **MIC-4013-6-G00** — dimensionally similar 4 mm SMT electrets. Measured ADC signal levels (raw-frame captures: ~±20 counts ≈ 16 mV for moderate room-level tones after the LMV321 stage) are more consistent with a standard **≈ −42 dBV/Pa** capsule than the −25 dBV/Pa the 4015-25T datasheet specifies, slightly favouring the 4013-class candidates. Functionally it does not matter: the firmware's analysis is fully relative (per-frame normalisation + adaptive noise floor), so capsule sensitivity only shifts where the floor settles. The **LMV321IDBVR** op-amp (marked `RC1F` on the PCB, located adjacent to the mic) provides the preamp stage between capsule and ADC. Both are analog-only components — no I²S or PDM interface. The correct ADC input is **GPIO35 / ADC1_CH7** (input-only pin). GPIO36 / ADC1_CH0 (`SENSOR_VP`) is **not** connected to the microphone on this hardware revision.
+
+#### Sampling driver — `adc_continuous` (I²S0 DMA, hardware-clocked)
+
+Capture is driven by the ESP32's **digital ADC controller via I²S0 DMA** (`adc_continuous`): the SAR is clocked in hardware at **32 kHz** (the digital controller's minimum is 20 kHz) and DMA delivers complete frames; the mic task averages every 4 samples down to the **8 kHz** analysis rate (the averaging doubles as an anti-alias filter and adds ~1 bit of effective resolution). Exact sample spacing, near-zero CPU per sample.
+
+**Why hardware clocking is non-negotiable** (every software-timed approach was tried and failed):
+- `esp_timer` + `adc_oneshot_read()` at 125 µs: each read costs **300–600 µs** (driver mutex, per-read reconfiguration), so the timer ran in permanent catch-up — the *real* sample rate was ~1.7 kHz, making every band above the true ~850 Hz Nyquist **aliased noise** (measured ~78 % of Core 0 for the privilege).
+- Register-level SAR reads fixed the rate and cut CPU to ~16 %, but RTOS preemption produced **sampling jitter** (esp_timer catch-up clusters samples back-to-back, then they're treated as uniform) — a swept-tone test showed high-frequency energy smeared into the low bands and nothing detected above ~450 Hz.
+
+**I²S0 sharing with audio:** `dac_continuous` (audio playback) uses the same peripheral. Audio claims it via `mic_set_audio_active(true)` before each clip and releases it after teardown — the spectrum freezes for the duration of a button click or alarm and resumes automatically (same pattern as the LED pause during playback).
+
+| Parameter | Value |
+|---|---|
+| Hardware rate | 32 000 Hz (I²S0-clocked, DMA) ÷ 4 → 8 000 Hz effective |
+| Frame size | 128 samples (16 ms per Goertzel frame, ~62 fps) |
+| Bit depth | 12-bit, ADC_ATTEN_DB_12 |
+| Window | Hann (suppresses off-band leakage — a loud bass note no longer splatters across all bands) |
+| CPU cost | Near-zero acquisition (DMA); ~4–5 % of Core 0 for Goertzel analysis.  Capture is gated to Spectrum mode (all other modes pay zero) and httpd is pinned to Core 1 (task-WDT history).  **Note:** noise baselines captured on firmware ≤ v1.13.x were measured under the old aliased sampling — re-capture (or Reset to Auto) after updating. |
+
+#### Frequency bands
+
+**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Each band is the **sum of all 62.5 Hz analysis bins inside its frequency range** (~60 bins across 250–3937 Hz, mapped to bands by geometric band edges), not a single bin at the band centre — a single bin only hears ±125 Hz, and the log-spaced centres above ~1 kHz sit 200–400 Hz apart, so tones between centres would fall into spectral cracks and vanish (a tone-sweep test measured literal zero at 3.2 kHz before this fix). Bands are logarithmically spaced across 280 Hz–3800 Hz (safely below the 4 kHz Nyquist limit), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. The table below lists the band centres. This layout avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
+
+| Tube | Bar 0 | Bar 1 | Bar 2 | Bar 3 | Range |
+|---|---|---|---|---|---|
+| 0 | 280 Hz | 315 Hz | 350 Hz | 395 Hz | Low bass |
+| 1 | 440 Hz | 495 Hz | 555 Hz | 620 Hz | Upper bass |
+| 2 | 695 Hz | 780 Hz | 870 Hz | 975 Hz | Lower mid |
+| 3 | 1095 Hz | 1225 Hz | 1370 Hz | 1535 Hz | Midrange |
+| 4 | 1720 Hz | 1925 Hz | 2160 Hz | 2420 Hz | Presence |
+| 5 | 2710 Hz | 3030 Hz | 3395 Hz | 3800 Hz | Treble |
+
+Ratio between adjacent bands ≈ 1.12× per step. The display reads left-to-right from bass (tube 0) to treble (tube 5).
+
+#### Noise floor and peak-hold
+
+Because the LMV321 preamp amplifies broadband electrical noise alongside audio, a **two-phase adaptive noise floor estimator** runs per band:
+
+- **Phase 1 (first ~4 s, 250 frames):** fast convergence (α = 0.02, no signal guard) locks the per-band noise floor from zero.
+- **Phase 2 (steady state):** slow drift tracking (α = 0.002) only when the current bin is below 4× the estimated floor — prevents audio signals from biasing the floor upward.
+
+Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** threshold (`mic_silence_gate` in config, adjustable under **Display → Spectrum Mode → Noise Floor**) blanks all bands when the **sum of post-floor band power** falls below the set value — a *spectral* gate, self-calibrating because the adaptive floor has already absorbed electrical noise. Silence sums to <10; even quiet real audio exceeds 50. **Default 25; 0 disables.** *(Semantics changed: the old gate compared time-domain RMS² with a default of 250 — it was volume-calibrated rather than correctness-calibrated, blanking clearly-detected mid-frequency tones at listening level while letting loud sub-bass open the display onto nothing but speaker-distortion hash. Users upgrading should re-tune the slider, starting at 25.)*
+
+Display dynamics: band power is smoothed with a short EMA (τ ≈ 45 ms) so tones near a band boundary hold a steady bar instead of flickering between neighbours, then peak-hold applies instant attack with exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
+
+#### Spectrum LED Control
+
+The LED ring behaviour in Spectrum mode is independently configurable under **Display → Spectrum Mode → LED Source**:
+
+| Source | Behaviour |
+|---|---|
+| **Custom glow colour** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. The colour is set by the **LED Glow Colour** picker and is the same for all LEDs. |
+| **Follow accent mode** | The LEDs ignore the audio entirely and animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colours from the LED settings. The LCD bars still respond to the microphone normally. |
+
+The **LCD Bar Colour** picker is separate from the LED source and always applies — it controls the colour of the frequency bars drawn on the LCDs regardless of which LED source is selected.
+
+### SHT30 Temperature / Humidity Sensor
+
+The **SHT30** is fitted on the Nextube PCB and shares the I²C bus with the PCF8563 RTC.
+
+| Parameter | Value |
+|---|---|
+| I²C address | 0x44 (ADDR pin low) |
+| Bus | Shared with PCF8563 RTC — SCL=GPIO22, SDA=GPIO23 |
+| Poll interval | Every 30 seconds (background FreeRTOS task) |
+| Detection | Probed at boot via `i2c_master_probe()`; if the probe fails the driver disables itself silently |
+
+Readings appear on the **Dashboard** under *Local Sensor* (temperature and humidity) and are included in the `/api/status` response as `sensor.temp_c` and `sensor.humidity`. The displayed temperature respects the **Units** setting (Celsius / Fahrenheit).
+
+### Replacement LCD Panels
+
+> [!IMPORTANT]
+> **LCD replacement support requires firmware v1.8 or later.** Earlier versions lack the per-tube calibration settings (VCOM, gamma, column/row offsets, panel profile) needed to configure ST7735S replacement panels correctly.
+
+The six original displays are **80×160 px ST7735 "Green Tab" IPS panels**. If one or more tubes fail they can be replaced with compatible ST7735S modules — the most common drop-in replacement confirmed to work with this firmware is:
+
+ <img width="335" height="100" alt="image" src="https://github.com/user-attachments/assets/8837cff8-df31-41ae-81ee-644e3794f72e" />
+
+Note the connector when purchasing
+
+| Part number | Notes | Source |
+|---|---|---|
+| **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (Requires Invert Set)| [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
+| **LY096X1608TBBIG09C08** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (No Invert Required) | [Alibaba listing](https://www.alibaba.com/product-detail/TFT-LCD-0-96-Inch-80X160_1600462526823.html) |
+
+ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colours on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
+
+> [!TIP]
+> **LCD swap guide:** For a step-by-step video walkthrough of the physical panel replacement process, see the [community discussion thread](https://github.com/MrToast99/Nextube-Remaster/discussions/35).
+
+#### Quick-start for LH096NT-IF09W replacement panels
+
+1. Flash firmware, open the web UI
+2. Go to **Display → Advanced Display → Panel Profile**
+3. For each replaced tube set **Profile → Vivid** and **VCOM → 40** as a starting point
+4. Click **Save** and evaluate — if colours are still washed raise VCOM toward 50–60; if they look over-saturated or too dark lower it toward 25–30
+5. If colours remain washed even at high VCOM, raise **Gamma Correction** for that tube to **1.8–2.2**
+6. If colours are inverted (white background appears black), tick **Colour Inversion** for that tube
+7. If there is a 1-pixel static border on the right or bottom edge, set **Column Offset → +2** and **Row Offset → +1** for that tube
+8. Click **Save** — changes take effect immediately without a reboot
+
+> **Note on window offsets:** The LH096NT-IF09W ST7735S variant uses a frame-buffer that is 2 px wider than the visible area. Without the +2 column offset, the rightmost column of uninitialized frame-buffer appears as a thin static line. Row offset of +1 corrects the same issue at the bottom edge.
+
+---
+
+### Flash Layout (16MB)
+
+| Offset | Size | Partition |
+|---|---|---|
+| 0x001000 | — | Bootloader |
+| 0x008000 | — | Partition table |
+| 0x009000 | 20K | NVS |
+| 0x00E000 | 8K | OTA data |
+| 0x010000 | 4.5M | app0 (OTA slot 0) |
+| 0x490000 | 4.5M | app1 (OTA slot 1) |
+| 0x910000 | 7M | LittleFS |
 
 ## Project Structure
 
