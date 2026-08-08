@@ -2893,6 +2893,12 @@ static uint8_t s_wl_glyph_r = 255, s_wl_glyph_g = 255, s_wl_glyph_b = 255;
 static uint8_t s_wl_font_r  = 255, s_wl_font_g  = 255, s_wl_font_b  = 255;
 static bool    s_wl_shadow   = true;
 static uint8_t s_wl_shadow_r = 0,  s_wl_shadow_g = 0,  s_wl_shadow_b = 0;
+/* Clock-digit-glyph shadow — independent of s_wl_shadow (font/text shadow,
+ * above). Split so users can tune digit and font shadows separately (e.g. a
+ * dark digit + dark shadow combo alongside a light font colour, which would
+ * otherwise be forced to share the dark shadow and read as low-contrast). */
+static bool    s_wl_glyph_shadow   = true;
+static uint8_t s_wl_glyph_shadow_r = 0,  s_wl_glyph_shadow_g = 0,  s_wl_glyph_shadow_b = 0;
 static char    s_wl_bg_theme[32] = "";
 static char    s_wl_bg_png_cached[256] = ""; /* path of last successfully decoded PNG bg */
 static uint8_t *s_wl_bg_png_buf        = NULL; /* RGB565 cache in PSRAM for custom PNG bg */
@@ -4203,7 +4209,7 @@ static void wl_glyph_render(uint8_t *fb, char ch, bool shadow,
                 }
                 if (halo_a > 0) {
                     if (cov_out) halo_out[idx] = (uint8_t)halo_a;
-                    else wl_blend_px(row + ox * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, halo_a);
+                    else wl_blend_px(row + ox * 2, s_wl_glyph_shadow_r, s_wl_glyph_shadow_g, s_wl_glyph_shadow_b, halo_a);
                 }
             }
         }
@@ -4247,11 +4253,11 @@ static void wl_glyph(uint8_t *fb, char ch)
                                (uint8_t)s_ft_face_id, (uint32_t)(unsigned char)ch,
                                WL_FT_BIG_PX,
                                s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b,
-                               s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
+                               s_wl_glyph_shadow, s_wl_glyph_shadow_r, s_wl_glyph_shadow_g, s_wl_glyph_shadow_b);
         return;
     }
 
-    bool shadow = s_wl_shadow;
+    bool shadow = s_wl_glyph_shadow;
     wl_glyph_cache_t *e = wl_glyph_cache_get(ch, shadow);
     if (!e) { wl_glyph_render(fb, ch, shadow, NULL, NULL); return; }  /* OOM fallback */
 
@@ -6201,6 +6207,11 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
         s_wl_shadow_r = (uint8_t)out[0]; s_wl_shadow_g = (uint8_t)out[1]; s_wl_shadow_b = (uint8_t)out[2];
         /* Boolean can't blend — flip at mid-twilight. */
         s_wl_shadow = (nt >= 128) ? cfg->custom_shadow_night : cfg->custom_shadow;
+        for (int i = 0; i < 3; i++) { day[i] = cfg->custom_glyph_shadow_color[i];
+                                      nite[i] = cfg->custom_glyph_shadow_color_night[i]; }
+        wl_lerp3(day, nite, nt, out);
+        s_wl_glyph_shadow_r = (uint8_t)out[0]; s_wl_glyph_shadow_g = (uint8_t)out[1]; s_wl_glyph_shadow_b = (uint8_t)out[2];
+        s_wl_glyph_shadow = (nt >= 128) ? cfg->custom_glyph_shadow_night : cfg->custom_glyph_shadow;
     }
     wl_refresh_ft_face(cfg->custom_font);
     if (s_wl_is_custom) {
@@ -6790,6 +6801,8 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
     s_wl_font_r = 255; s_wl_font_g = 255; s_wl_font_b = 255;
     s_wl_shadow = true;
     s_wl_shadow_r = 0; s_wl_shadow_g = 0; s_wl_shadow_b = 0;
+    s_wl_glyph_shadow = true;
+    s_wl_glyph_shadow_r = 0; s_wl_glyph_shadow_g = 0; s_wl_glyph_shadow_b = 0;
     s_wl_bg_theme[0] = '\0';
     wl_refresh_ft_face(cfg->custom_font);
 

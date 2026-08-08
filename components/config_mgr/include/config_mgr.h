@@ -82,8 +82,10 @@ typedef struct {
     uint8_t          custom_bg_color2[3]; /* gradient end colour (ignored for "solid") */
     uint8_t          custom_font_color[3];   /* info-panel / label text RGB */
     uint8_t          custom_glyph_color[3];  /* clock digit glyph RGB */
-    bool             custom_shadow;          /* shadow on/off for glyphs and text */
-    uint8_t          custom_shadow_color[3]; /* shadow RGB (used when custom_shadow=true) */
+    bool             custom_shadow;          /* font/text shadow on/off (info panels, labels — NOT clock digits, see custom_glyph_shadow) */
+    uint8_t          custom_shadow_color[3]; /* font/text shadow RGB (used when custom_shadow=true) */
+    bool             custom_glyph_shadow;          /* clock-digit-glyph shadow on/off — independent of custom_shadow (font/text) */
+    uint8_t          custom_glyph_shadow_color[3]; /* clock-digit-glyph shadow RGB (used when custom_glyph_shadow=true) */
     /* Night color set (issue #73) — a second font/glyph/shadow set that the
      * WeatherLive sky crossfades to through twilight, tracking the scene's
      * real geocoded sunrise/sunset. Only active while the animated WL sky is
@@ -91,8 +93,10 @@ typedef struct {
     bool             custom_night_colors;         /* enable the night set */
     uint8_t          custom_font_color_night[3];
     uint8_t          custom_glyph_color_night[3];
-    bool             custom_shadow_night;         /* shadow on/off at night (flips at mid-twilight) */
+    bool             custom_shadow_night;         /* font/text shadow on/off at night (flips at mid-twilight) */
     uint8_t          custom_shadow_color_night[3];
+    bool             custom_glyph_shadow_night;         /* clock-digit-glyph shadow on/off at night */
+    uint8_t          custom_glyph_shadow_color_night[3];
     char             custom_font[64];        /* TTF filename in /spiffs/fonts/; "" = logisoso (u8g2 fallback).
                                                * Also applies to 24H_CX asset-theme Outdoor Temp/Humidity/Wind/
                                                * AQI/combined-H-T panels (they share wl_text() with WeatherLive). */
@@ -365,6 +369,16 @@ char *config_to_json(bool include_password);
 
 /** Reset to factory defaults and save. */
 void config_reset(void);
+
+/** Flash write-health counter — session-scoped (resets on reboot), incremented
+ * whenever a low-level flash write/erase genuinely fails: config.json save
+ * (temp-file write or the atomic rename), or a LittleFS OTA partition
+ * erase/write. Deliberately NOT incremented for application-level failures
+ * (bad path, out of space) — only for conditions that indicate the flash
+ * hardware itself is failing to do what it was asked. A healthy chip should
+ * see this stay at 0 for the life of the device. */
+void     config_mgr_note_flash_write_failure(void);
+uint32_t config_mgr_get_flash_write_fail_count(void);
 
 /** Advance to the next enabled mode and save.
  *  Called by the display task when the rotation timer fires.

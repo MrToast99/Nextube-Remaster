@@ -893,6 +893,10 @@ static esp_err_t api_status(httpd_req_t *r)
         }
         cJSON_AddBoolToObject(root, "ota_rollback", rollback);
     }
+    /* Flash write-health — see config_mgr_note_flash_write_failure(). Should
+     * stay 0 for the life of a healthy device; hidden-debug-panel only. */
+    cJSON_AddNumberToObject(root, "flash_write_fail_count",
+                            (double)config_mgr_get_flash_write_fail_count());
     int64_t t_ota = esp_timer_get_time();
     char *json = cJSON_PrintUnformatted(root);
     int64_t t_json = esp_timer_get_time();
@@ -1383,6 +1387,7 @@ static esp_err_t api_fs_ota_impl(httpd_req_t *r)
         for (int off = 0; off < (int)alloc_len; off += FS_SECTOR) {
             if (esp_partition_erase_range(part, (uint32_t)off, FS_SECTOR) != ESP_OK ||
                 esp_partition_write(part, (uint32_t)off, img_buf + off, FS_SECTOR) != ESP_OK) {
+                config_mgr_note_flash_write_failure();
                 flash_ok = false;
                 break;
             }
@@ -1444,9 +1449,9 @@ static esp_err_t api_fs_ota_impl(httpd_req_t *r)
             }
 
             if (esp_partition_erase_range(part, written, FS_SECTOR) != ESP_OK)
-                FS_OTA_FAIL("Erase failed");
+                { config_mgr_note_flash_write_failure(); FS_OTA_FAIL("Erase failed"); }
             if (esp_partition_write(part, written, buf, FS_SECTOR) != ESP_OK)
-                FS_OTA_FAIL("Write failed");
+                { config_mgr_note_flash_write_failure(); FS_OTA_FAIL("Write failed"); }
             written += rx;
             vTaskDelay(1);   /* yield between sectors — see the PSRAM-path loop above */
         }

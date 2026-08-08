@@ -1279,17 +1279,18 @@ The WeatherLive theme and all custom clock faces support user-supplied TrueType 
 
 ### Shadow
 
-When a Custom Face font is active a **drop shadow** can be drawn around every glyph. Enable it and pick the shadow colour under **Display → Custom Face → Shadow**. The shadow is a soft bloom (±2 px) that appears behind each rendered character.
+When a Custom Face font is active a **drop shadow** can be drawn around glyphs. **Digit shadow** and **Font shadow** are independent controls — each has its own On/Off toggle and colour under **Display → Custom Face** (and independent day/night variants if Night color set is enabled). Splitting them lets you, for example, run a dark digit colour with a matching dark digit shadow while keeping font/label text light with a lighter (or disabled) font shadow, without the two fighting each other. Both are a soft bloom (±2 px) behind each rendered character.
 
-Beyond text glyphs, the shadow setting also controls the graphical weather-panel elements:
+- **Digit shadow** — the clock face numerals only.
+- **Font shadow** — info-panel and label text, plus the graphical weather-panel elements that are visually part of the same text:
 
-| Element | Shadow behaviour |
-|---|---|
-| Hi/Lo temperature range track (tube 4) | Soft underline shadow below the bar |
-| Current-temperature marker (tube 4) | Drop shadow offset below the circle |
-| Humidity teardrop (tube 5) | Halo around the teardrop outline |
+  | Element | Shadow behaviour |
+  |---|---|
+  | Hi/Lo temperature range track (tube 4) | Soft underline shadow below the bar |
+  | Current-temperature marker (tube 4) | Drop shadow offset below the circle |
+  | Humidity teardrop (tube 5) | Halo around the teardrop outline |
 
-All three elements use the same shadow colour set in **Display → Custom Face → Shadow**. Set the colour to pure black for a classic engraved look, or to a tinted hue to complement the theme palette.
+Set either colour to pure black for a classic engraved look, or to a tinted hue to complement the theme palette. Turn a shadow off entirely by setting its On/Off toggle to Off — no need to fight with color values.
 
 ### Uploading a font
 

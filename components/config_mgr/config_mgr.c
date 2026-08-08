@@ -21,6 +21,10 @@ static nextube_config_t s_cfg;
 static SemaphoreHandle_t s_mutex;
 static SemaphoreHandle_t s_tls_sem;
 
+static uint32_t s_flash_write_fail_count = 0;
+void config_mgr_note_flash_write_failure(void) { s_flash_write_fail_count++; }
+uint32_t config_mgr_get_flash_write_fail_count(void) { return s_flash_write_fail_count; }
+
 /* ── Defaults ──────────────────────────────────────────────────────── */
 static void set_defaults(void)
 {
@@ -53,6 +57,8 @@ static void set_defaults(void)
     s_cfg.custom_glyph_color[0] = 255; s_cfg.custom_glyph_color[1] = 255; s_cfg.custom_glyph_color[2] = 255;
     s_cfg.custom_shadow         = true;
     s_cfg.custom_shadow_color[0]= 0;   s_cfg.custom_shadow_color[1]= 0;   s_cfg.custom_shadow_color[2]= 0;
+    s_cfg.custom_glyph_shadow          = true;
+    s_cfg.custom_glyph_shadow_color[0] = 0; s_cfg.custom_glyph_shadow_color[1] = 0; s_cfg.custom_glyph_shadow_color[2] = 0;
     /* Night color set: disabled; colors mirror the day defaults so enabling
      * it is a no-op until the user actually picks night colors. */
     s_cfg.custom_night_colors   = false;
@@ -60,6 +66,8 @@ static void set_defaults(void)
     s_cfg.custom_glyph_color_night[0] = 255; s_cfg.custom_glyph_color_night[1] = 255; s_cfg.custom_glyph_color_night[2] = 255;
     s_cfg.custom_shadow_night         = true;
     s_cfg.custom_shadow_color_night[0]= 0;   s_cfg.custom_shadow_color_night[1]= 0;   s_cfg.custom_shadow_color_night[2]= 0;
+    s_cfg.custom_glyph_shadow_night          = true;
+    s_cfg.custom_glyph_shadow_color_night[0] = 0; s_cfg.custom_glyph_shadow_color_night[1] = 0; s_cfg.custom_glyph_shadow_color_night[2] = 0;
     s_cfg.custom_font[0]        = '\0';
     s_cfg.dm_on_color[0]  = 255; s_cfg.dm_on_color[1]  = 255; s_cfg.dm_on_color[2]  = 255;
     s_cfg.dm_off_color[0] = 25;  s_cfg.dm_off_color[1] = 25;  s_cfg.dm_off_color[2] = 25;
@@ -577,20 +585,39 @@ static void parse_json(const char *json, size_t len)
         if (cJSON_IsBool(v)) s_cfg.custom_night_colors = cJSON_IsTrue(v);
         v = cJSON_GetObjectItem(root, "custom_shadow_night");
         if (cJSON_IsBool(v)) s_cfg.custom_shadow_night = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "custom_glyph_shadow");
+        bool have_glyph_shadow = cJSON_IsBool(v);
+        if (have_glyph_shadow) s_cfg.custom_glyph_shadow = cJSON_IsTrue(v);
+        v = cJSON_GetObjectItem(root, "custom_glyph_shadow_night");
+        bool have_glyph_shadow_night = cJSON_IsBool(v);
+        if (have_glyph_shadow_night) s_cfg.custom_glyph_shadow_night = cJSON_IsTrue(v);
+        /* Migration: configs saved before the font/digit shadow split have no
+         * custom_glyph_shadow* keys at all. Rather than leaving the glyph
+         * side at the hardcoded default, inherit whatever the user had
+         * already tuned for the (formerly shared) shadow — preserves their
+         * prior look instead of silently resetting the digit shadow to
+         * black. Only applies once: once custom_glyph_shadow is saved even
+         * a single time, the key exists from then on and this is skipped. */
+        if (!have_glyph_shadow) s_cfg.custom_glyph_shadow = s_cfg.custom_shadow;
+        if (!have_glyph_shadow_night) s_cfg.custom_glyph_shadow_night = s_cfg.custom_shadow_night;
     }
     json_read_str(root, "custom_font", s_cfg.custom_font, sizeof(s_cfg.custom_font));
     {
-        static const char *const color_keys[10] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
+        bool have_glyph_shadow_color       = cJSON_IsArray(cJSON_GetObjectItem(root, "custom_glyph_shadow_color"));
+        bool have_glyph_shadow_color_night = cJSON_IsArray(cJSON_GetObjectItem(root, "custom_glyph_shadow_color_night"));
+        static const char *const color_keys[12] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
                                                     "dm_on_color", "dm_off_color",
                                                     "custom_bg_color1", "custom_bg_color2",
                                                     "custom_font_color_night", "custom_glyph_color_night",
-                                                    "custom_shadow_color_night" };
-        uint8_t *const color_ptrs[10] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
+                                                    "custom_shadow_color_night",
+                                                    "custom_glyph_shadow_color", "custom_glyph_shadow_color_night" };
+        uint8_t *const color_ptrs[12] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
                                           s_cfg.dm_on_color, s_cfg.dm_off_color,
                                           s_cfg.custom_bg_color1, s_cfg.custom_bg_color2,
                                           s_cfg.custom_font_color_night, s_cfg.custom_glyph_color_night,
-                                          s_cfg.custom_shadow_color_night };
-        for (int ci = 0; ci < 10; ci++) {
+                                          s_cfg.custom_shadow_color_night,
+                                          s_cfg.custom_glyph_shadow_color, s_cfg.custom_glyph_shadow_color_night };
+        for (int ci = 0; ci < 12; ci++) {
             cJSON *arr = cJSON_GetObjectItem(root, color_keys[ci]);
             if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= 3) {
                 for (int ch = 0; ch < 3; ch++) {
@@ -600,6 +627,11 @@ static void parse_json(const char *json, size_t len)
                 }
             }
         }
+        /* Same migration as above, for the shadow *color* (see comment there). */
+        if (!have_glyph_shadow_color)
+            memcpy(s_cfg.custom_glyph_shadow_color, s_cfg.custom_shadow_color, 3);
+        if (!have_glyph_shadow_color_night)
+            memcpy(s_cfg.custom_glyph_shadow_color_night, s_cfg.custom_shadow_color_night, 3);
     }
     json_read_u8(root, "lcd_brightness", &s_cfg.lcd_brightness);
     if (s_cfg.lcd_brightness > 100) s_cfg.lcd_brightness = 100;
@@ -1042,9 +1074,11 @@ static void write_config_file(char *json)
     }
     if (!ok) {
         ESP_LOGE(TAG, "Config save failed (temp write) — old config left intact");
+        config_mgr_note_flash_write_failure();
         remove(TMP_PATH);
     } else if (rename(TMP_PATH, CONFIG_PATH) != 0) {
         ESP_LOGE(TAG, "Config save failed (rename) — old config left intact");
+        config_mgr_note_flash_write_failure();
         remove(TMP_PATH);
     } else {
         ESP_LOGI(TAG, "Config saved to flash (%u bytes)", (unsigned)len);
@@ -1310,19 +1344,23 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "custom_shadow",        s_cfg.custom_shadow);
     cJSON_AddBoolToObject  (root, "custom_night_colors",  s_cfg.custom_night_colors);
     cJSON_AddBoolToObject  (root, "custom_shadow_night",  s_cfg.custom_shadow_night);
+    cJSON_AddBoolToObject  (root, "custom_glyph_shadow",        s_cfg.custom_glyph_shadow);
+    cJSON_AddBoolToObject  (root, "custom_glyph_shadow_night",  s_cfg.custom_glyph_shadow_night);
     cJSON_AddStringToObject(root, "custom_font",          s_cfg.custom_font);
     {
-        const char *const keys[10]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
+        const char *const keys[12]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
                                         "dm_on_color", "dm_off_color",
                                         "custom_bg_color1", "custom_bg_color2",
                                         "custom_font_color_night", "custom_glyph_color_night",
-                                        "custom_shadow_color_night" };
-        const uint8_t *const ptrs[10] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
+                                        "custom_shadow_color_night",
+                                        "custom_glyph_shadow_color", "custom_glyph_shadow_color_night" };
+        const uint8_t *const ptrs[12] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
                                           s_cfg.dm_on_color, s_cfg.dm_off_color,
                                           s_cfg.custom_bg_color1, s_cfg.custom_bg_color2,
                                           s_cfg.custom_font_color_night, s_cfg.custom_glyph_color_night,
-                                          s_cfg.custom_shadow_color_night };
-        for (int ci = 0; ci < 10; ci++) {
+                                          s_cfg.custom_shadow_color_night,
+                                          s_cfg.custom_glyph_shadow_color, s_cfg.custom_glyph_shadow_color_night };
+        for (int ci = 0; ci < 12; ci++) {
             cJSON *arr = cJSON_CreateArray();
             for (int ch = 0; ch < 3; ch++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(ptrs[ci][ch]));
             cJSON_AddItemToObject(root, keys[ci], arr);

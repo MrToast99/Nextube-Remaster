@@ -256,24 +256,45 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
           <input type="color" id="f-custom-bg-color2" value="#3c3c78" onchange="markDirty()" style="height:2rem;cursor:pointer">
         </div>
       </div>
-      <div class="field">
-        <label>Font color <span style="color:var(--dim);font-size:.82rem">(info panels &amp; labels)</span></label>
-        <input type="color" id="f-custom-font-color" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+      <div style="margin-bottom:.6rem">
+        <div style="font-size:.85rem;font-weight:600;letter-spacing:.02em;color:var(--hi);margin-bottom:.3rem">Font</div>
+        <div style="border-left:2px solid rgba(255,255,255,.12);padding-left:.8rem">
+          <div class="field">
+            <label>Color <span style="color:var(--dim);font-size:.82rem">(info panels &amp; labels)</span></label>
+            <input type="color" id="f-custom-font-color" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+          </div>
+          <div class="field">
+            <label>Shadow</label>
+            <select id="f-custom-shadow" onchange="onCustomShadowChange()">
+              <option value="1">On</option>
+              <option value="0">Off</option>
+            </select>
+          </div>
+          <div class="field" id="custom-shadow-color-wrap">
+            <label>Shadow color</label>
+            <input type="color" id="f-custom-shadow-color" value="#5c5c5c" onchange="markDirty()" style="height:2rem;cursor:pointer">
+          </div>
+        </div>
       </div>
-      <div class="field">
-        <label>Digit color <span style="color:var(--dim);font-size:.82rem">(clock face numerals)</span></label>
-        <input type="color" id="f-custom-glyph-color" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
-      </div>
-      <div class="field">
-        <label>Shadow</label>
-        <select id="f-custom-shadow" onchange="onCustomShadowChange()">
-          <option value="1">On</option>
-          <option value="0">Off</option>
-        </select>
-      </div>
-      <div class="field" id="custom-shadow-color-wrap">
-        <label>Shadow color</label>
-        <input type="color" id="f-custom-shadow-color" value="#5c5c5c" onchange="markDirty()" style="height:2rem;cursor:pointer">
+      <div style="margin-bottom:.5rem">
+        <div style="font-size:.85rem;font-weight:600;letter-spacing:.02em;color:var(--hi);margin-bottom:.3rem">Digit</div>
+        <div style="border-left:2px solid rgba(255,255,255,.12);padding-left:.8rem">
+          <div class="field">
+            <label>Color <span style="color:var(--dim);font-size:.82rem">(clock face numerals)</span></label>
+            <input type="color" id="f-custom-glyph-color" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+          </div>
+          <div class="field">
+            <label>Shadow</label>
+            <select id="f-custom-glyph-shadow" onchange="onCustomGlyphShadowChange()">
+              <option value="1">On</option>
+              <option value="0">Off</option>
+            </select>
+          </div>
+          <div class="field" id="custom-glyph-shadow-color-wrap">
+            <label>Shadow color</label>
+            <input type="color" id="f-custom-glyph-shadow-color" value="#000000" onchange="markDirty()" style="height:2rem;cursor:pointer">
+          </div>
+        </div>
       </div>
       <div class="field">
         <label class="chk-row">
@@ -282,24 +303,45 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
         </label>
       </div>
       <div id="custom-night-wrap" style="display:none;border-left:2px solid rgba(255,255,255,.12);padding-left:.8rem;margin-bottom:.5rem">
-        <div class="field">
-          <label>Font color (night)</label>
-          <input type="color" id="f-custom-font-color-night" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+        <div style="margin-bottom:.6rem">
+          <div style="font-size:.85rem;font-weight:600;letter-spacing:.02em;color:var(--hi);margin-bottom:.3rem">Font (night)</div>
+          <div style="border-left:2px solid rgba(255,255,255,.12);padding-left:.8rem">
+            <div class="field">
+              <label>Color</label>
+              <input type="color" id="f-custom-font-color-night" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+            </div>
+            <div class="field">
+              <label>Shadow</label>
+              <select id="f-custom-shadow-night" onchange="onCustomNightShadowChange()">
+                <option value="1">On</option>
+                <option value="0">Off</option>
+              </select>
+            </div>
+            <div class="field" id="custom-night-shadow-color-wrap">
+              <label>Shadow color</label>
+              <input type="color" id="f-custom-shadow-color-night" value="#000000" onchange="markDirty()" style="height:2rem;cursor:pointer">
+            </div>
+          </div>
         </div>
-        <div class="field">
-          <label>Digit color (night)</label>
-          <input type="color" id="f-custom-glyph-color-night" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
-        </div>
-        <div class="field">
-          <label>Shadow (night)</label>
-          <select id="f-custom-shadow-night" onchange="onCustomNightShadowChange()">
-            <option value="1">On</option>
-            <option value="0">Off</option>
-          </select>
-        </div>
-        <div class="field" id="custom-night-shadow-color-wrap">
-          <label>Shadow color (night)</label>
-          <input type="color" id="f-custom-shadow-color-night" value="#000000" onchange="markDirty()" style="height:2rem;cursor:pointer">
+        <div style="margin-bottom:.5rem">
+          <div style="font-size:.85rem;font-weight:600;letter-spacing:.02em;color:var(--hi);margin-bottom:.3rem">Digit (night)</div>
+          <div style="border-left:2px solid rgba(255,255,255,.12);padding-left:.8rem">
+            <div class="field">
+              <label>Color</label>
+              <input type="color" id="f-custom-glyph-color-night" value="#ffffff" onchange="markDirty()" style="height:2rem;cursor:pointer">
+            </div>
+            <div class="field">
+              <label>Shadow</label>
+              <select id="f-custom-glyph-shadow-night" onchange="onCustomNightGlyphShadowChange()">
+                <option value="1">On</option>
+                <option value="0">Off</option>
+              </select>
+            </div>
+            <div class="field" id="custom-night-glyph-shadow-color-wrap">
+              <label>Shadow color</label>
+              <input type="color" id="f-custom-glyph-shadow-color-night" value="#000000" onchange="markDirty()" style="height:2rem;cursor:pointer">
+            </div>
+          </div>
         </div>
       </div>
       <div class="field">
@@ -1417,6 +1459,14 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <p style="font-size:.82rem;color:var(--dim);margin:0">These are experimental/developer tools. Poke around, but don't blame me if something goes sideways.</p>
     </div>
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
+      <h2 style="color:#ffa000">&#x1F4BE; Flash Health</h2>
+      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.6rem">
+        Count of genuine low-level flash write/erase failures (config saves, LittleFS OTA) since boot —
+        not application-level failures like a bad path or a full filesystem. Should stay 0 on healthy flash.
+      </p>
+      <p style="font-size:.85rem">Write/erase failures: <strong id="dbg-flash-fail-count">--</strong></p>
+    </div>
+    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
       <h2 style="color:#ffa000">&#x23F1;&#xFE0F; Time Disciplining (experimental)</h2>
       <p style="font-size:.8rem;color:var(--dim);margin-bottom:.8rem">
         How the clock is held <em>between</em> hourly NTP syncs. A <code>DRIFT</code> line is logged
@@ -2444,6 +2494,18 @@ function onCustomNightShadowChange() {
   const w = $('custom-night-shadow-color-wrap');
   if (w) w.style.display = on ? '' : 'none';
 }
+function onCustomGlyphShadowChange() {
+  markDirty();
+  const on = $('f-custom-glyph-shadow').value === '1';
+  const w = $('custom-glyph-shadow-color-wrap');
+  if (w) w.style.display = on ? '' : 'none';
+}
+function onCustomNightGlyphShadowChange() {
+  markDirty();
+  const on = $('f-custom-glyph-shadow-night').value === '1';
+  const w = $('custom-night-glyph-shadow-color-wrap');
+  if (w) w.style.display = on ? '' : 'none';
+}
 
 function onThemeChange() {
   markDirty();
@@ -2599,14 +2661,21 @@ async function loadSettings() {
   if ($('f-custom-glyph-color'))  $('f-custom-glyph-color').value  = rgbHex(cfg.custom_glyph_color);
   if ($('f-custom-shadow'))       $('f-custom-shadow').value       = cfg.custom_shadow !== false ? '1' : '0';
   if ($('f-custom-shadow-color')) $('f-custom-shadow-color').value = rgbHex(cfg.custom_shadow_color);
+  if ($('f-custom-glyph-shadow'))       $('f-custom-glyph-shadow').value       = cfg.custom_glyph_shadow !== false ? '1' : '0';
+  if ($('f-custom-glyph-shadow-color')) $('f-custom-glyph-shadow-color').value = rgbHex(cfg.custom_glyph_shadow_color);
+  onCustomShadowChange();       /* shadow-color visibility */
+  onCustomGlyphShadowChange();  /* glyph shadow-color visibility */
   if ($('f-custom-night-en')) {
     $('f-custom-night-en').checked = cfg.custom_night_colors === true;
     $('f-custom-font-color-night').value  = rgbHex(cfg.custom_font_color_night);
     $('f-custom-glyph-color-night').value = rgbHex(cfg.custom_glyph_color_night);
     $('f-custom-shadow-night').value      = cfg.custom_shadow_night !== false ? '1' : '0';
     $('f-custom-shadow-color-night').value = rgbHex(cfg.custom_shadow_color_night);
+    $('f-custom-glyph-shadow-night').value       = cfg.custom_glyph_shadow_night !== false ? '1' : '0';
+    $('f-custom-glyph-shadow-color-night').value = rgbHex(cfg.custom_glyph_shadow_color_night);
     onCustomNightChange();       /* sub-group visibility */
     onCustomNightShadowChange(); /* night shadow-color visibility */
+    onCustomNightGlyphShadowChange(); /* night glyph shadow-color visibility */
   }
   if ($('f-dm-on-color'))  $('f-dm-on-color').value  = rgbHex(cfg.dm_on_color);
   if ($('f-dm-off-color')) $('f-dm-off-color').value = rgbHex(cfg.dm_off_color);
@@ -3324,11 +3393,15 @@ async function saveSettings() {
     custom_glyph_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-glyph-color')?.value || '#ffffff').replace('#','')),
     custom_shadow: $('f-custom-shadow') ? $('f-custom-shadow').value === '1' : true,
     custom_shadow_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-shadow-color')?.value || '#000000').replace('#','')),
+    custom_glyph_shadow: $('f-custom-glyph-shadow') ? $('f-custom-glyph-shadow').value === '1' : true,
+    custom_glyph_shadow_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-glyph-shadow-color')?.value || '#000000').replace('#','')),
     custom_night_colors: $('f-custom-night-en') ? $('f-custom-night-en').checked : false,
     custom_font_color_night: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-font-color-night')?.value || '#ffffff').replace('#','')),
     custom_glyph_color_night: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-glyph-color-night')?.value || '#ffffff').replace('#','')),
     custom_shadow_night: $('f-custom-shadow-night') ? $('f-custom-shadow-night').value === '1' : true,
     custom_shadow_color_night: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-shadow-color-night')?.value || '#000000').replace('#','')),
+    custom_glyph_shadow_night: $('f-custom-glyph-shadow-night') ? $('f-custom-glyph-shadow-night').value === '1' : true,
+    custom_glyph_shadow_color_night: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-custom-glyph-shadow-color-night')?.value || '#000000').replace('#','')),
     custom_font: $('f-custom-font')?.value || '',
     dm_on_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-dm-on-color')?.value || '#ffffff').replace('#','')),
     dm_off_color: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])(($('f-dm-off-color')?.value || '#191919').replace('#','')),
@@ -4451,6 +4524,7 @@ async function refreshStatus() {
   $('s-mastodon').textContent  = s.mastodon_followers  != null ? s.mastodon_followers.toLocaleString()  : '--';
   $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
   $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';
+  if ($('dbg-flash-fail-count')) $('dbg-flash-fail-count').textContent = s.flash_write_fail_count ?? '--';
 
   /* LittleFS storage card */
   if (s.fs_total) {
