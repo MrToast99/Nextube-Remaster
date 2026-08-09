@@ -66,6 +66,15 @@ select option{background:var(--accent);color:var(--text)}
 .field input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--hi);cursor:pointer;box-shadow:var(--shadow-sm);transition:transform .12s var(--ease)}
 .field input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.1)}
 .field input[type=range]::-moz-range-thumb{width:16px;height:16px;border:none;border-radius:50%;background:var(--hi);cursor:pointer;box-shadow:var(--shadow-sm)}
+/* Chrome insets the color swatch inside the general .field input padding/
+ * background, leaving mostly plain --accent background visible around a
+ * thin strip of actual color; Firefox ignores the padding and fills the
+ * whole box. Zero out the box model and let the swatch itself fill it, so
+ * both browsers render the same full-bleed color bar. */
+.field input[type=color]{padding:0;background:none}
+.field input[type=color]::-webkit-color-swatch-wrapper{padding:0}
+.field input[type=color]::-webkit-color-swatch{border:none;border-radius:calc(var(--radius-sm) - 1px)}
+.field input[type=color]::-moz-color-swatch{border:none;border-radius:calc(var(--radius-sm) - 1px)}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
 .btn{display:inline-block;padding:.65rem 1.25rem;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:.85rem;font-weight:600;letter-spacing:.01em;transition:filter .15s var(--ease),transform .1s var(--ease)}
 .btn:active{transform:translateY(1px)}
@@ -4876,6 +4885,7 @@ async function onAuthSucceeded() {
    * refreshStatus populates s-fwver.  checkForUpdates needs both to be done or it
    * either hits the wrong repo URL or returns early on a '--' firmware version.  */
   await Promise.all([loadSettings(), refreshStatus()]);
+  if (!$('f-ssid').value) { showOnboardWizard(); return; }
   checkForUpdates(true);
   buildLogToggles();
   setInterval(refreshStatus, 5000);
@@ -5386,13 +5396,18 @@ async function startAutoUpdate() {
     outline: none; border-color: var(--hi,#ef4565);
     box-shadow: 0 0 0 3px rgba(var(--hi-rgb,239,69,101),.18);
   }
-  .auth-card button {
+  /* :not(.btn) so buttons that opt into the app's own .btn/.btn-primary/
+   * .btn-outline system (e.g. the onboarding wizard's WiFi Connect/Scan
+   * buttons, styled to match the Network tab) aren't fought over by both
+   * rule sets — .auth-card button has higher specificity than a single
+   * class and would otherwise win, flattening .btn-outline to solid red. */
+  .auth-card button:not(.btn) {
     width: 100%; padding: .65rem; margin-top: .35rem;
     background: var(--hi,#ef4565); color: #fff; border: none;
     border-radius: var(--radius-sm, 6px); cursor: pointer; font-weight: 600;
     font-size: .95rem; transition: filter .15s var(--ease,ease);
   }
-  .auth-card button:hover:not(:disabled) { filter: brightness(1.12); }
+  .auth-card button:not(.btn):hover:not(:disabled) { filter: brightness(1.12); }
   .auth-card button:disabled { opacity: .7; cursor: default; }
   .auth-err { color: #f87171; font-size: .82rem; min-height: 1.2em; margin-top: .35rem; }
 
@@ -5442,6 +5457,56 @@ async function startAutoUpdate() {
   </div>
 </div>
 
+<!-- ──── First-boot onboarding wizard ──────────────────────────────────
+     Shown by showOnboardWizard() (called from onAuthSucceeded() whenever
+     the loaded config has no ssid set — a fresh flash or a post-factory-
+     -reset device). Deliberately has no close/X/backdrop-dismiss control:
+     the device isn't reachable off the Nextube-Setup AP until the user
+     either restores a backup or enters WiFi credentials, so there is
+     nothing useful to "skip" to. -->
+<div id="onboard-modal" class="auth-overlay">
+  <div class="auth-card" style="max-width:440px">
+
+    <div id="onboard-step-choice">
+      <h3>👋 Welcome to your Nextube</h3>
+      <p>This device isn't on your WiFi yet. Restore a previously-downloaded backup, or set it up manually — one of these is required before you can continue.</p>
+      <button onclick="onboardShowStep('restore')">📁 Restore from backup</button>
+      <button onclick="onboardShowStep('manual')" style="margin-top:.5rem;background:var(--accent,rgba(255,255,255,.08));color:inherit">🛠️ Set up manually</button>
+    </div>
+
+    <div id="onboard-step-restore" style="display:none">
+      <h3>📁 Restore from backup</h3>
+      <p>Select the <code>nextube-config.json</code> file you downloaded from System → Backup &amp; Restore on this (or a previous) device. This restores WiFi credentials along with every other setting.</p>
+      <input type="file" id="onboard-import-file" accept=".json" style="display:none" onchange="importSettings(this)">
+      <button onclick="$('onboard-import-file').click()">Choose file…</button>
+      <p style="margin-top:1rem"><a href="#" onclick="onboardShowStep('choice');return false" style="color:var(--dim)">← Back</a></p>
+    </div>
+
+    <div id="onboard-step-manual" style="display:none">
+      <h3>🛠️ Set up manually</h3>
+      <p>Scan for your WiFi network or enter it directly, then connect.</p>
+      <div class="field"><label>SSID</label><input id="onboard-ssid" type="text"></div>
+      <div class="field"><label>Password</label><input id="onboard-pass" type="password"></div>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="onboardConnectWifi()">Connect</button>
+        <button class="btn btn-outline" onclick="onboardScanWifi()">Scan Networks</button>
+      </div>
+      <div id="onboard-wifi-list" style="margin-top:.6rem"></div>
+      <div id="onboard-manual-err" class="auth-err"></div>
+      <p style="margin-top:.5rem"><a href="#" onclick="onboardShowStep('choice');return false" style="color:var(--dim)">← Back</a></p>
+    </div>
+
+    <div id="onboard-step-connecting" style="display:none">
+      <h3><span class="nx-spinner" aria-hidden="true"></span>Connecting…</h3>
+      <p id="onboard-connecting-status">Applying WiFi credentials and waiting for the device to join your network. This can take up to 40 seconds.</p>
+      <div id="onboard-connecting-actions" style="display:none">
+        <p style="margin-top:.5rem"><a href="#" onclick="onboardShowStep('manual');return false" style="color:var(--dim)">← Back, try again</a></p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <script>
 /* ────— Auth UI glue (declared at script bottom so secureFetch above
  *  can reference showLoginModal via hoisting; all functions are global). */
@@ -5470,6 +5535,85 @@ function hideAuthModals() {
   document.getElementById('setpw-modal').classList.remove('show');
   document.getElementById('login-modal').classList.remove('show');
   document.getElementById('unreach-modal').classList.remove('show');
+}
+
+/* ── First-boot onboarding wizard ─────────────────────────────────
+ * Triggered from onAuthSucceeded() whenever the loaded config has no
+ * ssid.  Intentionally has no dismiss path other than completing one
+ * of the two steps — see the markup comment above #onboard-modal. */
+function showOnboardWizard() {
+  document.getElementById('onboard-modal').classList.add('show');
+  onboardShowStep('choice');
+}
+function onboardShowStep(step) {
+  for (const s of ['choice', 'restore', 'manual', 'connecting']) {
+    document.getElementById('onboard-step-' + s).style.display = (s === step) ? '' : 'none';
+  }
+}
+
+/* Mirrors scanWifi() (Network tab) but renders into the wizard's own
+ * list/SSID field rather than the Network tab's — kept as a small
+ * separate function since the two live in different DOM structures. */
+async function onboardScanWifi() {
+  await api('wifi/scan', { method: 'POST' });
+  toast(tr('js.scanning'));
+  setTimeout(async () => {
+    const nets = await api('wifi/scan');
+    if (!nets) return;
+    $('onboard-wifi-list').innerHTML = nets.map(n => {
+      const safe = esc(n.ssid);
+      return `<div class="wifi-item" onclick="$('onboard-ssid').value=decodeURIComponent('${encodeURIComponent(n.ssid)}')">
+        <span class="ssid">${safe}</span><span class="rssi">${n.rssi} dBm</span>
+      </div>`;
+    }).join('');
+  }, 3000);
+}
+
+async function onboardConnectWifi() {
+  const ssid = $('onboard-ssid').value.trim();
+  const err  = document.getElementById('onboard-manual-err');
+  err.textContent = '';
+  if (!ssid) { err.textContent = 'Enter or select a network name'; return; }
+
+  onboardShowStep('connecting');
+  document.getElementById('onboard-connecting-actions').style.display = 'none';
+  document.getElementById('onboard-connecting-status').textContent =
+    'Applying WiFi credentials and waiting for the device to join your network. This can take up to 40 seconds.';
+
+  const res = await api('settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ssid, password: $('onboard-pass').value })
+  });
+  if (res?.status !== 'ok') {
+    onboardShowStep('manual');
+    err.textContent = 'Could not save WiFi settings — try again';
+    return;
+  }
+
+  /* SSID changes trigger a background reconnect on the device (no reboot) —
+   * poll /api/status for wifi_connected rather than waiting for a fixed delay.
+   * Uses a plain unauthenticated fetch (like bootAuth's own status probe)
+   * and swallows errors silently: brief unreachability while the radio
+   * switches networks is the expected, common case here, not a real error —
+   * routing it through api()/toast() would spam failure toasts throughout
+   * the very transition this step exists to wait out. */
+  const deadline = Date.now() + 40000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 2000));
+    let s = null;
+    try { const r = await fetch('/api/status'); if (r.ok) s = await r.json(); } catch (_) { /* expected mid-handover */ }
+    if (s?.wifi_connected) {
+      document.getElementById('onboard-connecting-status').innerHTML =
+        'Connected! This setup page may stop responding shortly as the <code>Nextube-Setup</code> ' +
+        'network shuts down. Reconnect to your WiFi and open <code>http://' +
+        esc($('f-hostname').value || 'nextube-remaster') + '.local</code> (or the device\'s new IP) to continue.';
+      return;
+    }
+  }
+  document.getElementById('onboard-connecting-status').textContent =
+    'Still not connected after 40 seconds — double-check the password and try again.';
+  document.getElementById('onboard-connecting-actions').style.display = '';
 }
 
 /* ── XHR auth helpers ────────────────────────────────────────────

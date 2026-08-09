@@ -326,7 +326,11 @@ The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi prov
 1. The tubes display the 8-digit PIN (or find it in the serial log).
 2. On your phone or laptop, connect to **Nextube-Setup** and enter the PIN **as the WiFi password** when prompted.
 3. Navigate to **http://192.168.4.1**.
-4. Set your admin password (first boot only), then enter your home WiFi credentials under **Network**.
+4. A **setup wizard** appears automatically — this step is required and can't be skipped. Choose one:
+   - **Restore from backup** — upload a previously-downloaded `nextube-config.json` (downloaded from **System → Backup & Restore** on any Nextube) to restore WiFi credentials along with every other setting in one step.
+   - **Set up manually** — scan for your network (or type the SSID directly), enter the password, and connect.
+
+   Once connected, optionally set an admin password under **System → Admin Authentication**.
 
 > [!TIP]
 > **No laptop nearby?** A smartphone works perfectly for initial setup. Connect your phone to **Nextube-Setup**, open a browser, and go to **http://192.168.4.1** to complete the WiFi configuration. Once the Nextube joins your home network, manage it from any device on the same network.
