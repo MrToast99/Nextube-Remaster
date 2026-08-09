@@ -30,11 +30,11 @@ Like the work? Help keep me Caffeinated! <br>
     - [Automatic Update Checks](#automatic-update-checks)
     - [Returning to factory firmware](#returning-to-the-original-factory-firmware)
 - [Web Management UI](#web-management-ui)
-  - [Setup AP (WiFi Provisioning and First Setup)](#setup-ap-wifi-provisioning-and-first-connection)
-  - [Admin Authentication](#admin-authentication-optional)
+  - [Setup (WiFi Provisioning and First Setup)](#setup-wifi-provisioning-and-first-connection)
   - [Web UI Language](#web-ui-language)
   - [Static IP & Network Diagnostics](#static-ip--network-diagnostics)
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
+  - [Admin Authentication (optional)](#admin-authentication-optional)
 - [Modes](#modes)
   - [Mode Rotation](#mode-rotation)
   - [Theme Rotation](#theme-rotation)
@@ -310,7 +310,7 @@ The release includes `Stock Recovery Firmware/full_bak-used_flash_0x0.bin` — a
 
 ## Web Management UI
 
-### Setup AP (WiFi Provisioning) and First connection
+### Setup (WiFi Provisioning) and First connection
 
 The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi provisioning. The password is an **8-digit PIN** unique to each device, generated on first boot and stored in NVS.
 
@@ -376,22 +376,6 @@ The web UI provides:
   - Factory reset (settings-only or full)
   - About (shows firmware + web UI versions independently)
 
-### Admin Authentication (optional)
-
-Authentication is **disabled by default** — the web UI is fully accessible to anyone on your network without a password, matching the behaviour of all previous firmware versions.
-
-To enable password protection, go to **System → Lock Webui** and check **Require admin password to change settings**. On first enable you will be prompted to set a password (minimum 6 characters). The password is stored as a PBKDF2-SHA256 hash in NVS — it survives firmware OTA and is never visible in any API response. It is cleared only by a **Full factory reset**.
-
-Once enabled:
-- Every visit shows a login prompt. Sessions are stored in your browser's `localStorage` and remain valid for 7 days (sliding window).
-- Five wrong password attempts in a row trigger a **60-second lockout**.
-- All mutation endpoints and any endpoint that returns secrets (settings, AP PIN) require a valid bearer token.
-- `/api/status`, static files, and the login endpoints remain open so the UI can always load and authenticate.
-
-Authentication can be disabled again at any time from the same **Lock Webui** card (requires a valid session to turn off). You can also change the password there, or sign out to clear your local session.
-
-Sessions are **RAM-only** and lost on reboot — you will be asked to log in once after each restart.
-
 ### Web UI Language
 
 The web interface is available in **11 languages**:
@@ -421,7 +405,7 @@ To switch languages manually, use the **Language** dropdown at the top of any pa
 **Network → WiFi Configuration** includes an optional **Use static IP** toggle. When enabled, set the IP address, subnet mask, gateway, and DNS (a second DNS server is optional). DHCP is used whenever this is off (the default) or any required field is left blank on boot.
 
 > [!IMPORTANT]
-> **Requires reboot to take effect**, same as the Hostname field above. If you enter settings that make the device unreachable (wrong gateway/subnet), hold the **LEFT** and **RIGHT** touch pads for 15 seconds to bring up the `Nextube-Setup` recovery network (see [Setup AP](#setup-ap-wifi-provisioning-and-first-connection) above) and fix the settings from there — misconfigured static IP doesn't prevent the device from associating to your WiFi, so this recovery path always works.
+> **Requires reboot to take effect**, same as the Hostname field above. If you enter settings that make the device unreachable (wrong gateway/subnet), hold the **LEFT** and **RIGHT** touch pads for 15 seconds to bring up the `Nextube-Setup` recovery network (see [Setup](#setup-wifi-provisioning-and-first-connection) above) and fix the settings from there — misconfigured static IP doesn't prevent the device from associating to your WiFi, so this recovery path always works.
 
 Below the WiFi Configuration card, a collapsible **Network Info** panel shows read-only diagnostics, fetched on demand when expanded:
 - **Connected since** — time since the current WiFi association was established
@@ -480,6 +464,22 @@ Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, on
 | **Scheduled** | Automatic overnight burn-in recovery. Fires at a configured hour on a **weekly** (Sunday midnight) or **monthly** (1st of month) schedule. Tube bitmask, session duration, and trigger hour are all configurable. Disabled by default. |
 
 The CASET window also drifts ±2 px every hour automatically (synchronized to the real-time hour value) as a passive column-shift anti-burn-in measure — no configuration needed.
+
+### Admin Authentication (optional)
+
+Authentication is **disabled by default** — the web UI is fully accessible to anyone on your network without a password, matching the behaviour of all previous firmware versions.
+
+To enable password protection, go to **System → Lock Webui** and check **Require admin password to change settings**. On first enable you will be prompted to set a password (minimum 6 characters). The password is stored as a PBKDF2-SHA256 hash in NVS — it survives firmware OTA and is never visible in any API response. It is cleared only by a **Full factory reset**.
+
+Once enabled:
+- Every visit shows a login prompt. Sessions are stored in your browser's `localStorage` and remain valid for 7 days (sliding window).
+- Five wrong password attempts in a row trigger a **60-second lockout**.
+- All mutation endpoints and any endpoint that returns secrets (settings, AP PIN) require a valid bearer token.
+- `/api/status`, static files, and the login endpoints remain open so the UI can always load and authenticate.
+
+Authentication can be disabled again at any time from the same **Lock Webui** card (requires a valid session to turn off). You can also change the password there, or sign out to clear your local session.
+
+Sessions are **RAM-only** and lost on reboot — you will be asked to log in once after each restart.
 
 ## Modes
 
