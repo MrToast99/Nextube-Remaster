@@ -16,7 +16,7 @@ Like the work? Help keep me Caffeinated! <br>
 
 - [What is this?](#what-is-this)
 - [Features](#features)
-- [Building](#building)
+- [Building (optional, for forks and contributors)](#building-optional-for-forks-and-contributors)
   - [Prerequisites](#prerequisites)
   - [Local Build](#local-build)
   - [Versioning](#versioning)
@@ -148,7 +148,10 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Network Info panel — disconnect/reconnect log, signal strength, link details | ✅ Working |
 | Debug logging controls — per-subsystem verbosity, no serial connection required | ✅ Working |
 
-## Building
+## Building (optional, for forks and contributors)
+
+> [!TIP]
+> **Most users don't need this section.** Building from source is only for forking the project or contributing code. To just run the firmware, download a pre-built binary from the [GitHub release](https://github.com/MrToast99/Nextube-Remaster/releases) assets and skip straight to [Flashing](#flashing).
 
 ### Prerequisites
 
@@ -667,8 +670,8 @@ Required LittleFS image files — see the **Themes** section for the full folder
 
 ```
 AMPM/              blank.jpg   dot.jpg
-MutiInfo/Temperature/   degreec.jpg   degreef.jpg   minus.jpg
-MutiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
+MultiInfo/Temperature/   degreec.jpg   degreef.jpg   minus.jpg
+MultiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
                         rain.jpg  snow.jpg  squalls.jpg  thunderstorm.jpg
                         sand.jpg  tornado.jpg  volcanicAsh.jpg
 ```
@@ -1174,7 +1177,7 @@ Use the built-in LittleFS file browser under **System → LittleFS Files**:
 2. Click **📂 New Folder** → enter your theme name (e.g. `MyTheme`)
 3. Navigate into `MyTheme/`, click **New Folder** → `Numbers`
 4. Navigate into `Numbers/`, click **⬆ Upload File(s)** → select `0.jpg` … `9.jpg`
-5. Go back to `MyTheme/` and repeat for `AMPM/` and `MutiInfo/Weather/` (and any other subfolders needed)
+5. Go back to `MyTheme/` and repeat for `AMPM/` and `MultiInfo/Weather/` (and any other subfolders needed)
 6. Open the **Display** tab — your theme appears in the dropdown immediately
 
 #### Option B — Bulk folder upload
@@ -1205,7 +1208,7 @@ All paths are relative to `/images/themes/{ThemeName}/`.
 │     back to /images/system/{name}.jpg when absent from a theme — so older or
 │     custom themes that predate these icons still display correctly.
 │     All other missing AMPM assets render as black.
-├── MutiInfo/
+├── MultiInfo/
 │   ├── Temperature/
 │   │   ├── degreec.jpg  ← °C symbol
 │   │   ├── degreef.jpg  ← °F symbol
@@ -1217,6 +1220,11 @@ All paths are relative to `/images/themes/{ThemeName}/`.
 │       ├── fog.jpg           rain.jpg             snow.jpg
 │       ├── squalls.jpg       thunderstorm.jpg     sand.jpg
 │       └── tornado.jpg       volcanicAsh.jpg
+│
+│   * "MultiInfo" was "MutiInfo" — a typo inherited from the stock firmware —
+│     in older builds. Themes uploaded before this fix still work: the
+│     firmware falls back to the legacy misspelled folder name per-asset if
+│     the corrected path isn't found. New themes should use "MultiInfo".
 │   
 └── FlipClock/            ← required only for FlipClock theme
     └── (same Numbers + AMPM sub-structure, used for split-flap animation)
