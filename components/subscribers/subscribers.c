@@ -29,8 +29,11 @@ static SemaphoreHandle_t s_mastodon_mutex = NULL;
 static SemaphoreHandle_t s_refresh_sem = NULL;
 
 /* Shared receive buffer — used only by YouTube and Bilibili fetches.
- * Instagram and TikTok use a task-local heap buffer to avoid growing
- * this BSS region (internal SRAM is shared with the weather TLS stack). */
+ * Instagram (internal API), TikTok (Research API) and Mastodon use a
+ * separate shared heap buffer (see get_shared_rx_buf() below) to avoid
+ * growing this BSS region (internal SRAM is shared with the weather TLS
+ * stack); the relay paths for YouTube/Instagram/TikTok use their own small
+ * stack buffer instead, since relay responses are compact JSON. */
 static char s_http_buf[2048];
 static int  s_http_buf_len = 0;
 
@@ -81,6 +84,50 @@ static esp_err_t http_event_heap(esp_http_client_event_t *evt)
         }
     }
     return ESP_OK;
+}
+
+/* Percent-encode a value for embedding in a URL query/path segment (RFC 3986
+ * unreserved set kept literal; everything else — including '&', '?', '"',
+ * spaces — escaped as %XX).  Small duplicate of weather.c's
+ * url_encode_query() (that one is file-static there too, so this copy avoids
+ * a larger cross-component refactor).  Used to safely embed usernames /
+ * instance names sourced from user-editable config into request URLs. */
+static void url_encode_query(const char *in, char *out, size_t out_sz)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o + 4 < out_sz; p++) {
+        unsigned char c = *p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out[o++] = (char)c;
+        } else {
+            out[o++] = '%';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 0x0F];
+        }
+    }
+    out[o] = '\0';
+}
+
+/* Shared heap RX buffer for the Instagram-internal, TikTok-API, and Mastodon
+ * fetches — sized to the largest single need (Instagram's 16 KB).  All three
+ * run serially from the single subscribers_task poll loop (see
+ * subscribers_task below) and are never concurrent, so one lazily-allocated
+ * static buffer avoids repeatedly malloc/free-ing a multi-KB block every
+ * poll cycle (at least every 5 minutes, for the device's entire uptime) —
+ * not a leak, just long-uptime heap-fragmentation risk.  No mutex needed:
+ * single-task, serial use only. */
+#define SHARED_RX_BUF_SIZE 16384
+static char *s_shared_rx_buf = NULL;
+
+static char *get_shared_rx_buf(void)
+{
+    if (!s_shared_rx_buf) {
+        s_shared_rx_buf = heap_caps_malloc(SHARED_RX_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_shared_rx_buf) s_shared_rx_buf = malloc(SHARED_RX_BUF_SIZE);
+    }
+    return s_shared_rx_buf;
 }
 
 /* ── YouTube ──────────────────────────────────────────────────────────── */
@@ -240,7 +287,6 @@ static void fetch_bilibili(void)
     }
 }
 
-/* ── Instagram ────────────────────────────────────────────────────────── */
 /* ── Instagram ────────────────────────────────────────────────────────────
  * Method is selected by instagram_method config field:
  *   "relay"    — GET http://<tiktok_relay_host>:8888/instagram?user=<u>
@@ -273,8 +319,10 @@ static void fetch_instagram(void)
         char relay_buf[128] = {0};
         heap_rx_t ctx = { .buf = relay_buf, .buf_size = sizeof(relay_buf), .buf_len = 0 };
 
-        char url[192];
-        snprintf(url, sizeof(url), "http://%s:8888/instagram?user=%s", relay_host, user);
+        char enc_user[144];
+        url_encode_query(user, enc_user, sizeof(enc_user));
+        char url[256];
+        snprintf(url, sizeof(url), "http://%s:8888/instagram?user=%s", relay_host, enc_user);
 
         esp_http_client_config_t http_cfg = {
             .url = url, .event_handler = http_event_heap,
@@ -305,21 +353,22 @@ static void fetch_instagram(void)
 
     } else {
         /* ── Internal API path (default) ─────────────────────────────────── */
-        /* Allocate receive buffer from PSRAM — Instagram responses run 50–100 KB.
-         * We only need the first ~16 KB: "edge_followed_by":{"count":N} always
-         * appears before the bulky media-edge arrays. */
-        const int BUF_SIZE = 16384;
+        /* Receive buffer — Instagram responses run 50–100 KB; we only need
+         * the first ~16 KB, since "edge_followed_by":{"count":N} always
+         * appears before the bulky media-edge arrays.  Shared/reused buffer,
+         * see get_shared_rx_buf(). */
         heap_rx_t ctx = {
-            .buf      = heap_caps_malloc(BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-            .buf_size = BUF_SIZE,
+            .buf      = get_shared_rx_buf(),
+            .buf_size = SHARED_RX_BUF_SIZE,
             .buf_len  = 0,
         };
-        if (!ctx.buf) { ctx.buf = malloc(4096); ctx.buf_size = 4096; }
         if (!ctx.buf) { ESP_LOGW(TAG, "Instagram: no memory for RX buffer"); return; }
 
-        char url[256];
+        char enc_user[144];
+        url_encode_query(user, enc_user, sizeof(enc_user));
+        char url[320];
         snprintf(url, sizeof(url),
-            "https://i.instagram.com/api/v1/users/web_profile_info/?username=%s", user);
+            "https://i.instagram.com/api/v1/users/web_profile_info/?username=%s", enc_user);
 
         esp_http_client_config_t http_cfg = {
             .url = url, .event_handler = http_event_heap, .user_data = &ctx,
@@ -359,7 +408,7 @@ static void fetch_instagram(void)
         } else {
             ESP_LOGW(TAG, "Instagram fetch failed: err=%d status=%d", err, status);
         }
-        free(ctx.buf);
+        /* ctx.buf is the shared buffer — not freed here, see get_shared_rx_buf(). */
     }
 }
 
@@ -390,18 +439,25 @@ static void fetch_tiktok(void)
 
     if (tiktok_key[0] != '\0') {
         /* ── Path 1: TikTok Research API ───────────────────────────────── */
-        const int BUF_SIZE = 4096;
         heap_rx_t ctx = {
-            .buf      = heap_caps_malloc(BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-            .buf_size = BUF_SIZE,
+            .buf      = get_shared_rx_buf(),
+            .buf_size = SHARED_RX_BUF_SIZE,
             .buf_len  = 0,
         };
-        if (!ctx.buf) { ctx.buf = malloc(BUF_SIZE); ctx.buf_size = BUF_SIZE; }
         if (!ctx.buf) { ESP_LOGW(TAG, "TikTok: no memory for RX buffer"); return; }
 
-        /* Build JSON body: {"username":"<user>"} */
-        char body[64];
-        snprintf(body, sizeof(body), "{\"username\":\"%s\"}", user);
+        /* Build JSON body: {"username":"<user>"} via cJSON rather than hand
+         * string-interpolation — user comes straight from config, and a
+         * '"' or '\' in it would otherwise corrupt/inject into the POST
+         * body sent to TikTok's API. */
+        cJSON *body_json = cJSON_CreateObject();
+        cJSON_AddStringToObject(body_json, "username", user);
+        char *body = cJSON_PrintUnformatted(body_json);
+        cJSON_Delete(body_json);
+        if (!body) {
+            ESP_LOGW(TAG, "TikTok: failed to build JSON POST body");
+            return;
+        }
 
         esp_http_client_config_t http_cfg = {
             .url               = "https://open.tiktokapis.com/v2/research/user/info/?fields=follower_count",
@@ -424,6 +480,7 @@ static void fetch_tiktok(void)
         int status    = client ? esp_http_client_get_status_code(client) : 0;
         esp_http_client_cleanup(client);   /* NULL-safe */
         tls_sem_give();
+        free(body);
 
         if (err == ESP_OK && status == 200) {
             ctx.buf[ctx.buf_len] = '\0';
@@ -443,15 +500,17 @@ static void fetch_tiktok(void)
         } else {
             ESP_LOGW(TAG, "TikTok API fetch failed: err=%d status=%d", err, status);
         }
-        free(ctx.buf);
+        /* ctx.buf is the shared buffer — not freed here, see get_shared_rx_buf(). */
 
     } else if (relay_host[0] != '\0') {
         /* ── Path 2: local relay ────────────────────────────────────────── */
         char relay_buf[128] = {0};
         heap_rx_t ctx = { .buf = relay_buf, .buf_size = sizeof(relay_buf), .buf_len = 0 };
 
-        char url[192];
-        snprintf(url, sizeof(url), "http://%s:8888/tiktok?user=%s", relay_host, user);
+        char enc_user[144];
+        url_encode_query(user, enc_user, sizeof(enc_user));
+        char url[256];
+        snprintf(url, sizeof(url), "http://%s:8888/tiktok?user=%s", relay_host, enc_user);
 
         esp_http_client_config_t http_cfg = {
             .url = url, .event_handler = http_event_heap,
@@ -508,18 +567,19 @@ static void fetch_mastodon(void)
         return;
     }
 
-    const int BUF_SIZE = 4096;
     heap_rx_t ctx = {
-        .buf      = heap_caps_malloc(BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-        .buf_size = BUF_SIZE,
+        .buf      = get_shared_rx_buf(),
+        .buf_size = SHARED_RX_BUF_SIZE,
         .buf_len  = 0,
     };
-    if (!ctx.buf) { ctx.buf = malloc(BUF_SIZE); ctx.buf_size = BUF_SIZE; }
     if (!ctx.buf) { ESP_LOGW(TAG, "Mastodon: no memory for RX buffer"); return; }
 
-    char url[192];
+    char enc_user[144], enc_instance[192];
+    url_encode_query(user,     enc_user,     sizeof(enc_user));
+    url_encode_query(instance, enc_instance, sizeof(enc_instance));
+    char url[400];
     snprintf(url, sizeof(url),
-             "https://%s/api/v1/accounts/lookup?acct=%s", instance, user);
+             "https://%s/api/v1/accounts/lookup?acct=%s", enc_instance, enc_user);
 
     esp_http_client_config_t http_cfg = {
         .url = url, .event_handler = http_event_heap, .user_data = &ctx,
@@ -551,7 +611,7 @@ static void fetch_mastodon(void)
     } else {
         ESP_LOGW(TAG, "Mastodon fetch failed: err=%d status=%d", err, status);
     }
-    free(ctx.buf);
+    /* ctx.buf is the shared buffer — not freed here, see get_shared_rx_buf(). */
 }
 
 /* ── Main task — polls all configured platforms at the configured interval ── */

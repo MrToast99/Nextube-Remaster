@@ -164,17 +164,23 @@ void leds_off(void)
     ws2812_write();
 }
 
-/* leds_effect_breath – legacy keyframe-less breath using a fixed warm-blue
- * palette.  Kept for external callers; the LED task uses the config-aware
- * version below so per-tube colours are respected. */
-void leds_effect_breath(void)
+/* Simple HSV→RGB at S=1, V=200 (fixed value used by every hue-rotation
+ * effect in this file).  hue is degrees, wrapped to [0, 360).  Factored out
+ * of leds_effect_rainbow() and the BL_MODE_RAINBOW case below — the two
+ * used to duplicate this sector/fractional-part math near-verbatim. */
+static void hsv_wheel_to_rgb(int hue, uint8_t *r, uint8_t *g, uint8_t *b)
 {
-    static float phase = 0;
-    phase += 0.05f;
-    float val = (sinf(phase) + 1.0f) / 2.0f;
-    uint8_t v = (uint8_t)(val * 200);
-    leds_set_all(v / 3, v / 2, v);
-    leds_update();
+    hue = ((hue % 360) + 360) % 360;
+    int sector = hue / 60;
+    int f = (hue % 60) * 200 / 60;
+    switch (sector) {
+        case 0:  *r = 200;     *g = f;       *b = 0;       break;
+        case 1:  *r = 200 - f; *g = 200;     *b = 0;       break;
+        case 2:  *r = 0;       *g = 200;     *b = f;       break;
+        case 3:  *r = 0;       *g = 200 - f; *b = 200;     break;
+        case 4:  *r = f;       *g = 0;       *b = 200;     break;
+        default: *r = 200;     *g = 0;       *b = 200 - f; break;
+    }
 }
 
 void leds_effect_rainbow(void)
@@ -183,18 +189,8 @@ void leds_effect_rainbow(void)
     hue_offset = (hue_offset + 4) % 360;
     for (int i = 0; i < LED_COUNT; i++) {
         int hue = (hue_offset + i * 60) % 360;
-        /* Simple HSV→RGB at S=1, V=200 */
-        int sector = hue / 60;
-        int f = (hue % 60) * 200 / 60;
         uint8_t r, g, b;
-        switch (sector) {
-            case 0:  r = 200; g = f;       b = 0;       break;
-            case 1:  r = 200 - f; g = 200; b = 0;       break;
-            case 2:  r = 0;   g = 200;     b = f;       break;
-            case 3:  r = 0;   g = 200 - f; b = 200;     break;
-            case 4:  r = f;   g = 0;       b = 200;     break;
-            default: r = 200; g = 0;       b = 200 - f; break;
-        }
+        hsv_wheel_to_rgb(hue, &r, &g, &b);
         leds_set_color(i, r, g, b);
     }
     leds_update();
@@ -325,6 +321,7 @@ static void led_task(void *arg)
         app_mode_t current_mode;
         uint8_t spectrum_rgb[3];
         uint8_t spectrum_led_source;
+        bool    spectrum_led_beat_react;
         backlight_mode_t backlight_mode;
         uint8_t backlight_rgb[LED_COUNT][3];
         uint8_t sunmoon_sun_rgb[3];
@@ -339,6 +336,7 @@ static void led_task(void *arg)
         current_mode        = cfg->current_mode;
         memcpy(spectrum_rgb,  cfg->spectrum_rgb,  sizeof(spectrum_rgb));
         spectrum_led_source = cfg->spectrum_led_source;
+        spectrum_led_beat_react = cfg->spectrum_led_beat_react;
         backlight_mode      = cfg->backlight_mode;
         memcpy(backlight_rgb, cfg->backlight_rgb, sizeof(backlight_rgb));
         memcpy(sunmoon_sun_rgb,  cfg->sunmoon_sun_rgb,  sizeof(sunmoon_sun_rgb));
@@ -372,6 +370,16 @@ static void led_task(void *arg)
             continue;
         }
 
+        /* Beat-reactive nudge for Breath/Rainbow (issue #43) — only while the
+         * LCD is on Spectrum AND the LED source is "follow accent mode"
+         * (spectrum_led_source == 1, the branch just above this one), so the
+         * mic is guaranteed to already be capturing (see mic_task's capture
+         * gate). Not true BPM/tempo tracking — see mic_get_beat_pulse()'s
+         * comment. */
+        bool beat_react = (current_mode == APP_MODE_SPECTRUM &&
+                            spectrum_led_source == 1 &&
+                            spectrum_led_beat_react);
+
         switch (backlight_mode) {
         case BL_MODE_STATIC: {
             /* In static mode, transmit once when colour/brightness changes
@@ -401,9 +409,9 @@ static void led_task(void *arg)
             break;
         }
         case BL_MODE_BREATH: {
-            /* Modulate each tube's configured colour with a sine-wave envelope.
-             * The old leds_effect_breath() used a hardcoded blue palette;
-             * this version respects the per-tube backlight_RGB settings.
+            /* Modulate each tube's configured colour with a sine-wave envelope,
+             * respecting the per-tube backlight_RGB settings (unlike a fixed
+             * warm-blue palette).
              *
              * Update rate is fixed at 10 Hz (100 ms) to keep WS2812 RMT
              * bursts below 20 Hz and reduce audible coupling into the DAC.
@@ -414,6 +422,11 @@ static void led_task(void *arg)
              *   speed=10→ 0.20 rad/tick → ~3.1 s cycle (fast) */
             static float breath_phase = 0.0f;
             breath_phase += 0.02f * (float)led_effect_speed;
+            /* Beat nudge: on a detected onset, jump the phase forward extra
+             * so brightness visibly surges on the hit, then keeps cycling
+             * normally. Tuned constant, not calibrated — see beat_react's
+             * comment above. */
+            if (beat_react && mic_get_beat_pulse()) breath_phase += 0.9f;
             float val = (sinf(breath_phase) + 1.0f) / 2.0f;  /* 0.0 – 1.0 */
             for (int i = 0; i < LED_COUNT; i++) {
                 leds_set_color(i,
@@ -435,19 +448,14 @@ static void led_task(void *arg)
              *   speed=10 → 10°/50 ms →  1.8 s/revolution (fast)  */
             static int rainbow_hue = 0;
             rainbow_hue = (rainbow_hue + (int)led_effect_speed) % 360;
+            /* Beat nudge: on a detected onset, jump the hue forward extra so
+             * the colour visibly shifts on the hit. Tuned constant, not
+             * calibrated — see beat_react's comment above. */
+            if (beat_react && mic_get_beat_pulse()) rainbow_hue = (rainbow_hue + 40) % 360;
             for (int i = 0; i < LED_COUNT; i++) {
-                int hue    = (rainbow_hue + i * 60) % 360;
-                int sector = hue / 60;
-                int f      = (hue % 60) * 200 / 60;
+                int hue = (rainbow_hue + i * 60) % 360;
                 uint8_t r, g, b;
-                switch (sector) {
-                    case 0:  r = 200; g = f;       b = 0;       break;
-                    case 1:  r = 200-f; g = 200;   b = 0;       break;
-                    case 2:  r = 0;   g = 200;     b = f;       break;
-                    case 3:  r = 0;   g = 200-f;   b = 200;     break;
-                    case 4:  r = f;   g = 0;       b = 200;     break;
-                    default: r = 200; g = 0;       b = 200-f;   break;
-                }
+                hsv_wheel_to_rgb(hue, &r, &g, &b);
                 leds_set_color(i, r, g, b);
             }
             leds_update();

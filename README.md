@@ -1686,9 +1686,11 @@ The LED ring behaviour in Spectrum mode is independently configurable under **Di
 | Source | Behaviour |
 |---|---|
 | **Custom glow colour** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. The colour is set by the **LED Glow Colour** picker and is the same for all LEDs. |
-| **Follow accent mode** | The LEDs ignore the audio entirely and animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colours from the LED settings. The LCD bars still respond to the microphone normally. |
+| **Follow accent mode** | The LEDs animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colours from the LED settings, ignoring the audio by default. The LCD bars still respond to the microphone normally. |
 
 The **LCD Bar Colour** picker is separate from the LED source and always applies — it controls the colour of the frequency bars drawn on the LCDs regardless of which LED source is selected.
+
+**Beat-reactive nudge (optional):** with **Follow accent mode** selected, an additional **Beat-reactive nudge for Breath / Rainbow** checkbox appears. When enabled, those two accent modes get an extra push (brightness surge for Breath, an extra hue jump for Rainbow) each time the microphone detects a percussive hit, on top of their normal animation. This is a lightweight broadband-transient detector, not true beats-per-minute tracking — the spectrum analyser's bands start at 280 Hz, so it reacts to snare/hihat/kick harmonics rather than a resolved sub-bass kick drum, and it won't lock to tempo the way a dedicated beat-detection algorithm would. Off by default; only has any effect for Breath and Rainbow specifically.
 
 ### SHT30 Temperature / Humidity Sensor
 

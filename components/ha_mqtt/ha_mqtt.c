@@ -133,7 +133,12 @@ static void publish(const char *topic, const char *payload, int retain)
 }
 
 /* ── Discovery payloads ────────────────────────────────────────────── */
-static void publish_discovery(void)
+/* include_sensors: publish the SHT30-backed temperature/humidity sensors and
+ * the outdoor AQI sensor.  Callers pass false when the SHT30 is not present
+ * so HA doesn't get discovery configs for entities that will never publish
+ * a state.  Every other entity (mode/display/brightness/theme/rotation/
+ * firmware/update) is unconditional — those don't depend on SHT30 presence. */
+static void publish_discovery(bool include_sensors)
 {
     char topic[TOPIC_MAXLEN];
     char payload[768];
@@ -148,57 +153,59 @@ static void publish_discovery(void)
              "\"sw_version\":\"%s\"",
              s_hostname, FW_VERSION_STR);
 
-    /* ── Temperature sensor ── */
-    char state_t[TOPIC_MAXLEN];
-    make_topic(state_t, sizeof(state_t), "sensor/temperature/state");
-    snprintf(topic, sizeof(topic),
-             "homeassistant/sensor/%s_temp/config", s_hostname);
-    snprintf(payload, sizeof(payload),
-             "{"
-             "\"name\":\"Nextube Temperature\","
-             "\"unique_id\":\"%s_temp\","
-             "\"state_topic\":\"%s\","
-             "\"value_template\":\"{{ value_json.temperature }}\","
-             "\"unit_of_measurement\":\"°C\","
-             "\"device_class\":\"temperature\","
-             "\"device\":{%s}"
-             "}",
-             s_hostname, state_t, dev);
-    publish(topic, payload, 1);
+    if (include_sensors) {
+        /* ── Temperature sensor ── */
+        char state_t[TOPIC_MAXLEN];
+        make_topic(state_t, sizeof(state_t), "sensor/temperature/state");
+        snprintf(topic, sizeof(topic),
+                 "homeassistant/sensor/%s_temp/config", s_hostname);
+        snprintf(payload, sizeof(payload),
+                 "{"
+                 "\"name\":\"Nextube Temperature\","
+                 "\"unique_id\":\"%s_temp\","
+                 "\"state_topic\":\"%s\","
+                 "\"value_template\":\"{{ value_json.temperature }}\","
+                 "\"unit_of_measurement\":\"°C\","
+                 "\"device_class\":\"temperature\","
+                 "\"device\":{%s}"
+                 "}",
+                 s_hostname, state_t, dev);
+        publish(topic, payload, 1);
 
-    /* ── Humidity sensor ── */
-    make_topic(state_t, sizeof(state_t), "sensor/humidity/state");
-    snprintf(topic, sizeof(topic),
-             "homeassistant/sensor/%s_hum/config", s_hostname);
-    snprintf(payload, sizeof(payload),
-             "{"
-             "\"name\":\"Nextube Humidity\","
-             "\"unique_id\":\"%s_hum\","
-             "\"state_topic\":\"%s\","
-             "\"value_template\":\"{{ value_json.humidity }}\","
-             "\"unit_of_measurement\":\"%%\","
-             "\"device_class\":\"humidity\","
-             "\"device\":{%s}"
-             "}",
-             s_hostname, state_t, dev);
-    publish(topic, payload, 1);
+        /* ── Humidity sensor ── */
+        make_topic(state_t, sizeof(state_t), "sensor/humidity/state");
+        snprintf(topic, sizeof(topic),
+                 "homeassistant/sensor/%s_hum/config", s_hostname);
+        snprintf(payload, sizeof(payload),
+                 "{"
+                 "\"name\":\"Nextube Humidity\","
+                 "\"unique_id\":\"%s_hum\","
+                 "\"state_topic\":\"%s\","
+                 "\"value_template\":\"{{ value_json.humidity }}\","
+                 "\"unit_of_measurement\":\"%%\","
+                 "\"device_class\":\"humidity\","
+                 "\"device\":{%s}"
+                 "}",
+                 s_hostname, state_t, dev);
+        publish(topic, payload, 1);
 
-    /* ── Air-quality sensor (outdoor AQI from Open-Meteo) ── */
-    make_topic(state_t, sizeof(state_t), "sensor/aqi/state");
-    snprintf(topic, sizeof(topic),
-             "homeassistant/sensor/%s_aqi/config", s_hostname);
-    snprintf(payload, sizeof(payload),
-             "{"
-             "\"name\":\"Nextube Air Quality\","
-             "\"unique_id\":\"%s_aqi\","
-             "\"state_topic\":\"%s\","
-             "\"value_template\":\"{{ value_json.aqi }}\","
-             "\"device_class\":\"aqi\","
-             "\"state_class\":\"measurement\","
-             "\"device\":{%s}"
-             "}",
-             s_hostname, state_t, dev);
-    publish(topic, payload, 1);
+        /* ── Air-quality sensor (outdoor AQI from Open-Meteo) ── */
+        make_topic(state_t, sizeof(state_t), "sensor/aqi/state");
+        snprintf(topic, sizeof(topic),
+                 "homeassistant/sensor/%s_aqi/config", s_hostname);
+        snprintf(payload, sizeof(payload),
+                 "{"
+                 "\"name\":\"Nextube Air Quality\","
+                 "\"unique_id\":\"%s_aqi\","
+                 "\"state_topic\":\"%s\","
+                 "\"value_template\":\"{{ value_json.aqi }}\","
+                 "\"device_class\":\"aqi\","
+                 "\"state_class\":\"measurement\","
+                 "\"device\":{%s}"
+                 "}",
+                 s_hostname, state_t, dev);
+        publish(topic, payload, 1);
+    }
 
     /* ── Mode select ── */
     char mode_state[TOPIC_MAXLEN], mode_cmd[TOPIC_MAXLEN];
@@ -748,139 +755,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
         /* Publish HA discovery payloads (only if SHT30 is present for sensors) */
         if (s_discovery) {
-            if (!sht30_is_present()) {
-                /* Skip temperature/humidity discovery — publish mode/display/brightness only */
-                char topic[TOPIC_MAXLEN];
-                char payload[768];   /* mode-select payload alone can reach ~580 bytes */
-                char dev[192];
-                snprintf(dev, sizeof(dev),
-                         "\"identifiers\":[\"%s\"],\"name\":\"Nextube\","
-                         "\"model\":\"Nextube-Remaster\","
-                         "\"manufacturer\":\"MrToast99\","
-                         "\"sw_version\":\"%s\"",
-                         s_hostname, FW_VERSION_STR);
-
-                char mode_state[TOPIC_MAXLEN], mode_cmd[TOPIC_MAXLEN];
-                make_topic(mode_state, sizeof(mode_state), "mode/state");
-                make_topic(mode_cmd,   sizeof(mode_cmd),   "mode/set");
-                snprintf(topic, sizeof(topic),
-                         "homeassistant/select/%s_mode/config", s_hostname);
-                snprintf(payload, sizeof(payload),
-                         "{"
-                         "\"name\":\"Nextube Mode\","
-                         "\"unique_id\":\"%s_mode\","
-                         "\"state_topic\":\"%s\","
-                         "\"command_topic\":\"%s\","
-                         "\"options\":["
-                           "\"Clock\","
-                           "\"YouTube\",\"Date\",\"Album\",\"Weather\","
-                           "\"Spectrum\",\"Instagram\",\"TikTok\",\"Mastodon\""
-                         "],"
-                         "\"device\":{%s}"
-                         "}",
-                         s_hostname, mode_state, mode_cmd, dev);
-                publish(topic, payload, 1);
-
-                char disp_state[TOPIC_MAXLEN], disp_cmd[TOPIC_MAXLEN];
-                make_topic(disp_state, sizeof(disp_state), "display/state");
-                make_topic(disp_cmd,   sizeof(disp_cmd),   "display/set");
-                snprintf(topic, sizeof(topic),
-                         "homeassistant/switch/%s_display/config", s_hostname);
-                snprintf(payload, sizeof(payload),
-                         "{"
-                         "\"name\":\"Nextube Display\","
-                         "\"unique_id\":\"%s_display\","
-                         "\"state_topic\":\"%s\","
-                         "\"command_topic\":\"%s\","
-                         "\"payload_on\":\"ON\","
-                         "\"payload_off\":\"OFF\","
-                         "\"device\":{%s}"
-                         "}",
-                         s_hostname, disp_state, disp_cmd, dev);
-                publish(topic, payload, 1);
-
-                char br_state[TOPIC_MAXLEN], br_cmd[TOPIC_MAXLEN];
-                make_topic(br_state, sizeof(br_state), "brightness/state");
-                make_topic(br_cmd,   sizeof(br_cmd),   "brightness/set");
-                snprintf(topic, sizeof(topic),
-                         "homeassistant/number/%s_brightness/config", s_hostname);
-                snprintf(payload, sizeof(payload),
-                         "{"
-                         "\"name\":\"Nextube Brightness\","
-                         "\"unique_id\":\"%s_brightness\","
-                         "\"state_topic\":\"%s\","
-                         "\"command_topic\":\"%s\","
-                         "\"min\":0,\"max\":100,\"step\":1,"
-                         "\"mode\":\"slider\","
-                         "\"device\":{%s}"
-                         "}",
-                         s_hostname, br_state, br_cmd, dev);
-                publish(topic, payload, 1);
-
-                /* Theme select */
-                char theme_state_ns[TOPIC_MAXLEN], theme_cmd_ns[TOPIC_MAXLEN];
-                make_topic(theme_state_ns, sizeof(theme_state_ns), "theme/state");
-                make_topic(theme_cmd_ns,   sizeof(theme_cmd_ns),   "theme/set");
-                snprintf(topic, sizeof(topic),
-                         "homeassistant/select/%s_theme/config", s_hostname);
-                snprintf(payload, sizeof(payload),
-                         "{"
-                         "\"name\":\"Nextube Theme\","
-                         "\"unique_id\":\"%s_theme\","
-                         "\"state_topic\":\"%s\","
-                         "\"command_topic\":\"%s\","
-                         "\"options\":["
-                           "\"NixieOY\",\"FlipClock\",\"DarkSlate\","
-                           "\"DotMatrix\",\"Formula1\","
-                           "\"GlitchGR\",\"LightFuture\",\"NotionRain\","
-                           "\"RedDigits\",\"RetroPaper\",\"WireMesh\","
-                           "\"WeatherLive\",\"WeatherLive Demo\""
-                         "],"
-                         "\"icon\":\"mdi:palette\","
-                         "\"device\":{%s}"
-                         "}",
-                         s_hostname, theme_state_ns, theme_cmd_ns, dev);
-                publish(topic, payload, 1);
-
-                /* Rotation switch */
-                char rot_state_ns[TOPIC_MAXLEN], rot_cmd_ns[TOPIC_MAXLEN];
-                make_topic(rot_state_ns, sizeof(rot_state_ns), "rotation/state");
-                make_topic(rot_cmd_ns,   sizeof(rot_cmd_ns),   "rotation/set");
-                snprintf(topic, sizeof(topic),
-                         "homeassistant/switch/%s_rotation/config", s_hostname);
-                snprintf(payload, sizeof(payload),
-                         "{"
-                         "\"name\":\"Nextube Mode Rotation\","
-                         "\"unique_id\":\"%s_rotation\","
-                         "\"state_topic\":\"%s\","
-                         "\"command_topic\":\"%s\","
-                         "\"payload_on\":\"ON\","
-                         "\"payload_off\":\"OFF\","
-                         "\"icon\":\"mdi:autorenew\","
-                         "\"device\":{%s}"
-                         "}",
-                         s_hostname, rot_state_ns, rot_cmd_ns, dev);
-                publish(topic, payload, 1);
-
-                /* Firmware version sensor (same whether SHT30 present or not) */
-                char fw_state[TOPIC_MAXLEN];
-                make_topic(fw_state, sizeof(fw_state), "firmware/state");
-                snprintf(topic, sizeof(topic),
-                         "homeassistant/sensor/%s_fw/config", s_hostname);
-                snprintf(payload, sizeof(payload),
-                         "{"
-                         "\"name\":\"Nextube Firmware\","
-                         "\"unique_id\":\"%s_fw\","
-                         "\"state_topic\":\"%s\","
-                         "\"entity_category\":\"diagnostic\","
-                         "\"icon\":\"mdi:chip\","
-                         "\"device\":{%s}"
-                         "}",
-                         s_hostname, fw_state, dev);
-                publish(topic, payload, 1);
-            } else {
-                publish_discovery();   /* full discovery including sensors */
-            }
+            publish_discovery(sht30_is_present());
         }
 
         /* Subscribe to command topics */
@@ -946,12 +821,42 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         break;
 
     case MQTT_EVENT_DATA: {
+        /* esp-mqtt splits a publish across multiple MQTT_EVENT_DATA callbacks
+         * whenever the payload is larger than its internal buffer.  Only the
+         * FIRST fragment of such a message carries event->topic —
+         * continuation fragments have topic_len == 0.  Without tracking the
+         * topic across fragments, every strcmp() below silently fails on a
+         * continuation fragment and the message is dropped with no error.
+         *
+         * s_frag_topic persists the topic for the duration of one logical
+         * message (current_data_offset == 0 through the fragment that
+         * reaches total_data_len), then is cleared so any later event that
+         * unexpectedly carries no topic doesn't silently reuse a stale one. */
+        static char s_frag_topic[TOPIC_MAXLEN] = "";
+
+        if (event->current_data_offset == 0 && event->topic_len > 0) {
+            int save_len = event->topic_len < (int)(sizeof(s_frag_topic) - 1)
+                         ? event->topic_len : (int)(sizeof(s_frag_topic) - 1);
+            memcpy(s_frag_topic, event->topic, save_len);
+            s_frag_topic[save_len] = '\0';
+        }
+
         /* Build null-terminated copies of topic and payload */
         char t[TOPIC_MAXLEN];
-        int  tlen = event->topic_len < (int)(sizeof(t) - 1)
-                  ? event->topic_len : (int)(sizeof(t) - 1);
-        memcpy(t, event->topic, tlen);
-        t[tlen] = '\0';
+        if (event->topic_len > 0) {
+            int tlen = event->topic_len < (int)(sizeof(t) - 1)
+                      ? event->topic_len : (int)(sizeof(t) - 1);
+            memcpy(t, event->topic, tlen);
+            t[tlen] = '\0';
+        } else {
+            /* Continuation fragment — use the topic saved from fragment 0. */
+            strncpy(t, s_frag_topic, sizeof(t) - 1);
+            t[sizeof(t) - 1] = '\0';
+        }
+
+        if (event->current_data_offset + event->data_len >= event->total_data_len) {
+            s_frag_topic[0] = '\0';   /* message complete — don't leak topic to next message */
+        }
 
         char p[128];
         int  plen = event->data_len < (int)(sizeof(p) - 1)

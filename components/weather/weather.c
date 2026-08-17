@@ -103,10 +103,21 @@ static void rl_wait(void)
  * Mozilla CA store.  Without it, all HTTPS requests fail the TLS handshake
  * silently (wttr.in, Open-Meteo, Met.no are all HTTPS-only). */
 #define HTTP_MAX_BODY 4096
+/* wttr.in's format=j1 response is 5-30+ KB (multi-day/hourly forecast,
+ * astronomy data) — far past HTTP_MAX_BODY, which silently truncates the
+ * read into invalid JSON that cJSON_Parse then rejects outright (unlike
+ * Met.no below, whose needed fields are extracted via strstr and tolerate
+ * truncation). wttr.in is the default provider when none is configured, so
+ * this reliably broke weather for most real city names out of the box.
+ * malloc() here is satisfied from the PSRAM pool already folded into the
+ * general heap allocator (4 MB, see boot log), not the small/scarce
+ * MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA pool — an occasional 32 KB buffer for
+ * an infrequent poll is cheap from that pool. */
+#define WTTR_MAX_BODY (32 * 1024)
 #define HTTP_USER_AGENT \
     "NextubeRemaster/" FW_VERSION_STR " github.com/MrToast99/Nextube-Remaster"
 
-static char *http_get(const char *url)
+static char *http_get_sized(const char *url, size_t max_body)
 {
     rl_wait();      /* enforce Open-Meteo free-tier rate limits */
 
@@ -141,7 +152,7 @@ static char *http_get(const char *url)
         esp_http_client_cleanup(c); c = NULL; goto done;
     }
 
-    result = malloc(HTTP_MAX_BODY + 1);
+    result = malloc(max_body + 1);
     if (!result) {
         esp_http_client_close(c);
         esp_http_client_cleanup(c); c = NULL; goto done;
@@ -149,9 +160,9 @@ static char *http_get(const char *url)
 
     int total = 0, r;
     do {
-        r = esp_http_client_read(c, result + total, HTTP_MAX_BODY - total);
+        r = esp_http_client_read(c, result + total, (int)max_body - total);
         if (r > 0) total += r;
-    } while (r > 0 && total < HTTP_MAX_BODY);
+    } while (r > 0 && (size_t)total < max_body);
     result[total] = '\0';
 
     esp_http_client_close(c);
@@ -162,6 +173,11 @@ static char *http_get(const char *url)
 done:
     tls_sem_give();
     return result;
+}
+
+static char *http_get(const char *url)
+{
+    return http_get_sized(url, HTTP_MAX_BODY);
 }
 
 /* Percent-encode a query-string / path value (RFC 3986 unreserved set kept
@@ -206,7 +222,7 @@ static void fetch_wttr(const wx_cfg_snap_t *cfg)
     char url[256];
     snprintf(url, sizeof(url), "https://wttr.in/%s?format=j1", enc_city);
 
-    char *body = http_get(url);
+    char *body = http_get_sized(url, WTTR_MAX_BODY);
     if (!body) return;
 
     cJSON *root = cJSON_Parse(body);

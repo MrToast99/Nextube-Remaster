@@ -112,10 +112,14 @@ typedef struct {
                                                falls back to spectrum_lcd_rgb otherwise */
     uint8_t          spectrum_led_source;   /* 0 = custom glow colour (amplitude-modulated),
                                                1 = follow configured accent mode (Static/Breath/Rainbow/Off) */
+    bool             spectrum_led_beat_react; /* Breath/Rainbow only, and only while
+                                               spectrum_led_source == 1: nudge the animation
+                                               on each detected audio beat onset (mic_get_beat_pulse()).
+                                               Default off — see components/microphone. */
     bool             notify_update_on_display; /* true = draw red indicator on tube 6 when a
                                                   firmware update is available.  Driven by the
                                                   web UI via POST /api/update_notify. */
-    uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0x1FF (all 9) */
+    uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0xFFF (all 12) */
     uint8_t          lcd_invert_mask;    /* bitmask: bit N = tube N needs INVON (colour-inverted replacement panel) */
     uint8_t          lcd_init_profile[6];    /* per-tube panel profile: 0=Standard, 1=Vivid (gamma curve selector) */
     uint8_t          lcd_vcom[6];        /* per-tube VMCTR1 VCOM value 0x00–0x3F (0=14, standard; higher=more contrast) */
@@ -279,7 +283,7 @@ typedef struct {
      * from within the display task — no web UI interaction required. */
     bool             burnin_auto_enabled;      /* false = disabled (default)         */
     uint8_t          burnin_auto_mask;         /* tube bitmask; 0x3F = all 6 tubes   */
-    uint32_t         burnin_auto_duration_s;   /* session length, 1–14400 s (default 3600 = 1 hr) */
+    uint32_t         burnin_auto_duration_s;   /* session length, 1800–14400 s (default 3600 = 1 hr) */
     char             burnin_auto_interval[8];  /* "weekly" (Sunday) or "monthly" (1st) */
     uint8_t          burnin_auto_hour;         /* hour of day to fire, 0-23 (default 0 = midnight) */
     char             burnin_auto_mode[16];     /* "colour-cycle" (default) or "snow" */

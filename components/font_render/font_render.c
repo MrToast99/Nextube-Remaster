@@ -35,9 +35,22 @@ typedef struct {
     /* For fr_draw_text: (ascent-descent) / outline_height_of_'0'.
      * Inflates px_size so digit '0' fills the caller's target height. */
     float          norm_ratio;
+    /* LRU eviction tick (see s_face_use_ctr) — bumped on load and on every
+     * subsequent use, so fr_load_face() can evict the actually-coldest slot
+     * instead of always slot 0. */
+    uint32_t       last_used;
 } fr_face_t;
 
 static fr_face_t s_faces[FR_MAX_FACES];
+/* Monotonically increasing use-order counter for face LRU tracking — a
+ * simple tick, not wall-clock time, so this needs no time-source dependency. */
+static uint32_t s_face_use_ctr = 0;
+
+static inline void fr_face_touch(int face_id)
+{
+    if (face_id >= 0 && face_id < FR_MAX_FACES)
+        s_faces[face_id].last_used = ++s_face_use_ctr;
+}
 
 /* ── Glyph cache (ring-buffer, FIFO eviction) ──────────────────────────────── */
 #define FR_CACHE_SIZE  128
@@ -47,6 +60,8 @@ typedef struct {
     uint16_t   px_size;
     uint8_t    face_id;
     bool       valid;
+    bool       failed;   /* true = rasterisation OOM'd; g.bitmap is NULL and
+                           * MUST NOT be retried — see fr_get_glyph's comment */
     fr_glyph_t g;
 } fr_cache_entry_t;
 
@@ -89,25 +104,30 @@ int fr_load_face(const char *spiffs_path)
     /* Return existing face if already loaded */
     for (int i = 0; i < FR_MAX_FACES; i++) {
         if (s_faces[i].loaded && strcmp(s_faces[i].path, spiffs_path) == 0) {
+            fr_face_touch(i);
             return i;
         }
     }
 
-    /* Find a free slot; evict slot 0 if all occupied */
+    /* Find a free slot; evict the least-recently-used face if all occupied */
     int slot = -1;
     for (int i = 0; i < FR_MAX_FACES; i++) {
         if (!s_faces[i].loaded) { slot = i; break; }
     }
     if (slot < 0) {
-        /* Evicted face_id 0 is REUSED for the new font, so any cached glyph
-         * bitmaps / layout memos keyed face_id=0 would be served for the
+        int lru = 0;
+        for (int i = 1; i < FR_MAX_FACES; i++) {
+            if (s_faces[i].last_used < s_faces[lru].last_used) lru = i;
+        }
+        /* Evicted face_id is REUSED for the new font, so any cached glyph
+         * bitmaps / layout memos keyed to that face_id would be served for the
          * wrong font (stale glyphs, wrong baseline).  The display side skips
          * its own flush when the returned id is unchanged (see
          * wl_refresh_ft_face) — so the flush must happen here. */
         fr_cache_flush();
-        heap_caps_free(s_faces[0].font_data);
-        s_faces[0].loaded = false;
-        slot = 0;
+        heap_caps_free(s_faces[lru].font_data);
+        s_faces[lru].loaded = false;
+        slot = lru;
     }
 
     FILE *f = fopen(spiffs_path, "rb");
@@ -148,13 +168,10 @@ int fr_load_face(const char *spiffs_path)
 
     s_faces[slot].font_data = buf;
     s_faces[slot].loaded    = true;
+    fr_face_touch(slot);
     strncpy(s_faces[slot].path, spiffs_path, sizeof(s_faces[slot].path) - 1);
     s_faces[slot].path[sizeof(s_faces[slot].path) - 1] = '\0';
 
-    /* ── Standard EM Scaling (Override Auto-Calibration) ───────────
-     * Replaces the old '0' digit bounding-box calibration.
-     * Fonts will now render true to their declared internal size,
-     * maintaining standard proportions without unexpected scaling. */
     /* ── Cap-Height Normalization (Visual Scaling) ───────────
      * We measure a standard capital 'H' to find out how much of the EM
      * square the letters actually use. This gives us a multiplier so
@@ -225,6 +242,10 @@ const fr_glyph_t *fr_get_glyph(uint8_t face_id, uint32_t codepoint, uint16_t px_
 {
     if (!fr_face_valid(face_id)) return NULL;
 
+    /* Every glyph lookup is a use of this face — keep LRU eviction in
+     * fr_load_face() from picking a face that's actually still active. */
+    fr_face_touch(face_id);
+
     /* MRU fast path */
     if (s_cache_mru >= 0) {
         fr_cache_entry_t *m = &s_cache[s_cache_mru];
@@ -258,15 +279,23 @@ const fr_glyph_t *fr_get_glyph(uint8_t face_id, uint32_t codepoint, uint16_t px_
     int bh = iy1 - iy0;
 
     uint8_t *bitmap = NULL;
+    bool raster_failed = false;
     if (bw > 0 && bh > 0) {
         bitmap = (uint8_t *)heap_caps_malloc((size_t)(bw * bh),
                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!bitmap) {
-            ESP_LOGE(TAG, "glyph alloc failed (%d B)", bw * bh);
-            return NULL;
+            /* Cache this as a permanent (until reboot) failure below instead
+             * of returning NULL here — otherwise every subsequent draw of
+             * this glyph re-attempts the same doomed allocation and re-logs
+             * this error every frame.  bw/bh are dropped to 0 so callers
+             * (fr_blit et al.) treat this exactly like a blank glyph; only
+             * bearing/advance stay valid so text layout is unaffected. */
+            ESP_LOGE(TAG, "glyph alloc failed (%d B) — caching as failed, no retry", bw * bh);
+            raster_failed = true;
+        } else {
+            stbtt_MakeCodepointBitmap(&face->info, bitmap, bw, bh, bw,
+                                      scale, scale, (int)codepoint);
         }
-        stbtt_MakeCodepointBitmap(&face->info, bitmap, bw, bh, bw,
-                                  scale, scale, (int)codepoint);
     }
 
     /* Evict oldest ring-buffer slot */
@@ -278,9 +307,10 @@ const fr_glyph_t *fr_get_glyph(uint8_t face_id, uint32_t codepoint, uint16_t px_
     slot->codepoint  = codepoint;
     slot->px_size    = px_size;
     slot->valid      = true;
+    slot->failed     = raster_failed;
     slot->g.bitmap   = bitmap;
-    slot->g.width    = (int16_t)bw;
-    slot->g.rows     = (int16_t)bh;
+    slot->g.width    = raster_failed ? 0 : (int16_t)bw;
+    slot->g.rows     = raster_failed ? 0 : (int16_t)bh;
     slot->g.bearing_x = (int16_t)ix0;
     slot->g.bearing_y = (int16_t)(-iy0); /* positive = above baseline */
     slot->g.advance  = (int16_t)(int)(advance_u * scale + 0.5f);
@@ -536,20 +566,26 @@ static uint32_t fr_utf8_next(const char **p)
     return '?';
 }
 
-void fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
-                  int cx, int baseline_y,
-                  uint8_t face_id, uint16_t px_size,
-                  const char *utf8_str,
-                  uint8_t cr, uint8_t cg, uint8_t cb,
-                  bool shadow, uint8_t sr, uint8_t sg, uint8_t sb)
+/* Shared sizing computation for fr_draw_text() / fr_measure_text(): inflates
+ * requested_px by the face's norm_ratio (so digit '0' fills the caller's
+ * target height), then applies width-fit (shrink to the tube's max_w if the
+ * string overflows) and height-fit (shrink further if any glyph's native
+ * bounding box renders taller than the caller's original target).  Both
+ * functions used to duplicate this ~40-line pass sequence almost verbatim,
+ * with only a comment noting they had to be kept in sync manually — factored
+ * here so fr_measure_text()'s reported advance can never desync from what
+ * fr_draw_text() actually renders.
+ * Returns the total pixel advance at the final fitted size; *out_adj_px
+ * receives that final px size (needed by fr_draw_text()'s render pass). */
+static int fr_compute_fit_size(int fb_w, uint8_t face_id, uint16_t requested_px,
+                                const char *utf8_str, uint16_t *out_adj_px)
 {
-    if (!utf8_str || !utf8_str[0] || !fr_face_valid(face_id)) return;
-
-    const uint16_t orig_px = px_size;   /* caller's target before norm_ratio */
+    const uint16_t orig_px = requested_px;   /* caller's target before norm_ratio */
 
     /* Inflate px_size by norm_ratio so that digit '0' fills orig_px pixels.
      * The height-fit pass below then scales everything back down if any glyph
      * exceeds orig_px, keeping the whole string within the caller's target. */
+    uint16_t px_size = requested_px;
     {
         float ratio = s_faces[face_id].norm_ratio;
         if (ratio > 1.001f) {
@@ -606,9 +642,26 @@ void fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
         }
     }
 
+    *out_adj_px = adj_px;
+    return total_adv;
+}
+
+void fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
+                  int cx, int baseline_y,
+                  uint8_t face_id, uint16_t px_size,
+                  const char *utf8_str,
+                  uint8_t cr, uint8_t cg, uint8_t cb,
+                  bool shadow, uint8_t sr, uint8_t sg, uint8_t sb)
+{
+    if (!utf8_str || !utf8_str[0] || !fr_face_valid(face_id)) return;
+
+    uint16_t adj_px;
+    int total_adv = fr_compute_fit_size(fb_w, face_id, px_size, utf8_str, &adj_px);
+
     /* Pass 2: render */
     int pen_x = cx - total_adv / 2;
-    p = utf8_str;
+    const char *p = utf8_str;
+    uint32_t cp;
     while ((cp = fr_utf8_next(&p)) != 0) {
         const fr_glyph_t *g = fr_get_glyph(face_id, cp, adj_px);
         if (!g) continue;
@@ -627,69 +680,14 @@ void fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
 }
 
 /* Return the total pixel advance of utf8_str at the given face/size, applying
- * the same norm_ratio and width-fit as fr_draw_text.  Callers use the result
- * to compute label center positions before rendering.  Returns 0 on error.  */
+ * the same norm_ratio, width-fit and height-fit as fr_draw_text (both share
+ * fr_compute_fit_size() so the two can never desync).  Callers use the
+ * result to compute label center positions before rendering.  Returns 0 on
+ * error. */
 int fr_measure_text(int fb_w, uint8_t face_id, uint16_t px_size, const char *utf8_str)
 {
     if (!utf8_str || !utf8_str[0] || !fr_face_valid(face_id)) return 0;
 
-    const uint16_t orig_px = px_size;   /* caller's target before norm_ratio */
-
-    {
-        float ratio = s_faces[face_id].norm_ratio;
-        if (ratio > 1.001f) {
-            uint16_t np = (uint16_t)((float)px_size * ratio + 0.5f);
-            px_size = (np < 4) ? 4 : np;
-        }
-    }
-
-    const int max_w = fb_w - FR_GLYPH_MARGIN_PX * 2;
-
-    int total_adv = 0;
-    const char *p = utf8_str;
-    uint32_t cp;
-    while ((cp = fr_utf8_next(&p)) != 0) {
-        const fr_glyph_t *g = fr_get_glyph(face_id, cp, px_size);
-        if (g) total_adv += g->advance;
-    }
-
-    uint16_t adj_px = px_size;
-    if (total_adv > max_w && total_adv > 0) {
-        adj_px = (uint16_t)((long)px_size * max_w / total_adv);
-        if (adj_px < 4) adj_px = 4;
-        total_adv = 0;
-        p = utf8_str;
-        while ((cp = fr_utf8_next(&p)) != 0) {
-            const fr_glyph_t *g = fr_get_glyph(face_id, cp, adj_px);
-            if (g) total_adv += g->advance;
-        }
-    }
-
-    /* Height-fit: apply the same pass as fr_draw_text so the returned advance
-     * matches what fr_draw_text will actually use for centering.  Without this,
-     * fonts whose glyphs exceed orig_px (e.g. "1" in many display fonts) trigger
-     * a further px_size reduction inside fr_draw_text that makes the rendered
-     * text narrower than fr_measure_text reported — causing label overlap when
-     * the measured half-widths are used to position two adjacent labels.       */
-    {
-        int max_h = 0;
-        p = utf8_str;
-        while ((cp = fr_utf8_next(&p)) != 0) {
-            const fr_glyph_t *g = fr_get_glyph(face_id, cp, adj_px);
-            if (g && (int)g->rows > max_h) max_h = (int)g->rows;
-        }
-        if (max_h > (int)orig_px && max_h > 0) {
-            uint16_t h_adj = (uint16_t)((long)adj_px * (int)orig_px / max_h);
-            if (h_adj < 4) h_adj = 4;
-            adj_px = h_adj;
-            total_adv = 0;
-            p = utf8_str;
-            while ((cp = fr_utf8_next(&p)) != 0) {
-                const fr_glyph_t *g = fr_get_glyph(face_id, cp, adj_px);
-                if (g) total_adv += g->advance;
-            }
-        }
-    }
-
-    return total_adv;
+    uint16_t adj_px;
+    return fr_compute_fit_size(fb_w, face_id, px_size, utf8_str, &adj_px);
 }

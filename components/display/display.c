@@ -55,10 +55,9 @@ static volatile bool s_parked   = false;
  * in which case the caller MUST NOT touch the bus.
  *
  * Why not vTaskSuspend() from outside: an asynchronous suspend can land
- * while the display task is INSIDE spi_device_polling_transmit(), i.e.
- * holding the spi_master bus lock.  The caller's first lcd_cmd() then
- * blocks forever on that lock and the vTaskResume() that would free it is
- * never reached — both tasks wedged until power cycle. */
+ * mid-transmit, holding the spi_master bus lock.  The caller's first
+ * lcd_cmd() then blocks forever on that lock and the vTaskResume() that
+ * would free it is never reached — both tasks wedged until power cycle. */
 static bool display_pause_for_spi(uint32_t timeout_ms)
 {
     if (!s_display_task_handle) return true;   /* boot: task not started yet */
@@ -201,8 +200,8 @@ static const uint16_t s_burnin_colors[] = {
 #define BURNIN_COLOR_SECS   30   /* seconds per colour step in the cycle */
 
 /* SPI pixel transfer chunk height — 8 rows × 80 px × 2 B = 1280 B on the
- * stack (SRAM).  Used by display_show_image() and display_show_image_region().
- * Defined at file scope so both functions can share the same constant. */
+ * stack (SRAM).  Used by display_show_image().
+ * Defined at file scope in case other renderers need the same constant. */
 #define DISP_CHUNK_ROWS 8
 
 /* ── MQTT Ticker overlay ─────────────────────────────────────────────────────
@@ -399,19 +398,35 @@ static void rebuild_gamma_lut(int tube)
     s_gamma_lut_active[tube] = true;
 }
 
+/* Transmit a buffer over SPI — the ONLY way any code may talk to spi_dev.
+ * Polling, not queued: queued transactions depend on the SPI completion
+ * interrupt, which a concurrent flash write (e.g. a config save) can starve
+ * for its whole duration — ESP32 flash writes disable interrupts and
+ * suspend the other core, since the flash-mapped cache would otherwise be
+ * inconsistent mid-write. That starves spi_device_get_trans_result()
+ * regardless of portMAX_DELAY and can corrupt the driver's transaction
+ * bookkeeping. Polling never waits on an interrupt — it busy-polls a
+ * hardware status register in the calling task's own context — so it's
+ * immune. */
+static inline void spi_tx_sync(const void *buf, size_t len_bytes)
+{
+    spi_transaction_t t = { .length = len_bytes * 8, .tx_buffer = buf };
+    spi_device_polling_transmit(spi_dev, &t);
+}
+
 static void lcd_cmd(uint8_t cmd)
 {
     gpio_set_level(PIN_LCD_DC, 0);
-    spi_transaction_t t = { .length = 8, .tx_buffer = &cmd };
-    spi_device_polling_transmit(spi_dev, &t);   /* 1 byte — polling cheaper than DMA setup */
+    /* 1 byte: the queued API costs more per-call than polling did here, but
+     * these run far less often than bulk pixel pushes — see spi_tx_sync. */
+    spi_tx_sync(&cmd, 1);
 }
 
 static void lcd_data(const uint8_t *data, int len)
 {
     if (len <= 0) return;
     gpio_set_level(PIN_LCD_DC, 1);
-    spi_transaction_t t = { .length = len * 8, .tx_buffer = data };
-    spi_device_polling_transmit(spi_dev, &t);   /* ≤8 bytes — polling cheaper than DMA setup */
+    spi_tx_sync(data, (size_t)len);   /* ≤8 bytes — see spi_tx_sync cost note above */
 }
 
 static void lcd_data_byte(uint8_t val) { lcd_data(&val, 1); }
@@ -487,7 +502,10 @@ void display_init(void)
     spi_bus_initialize(HSPI_HOST, &bus, SPI_DMA_CH_AUTO);
     spi_device_interface_config_t dev = {
         /* 26 MHz: max safe SPI speed when PSRAM is active on ESP32 (APB/3 = 26.666 MHz ceiling) */
-        .clock_speed_hz = 26*1000*1000, .mode = 0, .spics_io_num = -1, .queue_size = 7,
+        /* queue_size: unused by this driver — every transfer goes through
+         * spi_device_polling_transmit(), not spi_device_queue_trans(), but
+         * the ESP-IDF driver requires a nonzero value regardless. */
+        .clock_speed_hz = 26*1000*1000, .mode = 0, .spics_io_num = -1, .queue_size = 1,
     };
     spi_bus_add_device(HSPI_HOST, &dev, &spi_dev);
 
@@ -563,8 +581,8 @@ void display_apply_invert_mask(uint8_t mask)
     s_invert_mask = mask & 0x3F;
     /* Called live from the web UI while the display task renders: transmitting
      * here without pausing would flip CS/DC lines mid-frame (garbled tube) and
-     * race spi_device_polling_transmit on the same device handle.  Same
-     * cooperative pause as the VCOM/profile appliers; no-op cost at boot. */
+     * race the display task's own SPI transactions on the same device handle.
+     * Same cooperative pause as the VCOM/profile appliers; no-op cost at boot. */
     if (!display_pause_for_spi(5000)) {
         ESP_LOGW(TAG, "invert apply: display task did not pause — deferred to next reboot");
         return;   /* s_invert_mask is stored; boot / next reinit re-applies it */
@@ -845,24 +863,12 @@ static inline void open_lcd_window(uint8_t ox, uint8_t oy, uint8_t w, uint8_t h)
     gpio_set_level(PIN_LCD_DC, 1);
 }
 
-/* Transmit a DMA-capable (SRAM) pixel buffer over SPI using POLLING.
- *
- * IMPORTANT — do NOT switch this to the interrupt-driven spi_device_transmit():
- * an earlier version did, to let the display task sleep during the DMA, but the
- * device's command/setup writes (lcd_cmd/lcd_data) and several other blits stay
- * on spi_device_polling_transmit().  The ESP-IDF SPI master does not support
- * interleaving polling and interrupt transactions on the same device — it
- * corrupts the transaction queue and trips
- *   "assert failed: spi_device_transmit spi_master.c (ret_trans == trans_desc)"
- * (plus a NULL-deref inside the IRAM driver) during the rapid re-renders a mode
- * switch fires.  Keeping the whole device on polling is also what the
- * cooperative-park OTA handshake relies on for orphan-free suspension.
- *   buf MUST be DMA-capable (internal SRAM) — never a PSRAM pointer; the render
- *   path stages PSRAM through the SRAM `chunk` buffer before sending. */
+/* Transmit a DMA-capable (SRAM) pixel buffer — buf MUST be DMA-capable
+ * (internal SRAM) — never a PSRAM pointer; the render path stages PSRAM
+ * through the SRAM `chunk` buffer before sending. */
 static inline void spi_tx_pixels(const void *buf, size_t len_bytes)
 {
-    spi_transaction_t t = { .length = len_bytes * 8, .tx_buffer = buf };
-    spi_device_polling_transmit(spi_dev, &t);
+    spi_tx_sync(buf, len_bytes);
 }
 
 void display_fill(int tube, uint16_t color)
@@ -884,8 +890,7 @@ void display_fill(int tube, uint16_t color)
     uint8_t line[(LCD_WIDTH + 2 * BURNIN_SHIFT_MAX) * 2];
     for (int x = 0; x < FILL_W; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
     for (int y = 0; y < LCD_HEIGHT; y++) {
-        spi_transaction_t t = { .length = sizeof(line)*8, .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(line, sizeof(line));
     }
     deselect_all();
 }
@@ -1018,8 +1023,7 @@ static void stamp_update_indicator_bottom(uint8_t ox, uint8_t oy, int w, int h)
     uint8_t redline[LCD_WIDTH * 2];
     for (int x = 0; x < w; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
     for (int row = 0; row < 4; row++) {
-        spi_transaction_t tr = { .length = (size_t)(w * 2) * 8, .tx_buffer = redline };
-        spi_device_polling_transmit(spi_dev, &tr);
+        spi_tx_sync(redline, (size_t)(w * 2));
     }
 }
 
@@ -1119,8 +1123,7 @@ static void display_fill_snow(int tube)
     uint8_t line[LCD_WIDTH * 2];   /* 160 B — always SRAM, within stack budget */
     for (int y = 0; y < LCD_HEIGHT; y++) {
         esp_fill_random(line, sizeof(line));
-        spi_transaction_t t = {.length = sizeof(line) * 8, .tx_buffer = line};
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(line, sizeof(line));
     }
     deselect_all();
 }
@@ -1157,6 +1160,25 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 #define DISPLAY_TICK_MS_FAST    50   /* spectrum mode — 20 Hz to match LED task */
 #define DISPLAY_TICK_MS_MED    100   /* WeatherLive sky w/o precip — 10 Hz */
 #define DISPLAY_TICK_MS_SLOW   200   /* all other modes — 5 Hz */
+
+/* Hidden-debug-panel runtime override for animated WeatherLive's tick rate —
+ * lets the FAST/MED split above be replaced with one experimental rate
+ * (5-40 Hz) without a rebuild, to explore fluidity beyond the default 20 Hz
+ * ceiling once real hardware measurements are in. 0 = disabled (use the
+ * constants above unchanged). Deliberately does NOT affect Spectrum mode,
+ * whose 20 Hz is synced to the LED task / WS2812 audible-noise threshold,
+ * not display fluidity. Runtime only — NOT persisted, resets on reboot,
+ * same convention as /api/debug/loglevel. See display_task's tick_ms
+ * selection below for where this is applied. */
+static volatile int s_debug_wl_fps = 0;
+
+void display_set_debug_wl_fps(int fps)
+{
+    if (fps != 0 && (fps < 5 || fps > 40)) return;   /* reject out-of-range, keep prior value */
+    s_debug_wl_fps = fps;
+    if (fps) ESP_LOGW(TAG, "debug WeatherLive FPS override: %d Hz", fps);
+    else     ESP_LOGW(TAG, "debug WeatherLive FPS override: disabled (using default FAST/MED rates)");
+}
 
 /* Weather panel indices — weather_panel local in display_task. */
 #define WEATHER_PANEL_TEMP  0   /* temperature + icon */
@@ -1579,95 +1601,6 @@ bool display_cx_push_image(int which, const uint8_t *jpg, size_t len)
     return ok;
 }
 
-/* ── display_show_image_region ───────────────────────────────────────────────
- * Render a rectangular sub-region of a decoded image to a specific position
- * within a tube's LCD address space.  Used by the 24H Custom tube-6 panel
- * renderer to composite two half-images (e.g. day name + date digits) into
- * the single tube without a separate PSRAM compose buffer.
- *
- * path          : LittleFS path, loaded through the normal img_cache
- * src_x, src_y  : top-left of the crop rectangle in decoded image coordinates
- * src_w, src_h  : size of the crop rectangle (clamped to image bounds)
- * dst_x, dst_y  : destination top-left on the tube (added to ox/oy offsets)
- *
- * Burns the tube-select / deselect cycle internally so multiple calls for
- * the same tube re-select it each time — acceptable at 5 Hz.              */
-static void display_show_image_region(int tube, const char *path,
-                                      int src_x, int src_y, int src_w, int src_h,
-                                      int dst_x, int dst_y)
-{
-    if (tube < 0 || tube >= LCD_COUNT) return;
-    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
-
-    if (!path) {
-        /* NULL path = fill the destination region with black.
-         * Used by the H/T panel to clear digit slots that are unused on a
-         * given frame (e.g. single-digit number occupying only the right
-         * slot), preventing stale pixels from a previous larger value. */
-        if (src_w <= 0 || src_h <= 0) return;
-        select_tube(tube);
-        uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                               + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube] + dst_x);
-        uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube] + dst_y);
-        open_lcd_window(ox, oy, (uint8_t)src_w, (uint8_t)src_h);
-        uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];
-        memset(chunk, 0, (size_t)src_w * 2 * DISP_CHUNK_ROWS);
-        for (int y = 0; y < src_h; y += DISP_CHUNK_ROWS) {
-            int rows = (y + DISP_CHUNK_ROWS <= src_h) ? DISP_CHUNK_ROWS : src_h - y;
-            spi_transaction_t tr = { .length = (size_t)(rows * src_w * 2) * 8,
-                                     .tx_buffer = chunk };
-            spi_device_polling_transmit(spi_dev, &tr);
-        }
-        deselect_all();
-        return;
-    }
-
-    int img_w = 0, img_h = 0;
-    const uint8_t *buf = img_cache_get(path, &img_w, &img_h);
-    if (!buf || img_w == 0 || img_h == 0) return;
-
-    /* Clamp crop to image bounds */
-    if (src_x < 0) src_x = 0;
-    if (src_y < 0) src_y = 0;
-    if (src_x >= img_w) return;
-    if (src_y >= img_h) return;
-    if (src_w <= 0 || src_x + src_w > img_w) src_w = img_w - src_x;
-    if (src_h <= 0 || src_y + src_h > img_h) src_h = img_h - src_y;
-
-    select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                           + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube] + dst_x);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube] + dst_y);
-    open_lcd_window(ox, oy, (uint8_t)src_w, (uint8_t)src_h);
-
-    uint8_t  chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];
-    bool     do_px  = s_gamma_lut_active[tube];    /* brightness+gamma combined LUT */
-
-    for (int y = src_y; y < src_y + src_h; y += DISP_CHUNK_ROWS) {
-        int rows = DISP_CHUNK_ROWS;
-        if (y + rows > src_y + src_h) rows = (src_y + src_h) - y;
-        for (int r = 0; r < rows; r++)
-            memcpy(chunk + r * src_w * 2,
-                   buf + (y + r) * img_w * 2 + src_x * 2,
-                   (size_t)(src_w * 2));
-        if (do_px) {
-            int npx = rows * src_w;
-            for (int j = 0; j < npx; j++) {
-                uint16_t px = ((uint16_t)chunk[j*2] << 8) | chunk[j*2+1];
-                px = wl_apply_px(px, tube, do_px);
-                chunk[j*2]   = (uint8_t)(px>>8);
-                chunk[j*2+1] = (uint8_t)(px&0xFF);
-            }
-        }
-        spi_transaction_t tr = {
-            .length    = (size_t)(rows * src_w * 2) * 8,
-            .tx_buffer = chunk,
-        };
-        spi_device_polling_transmit(spi_dev, &tr);
-    }
-    deselect_all();
-}
-
 /* ════════════════════════════════════════════════════════════════════
  *  FlipClock split-flap animation
  *
@@ -1842,25 +1775,6 @@ static void flip_prime_blank(int tube, const char *theme)
     }
 }
 
-/* ── Path builders ─────────────────────────────────────────────────── */
-void display_path_number(char *buf, size_t n, const char *theme, int digit)
-{ snprintf(buf, n, "/images/themes/%s/Numbers/%d.jpg", theme, digit); }
-
-void display_path_ampm(char *buf, size_t n, const char *theme, const char *name)
-{ snprintf(buf, n, "/images/themes/%s/AMPM/%s.jpg", theme, name); }
-
-void display_path_weather(char *buf, size_t n, const char *theme, const char *cond)
-{ snprintf(buf, n, "/images/themes/%s/MutiInfo/Weather/%s.jpg", theme, cond); }
-
-void display_path_temperature(char *buf, size_t n, const char *theme, const char *name)
-{ snprintf(buf, n, "/images/themes/%s/MutiInfo/Temperature/%s.jpg", theme, name); }
-
-void display_path_humidity(char *buf, size_t n, const char *theme, const char *name)
-{ snprintf(buf, n, "/images/themes/%s/MutiInfo/Humidity/%s.jpg", theme, name); }
-
-
-/* ── High-level helpers ────────────────────────────────────────────── */
-
 /* Check whether a SPIFFS file exists given its logical path (no "/spiffs" prefix).
  * All img_cache / display_show_image paths omit the mount-point prefix; fopen
  * probes must add it themselves or they silently always fail.               */
@@ -1873,6 +1787,62 @@ static bool spiffs_file_exists(const char *path)
     fclose(f);
     return true;
 }
+
+/* MultiInfo/MutiInfo folder-name fallback — the built-in themes and README
+ * now use the corrected "MultiInfo" spelling (inherited "MutiInfo" typo from
+ * the stock firmware), but existing user-uploaded custom themes may still
+ * only have the original misspelled folder. Probe the corrected path for
+ * the EXACT asset being requested (not a fixed canary file, since a custom
+ * theme could legitimately be missing any single icon) and fall back to the
+ * legacy name if it's not there. Cached per theme+asset — mirrors
+ * theme_ampm_has_png's cache below — since these paths are looked up on
+ * every render frame in WeatherLive/24H Custom. Reset by
+ * display_theme_cache_flush() after a hotpatch/theme upload. */
+#define MULTIINFO_CACHE_N 20
+static struct { char key[40]; bool use_legacy; } s_multiinfo_cache[MULTIINFO_CACHE_N];
+static int  s_multiinfo_cache_n         = 0;
+static char s_multiinfo_cache_theme[64] = {0};
+
+static const char *multiinfo_dir(const char *theme, const char *category, const char *name)
+{
+    if (strcmp(s_multiinfo_cache_theme, theme) != 0) {
+        strlcpy(s_multiinfo_cache_theme, theme, sizeof(s_multiinfo_cache_theme));
+        s_multiinfo_cache_n = 0;
+    }
+    char key[40];
+    snprintf(key, sizeof(key), "%s/%s", category, name);
+    for (int i = 0; i < s_multiinfo_cache_n; i++)
+        if (strcmp(s_multiinfo_cache[i].key, key) == 0)
+            return s_multiinfo_cache[i].use_legacy ? "MutiInfo" : "MultiInfo";
+    char probe[256];
+    snprintf(probe, sizeof(probe), "/images/themes/%s/MultiInfo/%s/%s.jpg", theme, category, name);
+    bool use_legacy = !spiffs_file_exists(probe);
+    if (s_multiinfo_cache_n < MULTIINFO_CACHE_N) {
+        strlcpy(s_multiinfo_cache[s_multiinfo_cache_n].key, key, sizeof(s_multiinfo_cache[0].key));
+        s_multiinfo_cache[s_multiinfo_cache_n].use_legacy = use_legacy;
+        s_multiinfo_cache_n++;
+    }
+    return use_legacy ? "MutiInfo" : "MultiInfo";
+}
+
+/* ── Path builders ─────────────────────────────────────────────────── */
+void display_path_number(char *buf, size_t n, const char *theme, int digit)
+{ snprintf(buf, n, "/images/themes/%s/Numbers/%d.jpg", theme, digit); }
+
+void display_path_ampm(char *buf, size_t n, const char *theme, const char *name)
+{ snprintf(buf, n, "/images/themes/%s/AMPM/%s.jpg", theme, name); }
+
+void display_path_weather(char *buf, size_t n, const char *theme, const char *cond)
+{ snprintf(buf, n, "/images/themes/%s/%s/Weather/%s.jpg", theme, multiinfo_dir(theme, "Weather", cond), cond); }
+
+void display_path_temperature(char *buf, size_t n, const char *theme, const char *name)
+{ snprintf(buf, n, "/images/themes/%s/%s/Temperature/%s.jpg", theme, multiinfo_dir(theme, "Temperature", name), name); }
+
+void display_path_humidity(char *buf, size_t n, const char *theme, const char *name)
+{ snprintf(buf, n, "/images/themes/%s/%s/Humidity/%s.jpg", theme, multiinfo_dir(theme, "Humidity", name), name); }
+
+
+/* ── High-level helpers ────────────────────────────────────────────── */
 
 /* ── PNG format cache ────────────────────────────────────────────────────
  * spiffs_file_exists() costs one fopen()/fclose() per call.  In clock mode
@@ -1932,6 +1902,8 @@ void display_theme_cache_flush(void)
 {
     s_ampm_cache_n = 0;
     s_ampm_cache_theme[0] = '\0';
+    s_multiinfo_cache_n = 0;
+    s_multiinfo_cache_theme[0] = '\0';
 }
 
 void display_show_number(int tube, int digit, const char *theme)
@@ -2119,8 +2091,7 @@ static void display_show_colon_blink(int tube, const char *theme, bool show_colo
         } else {
             memcpy(line, src, (size_t)s_colon_bw * 2);
         }
-        spi_transaction_t t = { .length = (size_t)(s_colon_bw * 2) * 8, .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(line, (size_t)(s_colon_bw * 2));
     }
     deselect_all();
 }
@@ -2242,9 +2213,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
     memset(chunk, 0, sizeof(chunk));
     for (int r = 0; r < MARGIN; r += DISP_CHUNK_ROWS) {
         int rows = (r + DISP_CHUNK_ROWS <= MARGIN) ? DISP_CHUNK_ROWS : MARGIN - r;
-        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
-                                 .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(chunk, (size_t)(rows * LCD_WIDTH * 2));
     }
 
     /* ── Text region: 2× pixel-scaled blit (128 output rows) ──────────
@@ -2269,9 +2238,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
                 chunk[(r * LCD_WIDTH + out_col + 1) * 2 + 1] = lo;
             }
         }
-        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
-                                 .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(chunk, (size_t)(rows * LCD_WIDTH * 2));
     }
 
     /* ── Bottom black margin (16 rows) ── */
@@ -2279,9 +2246,7 @@ static void pin_draw_tube(int tube, char ch, uint16_t fg)
     int bot = LCD_HEIGHT - MARGIN - OUT_H;   /* 160 - 16 - 128 = 16 rows */
     for (int r = 0; r < bot; r += DISP_CHUNK_ROWS) {
         int rows = (r + DISP_CHUNK_ROWS <= bot) ? DISP_CHUNK_ROWS : bot - r;
-        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
-                                 .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(chunk, (size_t)(rows * LCD_WIDTH * 2));
     }
 
     deselect_all();
@@ -2357,7 +2322,7 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
 }
 
 /* ── H/T panel helpers (U8g2 embedded-font rendering for kind==2) ────────────
- * render_cx_tube6 kind==2 renders temperature and humidity as text using the
+ * render_cx_panel's kind==2 renders temperature and humidity as text using the
  * U8g2 virtual frame buffer (s_u8g2, 128×64, configured in
  * display_init).  The three helpers below handle colour sampling, pixel blitting,
  * and string rendering respectively.
@@ -2499,8 +2464,7 @@ static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
             line[col * 2]     = lit ? fg_hi : 0x00;
             line[col * 2 + 1] = lit ? fg_lo : 0x00;
         }
-        spi_transaction_t t = { .length = sizeof(line) * 8, .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(line, sizeof(line));
     }
     deselect_all();
 }
@@ -2554,8 +2518,7 @@ static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
                 line[col * 2 + 1] = 0x00;
             }
         }
-        spi_transaction_t t = { .length = sizeof(line) * 8, .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(line, sizeof(line));
     }
     deselect_all();
 }
@@ -2816,15 +2779,18 @@ static void ht_draw_suntime(int tube, const char *timestr, bool rising,
     ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), 56, y_tube, fg, bg);
 }
 
-/* ── cx6_stamp_update_indicator ──────────────────────────────────────────────
+/* ── cx_stamp_update_indicator ───────────────────────────────────────────────
  * Panels rendered via ht_blit_at (weekdate, H/T, sunrise/sunset) bypass
  * display_show_digit(), so they never trigger the 4-row red stripe that
  * display_show_digit() applies automatically.  Worse, the H/T humidity blit
  * and the weekdate date blit both extend to row 159, overwriting whatever
  * display_show_image() had drawn there.
- * Call this once after ALL blits for tube 5 are complete to re-stamp the
- * indicator when s_update_indicator is active.  No-op when inactive.          */
-static void cx6_stamp_update_indicator(int tube)
+ * Called from render_cx_panel() for whichever tube it just rendered — tube 5
+ * in single-panel 24H-Custom mode, or tubes 4 AND 5 in dual-panel mode (one
+ * call per tube, each after ALL blits for that tube are complete) — to
+ * re-stamp the indicator when s_update_indicator is active.  No-op when
+ * inactive.                                                                  */
+static void cx_stamp_update_indicator(int tube)
 {
     if (!s_update_indicator) return;
     select_tube(tube);
@@ -2835,14 +2801,14 @@ static void cx6_stamp_update_indicator(int tube)
     uint8_t redline[LCD_WIDTH * 2];
     for (int x = 0; x < LCD_WIDTH; x++) { redline[x*2] = 0xF8; redline[x*2+1] = 0x00; }
     for (int row = 0; row < 4; row++) {
-        spi_transaction_t tr = { .length = sizeof(redline) * 8, .tx_buffer = redline };
-        spi_device_polling_transmit(spi_dev, &tr);
+        spi_tx_sync(redline, sizeof(redline));
     }
     deselect_all();
 }
 
-/* ── render_cx_tube6 ─────────────────────────────────────────────────────────
- * Render the current 24H-Custom info panel onto tube 5 (the rightmost tube).
+/* ── render_cx_panel ─────────────────────────────────────────────────────────
+ * Render the current 24H-Custom info panel onto the given tube — tube 5 (the
+ * rightmost tube) in single-panel mode, or tube 4 as well in dual-panel mode.
  * Each panel occupies the full 80×160 display by compositing two 80×80 halves:
  *
  *   WEATHER  — Full tube (80×160) : current weather condition icon JPEG.
@@ -3075,6 +3041,12 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
                              int lcd_tube, const bool enabled[10],
                              uint8_t panel_id, int8_t *last_kind)
 {
+    /* Same burn-in/snow guard as wl_draw_tube()/wl_draw_panel() — avoids a
+     * push-then-immediately-overwrite flicker race. Unlike those, this
+     * function pushes per-blit (ht_blit/ht_blit_at) rather than once at the
+     * end, so the guard has to sit here at the top. */
+    if ((s_burnin_mask | s_snow_mask) & (1u << lcd_tube)) return;
+
     /* Keep the active TTF face in sync with cfg->custom_font even though this
      * is an asset (non-Custom/WeatherLive) theme: the outdoor temp/humidity/
      * wind/AQI/combined-H-T panel kinds below reuse the SAME wl_text()-based
@@ -3121,6 +3093,17 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
     /* Pushed-image panel with nothing pushed yet → show weekdate until the first
      * /api/cx_image arrives, so an enabled-but-empty tube isn't a black slot. */
     if (kind == 5 && !s_cx_push_valid[push_idx]) kind = 1;
+
+    /* Indoor H/T panel (2) depends on the SHT30 sensor rather than the
+     * weather API, so it needs its own cold-boot/self-heal check here
+     * instead of the weather_get() guard above: if the sensor read fails,
+     * fall back to the weekdate panel so *last_kind still gets recorded
+     * and the tube doesn't repaint on every tick while the sensor is
+     * simply absent. */
+    if (kind == 2) {
+        sht30_reading_t s_probe;
+        if (!sht30_get(&s_probe)) kind = 1;
+    }
 
     if (kind == 0) {
         /* ── Weather icon panel ─────────────────────────────────────────────
@@ -3249,12 +3232,8 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
          * (current temp + degree ring over today's Hi/Lo range track + marker +
          * lo/hi numbers), rendered into the shared framebuffer over the theme's
          * AMPM/blank.jpg background via the SAME wl_temp_panel() drawing code.
-         * Falls back to black when weather API has no valid data.            */
-        const weather_data_t *ow = weather_get();
-        if (!ow || !ow->valid) {
-            if (kind != *last_kind) display_fill(lcd_tube, 0x0000);
-            goto cx_tube6_done;
-        }
+         * Validity ensured by the cold-boot guard above.                     */
+        const weather_data_t *ow = weather_get();   /* validity ensured by guard above */
         {
             uint8_t *fb = wl_fb();
             if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
@@ -3421,7 +3400,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
          * OUTDOOR_HT panel, rendered into the shared framebuffer over the
          * theme's AMPM/blank.jpg via the SAME wl_outdoor_ht_panel() drawing
          * code.  Validity ensured by the cold-boot guard above. */
-        const weather_data_t *ow = weather_get();
+        const weather_data_t *ow = weather_get();   /* validity ensured by guard above */
         uint8_t *fb = wl_fb();
         if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
 
@@ -3430,9 +3409,9 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         int fg_r, fg_g, fg_b;
         cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
         bool use_f     = (strcmp(cfg->temp_format, "Fahrenheit") == 0);
-        int  temp_disp = (ow && ow->valid) ? (int)lroundf(to_display_temp(ow->temp_c, use_f)) : 0;
-        int  hum       = (ow && ow->valid) ? (int)lroundf(ow->humidity) : 0;
-        wl_outdoor_ht_panel(fb, cfg->language, temp_disp, hum, ow && ow->valid, fg_r, fg_g, fg_b);
+        int  temp_disp = ow ? (int)lroundf(to_display_temp(ow->temp_c, use_f)) : 0;
+        int  hum       = ow ? (int)lroundf(ow->humidity) : 0;
+        wl_outdoor_ht_panel(fb, cfg->language, temp_disp, hum, ow != NULL, fg_r, fg_g, fg_b);
         display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
     }
 
@@ -3441,8 +3420,8 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
 cx_tube6_done:
     /* Re-stamp the update indicator after every panel render.
      * ht_blit_at paths overwrite the bottom rows; display_fill misses it
-     * entirely.  cx6_stamp_update_indicator() is a no-op when inactive. */
-    cx6_stamp_update_indicator(lcd_tube);
+     * entirely.  cx_stamp_update_indicator() is a no-op when inactive. */
+    cx_stamp_update_indicator(lcd_tube);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -3581,6 +3560,130 @@ static void wl_cloud_lump(uint8_t *fb, int cx, int cy, int R,
             wl_blend_px(row + x * 2, r, g, b, a);
         }
     }
+}
+
+/* ── Shared scene-building core ──────────────────────────────────────────────
+ * Sunrise/sunset resolution, the twilight-aware night factor, and the sun/moon
+ * arc placement used to appear near-verbatim in render_weatherlive() and both
+ * branches of wl_ensure_scene(). Factored here so a future change to this
+ * model (new twilight window, different arc shape, …) can't silently diverge
+ * between the animated-clock path and the two static-scene paths.
+ *
+ * `t`    : real local time — always the actual clock, even under WeatherLive
+ *          Demo (used for sun_calc_solar/sun_calc_moon_phase, which need a
+ *          real date; only the caller's `mins` may be a virtual/accelerated
+ *          value in demo mode, so it is taken as a separate parameter rather
+ *          than derived from `t` here).
+ * `mins`  : minutes-of-day driving the sky gradient/night/arc position —
+ *           normally t->tm_hour*60+t->tm_min, but render_weatherlive()
+ *           substitutes an accelerated virtual value while in Demo mode.
+ * `out`   : scene struct — tr/tg/tb, hr/hg/hb, night, and all body_* fields
+ *           are populated; other fields (precip/cloud/wind/flash/anim_t) are
+ *           untouched since callers derive those independently.
+ * `out_sunrise`/`out_sunset` : resolved sunrise/sunset (minutes-of-day),
+ *           optional — pass NULL if the caller doesn't need them back. */
+static void wl_build_scene_core(const struct tm *t, int mins, wl_scene_t *out,
+                                 int *out_sunrise, int *out_sunset)
+{
+    int SUNRISE = 360, SUNSET = 1140;
+    float lat = 0.0f, lon = 0.0f;
+    bool  have_loc = weather_get_location(&lat, &lon);
+    if (have_loc) {
+        int rise = -1, set = -1;
+        sun_calc_solar(lat, lon, t, &rise, &set);
+        if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
+    }
+
+    int top[3], hor[3];
+    wl_sky_palette(mins, SUNRISE, SUNSET, top, hor);
+    out->tr = top[0]; out->tg = top[1]; out->tb = top[2];
+    out->hr = hor[0]; out->hg = hor[1]; out->hb = hor[2];
+
+    /* Night factor (0..255) for the stars: fully dark outside the ±TW
+     * twilight windows, ramping to 0 across dawn/dusk so stars fade in/out
+     * with the sky. Mirrors wl_sky_palette's TW window. */
+    {
+        const int TW = 55;
+        int srA = SUNRISE - TW, srB = SUNRISE + TW;
+        int ssA = SUNSET  - TW, ssB = SUNSET  + TW;
+        int night;
+        if      (mins < srA || mins >= ssB) night = 255;          /* deep night */
+        else if (mins < srB) night = 255 * (srB - mins) / (srB - srA);  /* dawn */
+        else if (mins < ssA) night = 0;                           /* full day   */
+        else                 night = 255 * (mins - ssA) / (ssB - ssA);  /* dusk */
+        if (night < 0)   night = 0;
+        if (night > 255) night = 255;
+        out->night = night;
+    }
+
+    /* Sun/moon arc — same SUNRISE/SUNSET; X sweeps the 6-tube panorama, Y arcs
+     * with a parabola (highest at mid-span); at night a moon traces the same
+     * path.  Virtual canvas spans all six active areas + the five inter-tube
+     * gaps, so the arc sweeps the true physical width. */
+    const int PANO_W    = LCD_COUNT * LCD_WIDTH + (LCD_COUNT - 1) * WL_GAP_PX;
+    const int HORIZON_Y = 118;                        /* arc baseline row       */
+
+    out->body_show    = false;
+    out->body_is_moon = false;
+    out->body_r       = 15;
+
+    if (mins >= SUNRISE && mins < SUNSET) {
+        /* Daytime: the sun arcs from sunrise (left) to sunset (right). */
+        float frac = (float)(mins - SUNRISE) / (float)(SUNSET - SUNRISE);
+        int   arc  = (int)(80.0f * 4.0f * frac * (1.0f - frac));
+        out->body_show = true;
+        out->body_x = (int)(frac * PANO_W);
+        out->body_y = HORIZON_Y - arc;
+        out->br = 255; out->bg = 228; out->bb = 120;        /* warm sun */
+    } else {
+        /* Night: real moon phase, positioned by phase relative to the sun.
+         * A full moon transits at solar midnight (opposite the sun); a new moon
+         * transits near noon (so it's absent from the night sky); the quarters
+         * transit near dusk/dawn.  Moonrise/set ≈ transit ± 6.2 h. */
+        float phase = sun_calc_moon_phase(t);
+        out->moon_term   = cosf(2.0f * (float)M_PI * phase);
+        out->moon_waxing = (phase <= 0.5f);
+        if (lat < 0.0f) out->moon_waxing = !out->moon_waxing;   /* S-hemisphere mirror */
+
+        int solar_noon = (SUNRISE + SUNSET) / 2;
+        int transit    = (solar_noon + (int)(phase * 1440.0f)) % 1440;
+        const int HALF_UP = 372;                      /* ~6.2 h either side */
+        int mrise = (transit - HALF_UP + 1440) % 1440;
+        int since = (mins - mrise + 1440) % 1440;     /* minutes into the up-window */
+        if (since < 2 * HALF_UP) {                    /* moon above the horizon */
+            float mfrac = (float)since / (float)(2 * HALF_UP);
+            int   arc   = (int)(80.0f * 4.0f * mfrac * (1.0f - mfrac));
+            out->body_show    = true;
+            out->body_is_moon = true;
+            out->body_x = (int)(mfrac * PANO_W);
+            out->body_y = HORIZON_Y - arc;
+            out->br = 230; out->bg = 234; out->bb = 248;     /* pale moon */
+        }
+        /* else: moon below the horizon → empty night sky (e.g. around new moon) */
+    }
+
+    if (out_sunrise) *out_sunrise = SUNRISE;
+    if (out_sunset)  *out_sunset  = SUNSET;
+}
+
+/* Weather-icon → cloud/precipitation scene parameters, shared by
+ * render_weatherlive() and both wl_ensure_scene() branches so the mapping
+ * table can't drift between the animated-clock path and the static-scene
+ * path. Does NOT touch flash or wind — callers set those separately since
+ * that behaviour genuinely differs between call sites (lightning strikes and
+ * live wind only animate on the clock face; wl_ensure_scene's non-clock
+ * paths always show a calm, flash-free sky). */
+static void wl_scene_clouds_from_icon(const char *ic, wl_scene_t *out)
+{
+    out->precip = 0; out->ncloud = 1; out->ca = 110;             /* default: clear, one wisp */
+    out->cr = 245; out->cg = 248; out->cb = 255;
+    if      (!strcmp(ic, "fewClouds"))      { out->ncloud = 2; out->ca = 150; }
+    else if (!strcmp(ic, "overcastClouds")) { out->ncloud = 6; out->ca = 200; out->cr = 200; out->cg = 205; out->cb = 215; }
+    else if (!strcmp(ic, "fog"))            { out->ncloud = 6; out->ca = 150; out->cr = 205; out->cg = 208; out->cb = 214; }
+    else if (!strcmp(ic, "rain"))           { out->ncloud = 5; out->ca = 190; out->cr = 170; out->cg = 178; out->cb = 190; out->precip = 1; }
+    else if (!strcmp(ic, "squalls"))        { out->ncloud = 5; out->ca = 200; out->cr = 160; out->cg = 168; out->cb = 182; out->precip = 1; }
+    else if (!strcmp(ic, "thunderstorm"))   { out->ncloud = 6; out->ca = 210; out->cr = 140; out->cg = 146; out->cb = 160; out->precip = 1; }
+    else if (!strcmp(ic, "snow"))           { out->ncloud = 5; out->ca = 190; out->cr = 210; out->cg = 215; out->cb = 225; out->precip = 2; }
 }
 
 /* Precipitation particle field, in gap-aware panorama coords (every particle is
@@ -4267,7 +4370,7 @@ static void wl_glyph(uint8_t *fb, char ch)
         if (e->cov[i] > 4)
             wl_blend_px(fb + i * 2, s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b, e->cov[i]);
         else if (shadow && e->halo && e->halo[i] > 0)
-            wl_blend_px(fb + i * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, e->halo[i]);
+            wl_blend_px(fb + i * 2, s_wl_glyph_shadow_r, s_wl_glyph_shadow_g, s_wl_glyph_shadow_b, e->halo[i]);
     }
 }
 
@@ -4418,7 +4521,7 @@ static const uint8_t dm_font_degreec[14]   = {0x00,0x20,0x50,0x20,0x00,0x1C,0x22
 static const uint8_t dm_font_degreef[14]   = {0x00,0x20,0x50,0x20,0x00,0x3C,0x20,0x20,0x38,0x20,0x20,0x20,0x00,0x00};
 static const uint8_t dm_font_tempminus[14] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x3E,0x00,0x00,0x00,0x00,0x00,0x00};
 
-/* Weather-condition icons (MutiInfo/Weather JPEG equivalents) — this theme
+/* Weather-condition icons (MultiInfo/Weather JPEG equivalents) — this theme
  * has no icon art on disk, so wl_render_asset's "leave black" precedent
  * would otherwise apply here too. Simple hand-drawn pictograms instead, a
  * first draft meant to be refined in the font editor tool like every other
@@ -5075,7 +5178,10 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
 
     bool  want_marg = (w == LCD_WIDTH && h <= LCD_HEIGHT);
 
-    uint8_t chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];   /* 1 280 B SRAM */
+    /* Static so it lives off the task stack (same reasoning as cfg_snap's
+     * static local a few hundred lines down: this task's stack budget is
+     * tight). */
+    static uint8_t s_dd_chunk[LCD_WIDTH * 2 * DISP_CHUNK_ROWS];
 
     bool any_dirty = false;
     int  span_start = -1;
@@ -5101,19 +5207,19 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
             for (int y = 0; y < span_h; y += DISP_CHUNK_ROWS) {
                 int rows    = (y + DISP_CHUNK_ROWS <= span_h) ? DISP_CHUNK_ROWS : span_h - y;
                 int abs_row = span_start + y;
-                memcpy(chunk, data + abs_row * row_bytes, (size_t)(rows * w * 2));
+                size_t len  = (size_t)(rows * w * 2);
 
+                memcpy(s_dd_chunk, data + abs_row * row_bytes, len);
                 if (do_px) {
                     int npx = rows * w;
                     for (int j = 0; j < npx; j++) {
-                        uint16_t px = ((uint16_t)chunk[j * 2] << 8) | chunk[j * 2 + 1];
+                        uint16_t px = ((uint16_t)s_dd_chunk[j * 2] << 8) | s_dd_chunk[j * 2 + 1];
                         px = wl_apply_px(px, tube, do_px);
-                        chunk[j * 2]     = (uint8_t)(px >> 8);
-                        chunk[j * 2 + 1] = (uint8_t)(px & 0xFF);
+                        s_dd_chunk[j * 2]     = (uint8_t)(px >> 8);
+                        s_dd_chunk[j * 2 + 1] = (uint8_t)(px & 0xFF);
                     }
                 }
-
-                spi_tx_pixels(chunk, (size_t)(rows * w * 2));
+                spi_tx_sync(s_dd_chunk, len);
             }
 
             /* Update prev for exactly this span.  Clean rows already equal data
@@ -5153,6 +5259,12 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
  * sky panorama. */
 static void wl_draw_tube(int tube, char ch, const wl_scene_t *sc)
 {
+    /* Skip any tube held by the colour-cycle or snow burn-in — it gets
+     * overwritten by display_fill()/display_fill_snow() in the display task
+     * right after normal rendering anyway (see the identical guard and
+     * comment in display_show_image()). Avoids a push-then-immediately-
+     * overwrite flicker race. */
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
     uint8_t *fb = wl_fb();
     if (!fb) { display_fill(tube, wl_rgb565(sc->tr, sc->tg, sc->tb)); return; }
     wl_paint_background(fb, tube, sc);
@@ -6018,6 +6130,11 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
                           int sunrise, int sunset,
                           int indoor_temp_disp, int indoor_hum)
 {
+    /* Same burn-in/snow guard as wl_draw_tube() — avoids a push-then-
+     * immediately-overwrite flicker race. Tube 5/6 info panels (weekday/
+     * date, temp, humidity, wind, sunrise, AQI, indoor H/T) all funnel
+     * through this one function, so a single guard here covers all of them. */
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
     uint8_t *fb = wl_fb();
     if (!fb) { display_fill(tube, wl_rgb565(sc->tr, sc->tg, sc->tb)); return; }
 
@@ -6252,84 +6369,11 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
      * location is known or on polar day/night.  Drives BOTH the sky palette and
      * the sun/moon arc, so the day length tracks the real season/location.
      * (In demo mode `mins` is the accelerated virtual clock, but the sun events
-     *  stay real, so the sky still cycles correctly across them.) */
-    int SUNRISE = 360, SUNSET = 1140;
-    float lat = 0.0f, lon = 0.0f;
-    bool  have_loc = weather_get_location(&lat, &lon);
-    if (have_loc) {
-        int rise = -1, set = -1;
-        sun_calc_solar(lat, lon, t, &rise, &set);
-        if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
-    }
-
-    int top[3], hor[3];
-    wl_sky_palette(mins, SUNRISE, SUNSET, top, hor);
-    sc.tr = top[0]; sc.tg = top[1]; sc.tb = top[2];
-    sc.hr = hor[0]; sc.hg = hor[1]; sc.hb = hor[2];
-
-    /* Night factor (0..255) for the stars: fully dark outside the ±TW twilight
-     * windows, ramping to 0 across dawn/dusk so stars fade in/out with the sky.
-     * Mirrors wl_sky_palette's TW window. */
-    {
-        const int TW = 55;
-        int srA = SUNRISE - TW, srB = SUNRISE + TW;
-        int ssA = SUNSET  - TW, ssB = SUNSET  + TW;
-        if      (mins < srA || mins >= ssB) sc.night = 255;          /* deep night */
-        else if (mins < srB) sc.night = 255 * (srB - mins) / (srB - srA);  /* dawn */
-        else if (mins < ssA) sc.night = 0;                           /* full day   */
-        else                 sc.night = 255 * (mins - ssA) / (ssB - ssA);  /* dusk */
-        if (sc.night < 0)   sc.night = 0;
-        if (sc.night > 255) sc.night = 255;
-    }
-
-    /* Sun/moon arc — same SUNRISE/SUNSET; X sweeps the 6-tube panorama, Y arcs
-     * with a parabola (highest at mid-span); at night a moon traces the same
-     * path. */
-
-    /* Virtual canvas spans all six active areas + the five inter-tube gaps, so
-     * the arc sweeps the true physical width (left edge of tube 0 → right edge
-     * of tube 5). */
-    const int PANO_W    = LCD_COUNT * LCD_WIDTH + (LCD_COUNT - 1) * WL_GAP_PX;
-    const int HORIZON_Y = 118;                        /* arc baseline row       */
-
-    sc.body_show    = false;
-    sc.body_is_moon = false;
-    sc.body_r       = 15;
-
-    if (mins >= SUNRISE && mins < SUNSET) {
-        /* Daytime: the sun arcs from sunrise (left) to sunset (right). */
-        float frac = (float)(mins - SUNRISE) / (float)(SUNSET - SUNRISE);
-        int   arc  = (int)(80.0f * 4.0f * frac * (1.0f - frac));
-        sc.body_show = true;
-        sc.body_x = (int)(frac * PANO_W);
-        sc.body_y = HORIZON_Y - arc;
-        sc.br = 255; sc.bg = 228; sc.bb = 120;        /* warm sun */
-    } else {
-        /* Night: real moon phase, positioned by phase relative to the sun.
-         * A full moon transits at solar midnight (opposite the sun); a new moon
-         * transits near noon (so it's absent from the night sky); the quarters
-         * transit near dusk/dawn.  Moonrise/set ≈ transit ± 6.2 h. */
-        float phase = sun_calc_moon_phase(t);
-        sc.moon_term   = cosf(2.0f * (float)M_PI * phase);
-        sc.moon_waxing = (phase <= 0.5f);
-        if (lat < 0.0f) sc.moon_waxing = !sc.moon_waxing;   /* S-hemisphere mirror */
-
-        int solar_noon = (SUNRISE + SUNSET) / 2;
-        int transit    = (solar_noon + (int)(phase * 1440.0f)) % 1440;
-        const int HALF_UP = 372;                      /* ~6.2 h either side */
-        int mrise = (transit - HALF_UP + 1440) % 1440;
-        int since = (mins - mrise + 1440) % 1440;     /* minutes into the up-window */
-        if (since < 2 * HALF_UP) {                    /* moon above the horizon */
-            float mfrac = (float)since / (float)(2 * HALF_UP);
-            int   arc   = (int)(80.0f * 4.0f * mfrac * (1.0f - mfrac));
-            sc.body_show    = true;
-            sc.body_is_moon = true;
-            sc.body_x = (int)(mfrac * PANO_W);
-            sc.body_y = HORIZON_Y - arc;
-            sc.br = 230; sc.bg = 234; sc.bb = 248;     /* pale moon */
-        }
-        /* else: moon below the horizon → empty night sky (e.g. around new moon) */
-    }
+     *  stay real, so the sky still cycles correctly across them.)
+     * Shared with wl_ensure_scene()'s two branches via wl_build_scene_core() —
+     * see that function for the sky/night/arc math itself. */
+    int SUNRISE, SUNSET;
+    wl_build_scene_core(t, mins, &sc, &SUNRISE, &SUNSET);
 
     /* ── Animation clock (continuous) + frame delta ──────────────────────── */
     float dt = (s_wl_last_us != 0) ? (now_us - s_wl_last_us) / 1000000.0f : 0.05f;
@@ -6341,15 +6385,7 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     /* ── Condition → cloud density + precipitation ───────────────────────── */
     const weather_data_t *w = weather_get();
     const char *ic = demo_ic ? demo_ic : ((w && w->valid) ? w->icon : "");
-    sc.precip = 0; sc.ncloud = 1; sc.ca = 110;             /* default: clear, one wisp */
-    sc.cr = 245; sc.cg = 248; sc.cb = 255;
-    if      (!strcmp(ic, "fewClouds"))      { sc.ncloud = 2; sc.ca = 150; }
-    else if (!strcmp(ic, "overcastClouds")) { sc.ncloud = 6; sc.ca = 200; sc.cr = 200; sc.cg = 205; sc.cb = 215; }
-    else if (!strcmp(ic, "fog"))            { sc.ncloud = 6; sc.ca = 150; sc.cr = 205; sc.cg = 208; sc.cb = 214; }
-    else if (!strcmp(ic, "rain"))           { sc.ncloud = 5; sc.ca = 190; sc.cr = 170; sc.cg = 178; sc.cb = 190; sc.precip = 1; }
-    else if (!strcmp(ic, "squalls"))        { sc.ncloud = 5; sc.ca = 200; sc.cr = 160; sc.cg = 168; sc.cb = 182; sc.precip = 1; }
-    else if (!strcmp(ic, "thunderstorm"))   { sc.ncloud = 6; sc.ca = 210; sc.cr = 140; sc.cg = 146; sc.cb = 160; sc.precip = 1; }
-    else if (!strcmp(ic, "snow"))           { sc.ncloud = 5; sc.ca = 190; sc.cr = 210; sc.cg = 215; sc.cb = 225; sc.precip = 2; }
+    wl_scene_clouds_from_icon(ic, &sc);
 
     /* ── Wind (≈50 km/h saturates) drives cloud drift, gusts and rain slant ── */
     sc.wind = w->wind_kph / 50.0f;
@@ -6642,80 +6678,21 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
 
         /* Refresh time-of-day fields (gradient, sun/moon arc, night factor) so
          * the sky tracks real time in non-clock modes — same logic as
-         * render_weatherlive's per-frame rebuild.  Cloud layout stays fixed. */
+         * render_weatherlive's per-frame rebuild.  Cloud layout stays fixed.
+         * Shared via wl_build_scene_core() / wl_scene_clouds_from_icon() —
+         * see those functions for the sky/night/arc/cloud math itself. */
         time_t now_sec = time(NULL);
         struct tm lt; localtime_r(&now_sec, &lt);
         int mins = lt.tm_hour * 60 + lt.tm_min;
 
-        int SUNRISE = 360, SUNSET = 1140;
-        float lat = 0.0f, lon = 0.0f;
-        if (weather_get_location(&lat, &lon)) {
-            int rise = -1, set = -1;
-            sun_calc_solar(lat, lon, &lt, &rise, &set);
-            if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
-        }
-
-        int top3[3], hor3[3];
-        wl_sky_palette(mins, SUNRISE, SUNSET, top3, hor3);
-        s_wl_last_scene.tr = top3[0]; s_wl_last_scene.tg = top3[1]; s_wl_last_scene.tb = top3[2];
-        s_wl_last_scene.hr = hor3[0]; s_wl_last_scene.hg = hor3[1]; s_wl_last_scene.hb = hor3[2];
-
-        {   const int TW = 55;
-            int srA = SUNRISE - TW, srB = SUNRISE + TW;
-            int ssA = SUNSET  - TW, ssB = SUNSET  + TW;
-            int night;
-            if      (mins < srA || mins >= ssB) night = 255;
-            else if (mins < srB) night = 255 * (srB - mins) / (srB - srA);
-            else if (mins < ssA) night = 0;
-            else                 night = 255 * (mins - ssA) / (ssB - ssA);
-            if (night < 0) night = 0;
-            if (night > 255) night = 255;
-            s_wl_last_scene.night = night;
-        }
-
-        const int PANO_W    = LCD_COUNT * LCD_WIDTH + (LCD_COUNT - 1) * WL_GAP_PX;
-        const int HORIZON_Y = 118;
-        s_wl_last_scene.body_show = false; s_wl_last_scene.body_is_moon = false; s_wl_last_scene.body_r = 15;
-        if (mins >= SUNRISE && mins < SUNSET) {
-            float frac = (float)(mins - SUNRISE) / (float)(SUNSET - SUNRISE);
-            int arc = (int)(80.0f * 4.0f * frac * (1.0f - frac));
-            s_wl_last_scene.body_show = true;
-            s_wl_last_scene.body_x = (int)(frac * PANO_W);
-            s_wl_last_scene.body_y = HORIZON_Y - arc;
-            s_wl_last_scene.br = 255; s_wl_last_scene.bg = 228; s_wl_last_scene.bb = 120;
-        } else {
-            float phase = sun_calc_moon_phase(&lt);
-            s_wl_last_scene.moon_term   = cosf(2.0f * (float)M_PI * phase);
-            s_wl_last_scene.moon_waxing = (phase <= 0.5f);
-            if (lat < 0.0f) s_wl_last_scene.moon_waxing = !s_wl_last_scene.moon_waxing;
-            int solar_noon = (SUNRISE + SUNSET) / 2;
-            int transit    = (solar_noon + (int)(phase * 1440.0f)) % 1440;
-            const int HALF_UP = 372;
-            int mrise = (transit - HALF_UP + 1440) % 1440;
-            int since = (mins - mrise + 1440) % 1440;
-            if (since < 2 * HALF_UP) {
-                float mfrac = (float)since / (float)(2 * HALF_UP);
-                int arc = (int)(80.0f * 4.0f * mfrac * (1.0f - mfrac));
-                s_wl_last_scene.body_show = true; s_wl_last_scene.body_is_moon = true;
-                s_wl_last_scene.body_x = (int)(mfrac * PANO_W);
-                s_wl_last_scene.body_y = HORIZON_Y - arc;
-                s_wl_last_scene.br = 230; s_wl_last_scene.bg = 234; s_wl_last_scene.bb = 248;
-            }
-        }
+        int SUNRISE, SUNSET;
+        wl_build_scene_core(&lt, mins, &s_wl_last_scene, &SUNRISE, &SUNSET);
 
         {
             const weather_data_t *wdat = weather_get();
             const char *ic = (wdat && wdat->valid) ? wdat->icon : "";
-            s_wl_last_scene.precip = 0; s_wl_last_scene.ncloud = 1; s_wl_last_scene.ca = 110;
-            s_wl_last_scene.cr = 245; s_wl_last_scene.cg = 248; s_wl_last_scene.cb = 255;
+            wl_scene_clouds_from_icon(ic, &s_wl_last_scene);
             s_wl_last_scene.flash = 0.0f;
-            if      (!strcmp(ic, "fewClouds"))      { s_wl_last_scene.ncloud = 2; s_wl_last_scene.ca = 150; }
-            else if (!strcmp(ic, "overcastClouds")) { s_wl_last_scene.ncloud = 6; s_wl_last_scene.ca = 200; s_wl_last_scene.cr = 200; s_wl_last_scene.cg = 205; s_wl_last_scene.cb = 215; }
-            else if (!strcmp(ic, "fog"))            { s_wl_last_scene.ncloud = 6; s_wl_last_scene.ca = 150; s_wl_last_scene.cr = 205; s_wl_last_scene.cg = 208; s_wl_last_scene.cb = 214; }
-            else if (!strcmp(ic, "rain"))           { s_wl_last_scene.ncloud = 5; s_wl_last_scene.ca = 190; s_wl_last_scene.cr = 170; s_wl_last_scene.cg = 178; s_wl_last_scene.cb = 190; s_wl_last_scene.precip = 1; }
-            else if (!strcmp(ic, "squalls"))        { s_wl_last_scene.ncloud = 5; s_wl_last_scene.ca = 200; s_wl_last_scene.cr = 160; s_wl_last_scene.cg = 168; s_wl_last_scene.cb = 182; s_wl_last_scene.precip = 1; }
-            else if (!strcmp(ic, "thunderstorm"))   { s_wl_last_scene.ncloud = 6; s_wl_last_scene.ca = 210; s_wl_last_scene.cr = 140; s_wl_last_scene.cg = 146; s_wl_last_scene.cb = 160; s_wl_last_scene.precip = 1; }
-            else if (!strcmp(ic, "snow"))           { s_wl_last_scene.ncloud = 5; s_wl_last_scene.ca = 190; s_wl_last_scene.cr = 210; s_wl_last_scene.cg = 215; s_wl_last_scene.cb = 225; s_wl_last_scene.precip = 2; }
             s_wl_last_scene.wind = (wdat && wdat->valid) ? wdat->wind_kph / 50.0f : 0.0f;
             if (s_wl_last_scene.wind < 0.0f) s_wl_last_scene.wind = 0.0f;
             else if (s_wl_last_scene.wind > 1.0f) s_wl_last_scene.wind = 1.0f;
@@ -6727,74 +6704,16 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
     struct tm lt; localtime_r(&now_sec, &lt);
     int mins = lt.tm_hour * 60 + lt.tm_min;
 
-    int SUNRISE = 360, SUNSET = 1140;
-    float lat = 0.0f, lon = 0.0f;
-    if (weather_get_location(&lat, &lon)) {
-        int rise = -1, set = -1;
-        sun_calc_solar(lat, lon, &lt, &rise, &set);
-        if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
-    }
-
     wl_scene_t sc; memset(&sc, 0, sizeof(sc));
 
-    int top3[3], hor3[3];
-    wl_sky_palette(mins, SUNRISE, SUNSET, top3, hor3);
-    sc.tr = top3[0]; sc.tg = top3[1]; sc.tb = top3[2];
-    sc.hr = hor3[0]; sc.hg = hor3[1]; sc.hb = hor3[2];
-
-    {   const int TW = 55;
-        int srA = SUNRISE - TW, srB = SUNRISE + TW;
-        int ssA = SUNSET  - TW, ssB = SUNSET  + TW;
-        if      (mins < srA || mins >= ssB) sc.night = 255;
-        else if (mins < srB) sc.night = 255 * (srB - mins) / (srB - srA);
-        else if (mins < ssA) sc.night = 0;
-        else                 sc.night = 255 * (mins - ssA) / (ssB - ssA);
-        if (sc.night < 0) sc.night = 0;
-        if (sc.night > 255) sc.night = 255;
-    }
-
-    const int PANO_W    = LCD_COUNT * LCD_WIDTH + (LCD_COUNT - 1) * WL_GAP_PX;
-    const int HORIZON_Y = 118;
-    sc.body_show = false; sc.body_is_moon = false; sc.body_r = 15;
-    if (mins >= SUNRISE && mins < SUNSET) {
-        float frac = (float)(mins - SUNRISE) / (float)(SUNSET - SUNRISE);
-        int arc = (int)(80.0f * 4.0f * frac * (1.0f - frac));
-        sc.body_show = true;
-        sc.body_x = (int)(frac * PANO_W);
-        sc.body_y = HORIZON_Y - arc;
-        sc.br = 255; sc.bg = 228; sc.bb = 120;
-    } else {
-        float phase = sun_calc_moon_phase(&lt);
-        sc.moon_term   = cosf(2.0f * (float)M_PI * phase);
-        sc.moon_waxing = (phase <= 0.5f);
-        if (lat < 0.0f) sc.moon_waxing = !sc.moon_waxing;
-        int solar_noon = (SUNRISE + SUNSET) / 2;
-        int transit    = (solar_noon + (int)(phase * 1440.0f)) % 1440;
-        const int HALF_UP = 372;
-        int mrise = (transit - HALF_UP + 1440) % 1440;
-        int since = (mins - mrise + 1440) % 1440;
-        if (since < 2 * HALF_UP) {
-            float mfrac = (float)since / (float)(2 * HALF_UP);
-            int arc = (int)(80.0f * 4.0f * mfrac * (1.0f - mfrac));
-            sc.body_show = true; sc.body_is_moon = true;
-            sc.body_x = (int)(mfrac * PANO_W);
-            sc.body_y = HORIZON_Y - arc;
-            sc.br = 230; sc.bg = 234; sc.bb = 248;
-        }
-    }
+    int SUNRISE, SUNSET;
+    wl_build_scene_core(&lt, mins, &sc, &SUNRISE, &SUNSET);
 
     sc.anim_t = (float)esp_timer_get_time() / 1000000.0f;
     const weather_data_t *wdat = weather_get();
     const char *ic = (wdat && wdat->valid) ? wdat->icon : "";
-    sc.precip = 0; sc.ncloud = 1; sc.ca = 110;
-    sc.cr = 245; sc.cg = 248; sc.cb = 255; sc.flash = 0.0f;
-    if      (!strcmp(ic, "fewClouds"))      { sc.ncloud = 2; sc.ca = 150; }
-    else if (!strcmp(ic, "overcastClouds")) { sc.ncloud = 6; sc.ca = 200; sc.cr = 200; sc.cg = 205; sc.cb = 215; }
-    else if (!strcmp(ic, "fog"))            { sc.ncloud = 6; sc.ca = 150; sc.cr = 205; sc.cg = 208; sc.cb = 214; }
-    else if (!strcmp(ic, "rain"))           { sc.ncloud = 5; sc.ca = 190; sc.cr = 170; sc.cg = 178; sc.cb = 190; sc.precip = 1; }
-    else if (!strcmp(ic, "squalls"))        { sc.ncloud = 5; sc.ca = 200; sc.cr = 160; sc.cg = 168; sc.cb = 182; sc.precip = 1; }
-    else if (!strcmp(ic, "thunderstorm"))   { sc.ncloud = 6; sc.ca = 210; sc.cr = 140; sc.cg = 146; sc.cb = 160; sc.precip = 1; }
-    else if (!strcmp(ic, "snow"))           { sc.ncloud = 5; sc.ca = 190; sc.cr = 210; sc.cg = 215; sc.cb = 225; sc.precip = 2; }
+    wl_scene_clouds_from_icon(ic, &sc);
+    sc.flash = 0.0f;
     sc.wind = (wdat && wdat->valid) ? wdat->wind_kph / 50.0f : 0.0f;
     if (sc.wind < 0.0f) sc.wind = 0.0f; else if (sc.wind > 1.0f) sc.wind = 1.0f;
 
@@ -6884,6 +6803,12 @@ static bool png_composite_over_sky(uint8_t *fb, const char *path)
  * alpha) or fall back to .jpg black-key compositing if no PNG exists. */
 static void wl_tube_icon(int tube, const char *name)
 {
+    /* Skip any tube held by the colour-cycle or snow burn-in — it gets
+     * overwritten by display_fill()/display_fill_snow() in the display task
+     * right after normal rendering anyway (see the identical guard and
+     * comment in display_show_image()). Avoids a push-then-immediately-
+     * overwrite flicker race. */
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
     if (!s_wl_scene_valid) { display_fill(tube, 0x0000); return; }
     uint8_t *fb = wl_fb();
     if (!fb) { display_fill(tube, 0x0000); return; }
@@ -7237,11 +7162,7 @@ static void render_spectrum(const nextube_config_t *cfg)
             }
             *px++ = 0; *px++ = 0;                            /* trailing pad */
 
-            spi_transaction_t t = {
-                .length    = LCD_WIDTH * 2 * 8,
-                .tx_buffer = line,
-            };
-            spi_device_polling_transmit(spi_dev, &t);
+            spi_tx_sync(line, (size_t)LCD_WIDTH * 2);
         }
 
         /* Black-fill the burn-in edge bands on BOTH sides of the shifted
@@ -7263,8 +7184,7 @@ static void render_spectrum(const nextube_config_t *cfg)
                 if (band[b].w <= 0 || band[b].x0 < 0) continue;
                 open_lcd_window((uint8_t)band[b].x0, oy, (uint8_t)band[b].w, LCD_HEIGHT);
                 for (int y = 0; y < LCD_HEIGHT; y++) {
-                    spi_transaction_t mt = { .length = (size_t)(band[b].w * 2) * 8, .tx_buffer = black };
-                    spi_device_polling_transmit(spi_dev, &mt);
+                    spi_tx_sync(black, (size_t)(band[b].w * 2));
                 }
             }
             s_spec_margin_done[tube] = true;
@@ -7442,7 +7362,7 @@ static void render_album(const nextube_config_t *cfg,
  *   Leading zeros are blank.  Negative temps suppress humidity entirely.
  *   All blank slots use AMPM/blank.jpg for a theme-consistent appearance.
  *   Unit: AMPM/blank.jpg OR-composited with Temperature/degreec.jpg or degreef.jpg
- *   tube  5   : weather icon from MutiInfo/Weather/{icon}.jpg
+ *   tube  5   : weather icon from MultiInfo/Weather/{icon}.jpg
  *
  * Actual SPIFFS filenames (must match exactly):
  *   Temperature/ : degreec  degreef  minus
@@ -7894,6 +7814,12 @@ static void wx_sun_draw_time_buf(uint8_t *fb, const char *timestr, uint16_t fg)
  * wl_tube_str  → sky + centred text in the current WL font colour (digit/symbol replacement). */
 static void wl_tube_sky(int tube)
 {
+    /* Skip any tube held by the colour-cycle or snow burn-in — it gets
+     * overwritten by display_fill()/display_fill_snow() in the display task
+     * right after normal rendering anyway (see the identical guard and
+     * comment in display_show_image()). Avoids a push-then-immediately-
+     * overwrite flicker race. */
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
     if (!s_wl_scene_valid) { display_fill(tube, 0x0000); return; }
     uint8_t *fb = wl_fb();
     if (!fb) { display_fill(tube, 0x0000); return; }
@@ -7902,6 +7828,12 @@ static void wl_tube_sky(int tube)
 }
 static void wl_tube_str(int tube, const uint8_t *font, const char *str, int by)
 {
+    /* Skip any tube held by the colour-cycle or snow burn-in — it gets
+     * overwritten by display_fill()/display_fill_snow() in the display task
+     * right after normal rendering anyway (see the identical guard and
+     * comment in display_show_image()). Avoids a push-then-immediately-
+     * overwrite flicker race. */
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
     if (!s_wl_scene_valid) { display_fill(tube, 0x0000); return; }
     uint8_t *fb = wl_fb();
     if (!fb) { display_fill(tube, 0x0000); return; }
@@ -8742,9 +8674,7 @@ static void ht_blit_ticker_2x(int tube, const uint8_t *tile_buf, uint16_t fg)
                 chunk[(r * LCD_WIDTH + oc + 1) * 2 + 1] = lo;
             }
         }
-        spi_transaction_t t = { .length = (size_t)(rows * LCD_WIDTH * 2) * 8,
-                                 .tx_buffer = chunk };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_tx_sync(chunk, (size_t)(rows * LCD_WIDTH * 2));
     }
     deselect_all();
 }
@@ -9985,21 +9915,28 @@ static void display_task(void *arg)
          * frame-overrun stutter.  Static (non-animated) WeatherLive stays slow. */
         bool wl_precip_active = weatherlive_anim && s_wl_scene_valid &&
                                 s_wl_last_scene.precip;
+        /* s_debug_wl_fps (hidden debug panel) substitutes a single experimental
+         * rate for both the FAST and MED branches below — everything animated
+         * runs at the same custom Hz while testing, rather than preserving the
+         * precip-vs-clear-sky split. Spectrum mode is exempt (see the variable's
+         * comment above) and always keeps its fixed 20 Hz. */
+        int debug_tick_ms = s_debug_wl_fps ? (1000 / s_debug_wl_fps) : 0;
         TickType_t tick_ms;
-        if (mode == APP_MODE_SPECTRUM || sun_anim ||
-                weather_needs_fast || wl_precip_active || wl_colon_needs_fast)
-            tick_ms = pdMS_TO_TICKS(DISPLAY_TICK_MS_FAST);   /* 20 Hz */
+        if (mode == APP_MODE_SPECTRUM)
+            tick_ms = pdMS_TO_TICKS(DISPLAY_TICK_MS_FAST);   /* fixed — LED task / WS2812 noise-floor sync, not overridden */
+        else if (sun_anim || weather_needs_fast || wl_precip_active || wl_colon_needs_fast)
+            tick_ms = pdMS_TO_TICKS(debug_tick_ms ? debug_tick_ms : DISPLAY_TICK_MS_FAST);
         else if (weatherlive_anim)
-            tick_ms = pdMS_TO_TICKS(DISPLAY_TICK_MS_MED);    /* 10 Hz */
+            tick_ms = pdMS_TO_TICKS(debug_tick_ms ? debug_tick_ms : DISPLAY_TICK_MS_MED);
         else
             tick_ms = pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW);   /* 5 Hz */
 
         /* Re-sync wake timer when we've fallen behind the current tick budget.
          *
-         * Background: pixel blits use spi_device_polling_transmit() (CPU busy-
-         * wait, no DMA ISR dependency).  In Spectrum mode (tick = 50 ms) a full
-         * frame is 6 tubes × 160 row-transactions; the total render time can
-         * occasionally exceed the tick budget.
+         * Background: pixel blits busy-wait on the SPI bus (spi_tx_sync), so a
+         * full frame's total render time — 6 tubes × 160 row-transactions plus
+         * their compute in Spectrum mode (tick = 50 ms) — can occasionally
+         * exceed the tick budget.
          * When that happens vTaskDelayUntil's target is already in the past —
          * it returns immediately without sleeping, so IDLE1 on CPU 1 never runs
          * and the Task Watchdog fires after 5 s.
@@ -10053,14 +9990,12 @@ void display_config_changed(void)
 void display_show_wait(void)
 {
     /* COOPERATIVE park, not vTaskSuspend-from-outside: an asynchronous
-     * suspend can land between spi_device_queue_trans() and its matching
-     * get_trans_result inside spi_device_transmit() — the wait-screen draw
-     * below (from the CALLER's task) then collects the display task's
-     * orphaned transaction and trips the spi_master assert
-     * "ret_trans == trans_desc" (observed during OTA with a clock render in
-     * flight).  Instead, request a park and let the display task suspend
-     * ITSELF at its loop boundary, where no SPI transaction can be open.
-     * Flash operations always end in esp_restart(), so it never resumes. */
+     * suspend can land mid-transmit, holding the spi_master bus lock — the
+     * wait-screen draw below (from the CALLER's task) would then deadlock on
+     * its own first lcd_cmd(). Instead, request a park and let the display
+     * task suspend ITSELF at its loop boundary, where no SPI transaction can
+     * be open. Flash operations always end in esp_restart(), so it never
+     * resumes. */
     if (s_display_task_handle) {
         s_park_req = true;
         /* Worst case: a full cold-cache clock render (6 JPEG decodes) is in

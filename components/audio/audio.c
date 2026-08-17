@@ -58,6 +58,13 @@ static int               s_volume      = 20;
 static volatile bool     s_stop_flag   = false;
 static TaskHandle_t      s_audio_task  = NULL;
 static SemaphoreHandle_t s_play_mutex  = NULL;
+/* Serializes concurrent calls to audio_dac_test_set() itself (e.g. two
+ * overlapping HTTP requests hitting the same debug endpoint racing on
+ * s_dac_cont/s_dac_test_active).  A separate mutex from s_play_mutex is
+ * required: audio_dac_test_set() takes-then-gives s_play_mutex mid-body
+ * (to wait out any in-flight playback) before doing its own work, so
+ * holding s_play_mutex across the whole function would self-deadlock. */
+static SemaphoreHandle_t s_dac_test_mutex = NULL;
 
 /* Continuous DAC handle – live only while audio is enabled (streams clips
  * via I2S0 DMA).  NULL when disabled (GPIO25 is driven LOW instead). */
@@ -468,6 +475,7 @@ void audio_init(bool enabled)
 
     s_play_mutex = xSemaphoreCreateBinary();
     xSemaphoreGive(s_play_mutex);
+    s_dac_test_mutex = xSemaphoreCreateMutex();
 
     if (!enabled) {
         /* Disabled: do NOT touch GPIO25 — leave it in the isolated state
@@ -609,6 +617,12 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
 {
     if (!mode) return;
 
+    /* Serialize whole-function calls against each other (e.g. two overlapping
+     * HTTP debug-endpoint requests) — everything below races on s_dac_cont /
+     * s_dac_test_active if two callers interleave.  See s_dac_test_mutex's
+     * comment for why this can't just reuse s_play_mutex. */
+    if (s_dac_test_mutex) xSemaphoreTake(s_dac_test_mutex, portMAX_DELAY);
+
     /* Stop any active playback so we have exclusive DAC access.
      *
      * MUST NOT proceed if the playback task hasn't released the mutex: the
@@ -625,7 +639,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
             ESP_LOGW(TAG, "DAC test '%s': playback still draining after 2 s — "
                           "request dropped, retry shortly", mode);
-            return;
+            goto done;
         }
         xSemaphoreGive(s_play_mutex);
         s_stop_flag = false;
@@ -635,7 +649,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
     if (strcmp(mode, "normal") == 0) {
         if (!s_dac_test_active) {
             ESP_LOGI(TAG, "DAC test: already normal, no-op");
-            return;
+            goto done;
         }
         dac_test_teardown();
         s_dac_test_active = false;
@@ -645,7 +659,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
          * audio.  A clip will bring the DAC up again on demand. */
         rtc_gpio_isolate(PIN_AUDIO_DAC);
         ESP_LOGI(TAG, "DAC test: restored to isolated-pad idle");
-        return;
+        goto done;
     }
 
     /* ── All other modes: tear down current driver first ────────────── */
@@ -657,7 +671,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
         s_dac_test_active = true;
         ESP_LOGI(TAG, "DAC test: Hi-Z (GPIO%d = input)", PIN_AUDIO_DAC);
-        return;
+        goto done;
     }
 
     /* ── "silence" / "dc" — fresh DMA ring pre-filled with a constant level */
@@ -683,7 +697,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             ESP_LOGE(TAG, "DAC test: %s — DMA init failed", mode);
             if (s_dac_cont) { dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL; }
             mic_set_audio_active(false);
-            return;
+            goto done;
         }
         uint8_t *buf = (uint8_t *)malloc(DAC_DMA_BUF_SIZE);
         if (!buf) {
@@ -691,7 +705,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             dac_continuous_disable(s_dac_cont);
             dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL;
             mic_set_audio_active(false);
-            return;
+            goto done;
         }
         memset(buf, (uint8_t)level, DAC_DMA_BUF_SIZE);
         size_t w;
@@ -701,7 +715,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         s_dac_test_active = true;
         ESP_LOGI(TAG, "DAC test: %s level=%d (~%.0fmV)",
                  mode, level, level * 3300.0f / 255.0f);
-        return;
+        goto done;
     }
 
     /* ── "tone" — fresh DMA ring, filled immediately ─────────────────── */
@@ -723,7 +737,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             ESP_LOGE(TAG, "DAC test: tone — DMA init failed");
             if (s_dac_cont) { dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL; }
             mic_set_audio_active(false);
-            return;
+            goto done;
         }
 
         uint8_t *buf = (uint8_t *)malloc(DAC_DMA_BUF_SIZE);
@@ -732,7 +746,7 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
             dac_continuous_disable(s_dac_cont);
             dac_continuous_del_channels(s_dac_cont); s_dac_cont = NULL;
             mic_set_audio_active(false);
-            return;
+            goto done;
         }
         size_t w;
         for (int d = 0; d < DAC_DESC_NUM; d++) {
@@ -747,10 +761,13 @@ void audio_dac_test_set(const char *mode, int param_a, int param_b)
         free(buf);
         s_dac_test_active = true;
         ESP_LOGI(TAG, "DAC test: tone %d Hz amp=%d", freq, amp);
-        return;
+        goto done;
     }
 
     ESP_LOGW(TAG, "DAC test: unknown mode '%s'", mode);
+
+done:
+    if (s_dac_test_mutex) xSemaphoreGive(s_dac_test_mutex);
 }
 
 void audio_dac_test_stop(void)

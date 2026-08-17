@@ -72,7 +72,13 @@ bool sht30_init(void)
 
 bool sht30_is_present(void) { return s_present; }
 
-bool sht30_read(sht30_reading_t *out)
+/* Internal-only: the actual I2C trigger/wait/receive sequence, called
+ * exclusively from sht30_task() below (single writer of s_last, so no
+ * mutex is needed here).  Not declared in sht30.h — external callers must
+ * go through sht30_get(), which is mutex-protected against the concurrent
+ * readers (display task, ha_mqtt, web_server) that made s_mutex necessary
+ * in the first place (see its comment). */
+static bool sht30_read(sht30_reading_t *out)
 {
     if (!s_present || !out) return false;
 

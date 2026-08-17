@@ -298,7 +298,15 @@ static void reconnect_timer_cb(void *arg)
      * user can always reach the UI to fix credentials, and we
      * stop+restart it only once a new STA IP is actually obtained. */
     s_server_restart_pending = true;
-    wifi_manager_reconnect_sta();
+    bool reboot_needed = wifi_manager_reconnect_sta();
+    if (reboot_needed) {
+        /* Static IP is enabled — this no-reboot path doesn't restart DHCP or
+         * reapply static-IP fields, so the change (or a static IP that was
+         * just enabled/edited) won't fully take effect until next boot.
+         * Not surfaced to the UI yet — just logged so the info exists at
+         * the call site for a future UI affordance. */
+        ESP_LOGW(TAG, "Static IP is enabled — a reboot is required for IP/DNS changes to fully apply");
+    }
 }
 static esp_timer_handle_t s_reconnect_timer = NULL;
 static void schedule_wifi_reconnect(void)
@@ -512,6 +520,40 @@ static cJSON *read_json_body(httpd_req_t *r, size_t max_len)
     buf[rx] = '\0';
     cJSON *root = cJSON_Parse(buf);
     free(buf);
+    if (!root) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return NULL;
+    }
+    return root;
+}
+
+/* Stack-buffer variant of read_json_body(), for the many small debug/toggle
+ * handlers that just want a couple of fields out of a body well under a few
+ * hundred bytes and would rather not pay for a malloc.  buf must be at least
+ * buf_sz bytes; on success the received body is left null-terminated inside
+ * it.  Same contract as read_json_body(): returns a cJSON object (caller
+ * must cJSON_Delete) or NULL, sending its own 400 response on failure — so
+ * callers should just return on NULL. */
+static cJSON *read_json_body_small(httpd_req_t *r, char *buf, size_t buf_sz)
+{
+    /* Reserve one byte for the null terminator, same as the malloc'd path
+     * (which allocates max_len+1). */
+    if (r->content_len <= 0 || (size_t)r->content_len >= buf_sz) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid body length");
+        return NULL;
+    }
+    size_t len = (size_t)r->content_len;
+    size_t rx = 0;
+    while (rx < len) {
+        int n = httpd_req_recv(r, buf + rx, len - rx);
+        if (n <= 0) {
+            httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error");
+            return NULL;
+        }
+        rx += (size_t)n;
+    }
+    buf[rx] = '\0';
+    cJSON *root = cJSON_Parse(buf);
     if (!root) {
         httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON");
         return NULL;
@@ -763,7 +805,19 @@ static esp_err_t api_reboot(httpd_req_t *r)
 
 static esp_err_t api_status(httpd_req_t *r)
 {
-    /* Timing instrumentation — issue #82 (community-reported multi-second
+    /* NOT REQUIRE_AUTH'd, deliberately — this looked at first like the same
+     * unauthenticated-disclosure issue as /api/network_info (OTA-rollback
+     * state, admin_set), but frontend bootAuth() (data/web/index.html) does
+     * a plain unauthenticated fetch('/api/status') on every page load
+     * specifically to read admin_set and decide whether to show the login
+     * modal at all — gating this endpoint would make that check unable to
+     * run before the user has a token, i.e. a chicken-and-egg lockout.
+     * onboardConnectWifi() also polls this unauthenticated mid-onboarding,
+     * before any admin password necessarily exists yet.  admin_set is
+     * intentionally the only auth-relevant field here; the AP PIN itself is
+     * on the separate auth'd route /api/wifi/ap_pin. Leave this endpoint open.
+     *
+     * Timing instrumentation — issue #82 (community-reported multi-second
      * /api/status latency, captured via PCAPdroid: consistently ~5s, while
      * the much larger static GET / is ~2s). The payload-size mismatch argues
      * against a pure network/TCP-ACK cause and points at server-side time in
@@ -923,10 +977,15 @@ static esp_err_t api_status(httpd_req_t *r)
 /* GET /api/network_info — WiFi diagnostics: disconnect/reconnect log +
  * link-level details.  Split out from /api/status (which is polled
  * frequently by the dashboard) since this data changes rarely; the web UI
- * fetches it only when the Network Info panel is expanded.  Auth-open, same
- * tier as /api/status (REQUIRE_AUTH is reserved for mutation handlers). */
+ * fetches it only when the Network Info panel is expanded.  Auth-gated: MAC,
+ * BSSID, RSSI, netmask, gateway and DNS servers are LAN-topology info an
+ * unauthenticated device on the network shouldn't be able to snarf — same
+ * reasoning as /api/wifi/ap_pin (see that handler's comment).  Only called
+ * post-login via secureFetch(), so gating it doesn't affect any pre-auth
+ * flow. */
 static esp_err_t api_network_info(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "disconnect_count", wifi_manager_get_disconnect_count());
     cJSON_AddNumberToObject(root, "last_disconnect_reason", wifi_manager_get_last_disconnect_reason());
@@ -971,7 +1030,40 @@ static esp_err_t api_network_info(httpd_req_t *r)
  * there is no matching resume call.
  *
  * The display task is handled separately by display_show_wait(), which also
- * ensures the SPI bus is free before the first flash write. */
+ * ensures the SPI bus is free before the first flash write.
+ *
+ * Shared by ota_suspend_tasks() (suspends) and webui_resume_tasks() (resumes,
+ * used by the webui-pull path, which — unlike OTA — doesn't end in
+ * esp_restart() on the happy path).  Single source of truth so a future
+ * addition only has to happen once (previously "ha_mqtt" had to be added by
+ * hand to two independently-maintained copies of this list). */
+static const char *const k_paused_task_names[] = {
+    "weather",    /* HTTPS polling — competes with OTA TCP stream + heap */
+    "subscribers", /* HTTPS polling — competes with OTA TCP stream + heap */
+    "ntp",        /* SNTP/UDP      — adds lwIP load during flash writes  */
+    "sht30",      /* I2C sensor    — periodic wakeups, CPU cycles        */
+    "leds",       /* RMT DMA       — Core 1 bus traffic during writes    */
+    "mic",        /* I2S/ADC DMA   — continuous DMA, CPU interrupts      */
+    "audio_play", /* DAC/I2S       — ephemeral, only present if playing  */
+    "ha_mqtt",    /* MQTT broker connect/publish — was missing entirely;
+                   * observed in the field retrying esp_mqtt_client_start()
+                   * every 5 s throughout an entire webui-pull download +
+                   * extraction window, each attempt trying to spawn a new
+                   * internal esp-mqtt task and failing ("Error create mqtt
+                   * task") — the same transient internal-SRAM contention
+                   * class as the mDNS receive-buffer failures, just
+                   * landing on MQTT's task creation instead.  Suspending
+                   * this only pauses OUR wrapper task (its own connect
+                   * retry loop + 60 s publish loop); if a connection was
+                   * ALREADY established before this call, the underlying
+                   * esp-mqtt library's own internal worker task is a
+                   * separate task not covered here and keeps running —
+                   * acceptable, since an idle established connection is
+                   * far lighter than the active-connect-attempt storm
+                   * this fixes. */
+    NULL,
+};
+
 static void ota_suspend_tasks(void)
 {
     /* ── Spectrum-mode flash guard ──────────────────────────────────────
@@ -999,37 +1091,11 @@ static void ota_suspend_tasks(void)
         vTaskDelay(pdMS_TO_TICKS(400));
     }
 
-    static const char *const k_tasks[] = {
-        "weather",    /* HTTPS polling — competes with OTA TCP stream + heap */
-        "subscribers", /* HTTPS polling — competes with OTA TCP stream + heap */
-        "ntp",        /* SNTP/UDP      — adds lwIP load during flash writes  */
-        "sht30",      /* I2C sensor    — periodic wakeups, CPU cycles        */
-        "leds",       /* RMT DMA       — Core 1 bus traffic during writes    */
-        "mic",        /* I2S/ADC DMA   — continuous DMA, CPU interrupts      */
-        "audio_play", /* DAC/I2S       — ephemeral, only present if playing  */
-        "ha_mqtt",    /* MQTT broker connect/publish — was missing entirely;
-                       * observed in the field retrying esp_mqtt_client_start()
-                       * every 5 s throughout an entire webui-pull download +
-                       * extraction window, each attempt trying to spawn a new
-                       * internal esp-mqtt task and failing ("Error create mqtt
-                       * task") — the same transient internal-SRAM contention
-                       * class as the mDNS receive-buffer failures, just
-                       * landing on MQTT's task creation instead.  Suspending
-                       * this only pauses OUR wrapper task (its own connect
-                       * retry loop + 60 s publish loop); if a connection was
-                       * ALREADY established before this call, the underlying
-                       * esp-mqtt library's own internal worker task is a
-                       * separate task not covered here and keeps running —
-                       * acceptable, since an idle established connection is
-                       * far lighter than the active-connect-attempt storm
-                       * this fixes. */
-        NULL,
-    };
-    for (int i = 0; k_tasks[i]; i++) {
-        TaskHandle_t h = xTaskGetHandle(k_tasks[i]);
+    for (int i = 0; k_paused_task_names[i]; i++) {
+        TaskHandle_t h = xTaskGetHandle(k_paused_task_names[i]);
         if (h) {
             vTaskSuspend(h);
-            ESP_LOGI(TAG, "OTA: suspended '%s'", k_tasks[i]);
+            ESP_LOGI(TAG, "OTA: suspended '%s'", k_paused_task_names[i]);
         }
     }
     /* Brief yield so any task currently executing its current time-slice
@@ -1040,14 +1106,11 @@ static void ota_suspend_tasks(void)
 
 static void webui_resume_tasks(void)
 {
-    static const char *const k_tasks[] = {
-        "weather", "subscribers", "ntp", "sht30", "leds", "mic", "audio_play", "ha_mqtt", NULL,
-    };
-    for (int i = 0; k_tasks[i]; i++) {
-        TaskHandle_t h = xTaskGetHandle(k_tasks[i]);
+    for (int i = 0; k_paused_task_names[i]; i++) {
+        TaskHandle_t h = xTaskGetHandle(k_paused_task_names[i]);
         if (h) {
             vTaskResume(h);
-            ESP_LOGI(TAG, "[webui] resumed '%s'", k_tasks[i]);
+            ESP_LOGI(TAG, "[webui] resumed '%s'", k_paused_task_names[i]);
         }
     }
 }
@@ -1189,6 +1252,8 @@ static esp_err_t api_ota_impl(httpd_req_t *r)
     if (!upd) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition"), ESP_FAIL;
 
     int img_len = r->content_len;
+    if (img_len <= 0 || (uint32_t)img_len > upd->size)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad content length"), ESP_FAIL;
 
     /* ── Two-phase PSRAM-buffered OTA ───────────────────────────────────────
      * Phase 1 (network):  Receive the entire firmware image into PSRAM before
@@ -1552,6 +1617,129 @@ static void hp_drop_stale_index(void)
         ESP_LOGW(TAG, "[webui] could not remove stale index.html: %s", strerror(errno));
 }
 
+/* Shared ZIP local-file-header extractor for both flash-write paths that
+ * apply a WebUI patch ZIP: api_fs_hotpatch (whole ZIP already buffered in
+ * PSRAM from an authenticated POST body) and webui_pull_task (ZIP just
+ * downloaded over HTTPS from a release asset).  Walks LFH entries directly
+ * — no central-directory dependency, STORE-only — writing each entry to
+ * "/spiffs/<name>", creating parent dirs as needed.  Rejects path traversal
+ * and protects config.json from ever being overwritten by a patch, exactly
+ * as both call sites did before this was factored out.
+ *
+ * zip/zip_len    : the fully-buffered ZIP (caller has already verified the
+ *                   leading ZIP_LFH_SIG and owns/frees the buffer).
+ * log_prefix     : short tag prepended to this function's log lines so the
+ *                   two call sites stay distinguishable ("hotpatch:" vs
+ *                   "[webui] ") — the only cosmetic difference between them.
+ * success_at_info: hotpatch is a small, manually-triggered action, so each
+ *                   written file is logged at INFO for visibility; webui
+ *                   pulls can contain hundreds of files, so it logs each
+ *                   success at DEBUG and relies on the one-line summary at
+ *                   INFO — pass true/false to preserve that per-caller
+ *                   verbosity choice.
+ * files_written  : optional (NULL allowed) — if non-NULL, the name of every
+ *                   successfully-written file is appended to it as a cJSON
+ *                   string.  Used by api_fs_hotpatch to report the file list
+ *                   back over HTTP; webui_pull_task has no HTTP response to
+ *                   build for this and passes NULL.
+ * out_ok/out_skipped/out_failed: caller-owned counters, incremented (not
+ *                   reset) by this call — caller zero-initializes them.
+ *
+ * Caller remains responsible for shell_cache_flush() before extraction and
+ * for hp_drop_stale_index() / display_theme_cache_flush() / fs_usage_invalidate()
+ * afterward — those differ slightly in exactly which ones run at each call
+ * site, so they stay outside this helper. */
+static void extract_zip_to_littlefs(const uint8_t *zip, size_t zip_len,
+                                     const char *log_prefix, bool success_at_info,
+                                     cJSON *files_written,
+                                     int *out_ok, int *out_skipped, int *out_failed)
+{
+    const uint8_t *p   = zip;
+    const uint8_t *end = zip + zip_len;
+
+    while (p + (int)sizeof(zip_lfh_t) <= end) {
+        uint32_t sig = (uint32_t)(p[0] | p[1]<<8 | p[2]<<16 | p[3]<<24);
+
+        if (sig == ZIP_CDH_SIG || sig == ZIP_EOCD_SIG) break; /* done */
+        if (sig != ZIP_LFH_SIG) { p++; continue; }            /* re-sync  */
+
+        const zip_lfh_t *h = (const zip_lfh_t *)p;
+        p += sizeof(zip_lfh_t);
+
+        /* Size-based bounds checks: compare remaining space against the field
+         * lengths rather than `p + len > end`.  comp_sz is an attacker- (or
+         * corruption-) controlled uint32_t, so the pointer-arithmetic form can
+         * wrap on 32-bit and silently bypass the guard, leading to an OOB read
+         * in the fwrite below. */
+        if ((size_t)(h->fname_len + h->extra_len) > (size_t)(end - p)) break;
+        char fname[256] = {0};
+        int fnl = h->fname_len < 255 ? h->fname_len : 255;
+        memcpy(fname, p, fnl);
+        p += h->fname_len + h->extra_len;
+
+        if (h->comp_sz > (size_t)(end - p)) break;
+        const uint8_t *data = p;
+        p += h->comp_sz;
+
+        /* Skip directory entries and zero-length filenames. */
+        if (fnl == 0) continue;
+        if (fname[fnl - 1] == '/') {
+            ESP_LOGD(TAG, "%s dir  %s", log_prefix, fname);
+            continue;
+        }
+
+        /* Reject path traversal. */
+        if (strstr(fname, "..") || strstr(fname, "//")) {
+            ESP_LOGW(TAG, "%s rejected unsafe path '%s'", log_prefix, fname);
+            (*out_failed)++;
+            continue;
+        }
+
+        /* Protect user config — it must never be overwritten by a patch. */
+        if (strcmp(fname, "config.json") == 0) {
+            ESP_LOGI(TAG, "%s skipped protected file config.json", log_prefix);
+            (*out_skipped)++;
+            continue;
+        }
+
+        /* Only STORE (uncompressed) entries are supported. */
+        if (h->method != 0) {
+            ESP_LOGW(TAG, "%s skipped '%s' (method=%u; only STORE supported — "
+                          "regenerate ZIP with 'zip -0')", log_prefix, fname, h->method);
+            (*out_skipped)++;
+            continue;
+        }
+
+        /* Build VFS path and create any missing parent dirs. */
+        char vpath[320];
+        snprintf(vpath, sizeof(vpath), "/spiffs/%s", fname);
+        hp_mkdir_p(vpath);
+
+        FILE *f = fopen(vpath, "wb");
+        if (!f) {
+            ESP_LOGE(TAG, "%s fopen failed for '%s': %s", log_prefix, vpath, strerror(errno));
+            (*out_failed)++;
+            continue;
+        }
+        size_t written = fwrite(data, 1, h->comp_sz, f);
+        fclose(f);
+
+        if (written != h->comp_sz) {
+            ESP_LOGE(TAG, "%s short write '%s' (%u/%u)", log_prefix, fname,
+                     (unsigned)written, (unsigned)h->comp_sz);
+            (*out_failed)++;
+        } else {
+            if (success_at_info)
+                ESP_LOGI(TAG, "%s wrote '%s' (%u B)", log_prefix, fname, (unsigned)h->comp_sz);
+            else
+                ESP_LOGD(TAG, "%s wrote '%s' (%u B)", log_prefix, fname, (unsigned)h->comp_sz);
+            if (files_written) cJSON_AddItemToArray(files_written, cJSON_CreateString(fname));
+            (*out_ok)++;
+        }
+        vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs, starves IDLE */
+    }
+}
+
 static esp_err_t api_fs_hotpatch(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
@@ -1592,85 +1780,8 @@ static esp_err_t api_fs_hotpatch(httpd_req_t *r)
     cJSON *files_arr = cJSON_CreateArray();
     int ok = 0, skipped = 0, failed = 0;
 
-    const uint8_t *p   = zip;
-    const uint8_t *end = zip + rx;
-
-    while (p + (int)sizeof(zip_lfh_t) <= end) {
-        uint32_t sig = (uint32_t)(p[0] | p[1]<<8 | p[2]<<16 | p[3]<<24);
-
-        if (sig == ZIP_CDH_SIG || sig == ZIP_EOCD_SIG) break; /* done */
-        if (sig != ZIP_LFH_SIG) { p++; continue; }            /* re-sync  */
-
-        const zip_lfh_t *h = (const zip_lfh_t *)p;
-        p += sizeof(zip_lfh_t);
-
-        /* Size-based bounds checks: compare remaining space against the field
-         * lengths rather than `p + len > end`.  comp_sz is an attacker- (or
-         * corruption-) controlled uint32_t, so the pointer-arithmetic form can
-         * wrap on 32-bit and silently bypass the guard, leading to an OOB read
-         * in the fwrite below. */
-        if ((size_t)(h->fname_len + h->extra_len) > (size_t)(end - p)) break;
-        char fname[256] = {0};
-        int fnl = h->fname_len < 255 ? h->fname_len : 255;
-        memcpy(fname, p, fnl);
-        p += h->fname_len + h->extra_len;
-
-        if (h->comp_sz > (size_t)(end - p)) break;
-        const uint8_t *data = p;
-        p += h->comp_sz;
-
-        /* Skip directory entries and zero-length filenames. */
-        if (fnl == 0) continue;
-        if (fname[fnl - 1] == '/') continue;
-
-        /* Reject path traversal. */
-        if (strstr(fname, "..") || strstr(fname, "//")) {
-            ESP_LOGW(TAG, "hotpatch: rejected unsafe path '%s'", fname);
-            failed++;
-            continue;
-        }
-
-        /* Protect user config — it must never be overwritten by a hotpatch. */
-        if (strcmp(fname, "config.json") == 0) {
-            ESP_LOGI(TAG, "hotpatch: skipped protected file config.json");
-            skipped++;
-            continue;
-        }
-
-        /* Only STORE (uncompressed) entries are supported. */
-        if (h->method != 0) {
-            ESP_LOGW(TAG, "hotpatch: skipped '%s' (method=%u; only STORE supported — "
-                          "regenerate ZIP with 'zip -0')", fname, h->method);
-            skipped++;
-            continue;
-        }
-
-        /* Build VFS path and create any missing parent dirs. */
-        char vpath[320];
-        snprintf(vpath, sizeof(vpath), "/spiffs/%s", fname);
-        hp_mkdir_p(vpath);
-
-        FILE *f = fopen(vpath, "wb");
-        if (!f) {
-            ESP_LOGE(TAG, "hotpatch: fopen failed for '%s': %s", vpath, strerror(errno));
-            failed++;
-            continue;
-        }
-        size_t written = fwrite(data, 1, h->comp_sz, f);
-        fclose(f);
-
-        if (written != h->comp_sz) {
-            ESP_LOGE(TAG, "hotpatch: short write '%s' (%u/%u)", fname,
-                     (unsigned)written, (unsigned)h->comp_sz);
-            failed++;
-        } else {
-            ESP_LOGI(TAG, "hotpatch: wrote '%s' (%u B)", fname, (unsigned)h->comp_sz);
-            cJSON_AddItemToArray(files_arr, cJSON_CreateString(fname));
-            ok++;
-        }
-        vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs, starves IDLE
-                          * (same fix as webui_pull_task's identical extraction loop) */
-    }
+    extract_zip_to_littlefs(zip, (size_t)rx, "hotpatch:", /*success_at_info=*/true,
+                             files_arr, &ok, &skipped, &failed);
 
     free(zip);
     hp_drop_stale_index();
@@ -1832,7 +1943,10 @@ static void ota_pull_task(void *arg)
     ota_suspend_tasks();
 
     char s_ota_ua[128];
-    { const char *r = config_get()->update_repo;
+    { char r[64];
+      config_lock();
+      strlcpy(r, config_get()->update_repo, sizeof(r));
+      config_unlock();
       snprintf(s_ota_ua, sizeof(s_ota_ua), HTTP_UA_BASE "%s", r[0] ? r : HTTP_UA_REPO_DEFAULT); }
     esp_http_client_config_t hcfg = {
         .url                   = s_pull.url,
@@ -2116,6 +2230,77 @@ static esp_err_t api_ota_pull_status(httpd_req_t *r)
 static int64_t s_last_ota_pull_us = 0;
 #define OTA_PULL_RATE_LIMIT_US  (60LL * 1000000LL)   /* 60 seconds between pulls */
 
+/* Shared body-read-and-parse sequence for the two pull-trigger endpoints
+ * (api_ota_pull, api_webui_pull): both accept a POST body capped at 1024
+ * bytes of {"url":"...", "sha256":"<64-char hex, optional>", ...}.  Reads
+ * the body into a heap buffer, parses it, and extracts "url" (required,
+ * non-empty string — copied into url_out, truncated to url_cap like the
+ * original strncpy did) and "sha256" (copied into sha_out only if present
+ * AND exactly 64 chars, else sha_out[0] is left '\0' — same "hash_ok" test
+ * both callers used inline before this was factored out).
+ *
+ * Deliberately does NOT enforce any policy about whether sha256 is actually
+ * required — api_webui_pull has its own post-OTA-auth-bypass-window rule
+ * for that (sha256 becomes mandatory only when auth was bypassed) and must
+ * apply it itself using the returned sha_out, not have it baked in here.
+ *
+ * out_root, if non-NULL, receives the still-live parsed cJSON root instead
+ * of having this function delete it — api_ota_pull needs it afterward to
+ * also pull "webui_url"/"webui_sha256" out of the same body.  Caller then
+ * owns it and must cJSON_Delete() it.  Pass NULL to have it deleted here.
+ *
+ * Returns true on success.  On failure, sends its own 400/500 response (or,
+ * for a genuine socket read error, no response — same as before, matching
+ * the original bare `return ESP_FAIL`) and returns false; callers should
+ * just `return ESP_FAIL` on false. */
+static bool read_pull_url_body(httpd_req_t *r, char *url_out, size_t url_cap,
+                                char *sha_out, size_t sha_cap, cJSON **out_root)
+{
+    int len = r->content_len;
+    if (len <= 0 || len > 1024) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body");
+        return false;
+    }
+
+    char *body = malloc((size_t)len + 1);
+    if (!body) {
+        httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return false;
+    }
+
+    int rx = 0;
+    while (rx < len) {
+        int n = httpd_req_recv(r, body + rx, len - rx);
+        if (n <= 0) { free(body); return false; }
+        rx += n;
+    }
+    body[len] = '\0';
+
+    cJSON *j = cJSON_Parse(body);
+    free(body);
+    if (!j) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return false;
+    }
+
+    cJSON *url_j = cJSON_GetObjectItem(j, "url");
+    if (!cJSON_IsString(url_j) || !url_j->valuestring || !url_j->valuestring[0]) {
+        cJSON_Delete(j);
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing url");
+        return false;
+    }
+    snprintf(url_out, url_cap, "%s", url_j->valuestring);
+
+    sha_out[0] = '\0';
+    cJSON *hash_j = cJSON_GetObjectItem(j, "sha256");
+    if (cJSON_IsString(hash_j) && hash_j->valuestring && strlen(hash_j->valuestring) == 64)
+        snprintf(sha_out, sha_cap, "%s", hash_j->valuestring);
+
+    if (out_root) *out_root = j;
+    else          cJSON_Delete(j);
+    return true;
+}
+
 static esp_err_t api_ota_pull(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
@@ -2132,40 +2317,10 @@ static esp_err_t api_ota_pull(httpd_req_t *r)
         s_last_ota_pull_us = now;
     }
 
-    int len = r->content_len;
-    if (len <= 0 || len > 1024)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body"), ESP_FAIL;
-
-    char *body = malloc(len + 1);
-    if (!body) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
-
-    int rx = 0;
-    while (rx < len) {
-        int n = httpd_req_recv(r, body + rx, len - rx);
-        if (n <= 0) { free(body); return ESP_FAIL; }
-        rx += n;
-    }
-    body[len] = '\0';
-
-    cJSON *j = cJSON_Parse(body);
-    free(body);
-    if (!j) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
-
-    cJSON *url_j = cJSON_GetObjectItem(j, "url");
-    if (!cJSON_IsString(url_j) || !url_j->valuestring || !url_j->valuestring[0]) {
-        cJSON_Delete(j);
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing url"), ESP_FAIL;
-    }
-    strncpy(s_pull.url, url_j->valuestring, sizeof(s_pull.url) - 1);
-    s_pull.url[sizeof(s_pull.url) - 1] = '\0';
-
-    cJSON *hash_j = cJSON_GetObjectItem(j, "sha256");
-    if (cJSON_IsString(hash_j) && hash_j->valuestring && strlen(hash_j->valuestring) == 64) {
-        strncpy(s_pull.sha256, hash_j->valuestring, 64);
-        s_pull.sha256[64] = '\0';
-    } else {
-        s_pull.sha256[0] = '\0';
-    }
+    cJSON *j = NULL;
+    if (!read_pull_url_body(r, s_pull.url, sizeof(s_pull.url),
+                             s_pull.sha256, sizeof(s_pull.sha256), &j))
+        return ESP_FAIL;
 
     /* Optional: webui ZIP URL + hash to apply after firmware reboot.
      * Stored in NVS so the post-reboot handler can start the pull without
@@ -2280,7 +2435,10 @@ static void webui_pull_task(void *arg)
     tasks_suspended = true;
 
     char s_webui_ua[128];
-    { const char *r = config_get()->update_repo;
+    { char r[64];
+      config_lock();
+      strlcpy(r, config_get()->update_repo, sizeof(r));
+      config_unlock();
       snprintf(s_webui_ua, sizeof(s_webui_ua), HTTP_UA_BASE "%s", r[0] ? r : HTTP_UA_REPO_DEFAULT); }
     esp_http_client_config_t hcfg = {
         .url                   = s_webui.url,
@@ -2393,58 +2551,10 @@ static void webui_pull_task(void *arg)
          * requests get a cache-miss during extraction, not stale content. */
         shell_cache_flush();
         int ok = 0, skipped = 0, failed = 0;
-        const uint8_t *p = zip, *end = zip + received;
-        while (p + (int)sizeof(zip_lfh_t) <= end) {
-            uint32_t sig = (uint32_t)(p[0]|p[1]<<8|p[2]<<16|p[3]<<24);
-            if (sig == ZIP_CDH_SIG || sig == ZIP_EOCD_SIG) break;
-            if (sig != ZIP_LFH_SIG) { p++; continue; }
-            const zip_lfh_t *h = (const zip_lfh_t *)p;
-            p += sizeof(zip_lfh_t);
-            /* Size-based bounds checks — see the hotpatch extractor: the
-             * `p + comp_sz > end` form can wrap on 32-bit (comp_sz is an
-             * attacker/corruption-controlled uint32_t) and bypass the guard,
-             * causing an OOB read in the fwrite below. */
-            if ((size_t)(h->fname_len + h->extra_len) > (size_t)(end - p)) break;
-            char fname[256] = {0};
-            int fnl = h->fname_len < 255 ? h->fname_len : 255;
-            memcpy(fname, p, fnl);
-            p += h->fname_len + h->extra_len;
-            if (h->comp_sz > (size_t)(end - p)) break;
-            const uint8_t *data = p;
-            p += h->comp_sz;
-            if (fnl == 0) continue;
-            if (fname[fnl-1] == '/') { ESP_LOGD(TAG, "[webui]  dir  %s", fname); continue; }
-            if (strstr(fname, "..") || strstr(fname, "//")) {
-                ESP_LOGW(TAG, "[webui]  SKIP (path traversal) %s", fname);
-                failed++; continue;
-            }
-            if (strcmp(fname, "config.json") == 0) {
-                ESP_LOGI(TAG, "[webui]  skip (config.json protected)");
-                skipped++; continue;
-            }
-            if (h->method != 0) {
-                ESP_LOGW(TAG, "[webui]  skip (compressed method=%u) %s", h->method, fname);
-                skipped++; continue;
-            }
-            char vpath[320];
-            snprintf(vpath, sizeof(vpath), "/spiffs/%s", fname);
-            hp_mkdir_p(vpath);
-            FILE *f = fopen(vpath, "wb");
-            if (!f) {
-                ESP_LOGE(TAG, "[webui]  FAIL fopen %s", vpath);
-                failed++; continue;
-            }
-            size_t wr = fwrite(data, 1, h->comp_sz, f);
-            fclose(f);
-            if (wr != h->comp_sz) {
-                ESP_LOGE(TAG, "[webui]  FAIL write %s (%u/%u B)", fname, (unsigned)wr, (unsigned)h->comp_sz);
-                failed++;
-            } else {
-                ESP_LOGD(TAG, "[webui]  ok   %s (%u B)", fname, (unsigned)h->comp_sz);
-                ok++;
-            }
-            vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs, starves IDLE */
-        }
+
+        extract_zip_to_littlefs(zip, (size_t)received, "[webui] ", /*success_at_info=*/false,
+                                 NULL, &ok, &skipped, &failed);
+
         free(zip);
         hp_drop_stale_index();
         display_theme_cache_flush();   /* re-probe PNG format on next render */
@@ -2554,44 +2664,38 @@ static esp_err_t api_webui_pull(httpd_req_t *r)
 {
     /* Consume the one-time NVS bypass flag set before OTA reboot. */
     if (!s_post_ota_auth) s_post_ota_auth = consume_post_ota_flag();
-    if (!post_ota_auth_valid()) { REQUIRE_AUTH(r); }
+    bool bypassed = !post_ota_auth_valid();   /* true = normal auth required below */
+    if (bypassed) { REQUIRE_AUTH(r); }
     if (s_ota_active) {
         httpd_resp_set_status(r, "409 Conflict");
         return send_json(r, "{\"error\":\"ota_in_progress\"}");
     }
 
-    int len = r->content_len;
-    if (len <= 0 || len > 1024)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body"), ESP_FAIL;
+    /* Parse into local buffers first, NOT directly into s_webui.url/sha256 —
+     * the bypass-window check below must be able to reject the request
+     * without having already clobbered global pull state with an unvetted
+     * attacker-supplied URL. */
+    char url_buf[sizeof(s_webui.url)];
+    char sha_buf[sizeof(s_webui.sha256)];
+    if (!read_pull_url_body(r, url_buf, sizeof(url_buf), sha_buf, sizeof(sha_buf), NULL))
+        return ESP_FAIL;
+    bool hash_ok = sha_buf[0] != '\0';
 
-    char *body = malloc(len + 1);
-    if (!body) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
-
-    int rx = 0;
-    while (rx < len) {
-        int n = httpd_req_recv(r, body + rx, len - rx);
-        if (n <= 0) { free(body); return ESP_FAIL; }
-        rx += n;
+    /* !bypassed reached here only via REQUIRE_AUTH, i.e. a genuine password —
+     * that request body is trusted. During the post-OTA bypass window there
+     * is no password at all, so an attacker-supplied url/sha256 in the body
+     * would let anyone on the LAN point this device at an arbitrary ZIP for
+     * up to POST_OTA_AUTH_TTL_US after any OTA reboot. Require and verify a
+     * hash in that window instead of trusting the body's url/sha256 — same
+     * bar api_webui_pull_auto already holds itself to for the same window. */
+    if (bypassed && !hash_ok) {
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                    "sha256 required during the post-OTA auth window"), ESP_FAIL;
     }
-    body[len] = '\0';
 
-    cJSON *j = cJSON_Parse(body);
-    free(body);
-    if (!j) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
-
-    cJSON *url_j = cJSON_GetObjectItem(j, "url");
-    if (!cJSON_IsString(url_j) || !url_j->valuestring || !url_j->valuestring[0]) {
-        cJSON_Delete(j);
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing url"), ESP_FAIL;
-    }
-    strncpy(s_webui.url, url_j->valuestring, sizeof(s_webui.url) - 1);
-    s_webui.url[sizeof(s_webui.url) - 1] = '\0';
-
+    snprintf(s_webui.url, sizeof(s_webui.url), "%s", url_buf);
     s_webui.sha256[0] = '\0';
-    cJSON *hash_j = cJSON_GetObjectItem(j, "sha256");
-    if (cJSON_IsString(hash_j) && hash_j->valuestring && strlen(hash_j->valuestring) == 64)
-        strncpy(s_webui.sha256, hash_j->valuestring, 64);
-    cJSON_Delete(j);
+    if (hash_ok) snprintf(s_webui.sha256, sizeof(s_webui.sha256), "%s", sha_buf);
 
     s_webui.state   = WEBUI_IDLE;
     s_webui.error[0] = '\0';
@@ -2737,6 +2841,7 @@ static esp_err_t api_file_ls(httpd_req_t *r)
  * custom themes added via the file browser appear without a firmware update. */
 static esp_err_t api_themes(httpd_req_t *r)
 {
+    REQUIRE_AUTH(r);
 #define MAX_THEMES      48
 #define THEME_NAME_MAX  64
     char names[MAX_THEMES][THEME_NAME_MAX];
@@ -2864,6 +2969,11 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     if (!url_decode_inplace(p) || strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
 
+    /* Reject an empty body up front — otherwise a bodyless POST silently
+     * creates a zero-byte file instead of a clear error. */
+    if (r->content_len <= 0)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Empty body"), ESP_FAIL;
+
     /* Hard size cap — reject before opening the destination file so we don't
      * leave a partially-written file behind on rejection. */
     if (r->content_len > MAX_UPLOAD_BYTES)
@@ -2873,7 +2983,7 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
 
     /* Reject the upload if the declared size exceeds available free space. */
-    if (r->content_len > 0) {
+    {
         size_t total = 0, used = 0;
         esp_littlefs_info("littlefs", &total, &used);
         if ((size_t)r->content_len > (total - used))
@@ -3099,15 +3209,9 @@ static esp_err_t api_social_refresh(httpd_req_t *r)
 static esp_err_t api_debug_burnin(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char body[64] = {0};
-    int blen = (int)r->content_len;
-    if (blen <= 0 || blen >= (int)sizeof(body))
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required"), ESP_FAIL;
-    if (httpd_req_recv(r, body, (size_t)blen) != blen)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error"), ESP_FAIL;
-    cJSON *root = cJSON_Parse(body);
-    if (!root)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON"), ESP_FAIL;
+    char body[64];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
     cJSON *jm = cJSON_GetObjectItem(root, "mask");
     cJSON *jd = cJSON_GetObjectItem(root, "duration_s");
     uint8_t  mask       = cJSON_IsNumber(jm) ? (uint8_t)(jm->valueint & 0x3F) : 0;
@@ -3126,15 +3230,9 @@ static esp_err_t api_debug_burnin(httpd_req_t *r)
 static esp_err_t api_debug_snow(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char body[64] = {0};
-    int blen = (int)r->content_len;
-    if (blen <= 0 || blen >= (int)sizeof(body))
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required"), ESP_FAIL;
-    if (httpd_req_recv(r, body, (size_t)blen) != blen)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error"), ESP_FAIL;
-    cJSON *root = cJSON_Parse(body);
-    if (!root)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON"), ESP_FAIL;
+    char body[64];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
     cJSON *jm = cJSON_GetObjectItem(root, "mask");
     cJSON *jd = cJSON_GetObjectItem(root, "duration_s");
     uint8_t  mask       = cJSON_IsNumber(jm) ? (uint8_t)(jm->valueint & 0x3F) : 0;
@@ -3160,15 +3258,9 @@ static esp_err_t api_debug_snow(httpd_req_t *r)
 static esp_err_t api_update_notify(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char body[64] = {0};
-    int blen = (int)r->content_len;
-    if (blen <= 0 || blen >= (int)sizeof(body))
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required (≤63 bytes)"), ESP_FAIL;
-    if (httpd_req_recv(r, body, (size_t)blen) != blen)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error"), ESP_FAIL;
-    cJSON *root = cJSON_Parse(body);
-    if (!root)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON"), ESP_FAIL;
+    char body[64];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
     const cJSON *ja = cJSON_GetObjectItem(root, "active");
     bool active = cJSON_IsTrue(ja);
     cJSON_Delete(root);
@@ -3267,16 +3359,9 @@ static esp_err_t api_debug_adc(httpd_req_t *r)
 static esp_err_t api_debug_dac(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char body[256] = {0};
-    int  blen = (int)r->content_len;
-    if (blen <= 0 || blen >= (int)sizeof(body))
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required (≤255 bytes)");
-    if (httpd_req_recv(r, body, (size_t)blen) != blen)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error");
-
-    cJSON *root = cJSON_Parse(body);
-    if (!root)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    char body[256];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
 
     const cJSON *jmode = cJSON_GetObjectItem(root, "mode");
     /* Copy mode string NOW — cJSON_Delete(root) below frees jmode->valuestring */
@@ -3306,16 +3391,9 @@ static esp_err_t api_debug_dac(httpd_req_t *r)
 static esp_err_t api_debug_pwm(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char body[256] = {0};
-    int  blen = (int)r->content_len;
-    if (blen <= 0 || blen >= (int)sizeof(body))
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Body required (≤255 bytes)");
-    if (httpd_req_recv(r, body, (size_t)blen) != blen)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Read error");
-
-    cJSON *root = cJSON_Parse(body);
-    if (!root)
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    char body[256];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
 
     const cJSON *jrestore = cJSON_GetObjectItem(root, "restore");
     if (cJSON_IsTrue(jrestore)) {
@@ -3343,12 +3421,9 @@ static esp_err_t api_debug_pwm(httpd_req_t *r)
 static esp_err_t api_debug_loglevel(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char buf[128] = {0};
-    int  n = httpd_req_recv(r, buf, sizeof(buf) - 1);
-    if (n <= 0) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "No body"), ESP_FAIL;
-    buf[n] = '\0';
-    cJSON *root = cJSON_Parse(buf);
-    if (!root) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
+    char buf[128];
+    cJSON *root = read_json_body_small(r, buf, sizeof(buf));
+    if (!root) return ESP_FAIL;
 
     cJSON *jt = cJSON_GetObjectItem(root, "tag");
     if (!cJSON_IsString(jt) || jt->valuestring[0] == '\0') {
@@ -3376,6 +3451,32 @@ static esp_err_t api_debug_loglevel(httpd_req_t *r)
     esp_log_level_set(jt->valuestring, lvl);
     ESP_LOGW("web_srv", "log level: tag='%s' -> %d", jt->valuestring, (int)lvl);
     cJSON_Delete(root);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
+/* POST /api/debug/wl_fps — runtime WeatherLive animation-rate override.
+ * Body: { "fps": 30 }  → run animated WeatherLive at 30 Hz instead of the
+ *   normal 10/20 Hz split (Spectrum mode is exempt, see display_set_debug_wl_fps).
+ *   { "fps": 0 }        → disable, restore default behavior.
+ * Runtime only — NOT persisted, resets on reboot. */
+static esp_err_t api_debug_wl_fps(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char buf[64];
+    cJSON *root = read_json_body_small(r, buf, sizeof(buf));
+    if (!root) return ESP_FAIL;
+
+    cJSON *jf = cJSON_GetObjectItem(root, "fps");
+    if (!cJSON_IsNumber(jf)) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing fps"), ESP_FAIL;
+    }
+    int fps = jf->valueint;
+    cJSON_Delete(root);
+    if (fps != 0 && (fps < 5 || fps > 40))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "fps must be 0 or 5-40"), ESP_FAIL;
+
+    display_set_debug_wl_fps(fps);
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
@@ -3520,6 +3621,108 @@ static esp_err_t api_debug_tasks(httpd_req_t *r)
     }
     off += (size_t)snprintf(out + off, cap - off, "]}");
     free(ts1); free(ts2);
+
+    httpd_resp_set_type(r, "application/json");
+    esp_err_t err = httpd_resp_send(r, out, (ssize_t)off);
+    free(out);
+    return err;
+}
+
+/* ── Windowed task CPU accounting ─────────────────────────────────────────
+ * api_debug_tasks()'s 250 ms window reports whatever happened to be running
+ * in that quarter-second — useless for judging something like "is polling
+ * or queued SPI actually better" where the interesting behaviour (rain
+ * frames, mode switches, WiFi bursts) is spread over minutes. Since
+ * FreeRTOS's per-task runtime counters are cumulative, a fair average over
+ * an arbitrary window doesn't need repeated sampling — one snapshot at the
+ * start, one at the end, one diff. Cost is two uxTaskGetSystemState() calls
+ * total for the whole window, so it can't meaningfully perturb what it's
+ * measuring. Safe for any window under the ~71 min 32-bit counter wrap,
+ * same reasoning as the 250 ms version's comment above. */
+static TaskStatus_t *s_task_snap_start   = NULL;
+static UBaseType_t   s_task_snap_start_n = 0;
+static int64_t       s_task_snap_start_t = 0;
+
+/* POST /api/debug/tasks_start — snapshot now; call /api/debug/tasks_result
+ * later (any time after, doesn't consume/end the window) to read the
+ * average over the elapsed period. A second _start call discards whatever
+ * window was already running and begins a fresh one. */
+static esp_err_t api_debug_tasks_start(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    UBaseType_t cap_n = uxTaskGetNumberOfTasks() + 8;
+    TaskStatus_t *ts = malloc(cap_n * sizeof(TaskStatus_t));
+    if (!ts) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+
+    int64_t     t   = esp_timer_get_time();
+    UBaseType_t n   = uxTaskGetSystemState(ts, cap_n, NULL);
+    if (n == 0) { free(ts);
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "runtime stats unavailable"), ESP_FAIL; }
+
+    free(s_task_snap_start);   /* no-op if NULL — discard any prior window */
+    s_task_snap_start   = ts;
+    s_task_snap_start_n = n;
+    s_task_snap_start_t = t;
+    ESP_LOGI("web_srv", "task-stats window started (%u tasks)", (unsigned)n);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
+/* GET /api/debug/tasks_result — same response shape as /api/debug/tasks,
+ * averaged over the whole window since the last _start call instead of
+ * 250 ms. Repeatable — does not end or reset the window. */
+static esp_err_t api_debug_tasks_result(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    if (!s_task_snap_start)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "No window started — POST /api/debug/tasks_start first"), ESP_FAIL;
+
+    UBaseType_t cap_n = uxTaskGetNumberOfTasks() + 8;
+    TaskStatus_t *ts2 = malloc(cap_n * sizeof(TaskStatus_t));
+    if (!ts2) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+
+    int64_t     t2   = esp_timer_get_time();
+    UBaseType_t n2    = uxTaskGetSystemState(ts2, cap_n, NULL);
+    int64_t     wall = t2 - s_task_snap_start_t;
+    if (n2 == 0 || wall <= 0) { free(ts2);
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "runtime stats unavailable"), ESP_FAIL; }
+
+    size_t cap = (size_t)n2 * 120 + 96;
+    char  *out = malloc(cap);
+    if (!out) { free(ts2);
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
+
+    static const char *k_state[] = { "run", "ready", "blocked", "suspended", "deleted", "invalid" };
+    size_t off = (size_t)snprintf(out, cap, "{\"window_us\":%lld,\"tasks\":[",
+                                  (long long)wall);
+    for (UBaseType_t i = 0; i < n2 && off < cap - 2; i++) {
+        uint32_t prev = 0; bool found = false;
+        for (UBaseType_t j = 0; j < s_task_snap_start_n; j++) {
+            if (s_task_snap_start[j].xHandle == ts2[i].xHandle) {
+                prev = s_task_snap_start[j].ulRunTimeCounter; found = true; break;
+            }
+        }
+        uint32_t delta = found ? (ts2[i].ulRunTimeCounter - prev) : 0u;
+        uint32_t pct10 = (uint32_t)(((uint64_t)delta * 1000) / (uint64_t)wall);
+        int state = (int)ts2[i].eCurrentState;
+        if (state < 0 || state > 5) state = 5;
+        off += (size_t)snprintf(out + off, cap - off,
+            "%s{\"name\":\"%s\",\"prio\":%u,\"core\":%d,\"state\":\"%s\","
+            "\"stack_hwm\":%u,\"run_us\":%u,\"pct\":%u.%u,\"new\":%s}",
+            i ? "," : "",
+            ts2[i].pcTaskName,
+            (unsigned)ts2[i].uxCurrentPriority,
+            (int)ts2[i].xCoreID == INT32_MAX ? -1 : (int)ts2[i].xCoreID,
+            k_state[state],
+            (unsigned)ts2[i].usStackHighWaterMark,
+            (unsigned)ts2[i].ulRunTimeCounter,
+            (unsigned)(pct10 / 10), (unsigned)(pct10 % 10),
+            found ? "false" : "true");
+    }
+    off += (size_t)snprintf(out + off, cap - off, "]}");
+    free(ts2);
 
     httpd_resp_set_type(r, "application/json");
     esp_err_t err = httpd_resp_send(r, out, (ssize_t)off);
@@ -3792,7 +3995,10 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/debug/dac",       api_debug_dac),
     R(HTTP_POST, "/api/debug/pwm",       api_debug_pwm),
     R(HTTP_POST, "/api/debug/loglevel",  api_debug_loglevel),
+    R(HTTP_POST, "/api/debug/wl_fps",    api_debug_wl_fps),
     R(HTTP_GET,  "/api/debug/tasks",     api_debug_tasks),
+    R(HTTP_POST, "/api/debug/tasks_start",  api_debug_tasks_start),
+    R(HTTP_GET,  "/api/debug/tasks_result", api_debug_tasks_result),
     R(HTTP_GET,  "/api/debug/micframe",  api_debug_micframe),
     R(HTTP_GET,  "/api/debug/micbands",  api_debug_micbands),
     R(HTTP_POST, "/api/mic/calibrate",          api_mic_calibrate),

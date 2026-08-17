@@ -7,9 +7,12 @@
  *
  *   /images/themes/{theme}/Numbers/{0-9}.jpg
  *   /images/themes/{theme}/AMPM/{am,pm,colon,blank,dot,…}.jpg
- *   /images/themes/{theme}/MutiInfo/Weather/{sun,rain,…}.jpg
- *   /images/themes/{theme}/MutiInfo/Temperature/{degreec,degreef,minus}.jpg
- *   /images/themes/{theme}/MutiInfo/Humidity/{degree,humidity}.jpg
+ *   /images/themes/{theme}/MultiInfo/Weather/{sun,rain,…}.jpg
+ *   /images/themes/{theme}/MultiInfo/Temperature/{degreec,degreef,minus}.jpg
+ *   /images/themes/{theme}/MultiInfo/Humidity/{degree,humidity}.jpg
+ * ("MultiInfo" was "MutiInfo" — a typo inherited from the stock firmware —
+ * until this fix; display_path_weather/_temperature/_humidity fall back to
+ * the legacy spelling per-asset for themes uploaded before the rename.)
  *
  * Available themes: NixieOY, FlipClock, DarkSlate, Formula1, GlitchGR,
  *   LightFuture, NotionRain, RedDigits, RetroPaper, WireMesh
@@ -118,6 +121,13 @@ void display_show_ampm  (int tube, const char *name, const char *theme);
  *  Call after any hotpatch or WebUI pull that adds or removes theme PNGs,
  *  so the next render re-probes rather than serving the stale cached result. */
 void display_theme_cache_flush(void);
+
+/** Hidden-debug-panel override: run animated WeatherLive at a custom rate
+ *  (5-40 Hz) instead of the normal 10/20 Hz split, to explore fluidity
+ *  without rebuilding. Pass 0 to disable (restores default behavior).
+ *  Out-of-range non-zero values are rejected (prior setting kept).
+ *  Runtime only — not persisted, resets to disabled on every boot. */
+void display_set_debug_wl_fps(int fps);
 
 /* ── Update indicator ──────────────────────────────────────────────── */
 /** Activate or clear the clock-face firmware-update indicator.

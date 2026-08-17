@@ -6,6 +6,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
@@ -54,6 +55,50 @@ void ntp_register_sync_listener(ntp_sync_listener_t cb)
     s_sync_listener = cb;
 }
 
+/* ── SNTP reconfigure serialization ──────────────────────────────────────
+ * ntp_task's boot sequence (stop -> setoperatingmode -> setservername ->
+ * init) and ntp_apply_servers()'s sequence (stop -> setservername -> init)
+ * can each be triggered from a different task — the latter from a settings
+ * save on the httpd task, or from ntp_task's own daily DNS-refresh call.
+ * The 2026-08 fix that added esp_sntp_stop() before ntp_task's
+ * setoperatingmode() closed the ONE interleaving that had actually been
+ * observed, but nothing stopped a settings save's own esp_sntp_init() from
+ * landing between ntp_task's stop() and its later calls — the same
+ * "Operating mode must not be set while SNTP client is running" assert
+ * class, just via a different interleaving. This mutex makes each
+ * function's whole reconfigure sequence atomic relative to the other. */
+static SemaphoreHandle_t s_sntp_cfg_mutex = NULL;
+
+static SemaphoreHandle_t sntp_cfg_mutex(void)
+{
+    if (!s_sntp_cfg_mutex) s_sntp_cfg_mutex = xSemaphoreCreateMutex();
+    return s_sntp_cfg_mutex;
+}
+
+/* ntp_task's own handle, so time_sync_cb() (SNTP/network-task context) can
+ * wake it promptly for deferred work instead of doing that work itself —
+ * see time_sync_cb()'s comment. */
+static TaskHandle_t s_ntp_task_handle = NULL;
+
+/* Cached copy of cfg->time_discipline_mode, refreshed once a minute by
+ * discipline_tick() (ntp_task's own context — config_lock() is safe there).
+ * time_sync_cb() reads this instead of calling discipline_mode() itself —
+ * see time_sync_cb()'s comment for why. Defaults to 2 (PCF), matching
+ * config_mgr's own default, so a boot-time sync before the first
+ * discipline_tick() behaves correctly for users who never changed it; the
+ * discipline_mode() checks in time_sync_cb() only matter from the SECOND
+ * sync onward (the boot sync takes the !s_boot_synced branch instead), and
+ * ntp_task's loop always runs at least one discipline_tick() before then. */
+static volatile uint8_t s_discipline_mode_cached = 2;
+
+/* RTC write requested by time_sync_cb() but performed by ntp_task's own
+ * loop — rtc_set_time() is a blocking I2C write, which the SNTP callback
+ * context must not do (see time_sync_cb()'s comment). Single producer
+ * (time_sync_cb), single consumer (ntp_task's loop), so the flag-guards-data
+ * ordering below is safe without an explicit lock. */
+static volatile bool s_rtc_write_pending = false;
+static struct tm     s_rtc_write_tm;
+
 /* ── Between-sync time disciplining ─────────────────────────────────────────
  * cfg->time_discipline_mode:
  *   0 = off — reactive NTP only; XTAL drift uncorrected between syncs.
@@ -87,12 +132,21 @@ static uint8_t discipline_mode(void)
     return m;
 }
 
+/* Runs in the SNTP/network-task context, NOT ntp_task — must not block or
+ * take any mutex a network-using task can hold. Two things this used to do
+ * violated that: calling discipline_mode() (config_lock()) several times,
+ * and a blocking I2C RTC write. Both are now deferred — the discipline mode
+ * comes from a cache ntp_task's own loop refreshes (see
+ * s_discipline_mode_cached's comment), and the RTC write is handed off to
+ * ntp_task via s_rtc_write_pending + a task notification so it happens
+ * promptly but on ntp_task's own, safe-to-block context. */
 static void time_sync_cb(struct timeval *tv)
 {
     /* SNTP_SYNC_MODE_IMMED: settimeofday() was already called before this
      * callback fires, so time(NULL) == tv->tv_sec here.                   */
     time_t  ntp_sec = (tv && tv->tv_sec > 0) ? tv->tv_sec : time(NULL);
     int64_t now_us  = esp_timer_get_time();
+    uint8_t mode    = s_discipline_mode_cached;
 
     if (!s_boot_synced) {
         ESP_LOGI(TAG, "NTP sync: boot — clock set");
@@ -114,7 +168,7 @@ static void time_sync_cb(struct timeval *tv)
              * after the first sync.  Hard-set already applied by SNTP.   */
             ESP_LOGI(TAG, "NTP sync: %+lld ms (boot window)", (long long)offset_ms);
 
-        } else if (discipline_mode() == 2) {
+        } else if (mode == 2) {
             /* PCF slave active: hard-set stays; PCF edge-sync holds the
              * clock each minute.  Report worst-case error seen this hour.
              * offset_ms is reconstructed from the free-running esp_timer
@@ -128,7 +182,7 @@ static void time_sync_cb(struct timeval *tv)
                          (long long)offset_ms);
             }
 
-        } else if (discipline_mode() == 1) {
+        } else if (mode == 1) {
             /* ESP rate discipline active: hard-set stays; rate nudge each
              * minute.  Show raw XTAL drift for reference (same counterfactual
              * as mode 2: the disciplined clock drifted less than this).    */
@@ -158,9 +212,9 @@ static void time_sync_cb(struct timeval *tv)
          * Boot-window duplicates are excluded — their short elapsed time
          * makes the offset meaningless as a drift measure. */
         if (elapsed_s >= NTP_BOOT_WINDOW_S && s_sync_listener) {
-            float pcf_max = (discipline_mode() == 2 && s_pcf_n > 0)
+            float pcf_max = (mode == 2 && s_pcf_n > 0)
                           ? (float)s_pcf_max_abs : -1.0f;
-            s_sync_listener((int32_t)offset_ms, pcf_max, discipline_mode());
+            s_sync_listener((int32_t)offset_ms, pcf_max, mode);
         }
 
         /* Update XTAL drift EMA (silent — used by mode-1 discipline) and
@@ -185,20 +239,13 @@ static void time_sync_cb(struct timeval *tv)
     /* Write NTP time back to the battery-backed RTC so it survives power
      * cuts and provides a warm seed on the next boot.  Rounded to the
      * nearest second to centre the PCF-slave post-sync re-alignment at
-     * ±0.5 s rather than 0..−1 s.                                        */
+     * ±0.5 s rather than 0..−1 s.  The actual I2C write happens on
+     * ntp_task's own context — see s_rtc_write_pending's comment — so just
+     * stage the data and wake it here. */
     time_t rtc_sec = ntp_sec + ((tv && tv->tv_usec >= 500000) ? 1 : 0);
-    struct tm t;
-    localtime_r(&rtc_sec, &t);
-    if (!rtc_set_time(&t)) {
-        ESP_LOGW(TAG, "RTC write failed after NTP sync");
-    }
-
-    /* The RTC was just rewritten, so the next PCF-slave tick is a one-off
-     * whole-second re-alignment — flag it so discipline_tick() tracks it
-     * separately from the steady-state per-minute accumulator.
-     * Guard: only mode 2 ever clears this flag; setting it in other modes
-     * would leave it true indefinitely.                                   */
-    if (discipline_mode() == 2) s_pcf_post_sync = true;
+    localtime_r(&rtc_sec, &s_rtc_write_tm);
+    s_rtc_write_pending = true;
+    if (s_ntp_task_handle) xTaskNotifyGive(s_ntp_task_handle);
 }
 
 /* ── RTC validity floor ──────────────────────────────────────────────────
@@ -285,6 +332,7 @@ static void discipline_tick(void)
 {
     if (!s_time_valid) return;
     uint8_t mode = discipline_mode();
+    s_discipline_mode_cached = mode;   /* see s_discipline_mode_cached's comment */
 
     if (mode == 1) {
         /* ESP frequency disciplining.  +ve rate = clock slow → add time. */
@@ -319,6 +367,13 @@ static void discipline_tick(void)
                 ticked = true;
                 break;
             }
+            /* Short yield between polls: this was a zero-delay busy-spin that
+             * burned CPU and saturated the shared I2C0 bus (also used by
+             * SHT30) for up to 1.1 s once a minute with no correctness
+             * benefit. 1-2 ms is small enough not to meaningfully affect the
+             * edge-sync timing precision below — the loop just checks less
+             * often — while no longer being a tight spin. */
+            vTaskDelay(pdMS_TO_TICKS(2));
         }
         if (!ticked) { ESP_LOGW(TAG, "PCF slave: no tick edge (skipped)"); return; }
 
@@ -403,6 +458,20 @@ static void ntp_task(void *arg)
      * there is no need to re-acquire the lock here. */
     vTaskDelay(pdMS_TO_TICKS(5000));
 
+    /* Stop first — safe/idempotent even if SNTP was never started. Without
+     * this, a settings save that races ahead of this fixed 5 s delay (it
+     * calls ntp_apply_servers(), which already starts SNTP via its own
+     * stop -> setservername -> init sequence below) leaves SNTP already
+     * running by the time this line runs, and esp_sntp_setoperatingmode()
+     * on an already-running client hits
+     *   "assert failed: sntp_setoperatingmode ... Operating mode must not
+     *    be set while SNTP client is running" — an observed boot crash.
+     * The whole sequence is also serialized against ntp_apply_servers()
+     * itself via sntp_cfg_mutex() — stopping first isn't enough on its own
+     * if a concurrent call's esp_sntp_init() can still land in the middle
+     * of this sequence; see the mutex's comment. */
+    xSemaphoreTake(sntp_cfg_mutex(), portMAX_DELAY);
+    esp_sntp_stop();
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     for (int i = 0; i < 4; i++) {
         if (ntp_servers[i][0] != '\0')
@@ -418,6 +487,7 @@ static void ntp_task(void *arg)
     esp_sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
 
     esp_sntp_init();
+    xSemaphoreGive(s_sntp_cfg_mutex);
 
 /* Re-resolve pool.ntp.org DNS once per day so the cached IP stays fresh
  * as the NTP pool rotates members.  ntp_apply_servers() does the full
@@ -426,7 +496,31 @@ static void ntp_task(void *arg)
 
     int64_t last_dns_refresh = esp_timer_get_time();
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(DISCIPLINE_INTERVAL_S * 1000));   /* wake every minute */
+        /* Times out after DISCIPLINE_INTERVAL_S like the old vTaskDelay, but
+         * time_sync_cb() can also wake this early via xTaskNotifyGive() to
+         * get a pending RTC write serviced promptly instead of waiting up
+         * to a minute — see s_rtc_write_pending's comment. */
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(DISCIPLINE_INTERVAL_S * 1000));
+
+        if (s_rtc_write_pending) {
+            s_rtc_write_pending = false;
+            if (!rtc_set_time(&s_rtc_write_tm)) {
+                ESP_LOGW(TAG, "RTC write failed after NTP sync");
+            }
+            /* The RTC was just rewritten, so the next PCF-slave tick is a
+             * one-off whole-second re-alignment — flag it so
+             * discipline_tick() tracks it separately from the steady-state
+             * per-minute accumulator. Guard: only mode 2 ever clears this
+             * flag; setting it in other modes would leave it true
+             * indefinitely. */
+            if (s_discipline_mode_cached == 2) s_pcf_post_sync = true;
+        }
+
+        /* Woken early only for the RTC write above — don't run
+         * discipline_tick()/DNS-refresh on a partial interval; both assume
+         * a full DISCIPLINE_INTERVAL_S has actually elapsed. */
+        if (notified) continue;
+
         discipline_tick();   /* mode 0 = no-op; 1 = ESP rate; 2 = PCF slave */
         if (esp_timer_get_time() - last_dns_refresh >= NTP_DNS_REFRESH_US) {
             last_dns_refresh = esp_timer_get_time();
@@ -470,18 +564,23 @@ void ntp_apply_servers(void)
     }
     config_unlock();
     /* Stop SNTP before changing servers — lwIP setservername is not
-     * thread-safe while the SNTP polling timer is live. */
+     * thread-safe while the SNTP polling timer is live. Serialized against
+     * ntp_task's own boot-time reconfigure sequence — see sntp_cfg_mutex's
+     * comment. */
+    xSemaphoreTake(sntp_cfg_mutex(), portMAX_DELAY);
     esp_sntp_stop();
     for (int i = 0; i < 4; i++) {
         esp_sntp_setservername(i, servers[i][0] ? servers[i] : NULL);
     }
     esp_sntp_init();
+    xSemaphoreGive(s_sntp_cfg_mutex);
     ESP_LOGI(TAG, "NTP servers updated");
 }
 
 void ntp_time_start(void)
 {
-    if (xTaskCreate(ntp_task, "ntp", 4096, NULL, 5, NULL) != pdPASS)
+    (void)sntp_cfg_mutex();   /* create before ntp_task can possibly need it */
+    if (xTaskCreate(ntp_task, "ntp", 4096, NULL, 5, &s_ntp_task_handle) != pdPASS)
         ESP_LOGE(TAG, "ntp_task creation failed");
 }
 

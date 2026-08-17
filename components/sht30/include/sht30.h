@@ -19,10 +19,6 @@ bool sht30_init(void);
 /* True if the sensor was detected at startup. */
 bool sht30_is_present(void);
 
-/* Trigger a single high-repeatability measurement synchronously.
- * Blocks for ~20 ms.  Returns false on I²C error or CRC mismatch. */
-bool sht30_read(sht30_reading_t *out);
-
 /* Start a background FreeRTOS task that reads the sensor every 30 s.
  * Call after sht30_init(); safe to call even when sensor is absent
  * (task exits immediately). */

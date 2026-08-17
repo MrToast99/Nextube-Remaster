@@ -14,10 +14,28 @@
 #include <stdbool.h>
 
 /**
- * Initialise the ADC1 unit and configure the channel from cfg->mic_adc_channel.
- * Must be called before mic_task_start().
+ * Allocate the ADC hardware (oneshot unit + adc_continuous handle) — the
+ * memory-hungry part of setup (~10 KB of MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA
+ * for the continuous handle alone). Must be called EARLY in boot, before
+ * WiFi/MQTT/audio get a chance to claim that same small, contended memory
+ * pool — calling it late (after WiFi connects) can leave too little free for
+ * adc_continuous_new_handle() to succeed, and ESP-IDF's own cleanup path
+ * aborts the device on that failure with no way for application code to
+ * catch it. No-op (leaves the ADC unallocated) if the mic is disabled in
+ * config at the moment this runs. Call once, before mic_init().
  */
-void mic_init(void);
+void mic_hw_init(void);
+
+/**
+ * Finish mic setup: precompute analysis tables, create semaphores, and pick
+ * up the channel from cfg->mic_adc_channel (reconfiguring if it changed
+ * since mic_hw_init()). Must be called after mic_hw_init() and before
+ * mic_task_start(). Returns false (and skips all of the above) if the ADC
+ * hardware was never allocated — mic was disabled at boot when mic_hw_init()
+ * ran, or that allocation failed — in which case the caller should NOT call
+ * mic_task_start() either.
+ */
+bool mic_init(void);
 
 /**
  * Create and pin the microphone analysis task on core 0.
@@ -38,6 +56,17 @@ void mic_task_start(void);
  * Bands are log-spaced 280–3800 Hz, grouped 4 per tube (tube 0 = bands 0-3, etc.).
  */
 void mic_get_bands(float out[MIC_BAND_COUNT]);
+
+/*
+ * Consume-and-clear beat-onset flag, true at most once per detected beat.
+ * Broadband transient detector (not true BPM/tempo tracking) — reacts to
+ * general percussive hits (snare/hihat/kick harmonics; sub-bass kick
+ * fundamentals below 280 Hz aren't resolved by the analysis bands). Only
+ * produces pulses while the mic is actively capturing (Spectrum mode on
+ * screen — see mic_task's capture gate). Call at most once per tick from
+ * a single caller; a second call in the same tick sees it already cleared.
+ */
+bool mic_get_beat_pulse(void);
 
 /**
  * Read one raw 12-bit ADC sample (0-4095) from the currently configured

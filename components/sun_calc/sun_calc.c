@@ -40,11 +40,23 @@ void sun_calc_solar(float lat_deg, float lon_deg, const struct tm *t,
      *   tz_m = (local_hour*60 + local_min) - (utc_hour*60 + utc_min)
      *          + day_diff * 1440
      * tm_yday avoids month-boundary issues; multiplying by tm_year*365
-     * handles the single edge case of a UTC offset spanning a year end.    */
+     * handles the single edge case of a UTC offset spanning a year end.
+     *
+     * The instant used MUST be derived from the passed-in date `t`, not from
+     * "now" — `t` is treated as a local calendar date/time throughout this
+     * function (see Y/M/D and the moon-phase tm_hour/tm_min use above), so
+     * the offset must reflect whatever DST rule applies on THAT date.  Using
+     * time(NULL) instead was harmless while every caller passed "now", but
+     * would silently return the wrong offset if ever called near a DST
+     * boundary for a date other than today.  mktime() normalizes a local
+     * struct tm to its epoch using the TZ database's rule for that specific
+     * date (tm_isdst = -1 lets it decide), so gmtime_r() on the resulting
+     * time_t gives the true UTC breakdown for the same instant `t` names. */
     {
-        time_t ts = time(NULL);
-        struct tm ltm, utm;
-        localtime_r(&ts, &ltm);
+        struct tm ltm = *t;
+        ltm.tm_isdst = -1;
+        time_t ts = mktime(&ltm);   /* normalizes ltm in place (tm_yday etc.) */
+        struct tm utm;
         gmtime_r(&ts, &utm);
         int day_diff = (ltm.tm_yday + ltm.tm_year * 365)
                      - (utm.tm_yday + utm.tm_year * 365);

@@ -33,6 +33,7 @@
 #include "esp_adc/adc_continuous.h"  /* hardware-clocked capture (I2S0 DMA) */
 #include "soc/soc_caps.h"            /* SOC_ADC_DIGI_RESULT_BYTES           */
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -156,18 +157,28 @@ static const adc_channel_t ADC1_CHAN_MAP[8] = {
 static const int ADC1_GPIO_MAP[8] = { 36, 37, 38, 39, 32, 33, 34, 35 };
 
 /* ── Shared ADC state ────────────────────────────────────────────────── */
-static adc_oneshot_unit_handle_t s_adc        = NULL;
-static adc_channel_t             s_active_chan = ADC_CHANNEL_7;
-static uint8_t                   s_active_ch  = 7;   /* config index */
+static adc_oneshot_unit_handle_t  s_adc        = NULL;
+static volatile adc_channel_t     s_active_chan = ADC_CHANNEL_7;
+static volatile uint8_t           s_active_ch  = 7;   /* config index */
 
 /* ── Continuous-capture state ────────────────────────────────────────── */
-/* The adc_continuous handle is created/started and stopped/deleted ONLY by
- * mic_task (single owner — no handle lifecycle races).  Other tasks
- * communicate via flags:
+/* The adc_continuous handle is created ONCE at boot (mic_init) and lives for
+ * the device's lifetime, same as the oneshot unit s_adc — only started and
+ * stopped per Spectrum-mode session, never deinit'd/recreated. Earlier this
+ * churned adc_continuous_new_handle()/adc_continuous_deinit() on every
+ * session; that hit an ESP-IDF footgun (see acq_start()'s comment) and was
+ * unnecessary anyway — adc_continuous_config() is safe to call repeatedly on
+ * the same handle (it just memcpy's into an already-allocated pattern
+ * buffer, confirmed by reading esp_adc/adc_continuous.c directly), so a
+ * channel change only needs stop → config → start, not a full recreate.
+ * s_acq_running (not s_acq's NULLness) is the "is capture active" flag now
+ * that s_acq is always valid after init. mic_task is the sole owner (no
+ * handle lifecycle races). Other tasks communicate via flags:
  *   s_audio_claims_i2s — set by the audio component around DAC playback
  *                        (dac_continuous also needs I2S0); mic_task tears
  *                        the capture down and acks via s_i2s_released.   */
 static adc_continuous_handle_t s_acq               = NULL;
+static volatile bool           s_acq_running        = false;
 static volatile bool           s_audio_claims_i2s  = false;
 static SemaphoreHandle_t       s_i2s_released      = NULL;
 
@@ -198,6 +209,9 @@ static float s_dbg_power[BAND_COUNT];
 /* ── Shared output ───────────────────────────────────────────────────── */
 static float        s_bands[BAND_COUNT];
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+/* Edge-triggered beat-onset flag — set by the detector below, consumed (and
+ * cleared) by mic_get_beat_pulse(). See mic_get_beat_pulse()'s comment. */
+static volatile bool s_beat_pulse = false;
 
 /* ── Spectral tilt (display weighting) ───────────────────────────────── */
 /* Goertzel bins have constant bandwidth (SAMPLE_RATE/FRAME_SIZE = 62.5 Hz),
@@ -267,22 +281,19 @@ static volatile int s_last_raw = -1;
 
 /* ── Capture lifecycle (mic_task is the sole owner of s_acq) ─────────── */
 
-/* Create + start hardware-clocked capture on the active channel.
- * Returns false (and logs, rate-limited) when I2S0 is unavailable — e.g.
- * the audio DAC released it a moment ago and the peripheral has not fully
- * settled; the caller just retries on its next loop pass. */
+/* (Re)configure + start hardware-clocked capture on the active channel.
+ * s_acq itself is created once at boot (mic_init) and lives forever — this
+ * only starts/reconfigures it, never allocates/frees the handle (see the
+ * s_acq declaration comment for why).
+ *
+ * Returns false (and logs, rate-limited) on any failure — most commonly
+ * I2S0 being unavailable a moment after the audio DAC released it, before
+ * the peripheral has fully settled; the caller just retries on its next
+ * loop pass. Logs the actual esp_err_t from each step so a persistent
+ * failure is diagnosable instead of just "unavailable — will retry". */
 static bool acq_start(void)
 {
-    if (s_acq) return true;
-
-    adc_continuous_handle_cfg_t hcfg = {
-        .max_store_buf_size = RAW_FRAME_BYTES * 4,
-        .conv_frame_size    = RAW_FRAME_BYTES,
-    };
-    if (adc_continuous_new_handle(&hcfg, &s_acq) != ESP_OK) {
-        s_acq = NULL;
-        goto fail;
-    }
+    if (s_acq_running) return true;
 
     adc_digi_pattern_config_t pat = {
         .atten     = ADC_ATTEN_DB_12,
@@ -297,30 +308,39 @@ static bool acq_start(void)
         .conv_mode      = ADC_CONV_SINGLE_UNIT_1,
         .format         = ADC_DIGI_OUTPUT_FORMAT_TYPE1,
     };
-    if (adc_continuous_config(s_acq, &ccfg) != ESP_OK ||
-        adc_continuous_start(s_acq)         != ESP_OK) {
-        adc_continuous_deinit(s_acq);
-        s_acq = NULL;
-        goto fail;
+    esp_err_t cerr = adc_continuous_config(s_acq, &ccfg);
+    esp_err_t serr = (cerr == ESP_OK) ? adc_continuous_start(s_acq) : ESP_FAIL;
+    if (cerr != ESP_OK || serr != ESP_OK) {
+        if (cerr == ESP_OK && serr != ESP_OK) {
+            /* config succeeded but start failed — best-effort defensive stop
+             * so a retried acq_start() doesn't compound partial state on top
+             * of a handle ESP-IDF may still consider partially started. */
+            adc_continuous_stop(s_acq);
+        }
+        static int64_t s_last_fail_us = 0;
+        int64_t now = esp_timer_get_time();
+        if (now - s_last_fail_us > 10LL * 1000 * 1000) {
+            ESP_LOGW(TAG, "acq_start: config=%s start=%s — will retry",
+                     esp_err_to_name(cerr),
+                     cerr == ESP_OK ? esp_err_to_name(serr) : "skipped");
+            s_last_fail_us = now;
+        }
+        return false;
     }
+    s_acq_running = true;
     return true;
-
-fail:;
-    static int64_t s_last_fail_us = 0;
-    int64_t now = esp_timer_get_time();
-    if (now - s_last_fail_us > 10LL * 1000 * 1000) {
-        ESP_LOGW(TAG, "acq_start: I2S0/ADC unavailable — will retry");
-        s_last_fail_us = now;
-    }
-    return false;
 }
 
 static void acq_stop(void)
 {
-    if (!s_acq) return;
-    adc_continuous_stop(s_acq);
-    adc_continuous_deinit(s_acq);
-    s_acq = NULL;
+    if (!s_acq_running) return;
+    esp_err_t err = adc_continuous_stop(s_acq);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "acq_stop: adc_continuous_stop failed (%s) — driver still running, "
+                       "leaving s_acq_running set", esp_err_to_name(err));
+        return;
+    }
+    s_acq_running = false;
 }
 
 /* Called by the audio component around DAC playback (dac_continuous and
@@ -424,6 +444,10 @@ static void mic_task(void *arg)
             taskENTER_CRITICAL(&s_mux);
             memset(s_bands, 0, sizeof(s_bands));
             taskEXIT_CRITICAL(&s_mux);
+            /* Capture is gated off — clear peak-hold too so re-entering
+             * Spectrum mode starts from a clean state instead of displaying
+             * against a stale peak from potentially minutes earlier. */
+            memset(peak, 0, sizeof(peak));
             vTaskDelay(pdMS_TO_TICKS(100));   /* poll the gates at 10 Hz */
             continue;
         }
@@ -525,8 +549,15 @@ static void mic_task(void *arg)
         for (int b = 0; b < BAND_COUNT; b++) {
             float raw = bandE[b] / norm * MIC_GAIN;
 
-            /* Accumulate raw (pre-floor) energy for manual baseline capture */
-            if (s_cal_requested) s_cal_accum[b] += raw;
+            /* Accumulate raw (pre-floor) energy for manual baseline capture.
+             * Critical section guards against a concurrent mic_calibrate()
+             * timeout-then-retry resetting s_cal_accum mid-write (see
+             * mic_calibrate()'s timeout path). */
+            if (s_cal_requested) {
+                taskENTER_CRITICAL(&s_mux);
+                s_cal_accum[b] += raw;
+                taskEXIT_CRITICAL(&s_mux);
+            }
 
             if (s_noise_cal < PHASE1_FRAMES) {
                 /* Phase 1: fast unconstrained convergence */
@@ -634,6 +665,42 @@ static void mic_task(void *arg)
             }
         }
 
+        /* ── Beat-onset detector (issue #43: Breath/Rainbow beat-reactive nudge
+         * when spectrum_led_source == "follow accent mode") ──
+         * Feeds off s_disp_smooth (fast attack, ~16-24 ms, SMOOTH_ATTACK above)
+         * — deliberately NOT s_gate_smooth/total_power, which is the slow-
+         * attack signal the silence gate and WiFi-spike rejection above rely
+         * on specifically staying blind to single-frame transients. This runs
+         * after the silence-gate `continue` above, so gated-silent frames
+         * never fire a false beat.
+         *
+         * Broadband sum across all 24 bands, not just bass: the lowest
+         * analysis band starts at 280 Hz (see the band table), so sub-bass
+         * kick-drum fundamentals aren't resolved here — this reacts to
+         * general percussive transients (snare/hihat/kick harmonics), not a
+         * strictly kick-locked beat. BEAT_MIN_ENERGY and the 1.5x ratio below
+         * are starting-point constants, not calibrated against real music —
+         * same situation the noise-floor/WiFi-spike thresholds were in
+         * before those got tuned from field recordings (see above); expect
+         * to retune these by ear once this is on real hardware. */
+        #define BEAT_MIN_ENERGY     40.0f          /* absolute floor — ignore quiet ambient noise */
+        #define BEAT_REFRACTORY_US  200000LL       /* 200 ms — caps detection at 300 BPM */
+        static float   s_beat_baseline = 0.0f;
+        static int64_t s_beat_last_us  = 0;
+        {
+            float beat_energy = 0.0f;
+            for (int b = 0; b < BAND_COUNT; b++) beat_energy += s_disp_smooth[b];
+            int64_t now_us = esp_timer_get_time();
+            if (beat_energy > s_beat_baseline * 1.5f && beat_energy > BEAT_MIN_ENERGY &&
+                    (now_us - s_beat_last_us) > BEAT_REFRACTORY_US) {
+                taskENTER_CRITICAL(&s_mux);
+                s_beat_pulse = true;
+                taskEXIT_CRITICAL(&s_mux);
+                s_beat_last_us = now_us;
+            }
+            s_beat_baseline += 0.3f * (beat_energy - s_beat_baseline);
+        }
+
         /* ── Peak-hold ── */
         for (int b = 0; b < BAND_COUNT; b++) {
             if (s_disp_smooth[b] > peak[b]) peak[b]  = s_disp_smooth[b];
@@ -668,14 +735,100 @@ static void mic_task(void *arg)
 
 /* ── Public API ──────────────────────────────────────────────────────── */
 
-void mic_init(void)
+void mic_hw_init(void)
 {
+    config_lock();
+    const nextube_config_t *cfg = config_get();
+    bool    mic_en = cfg->mic_enabled;
+    uint8_t cfg_ch = cfg->mic_adc_channel;
+    config_unlock();
+
+    if (!mic_en) {
+        ESP_LOGI(TAG, "mic_hw_init: mic disabled — ADC hardware not allocated");
+        return;
+    }
+    if (cfg_ch > 7) cfg_ch = 7;
+    s_active_ch   = cfg_ch;
+    s_active_chan = ADC1_CHAN_MAP[cfg_ch];
+
+    /* Initialise ADC1 oneshot unit. Both this and the adc_continuous handle
+     * below are created once, here, and live for the device's lifetime —
+     * see the s_acq declaration comment for why they're never torn down and
+     * recreated per Spectrum-mode session. Failure here (unlike
+     * adc_continuous_new_handle() below) returns a normal error rather than
+     * hitting an ESP-IDF internal-abort landmine, so it's handled gracefully
+     * — log and leave the mic unallocated for this boot rather than crash
+     * the whole device over it. */
+    adc_oneshot_unit_init_cfg_t unit_cfg = {
+        .unit_id  = ADC_UNIT_1,
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
+    };
+    esp_err_t err = adc_oneshot_new_unit(&unit_cfg, &s_adc);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mic_hw_init: adc_oneshot_new_unit failed (%s) — mic unavailable this boot",
+                 esp_err_to_name(err));
+        s_adc = NULL;
+        return;
+    }
+
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .atten    = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    err = adc_oneshot_config_channel(s_adc, s_active_chan, &chan_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mic_hw_init: adc_oneshot_config_channel failed (%s) — mic unavailable this boot",
+                 esp_err_to_name(err));
+        adc_oneshot_del_unit(s_adc);
+        s_adc = NULL;
+        return;
+    }
+
+    /* adc_continuous_new_handle() needs ~10 KB of INTERNAL+DMA-capable RAM
+     * (ring buffer + DMA descriptors + rx buffers, all MALLOC_CAP_INTERNAL |
+     * MALLOC_CAP_DMA — a much smaller, more contended pool than general
+     * heap). If it fails partway through, its own cleanup path unconditionally
+     * calls adc_apb_periph_free() even though it never claimed the periph,
+     * which aborts the device — an ESP-IDF bug (confirmed by reading
+     * esp_adc/adc_continuous.c:163-254 directly) that happens INSIDE this
+     * call, before it can ever return an error to us; no amount of checking
+     * the return value here catches it. The only real fix is calling this
+     * EARLY (from app_main(), before wifi_manager_start()) while the pool is
+     * still abundant — confirmed by a live repro (2026-08-14): called after
+     * WiFi/MQTT connect, only 2163 B was free with no block bigger than
+     * 1396 B, and the allocation aborted the device on the spot. Kept as
+     * ESP_ERROR_CHECK for consistency with other boot-time driver setup, not
+     * because it adds protection beyond a plain call — see above. */
+    ESP_LOGI(TAG, "mic_hw_init: pre-adc_continuous DMA-capable internal RAM — free %u B, largest block %u B",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+
+    adc_continuous_handle_cfg_t hcfg = {
+        .max_store_buf_size = RAW_FRAME_BYTES * 4,
+        .conv_frame_size    = RAW_FRAME_BYTES,
+    };
+    ESP_ERROR_CHECK(adc_continuous_new_handle(&hcfg, &s_acq));
+
+    ESP_LOGI(TAG, "mic_hw_init: ADC1 CH%u (GPIO%d) hardware ready", cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
+}
+
+bool mic_init(void)
+{
+    if (!s_adc || !s_acq) {
+        ESP_LOGW(TAG, "mic_init: ADC hardware was not allocated (mic was disabled at boot, or "
+                       "mic_hw_init failed) — mic will not start this boot");
+        return false;
+    }
+
     config_lock();
     uint8_t cfg_ch = config_get()->mic_adc_channel;
     config_unlock();
     if (cfg_ch > 7) cfg_ch = 7;
-    s_active_ch   = cfg_ch;
-    s_active_chan  = ADC1_CHAN_MAP[cfg_ch];
+    /* mic_hw_init() already set the channel from config at boot; only
+     * reconfigure if it changed since then (e.g. user edited it via the web
+     * UI during the AP-PIN setup window before this deferred call runs). */
+    if (cfg_ch != s_active_ch)
+        reconfigure_channel(cfg_ch);
 
     /* Precompute the spectral-tilt weights (see MIC_TILT_EXP). */
     for (int b = 0; b < BAND_COUNT; b++)
@@ -714,20 +867,8 @@ void mic_init(void)
         }
     }
 
-    ESP_LOGI(TAG, "mic_init: CH%u (GPIO%d)", cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
-
-    /* Initialise ADC1 oneshot unit */
-    adc_oneshot_unit_init_cfg_t unit_cfg = {
-        .unit_id  = ADC_UNIT_1,
-        .ulp_mode = ADC_ULP_MODE_DISABLE,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &s_adc));
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten    = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_12,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, s_active_chan, &chan_cfg));
+    ESP_LOGI(TAG, "mic_init: CH%u (GPIO%d), ADC hardware already allocated by mic_hw_init()",
+             cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
 
     /* Audio↔mic I2S0 handoff ack (see mic_set_audio_active). */
     s_i2s_released = xSemaphoreCreateBinary();
@@ -737,11 +878,12 @@ void mic_init(void)
     s_dump_done = xSemaphoreCreateBinary();
     configASSERT(s_dump_done);
 
-    /* The adc_continuous capture itself is created on demand by mic_task
-     * (gated to Spectrum mode / calibration, released during audio playback)
-     * — nothing to start here. */
+    /* Capture itself is started/stopped on demand by mic_task (gated to
+     * Spectrum mode / calibration, released during audio playback) —
+     * nothing to start here. */
     ESP_LOGI(TAG, "Capture: adc_continuous %d Hz ÷%d → %d Hz effective — gated to Spectrum mode",
              ADC_HW_RATE, DECIM, SAMPLE_RATE);
+    return true;
 }
 
 int mic_read_raw(void)
@@ -750,7 +892,7 @@ int mic_read_raw(void)
      * stale, so take a fresh one-shot read.  While the continuous capture is
      * running we return the cached value mic_task keeps updating — a oneshot
      * read would contend with the digital controller for the SAR anyway. */
-    if (!s_acq && s_adc) {
+    if (!s_acq_running && s_adc) {
         int raw = -1;
         if (adc_oneshot_read(s_adc, s_active_chan, &raw) == ESP_OK)
             s_last_raw = raw;
@@ -794,6 +936,21 @@ void mic_get_bands(float out[MIC_BAND_COUNT])
     taskEXIT_CRITICAL(&s_mux);
 }
 
+/* Consume-and-clear: returns true at most once per detected beat onset (see
+ * the detector in mic_task above). Callers poll this once per their own
+ * tick — a caller ticking slower than BEAT_REFRACTORY_US won't miss a beat
+ * (the flag is level-held between mic frames, not a narrow edge window),
+ * but calling this more than once per intended "check" will make the second
+ * call see it already cleared. */
+bool mic_get_beat_pulse(void)
+{
+    taskENTER_CRITICAL(&s_mux);
+    bool p = s_beat_pulse;
+    s_beat_pulse = false;
+    taskEXIT_CRITICAL(&s_mux);
+    return p;
+}
+
 bool mic_calibrate(float out[MIC_BAND_COUNT], uint32_t timeout_ms)
 {
     if (!s_cal_done) {
@@ -816,7 +973,14 @@ bool mic_calibrate(float out[MIC_BAND_COUNT], uint32_t timeout_ms)
 
     /* Block until mic_task signals completion (or timeout) */
     if (xSemaphoreTake(s_cal_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        /* Same critical section pattern as the rest of this file's s_cal_*
+         * state: without it, a second mic_calibrate() call starting right
+         * after this timeout could reset s_cal_accum/s_cal_frame_cnt while
+         * mic_task is still mid-write to s_cal_accum[] for this abandoned
+         * session (see the accumulation write in mic_task). */
+        taskENTER_CRITICAL(&s_mux);
         s_cal_requested = false;
+        taskEXIT_CRITICAL(&s_mux);
         ESP_LOGW(TAG, "mic_calibrate: timeout after %u ms", (unsigned)timeout_ms);
         return false;
     }

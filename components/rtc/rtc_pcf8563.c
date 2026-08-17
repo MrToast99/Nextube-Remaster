@@ -75,6 +75,13 @@ void pcf8563_init(void)
         i2c_write_reg(0x01, &zero, 1) != ESP_OK ||
         i2c_write_reg(0x0D, &zero, 1) != ESP_OK) {
         ESP_LOGW(TAG, "PCF8563 not responding — RTC disabled");
+        /* Symmetric cleanup with the bus-add failure path above: don't leave
+         * the device registered / bus allocated for a chip that isn't
+         * actually responding. */
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+        i2c_del_master_bus(s_bus);
+        s_bus = NULL;
         return;
     }
     s_initialized = true;

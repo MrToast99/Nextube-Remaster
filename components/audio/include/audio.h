@@ -19,7 +19,9 @@ extern "C" {
 void audio_init(bool enabled);
 void audio_play_file(const char *path);
 void audio_set_volume(int vol);
-void audio_set_enabled(bool enabled);   /* saves the flag; applied at next reboot */
+void audio_set_enabled(bool enabled);   /* logs the change only; persistence to config.json
+                                          * and the reboot that applies it are the caller's
+                                          * responsibility (see web_server.c) */
 void audio_stop(void);
 
 /**

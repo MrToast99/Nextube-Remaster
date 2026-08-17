@@ -125,6 +125,19 @@ static esp_timer_handle_t s_ap_disable_timer   = NULL;
  * indeterminate state. */
 static bool s_manual_reconnect = false;
 
+/* ── STA reconnect backoff ────────────────────────────────────────────
+ * A wrong password or an out-of-range AP makes every association attempt
+ * fail immediately, and WIFI_EVENT_STA_DISCONNECTED fires again right after
+ * each esp_wifi_connect() — calling esp_wifi_connect() unconditionally here
+ * used to produce a continuous reconnect storm.  s_reconnect_fail_count
+ * tracks consecutive failures since the last successful connection (reset
+ * in the IP_EVENT_STA_GOT_IP handler) and reconnect_backoff_delay_ms() maps
+ * that count to an increasing retry delay, capped at 30 s.  The delay is
+ * applied via a one-shot esp_timer (s_reconnect_backoff_timer) rather than
+ * blocking this event-handler context with vTaskDelay. */
+static uint32_t           s_reconnect_fail_count     = 0;
+static esp_timer_handle_t s_reconnect_backoff_timer  = NULL;
+
 /* ──────— AP PIN helpers ──────────────────────────────────────────── */
 
 /* Generate a random 8-digit numeric PIN into out (must be AP_PIN_LEN+1).
@@ -228,6 +241,24 @@ static void ap_disable_cb(void *arg)
     esp_wifi_set_mode(WIFI_MODE_STA);
 }
 
+static void reconnect_backoff_cb(void *arg)
+{
+    esp_wifi_connect();
+}
+
+/* Map consecutive-failure count to a retry delay: immediate for the first
+ * few attempts (transient blips shouldn't feel slow), then back off in
+ * stages, capping at 30 s so a wrong password / out-of-range AP doesn't spin
+ * the radio continuously. */
+static uint32_t reconnect_backoff_delay_ms(uint32_t fail_count)
+{
+    if (fail_count <= 3)  return 0;        /* immediate retry */
+    if (fail_count <= 6)  return 2000;
+    if (fail_count <= 10) return 5000;
+    if (fail_count <= 15) return 15000;
+    return 30000;                          /* cap */
+}
+
 /* Bring the setup AP up on demand (manual trigger — the LEFT+RIGHT touch-pad
  * hotkey, see touch_input combo handling).  Idempotent: a no-op if the AP is
  * already broadcasting.  The AP stays up until STA obtains an IP, at which
@@ -246,6 +277,9 @@ static void init_ap_timers(void)
 {
     esp_timer_create_args_t a = { .callback = ap_disable_cb,  .name = "ap_disable"  };
     esp_timer_create(&a, &s_ap_disable_timer);
+
+    esp_timer_create_args_t b = { .callback = reconnect_backoff_cb, .name = "wifi_reconnect_bo" };
+    esp_timer_create(&b, &s_reconnect_backoff_timer);
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t base,
@@ -273,8 +307,20 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 ESP_LOGI(TAG, "STA disconnected (manual reconnect in progress, reason=%d)", dev->reason);
                 s_manual_reconnect = false;
             } else {
-                ESP_LOGW(TAG, "STA disconnected (reason=%d), retrying...", dev->reason);
-                esp_wifi_connect();
+                s_reconnect_fail_count++;
+                uint32_t delay_ms = reconnect_backoff_delay_ms(s_reconnect_fail_count);
+                ESP_LOGW(TAG, "STA disconnected (reason=%d), retry #%u in %u ms",
+                         dev->reason, (unsigned)s_reconnect_fail_count, (unsigned)delay_ms);
+                if (delay_ms == 0) {
+                    esp_wifi_connect();
+                } else if (s_reconnect_backoff_timer) {
+                    esp_timer_stop(s_reconnect_backoff_timer);
+                    esp_timer_start_once(s_reconnect_backoff_timer, (uint64_t)delay_ms * 1000);
+                } else {
+                    /* Timer unavailable (creation failed) — fall back to an
+                     * immediate retry rather than never reconnecting. */
+                    esp_wifi_connect();
+                }
             }
             break;
         }
@@ -302,6 +348,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         portEXIT_CRITICAL(&s_net_mux);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "STA IP: %s", s_ip_str);
+        /* Successful connection — clear the reconnect-backoff streak and any
+         * pending backoff retry so the next disconnect starts fresh. */
+        s_reconnect_fail_count = 0;
+        if (s_reconnect_backoff_timer) esp_timer_stop(s_reconnect_backoff_timer);
         esp_wifi_set_ps(WIFI_PS_NONE);
         /* If the AP is currently up (either because we never had STA
          * credentials and started in APSTA, or because the user summoned it
@@ -399,25 +449,44 @@ void wifi_manager_start(void)
      * convention as hostname, above) — wifi_manager_reconnect_sta() (the
      * no-reboot credential-save path) intentionally does not touch this. */
     if (static_ip_enabled && static_ip[0] && static_netmask[0] && static_gateway[0]) {
-        esp_netif_dhcpc_stop(s_sta_netif);
         esp_netif_ip_info_t ip_info = {0};
-        esp_netif_str_to_ip4(static_ip,      &ip_info.ip);
-        esp_netif_str_to_ip4(static_netmask, &ip_info.netmask);
-        esp_netif_str_to_ip4(static_gateway, &ip_info.gw);
-        esp_netif_set_ip_info(s_sta_netif, &ip_info);
-        if (static_dns1[0]) {
-            esp_netif_dns_info_t d = {0};
-            d.ip.type = ESP_IPADDR_TYPE_V4;
-            esp_netif_str_to_ip4(static_dns1, &d.ip.u_addr.ip4);
-            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &d);
+        esp_err_t e_ip  = esp_netif_str_to_ip4(static_ip,      &ip_info.ip);
+        esp_err_t e_nm  = esp_netif_str_to_ip4(static_netmask, &ip_info.netmask);
+        esp_err_t e_gw  = esp_netif_str_to_ip4(static_gateway, &ip_info.gw);
+        if (e_ip != ESP_OK) ESP_LOGE(TAG, "Static IP: failed to parse IP address \"%s\" (%s)", static_ip, esp_err_to_name(e_ip));
+        if (e_nm != ESP_OK) ESP_LOGE(TAG, "Static IP: failed to parse netmask \"%s\" (%s)", static_netmask, esp_err_to_name(e_nm));
+        if (e_gw != ESP_OK) ESP_LOGE(TAG, "Static IP: failed to parse gateway \"%s\" (%s)", static_gateway, esp_err_to_name(e_gw));
+
+        if (e_ip == ESP_OK && e_nm == ESP_OK && e_gw == ESP_OK) {
+            esp_netif_dhcpc_stop(s_sta_netif);
+            esp_netif_set_ip_info(s_sta_netif, &ip_info);
+            if (static_dns1[0]) {
+                esp_netif_dns_info_t d = {0};
+                d.ip.type = ESP_IPADDR_TYPE_V4;
+                esp_err_t e_d1 = esp_netif_str_to_ip4(static_dns1, &d.ip.u_addr.ip4);
+                if (e_d1 == ESP_OK) {
+                    esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &d);
+                } else {
+                    ESP_LOGE(TAG, "Static IP: failed to parse DNS1 \"%s\" (%s) — skipping", static_dns1, esp_err_to_name(e_d1));
+                }
+            }
+            if (static_dns2[0]) {
+                esp_netif_dns_info_t d = {0};
+                d.ip.type = ESP_IPADDR_TYPE_V4;
+                esp_err_t e_d2 = esp_netif_str_to_ip4(static_dns2, &d.ip.u_addr.ip4);
+                if (e_d2 == ESP_OK) {
+                    esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &d);
+                } else {
+                    ESP_LOGE(TAG, "Static IP: failed to parse DNS2 \"%s\" (%s) — skipping", static_dns2, esp_err_to_name(e_d2));
+                }
+            }
+            ESP_LOGI(TAG, "Static IP configured: %s / %s gw %s", static_ip, static_netmask, static_gateway);
+        } else {
+            /* IP/netmask/gateway failed to parse — same fallback as the
+             * "incomplete fields" case below: leave DHCP running (never
+             * stopped it above) so the device still gets a usable address. */
+            ESP_LOGW(TAG, "Static IP: one or more core fields failed to parse — falling back to DHCP");
         }
-        if (static_dns2[0]) {
-            esp_netif_dns_info_t d = {0};
-            d.ip.type = ESP_IPADDR_TYPE_V4;
-            esp_netif_str_to_ip4(static_dns2, &d.ip.u_addr.ip4);
-            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &d);
-        }
-        ESP_LOGI(TAG, "Static IP configured: %s / %s gw %s", static_ip, static_netmask, static_gateway);
     } else if (static_ip_enabled) {
         ESP_LOGW(TAG, "Static IP enabled but IP/netmask/gateway incomplete — falling back to DHCP");
     }
@@ -497,6 +566,13 @@ void wifi_manager_start(void)
             sizeof(ap_cfg.ap.password) - 1);
 
     wifi_config_t sta_cfg = {0};
+    /* Default WIFI_FAST_SCAN stops at the first AP meeting the (disabled by
+     * default) RSSI threshold, which on a multi-AP/mesh SSID can mean
+     * associating to a barely-in-range AP over a much stronger one nearby.
+     * Scan all channels and pick by signal so the device lands on the best
+     * AP for the SSID up front instead of roaming again moments later. */
+    sta_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    sta_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     strncpy((char *)sta_cfg.sta.ssid,     ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
     strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
 
@@ -555,7 +631,12 @@ void wifi_manager_start(void)
              have_creds ? "(staged, not broadcasting)" : "(broadcasting)");
 }
 
-void wifi_manager_reconnect_sta(void)
+/* Read the configured STA SSID/password and build a wifi_config_t ready for
+ * esp_wifi_set_config(WIFI_IF_STA, ...).  Shared by wifi_manager_reconnect_sta()
+ * and wifi_manager_apply_sta_credentials(), which previously re-derived this
+ * independently.  Returns false (out left zeroed) when no SSID is configured
+ * — callers treat that the same as before this was factored out: a no-op. */
+static bool load_sta_config(wifi_config_t *out)
 {
     char ssid[64], password[64];
     config_lock();
@@ -564,7 +645,25 @@ void wifi_manager_reconnect_sta(void)
     strncpy(password, cfg->password, sizeof(password) - 1); password[sizeof(password) - 1] = '\0';
     config_unlock();
 
-    if (strlen(ssid) == 0) return;
+    if (strlen(ssid) == 0) return false;
+
+    memset(out, 0, sizeof(*out));
+    out->sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    out->sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    strncpy((char *)out->sta.ssid,     ssid,     sizeof(out->sta.ssid)     - 1);
+    strncpy((char *)out->sta.password, password, sizeof(out->sta.password) - 1);
+    return true;
+}
+
+/* Returns true when a reboot is needed for the current config to take full
+ * effect.  This function only re-applies SSID/password — it deliberately
+ * does not restart DHCP or reapply static-IP fields (see the static-IP
+ * comment in wifi_manager_start()), so if static IP is enabled the caller
+ * should tell the user a reboot is required for those fields to apply. */
+bool wifi_manager_reconnect_sta(void)
+{
+    wifi_config_t sta_cfg;
+    if (!load_sta_config(&sta_cfg)) return false;
 
     /* User just saved credentials and is most likely connected via the AP.
      * Force APSTA so they remain on the AP during the connection attempt;
@@ -573,10 +672,6 @@ void wifi_manager_reconnect_sta(void)
      * broadcasting. */
     s_ap_active = true;
     esp_wifi_set_mode(WIFI_MODE_APSTA);
-
-    wifi_config_t sta_cfg = {0};
-    strncpy((char *)sta_cfg.sta.ssid,     ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
-    strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
 
@@ -592,7 +687,13 @@ void wifi_manager_reconnect_sta(void)
      * rather than relying on the event handler to do it. */
     esp_wifi_disconnect();
     esp_wifi_connect();
-    ESP_LOGI(TAG, "STA: connecting to \"%s\"", ssid);
+    ESP_LOGI(TAG, "STA: connecting to \"%s\"", (const char *)sta_cfg.sta.ssid);
+
+    bool reboot_needed;
+    config_lock();
+    reboot_needed = config_get()->static_ip_enabled;
+    config_unlock();
+    return reboot_needed;
 }
 
 bool wifi_manager_is_connected(void)
@@ -666,17 +767,8 @@ bool wifi_manager_get_net_info(wifi_manager_net_info_t *out)
 
 void wifi_manager_apply_sta_credentials(void)
 {
-    char ssid[64], password[64];
-    config_lock();
-    const nextube_config_t *cfg = config_get();
-    strncpy(ssid,     cfg->ssid,     sizeof(ssid)     - 1); ssid[sizeof(ssid)         - 1] = '\0';
-    strncpy(password, cfg->password, sizeof(password) - 1); password[sizeof(password) - 1] = '\0';
-    config_unlock();
-
-    if (strlen(ssid) == 0) return;
-    wifi_config_t sta_cfg = {0};
-    strncpy((char *)sta_cfg.sta.ssid,     ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
-    strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
+    wifi_config_t sta_cfg;
+    if (!load_sta_config(&sta_cfg)) return;
     esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
     ESP_LOGI(TAG, "STA credentials updated (no reconnect)");
 }

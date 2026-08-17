@@ -198,15 +198,15 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
   <div class="card">
     <h2 data-i18n="dash.quick_actions">Quick Actions</h2>
     <div class="btn-group">
-      <button class="btn btn-primary" data-mode-bit="0"  onclick="setMode('Clock')" data-i18n="mode.clock">Clock</button>
-      <button class="btn btn-outline" data-mode-bit="4"  onclick="setMode('Date')" data-i18n="mode.date">Date</button>
-      <button class="btn btn-outline" data-mode-bit="5"  onclick="setMode('Album')" data-i18n="mode.album">Album</button>
-      <button class="btn btn-outline" data-mode-bit="6"  onclick="setMode('Weather')" data-i18n="mode.weather">Weather</button>
-      <button class="btn btn-outline" data-mode-bit="7"  onclick="setMode('Spectrum')" data-i18n="mode.spectrum">Spectrum</button>
-      <button class="btn btn-outline" data-mode-bit="8"  onclick="setMode('YouTube')">YouTube</button>
-      <button class="btn btn-outline" data-mode-bit="9"  onclick="setMode('Instagram')">Instagram</button>
-      <button class="btn btn-outline" data-mode-bit="10" onclick="setMode('TikTok')">TikTok</button>
-      <button class="btn btn-outline" data-mode-bit="11" onclick="setMode('Mastodon')">Mastodon</button>
+      <button class="btn btn-outline" data-mode-bit="0"  data-mode-name="Clock"     onclick="setMode('Clock')" data-i18n="mode.clock">Clock</button>
+      <button class="btn btn-outline" data-mode-bit="4"  data-mode-name="Date"      onclick="setMode('Date')" data-i18n="mode.date">Date</button>
+      <button class="btn btn-outline" data-mode-bit="5"  data-mode-name="Album"     onclick="setMode('Album')" data-i18n="mode.album">Album</button>
+      <button class="btn btn-outline" data-mode-bit="6"  data-mode-name="Weather"   onclick="setMode('Weather')" data-i18n="mode.weather">Weather</button>
+      <button class="btn btn-outline" data-mode-bit="7"  data-mode-name="Spectrum"  onclick="setMode('Spectrum')" data-i18n="mode.spectrum">Spectrum</button>
+      <button class="btn btn-outline" data-mode-bit="8"  data-mode-name="YouTube"   onclick="setMode('YouTube')">YouTube</button>
+      <button class="btn btn-outline" data-mode-bit="9"  data-mode-name="Instagram" onclick="setMode('Instagram')">Instagram</button>
+      <button class="btn btn-outline" data-mode-bit="10" data-mode-name="TikTok"    onclick="setMode('TikTok')">TikTok</button>
+      <button class="btn btn-outline" data-mode-bit="11" data-mode-name="Mastodon"  onclick="setMode('Mastodon')">Mastodon</button>
     </div>
   </div>
 
@@ -689,6 +689,16 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <input type="checkbox" id="f-spec-lcd-wled" style="width:16px;height:16px;cursor:pointer">
       <label for="f-spec-lcd-wled" style="margin:0;cursor:pointer;font-weight:normal" data-i18n="spec.lcd_wled">Follow WLED primary colour (requires WLED Sync service; falls back to the colour above when no WLED data)</label>
     </div>
+    <div class="field" id="spec-beat-react-wrap" style="display:none;flex-direction:column;gap:.3rem;margin-top:.4rem">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-spec-beat-react" style="width:16px;height:16px;cursor:pointer">
+        <label for="f-spec-beat-react" style="margin:0;cursor:pointer;font-weight:normal" data-i18n="spec.beat_react">Beat-reactive nudge for Breath / Rainbow</label>
+      </div>
+      <p style="color:var(--dim);font-size:.78rem;margin:0 0 0 24px" data-i18n="spec.beat_react_hint">
+        Only affects Breath and Rainbow accent modes. Reacts to detected percussive hits (snare/hihat/kick) —
+        not true beats-per-minute tracking, since the analyser doesn't resolve sub-bass frequencies.
+      </p>
+    </div>
     <div class="field" style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-top:.4rem">
       <button onclick="micCalibrate()" style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem" data-i18n="spec.capture_baseline_btn">📸 Capture Baseline</button>
       <button onclick="micResetCal()"  style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem" data-i18n="spec.reset_auto_btn">↺ Reset to Auto</button>
@@ -835,8 +845,8 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="3" checked> 4</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="4" checked> 5</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="bi-sched-tube" value="5" checked> 6</label>
-        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="biSchedSelectAll()" data-i18n="btn.all">All</button>
-        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="biSchedSelectNone()" data-i18n="btn.none">None</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="biSchedSelect(true)" data-i18n="btn.all">All</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="biSchedSelect(false)" data-i18n="btn.none">None</button>
       </div>
     </div>
   </div>
@@ -1476,6 +1486,40 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <p style="font-size:.85rem">Write/erase failures: <strong id="dbg-flash-fail-count">--</strong></p>
     </div>
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
+      <h2 style="color:#ffa000">&#x1F3AC; WeatherLive Animation Rate</h2>
+      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.6rem">
+        Overrides WeatherLive's normal 10/20&nbsp;Hz split with one fixed rate, for testing fluidity
+        without reflashing. Doesn't affect Spectrum mode. <strong>Applied live, not persisted</strong> —
+        resets to default on reboot.
+      </p>
+      <div class="field">
+        <label>Custom rate (5-40 Hz, blank/0 = default)</label>
+        <input type="number" id="f-dbg-wl-fps" min="0" max="40" step="1" placeholder="0" data-no-dirty="1">
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="applyDebugWlFps()">Apply</button>
+        <button class="btn btn-outline" onclick="applyDebugWlFps(0)">Reset to default</button>
+      </div>
+    </div>
+    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
+      <h2 style="color:#ffa000">&#x1F4CA; Task CPU — windowed average</h2>
+      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.6rem">
+        The System tab's live view is an instantaneous 250&nbsp;ms sample — too noisy to fairly compare
+        e.g. CPU usage before and after a settings change, or other comparisons. This averages over an arbitrary window instead: hit <strong>Start</strong>,
+        let the device run normally for as long as you want (a rain scene, a soak test, whatever you're
+        testing), then <strong>Get Result</strong> — repeatable without restarting the window.
+      </p>
+      <div id="dbg-taskpick" style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.6rem;font-size:.82rem"></div>
+      <div class="btn-group">
+        <button class="btn btn-outline" onclick="dbgTasksRefreshList()">Refresh task list</button>
+        <button class="btn btn-outline" onclick="dbgTasksSelectNone()">Uncheck all</button>
+        <button class="btn btn-primary" onclick="dbgTasksStart()">Start</button>
+        <button class="btn btn-outline" onclick="dbgTasksResult()">Get result</button>
+      </div>
+      <p id="dbg-tasks-status" style="font-size:.8rem;color:var(--dim);margin:.5rem 0 0"></p>
+      <div id="dbg-tasks-table" style="font-size:.82rem;margin-top:.5rem"></div>
+    </div>
+    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
       <h2 style="color:#ffa000">&#x23F1;&#xFE0F; Time Disciplining (experimental)</h2>
       <p style="font-size:.8rem;color:var(--dim);margin-bottom:.8rem">
         How the clock is held <em>between</em> hourly NTP syncs. A <code>DRIFT</code> line is logged
@@ -1642,8 +1686,8 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="3"> 4</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="4"> 5</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="burnin-tube" value="5"> 6</label>
-        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="burninSelectAll()">All</button>
-        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="burninSelectNone()">None</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="burninSelect(true)">All</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="burninSelect(false)">None</button>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <span style="font-size:.82rem;color:var(--dim)">Duration:</span>
@@ -1672,8 +1716,8 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="3"> 4</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="4"> 5</label>
         <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="snow-tube" value="5"> 6</label>
-        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="snowSelectAll()">All</button>
-        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="snowSelectNone()">None</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="snowSelect(true)">All</button>
+        <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="snowSelect(false)">None</button>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <span style="font-size:.82rem;color:var(--dim)">Duration:</span>
@@ -1697,6 +1741,53 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
 <script>
 const $ = id => document.getElementById(id);
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+/* esc() is safe for text-node content but does NOT escape quote characters
+ * (they're only meaningful inside a serialized attribute value, not text —
+ * a text node round-tripped through textContent/innerHTML never escapes
+ * " or '). Use this instead of esc() anywhere a value is interpolated
+ * inside a quoted HTML attribute (e.g. value="${escAttr(x)}"), or an
+ * unescaped quote in the value breaks out of the attribute. */
+function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+/* Strip everything except a small formatting allowlist before HTML from an
+ * external source (GitHub release notes, rendered via marked.parse()) ever
+ * reaches innerHTML — marked does not sanitize its output, and update_repo
+ * is a user-settable config field, so a malicious/compromised release body
+ * would otherwise execute arbitrary JS in this page. Parsed into an inert
+ * <template> so embedded resources/handlers never fire during the walk (a
+ * live element can start fetching <img src> or firing onerror even while
+ * detached from the document). Images are deliberately not in the
+ * allowlist — release notes render as text/links/formatting only. */
+function sanitizeHtml(html) {
+  const ALLOWED_TAGS = new Set(['P','BR','STRONG','EM','B','I','CODE','PRE',
+    'UL','OL','LI','A','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','HR','DEL',
+    'TABLE','THEAD','TBODY','TR','TH','TD']);
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  const walk = node => {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        if (!ALLOWED_TAGS.has(child.tagName)) { child.remove(); continue; }
+        for (const attr of Array.from(child.attributes)) {
+          if (child.tagName === 'A' && attr.name === 'href' &&
+              /^(https?:|mailto:)/i.test(attr.value)) {
+            continue;   /* keep only http(s)/mailto links */
+          }
+          child.removeAttribute(attr.name);
+        }
+        if (child.tagName === 'A') {
+          child.setAttribute('target', '_blank');
+          child.setAttribute('rel', 'noopener noreferrer');
+        }
+        walk(child);
+      } else if (child.nodeType !== Node.TEXT_NODE) {
+        child.remove();   /* comments, processing instructions, etc. */
+      }
+    }
+  };
+  walk(tpl.content);
+  return tpl.innerHTML;
+}
 function fmtMtime(ts) {
   if (!ts) return '';
   const d = new Date(ts * 1000);
@@ -1942,6 +2033,8 @@ Object.assign(I18N.en, {
   "spec.led_color_label":"LED Glow Colour","spec.led_color_hint":"Amplitude-modulated LED ring colour in Spectrum mode",
   "spec.lcd_color_label":"LCD Bar Colour","spec.lcd_color_hint":"Bar colour for the LCD spectrum display",
   "spec.lcd_wled":"Follow WLED primary colour (requires WLED Sync service; falls back to the colour above when no WLED data)",
+  "spec.beat_react":"Beat-reactive nudge for Breath / Rainbow",
+  "spec.beat_react_hint":"Only affects Breath and Rainbow accent modes. Reacts to detected percussive hits (snare/hihat/kick) — not true beats-per-minute tracking, since the analyser doesn't resolve sub-bass frequencies.",
   "spec.capture_baseline_btn":"📸 Capture Baseline","spec.reset_auto_btn":"↺ Reset to Auto",
   "spec.capture_help":"While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.",
   "spec.capture_warn":"⚠️ <strong>Switch away from Spectrum mode before capturing.</strong> In Spectrum mode the mic is continuously processing live audio — this interferes with baseline capture and will cause a timeout error. Switch to Clock or any other mode first, then capture.",
@@ -2358,7 +2451,7 @@ async function loadNetworkInfo() {
       ['DNS', [d.dns1, d.dns2].filter(x => x && x !== '0.0.0.0').join(', ') || '—'],
     ];
     el.innerHTML = rows.map(([k, v]) =>
-      `<div style="display:flex;justify-content:space-between;padding:.25rem 0;border-bottom:1px solid var(--accent)"><span style="color:var(--dim)">${k}</span><span>${v}</span></div>`
+      `<div style="display:flex;justify-content:space-between;padding:.25rem 0;border-bottom:1px solid var(--accent)"><span style="color:var(--dim)">${esc(k)}</span><span>${esc(v)}</span></div>`
     ).join('');
   } catch (e) {
     el.innerHTML = '<p style="color:var(--dim)">Could not load network info</p>';
@@ -2462,7 +2555,6 @@ function updateClockFaceControls() {
     if (el) el.style.display = isProcedural ? 'none' : 'flex';
   });
 }
-function updateWliveVisibility() { updateClockFaceControls(); } /* compat alias */
 
 function onCustomBgChange() {
   markDirty();
@@ -2582,7 +2674,6 @@ async function loadThemes(manual) {
 async function loadFontList(manual) {
   const sels = Array.from(document.querySelectorAll('.ttf-font-select'));
   if (!sels.length) return;
-  const current = sels[0].value;
   try {
     const data = await api('file/ls?dir=/fonts');
     if (!Array.isArray(data)) return;
@@ -2591,8 +2682,9 @@ async function loadFontList(manual) {
       .map(f => f.name)
       .sort((a, b) => a.localeCompare(b));
     const optsHtml = '<option value="">Logisoso (built-in)</option>' +
-      ttfs.map(n => `<option value="${n.replace(/"/g,'&quot;')}">${n.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</option>`).join('');
+      ttfs.map(n => `<option value="${escAttr(n)}">${esc(n)}</option>`).join('');
     sels.forEach(sel => {
+      const current = sel.value;
       sel.innerHTML = optsHtml;
       if (current && !ttfs.includes(current)) {
         const opt = document.createElement('option');
@@ -2907,7 +2999,8 @@ async function loadSettings() {
   $('f-spec-lcd-color').value = '#' + slc.map(v => v.toString(16).padStart(2,'0')).join('');
   $('f-spec-lcd-wled').checked = cfg.spectrum_lcd_wled === true;  /* opt-in, default off */
   $('f-spec-led-src').value = String(cfg.spectrum_led_source || 0);
-  specLedSrcChange();  /* show/hide custom colour row to match loaded value */
+  $('f-spec-beat-react').checked = cfg.spectrum_led_beat_react === true;  /* opt-in, default off */
+  specLedSrcChange();  /* show/hide custom colour row + beat-react row to match loaded value */
 
   /* Mode rotation */
   const rotEnabled = cfg.rotation_enabled === true;
@@ -3175,6 +3268,19 @@ function updateDashboardVisibility(em) {
   });
 }
 
+/* Highlight whichever Quick Actions button matches the device's actual
+ * current mode (from refreshStatus()'s s.mode) — everything else stays
+ * btn-outline. Previously "Clock" had btn-primary hardcoded in the static
+ * HTML with nothing ever updating it, so it stayed highlighted regardless
+ * of the real active mode. */
+function updateQuickActionActive(modeName) {
+  document.querySelectorAll('#tab-dashboard .btn[data-mode-name]').forEach(btn => {
+    const active = btn.dataset.modeName === modeName;
+    btn.classList.toggle('btn-primary', active);
+    btn.classList.toggle('btn-outline', !active);
+  });
+}
+
 /* ── SHT30 offset unit (follows temperature_format) ──────────────── */
 function updateSht30OffsetUnit(isFahrenheit) {
   const inp = $('f-sht30-offset');
@@ -3320,8 +3426,7 @@ function onBurninSchedToggle() {
   box.style.opacity      = en ? '1'    : '.4';
   box.style.pointerEvents = en ? ''    : 'none';
 }
-function biSchedSelectAll()  { document.querySelectorAll('.bi-sched-tube').forEach(cb => cb.checked = true); }
-function biSchedSelectNone() { document.querySelectorAll('.bi-sched-tube').forEach(cb => cb.checked = false); }
+function biSchedSelect(checked) { document.querySelectorAll('.bi-sched-tube').forEach(cb => cb.checked = checked); }
 function biSchedMask() {
   let m = 0;
   document.querySelectorAll('.bi-sched-tube').forEach(cb => {
@@ -3421,6 +3526,7 @@ async function saveSettings() {
     spectrum_lcd_RGB: (h => [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)])($('f-spec-lcd-color').value.replace('#','')),
     spectrum_lcd_wled: $('f-spec-lcd-wled').checked,
     spectrum_led_source: +$('f-spec-led-src').value,
+    spectrum_led_beat_react: $('f-spec-beat-react').checked,
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,
     rotation_interval_s: +$('rot-interval').value,
@@ -4069,6 +4175,91 @@ function setLogLevelRaw(tag, level) {
     body:    JSON.stringify({ tag, level })
   }).catch(() => toast('Log toggle failed', true));
 }
+async function applyDebugWlFps(forceValue) {
+  const fps = forceValue === 0 ? 0 : (+$('f-dbg-wl-fps').value || 0);
+  if (fps !== 0 && (fps < 5 || fps > 40)) return toast('Enter 0 or 5-40', true);
+  const res = await secureFetch('/api/debug/wl_fps', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ fps })
+  }).catch(() => null);
+  if (!res?.ok) return toast('Failed to apply', true);
+  $('f-dbg-wl-fps').value = fps || '';
+  toast(fps ? `WeatherLive now running at ${fps} Hz` : 'Reset to default rate');
+}
+
+/* ── Task CPU — windowed average ──────────────────────────────────────
+ * Selection is purely a display-time filter — the backend always samples
+ * every task (cheap), we just hide the ones the user didn't check. Persisted
+ * in a JS Set across "Refresh task list" calls so re-fetching the (possibly
+ * changed) task set doesn't clear what you picked. An empty Set is a real,
+ * deliberate "show nothing" state (e.g. after Uncheck all) — NOT treated as
+ * "no filter" — so s_dbgTaskSelInit tracks whether we've ever populated it,
+ * separately from whether it's currently empty. */
+let s_dbgTaskSel = new Set();
+let s_dbgTaskSelInit = false;
+
+async function dbgTasksRefreshList() {
+  const j = await api('debug/tasks');
+  if (!j?.tasks) return;
+  const box = $('dbg-taskpick');
+  box.innerHTML = '';
+  if (!s_dbgTaskSelInit) {              /* first load only: default to all selected */
+    j.tasks.forEach(t => s_dbgTaskSel.add(t.name));
+    s_dbgTaskSelInit = true;
+  }
+  j.tasks.forEach(t => {
+    const lbl = document.createElement('label');
+    lbl.style.cssText = 'display:flex;align-items:center;gap:.3rem;cursor:pointer';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.className = 'chk'; cb.dataset.noDirty = '1';
+    cb.checked = s_dbgTaskSel.has(t.name);
+    cb.onchange = () => cb.checked ? s_dbgTaskSel.add(t.name) : s_dbgTaskSel.delete(t.name);
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode(t.name));
+    box.appendChild(lbl);
+  });
+}
+
+function dbgTasksSelectNone() {
+  s_dbgTaskSel.clear();
+  s_dbgTaskSelInit = true;   /* an explicit uncheck-all counts as "touched" — don't re-default to all on next refresh */
+  $('dbg-taskpick').querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false);
+}
+
+async function dbgTasksStart() {
+  const res = await secureFetch('/api/debug/tasks_start', { method: 'POST' }).catch(() => null);
+  if (!res?.ok) return toast('Failed to start window', true);
+  window.s_dbgTasksStartedAt = Date.now();
+  $('dbg-tasks-status').textContent = 'Recording started — let the device run, then hit Get result whenever.';
+  $('dbg-tasks-table').innerHTML = '';
+  toast('Task-stats window started');
+}
+
+function dbgTasksRenderTable(j) {
+  const secs = (j.window_us / 1e6).toFixed(1);
+  const rows = j.tasks
+    .filter(t => s_dbgTaskSel.has(t.name))
+    .sort((a, b) => b.pct - a.pct);
+  let html = `<p style="color:var(--dim)">Window: ${secs}s</p>`;
+  html += '<table style="width:100%;border-collapse:collapse"><tr style="text-align:left;color:var(--dim)">'
+        + '<th>Task</th><th>%</th><th>Core</th><th>Prio</th><th>State</th><th>Stack HWM</th></tr>';
+  rows.forEach(t => {
+    html += `<tr${t.new ? ' style="opacity:.6" title="Spawned mid-window — pct is under-reported"' : ''}>`
+          + `<td>${esc(t.name)}${t.new ? ' *' : ''}</td><td>${t.pct.toFixed(1)}</td><td>${t.core}</td>`
+          + `<td>${t.prio}</td><td>${esc(t.state)}</td><td>${t.stack_hwm}</td></tr>`;
+  });
+  html += '</table>';
+  $('dbg-tasks-table').innerHTML = html;
+}
+
+async function dbgTasksResult() {
+  const j = await api('debug/tasks_result');
+  if (!j?.tasks) return;
+  const secs = window.s_dbgTasksStartedAt ? ((Date.now() - window.s_dbgTasksStartedAt) / 1000).toFixed(0) : '?';
+  $('dbg-tasks-status').textContent = `Result as of ~${secs}s into the window (window still running — hit Get result again anytime).`;
+  dbgTasksRenderTable(j);
+}
 async function logAllOn() {
   /* Awaited sequentially — the ESP32 httpd queue is shallow (default 5),
    * so firing all POSTs concurrently can silently drop requests. Deliberately
@@ -4135,6 +4326,8 @@ function specLedSrcChange() {
   $('spec-color-label').style.display = disp;
   $('f-spec-color').style.display     = disp;
   $('spec-color-hint').style.display  = disp;
+  /* Beat-react only means anything for "follow accent mode" (source === '1'). */
+  $('spec-beat-react-wrap').style.display = show ? 'none' : 'flex';
   markDirty();
 }
 
@@ -4266,8 +4459,7 @@ function burninMask() {
   });
   return mask;
 }
-function burninSelectAll()  { document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = true); }
-function burninSelectNone() { document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = false); }
+function burninSelect(checked) { document.querySelectorAll('.burnin-tube').forEach(cb => cb.checked = checked); }
 
 /* Shared countdown formatter → "HH:MM:SS" */
 function _fmtCountdown(ms) {
@@ -4301,7 +4493,7 @@ async function burninStart(duration_s) {
       const left = _burninEndTime - Date.now();
       if (left <= 0) {
         msg.textContent = '✓ Complete — display restored';
-        burninSelectNone();
+        burninSelect(false);
         clearInterval(_burninInterval); _burninInterval = null;
         return;
       }
@@ -4313,7 +4505,7 @@ async function burninStart(duration_s) {
     _burninTimer = setTimeout(() => {
       if (_burninInterval) { clearInterval(_burninInterval); _burninInterval = null; }
       msg.textContent = '✓ Complete — display restored';
-      burninSelectNone();
+      burninSelect(false);
       _burninTimer = null;
     }, duration_s * 1000 + 500);
   } catch(e) { msg.textContent = '✗ ' + e.message; }
@@ -4321,7 +4513,7 @@ async function burninStart(duration_s) {
 async function burninRestore() {
   if (_burninTimer)    { clearTimeout(_burninTimer);    _burninTimer    = null; }
   if (_burninInterval) { clearInterval(_burninInterval); _burninInterval = null; }
-  burninSelectNone();
+  burninSelect(false);
   const msg = $('burnin-msg');
   try {
     const r = await secureFetch('/api/debug/burnin', {
@@ -4336,8 +4528,7 @@ async function burninRestore() {
 let _snowTimer    = null;
 let _snowInterval = null;
 let _snowEndTime  = 0;
-function snowSelectAll()  { document.querySelectorAll('.snow-tube').forEach(c => c.checked = true);  }
-function snowSelectNone() { document.querySelectorAll('.snow-tube').forEach(c => c.checked = false); }
+function snowSelect(checked) { document.querySelectorAll('.snow-tube').forEach(c => c.checked = checked); }
 
 async function snowStart(duration_s) {
   const checks = document.querySelectorAll('.snow-tube:checked');
@@ -4361,7 +4552,7 @@ async function snowStart(duration_s) {
       const left = _snowEndTime - Date.now();
       if (left <= 0) {
         msg.textContent = '✓ Complete — display restored';
-        snowSelectNone();
+        snowSelect(false);
         clearInterval(_snowInterval); _snowInterval = null;
         return;
       }
@@ -4372,7 +4563,7 @@ async function snowStart(duration_s) {
     _snowTimer = setTimeout(() => {
       if (_snowInterval) { clearInterval(_snowInterval); _snowInterval = null; }
       msg.textContent = '✓ Complete — display restored';
-      snowSelectNone();
+      snowSelect(false);
       _snowTimer = null;
     }, duration_s * 1000 + 500);
   } catch(e) { msg.textContent = '✗ ' + e.message; }
@@ -4381,7 +4572,7 @@ async function snowStart(duration_s) {
 async function snowStop() {
   if (_snowTimer)    { clearTimeout(_snowTimer);    _snowTimer    = null; }
   if (_snowInterval) { clearInterval(_snowInterval); _snowInterval = null; }
-  snowSelectNone();
+  snowSelect(false);
   const msg = $('snow-msg');
   try {
     const r = await secureFetch('/api/debug/snow', {
@@ -4515,6 +4706,7 @@ async function refreshStatus() {
    * the raw value the device reported (keeps unknown/future modes readable). */
   { const mk = 'mode.' + (s.mode || '').toLowerCase();
     $('s-mode').textContent = s.mode ? (I18N.en[mk] ? tr(mk) : s.mode) : '--'; }
+  if (s.mode) updateQuickActionActive(s.mode);
   const _useFahrenheit = (cfg.temperature_format || 'Celsius') === 'Fahrenheit';
   if (s.weather) {
     const _wt = _useFahrenheit ? (s.weather.temp_c * 9 / 5 + 32) : s.weather.temp_c;
@@ -5001,7 +5193,7 @@ async function startAutoUpdate() {
   const notes = $('au-notes');
   notes.style.display = '';
   if (_latestReleaseData.body && typeof marked !== 'undefined') {
-    notes.innerHTML = marked.parse(_latestReleaseData.body);
+    notes.innerHTML = sanitizeHtml(marked.parse(_latestReleaseData.body));
   } else {
     notes.innerHTML = '<p style="opacity:.6;font-size:.85rem">No release notes available.</p>';
   }
@@ -5769,9 +5961,7 @@ function updateAuthCard(adminSet) {
   const card = document.getElementById('auth-mgmt-card');
   if (!card) return;
 
-  if (!adminSet) {
-    card.innerHTML = `
-      <h2>${tr('sys.auth')}</h2>
+  const middleContent = !adminSet ? `
       <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">${tr('auth.disabled_desc')}</p>
       <div style="display:flex;flex-direction:column;gap:.5rem;max-width:340px">
         <input id="auth-en-pw"  type="password" placeholder="${tr('auth.new_pw_ph')}" autocomplete="new-password">
@@ -5781,17 +5971,16 @@ function updateAuthCard(adminSet) {
         <div class="btn-group" style="margin-top:.2rem">
           <button id="auth-en-btn" class="btn btn-primary" onclick="doEnableAuth()">${tr('auth.enable_btn')}</button>
         </div>
-      </div>`;
-  } else {
-    card.innerHTML = `
-      <h2>${tr('sys.auth')}</h2>
+      </div>` : `
       <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">${tr('auth.enabled_desc')}</p>
       <div class="btn-group">
         <button class="btn btn-outline" onclick="showChangePasswordPrompt()">${tr('auth.change_pw_btn')}</button>
         <button class="btn btn-outline" onclick="doLogout()">${tr('auth.sign_out_btn')}</button>
         <button class="btn btn-danger"  onclick="doDisableAuth()">${tr('auth.disable_btn')}</button>
       </div>`;
-  }
+
+  card.innerHTML = `
+      <h2>${tr('sys.auth')}</h2>${middleContent}`;
 }
 
 /* Enable auth: set a new password (only allowed when no password is set). */

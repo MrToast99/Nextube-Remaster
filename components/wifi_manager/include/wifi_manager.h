@@ -5,7 +5,12 @@
 extern "C" {
 #endif
 void wifi_manager_start(void);
-void wifi_manager_reconnect_sta(void);         /* re-read credentials, disconnect + reconnect */
+/* Re-read credentials, disconnect + reconnect.  Returns true when a reboot
+ * is needed for the current config to take full effect (this path re-applies
+ * SSID/password only — it does not restart DHCP or reapply static-IP fields,
+ * so if static IP is enabled the caller should surface that a reboot is
+ * required).  No-op (returns false) if no SSID is configured. */
+bool wifi_manager_reconnect_sta(void);
 void wifi_manager_apply_sta_credentials(void); /* update driver config without disconnecting */
 bool wifi_manager_is_connected(void);
 const char *wifi_manager_get_ip(void);

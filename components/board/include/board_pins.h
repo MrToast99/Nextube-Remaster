@@ -40,7 +40,7 @@
 #define I2C_FREQ_HZ       100000
 
 /* ── Audio (DAC → LTK8002D amplifier) ──────────────────────────────── */
-#define PIN_AUDIO_DAC     25   /* DAC_CHANNEL_1 */
+#define PIN_AUDIO_DAC     25   /* DAC_CHAN_0 */
 
 /* ── Microphone (unmarked 4 mm SMT electret — see README; Spectrum input) ── */
 #define PIN_MIC_ADC      35   /* ADC1_CH7 (GPIO35) – confirmed via debug panel */

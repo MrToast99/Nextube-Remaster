@@ -225,28 +225,24 @@ static void init_nvs(void)
     ESP_ERROR_CHECK(err);
 }
 
-/* ── Deferred audio + mic initialisation ──────────────────────────── */
-/* Started as a low-priority task from app_main so that audio/mic come up
- * well after the WiFi AP is broadcasting and any auto-connecting client's
- * WPA2 handshake has completed.
+/* ── Deferred audio initialisation ───────────────────────────────────── */
+/* Started as a low-priority task from app_main so that audio comes up well
+ * after the WiFi AP is broadcasting and any auto-connecting client's WPA2
+ * handshake has completed — a fixed 8 s delay, enough to clear that window.
  *
- * AUDIO starts after a fixed 8 s delay — enough to clear the WPA2 window.
- *
- * MIC start is additionally gated on wifi_manager_ap_pin_visible().
- * During the AP PIN phase the display task (Core 1) makes rapid SPIFFS reads
- * to load the PIN-digit JPEGs.  Starting the mic concurrently adds SPI0 bus
- * pressure that can trigger the ESP32 PSRAM cache errata → IWDT on Core 1.
- * Waiting for the PIN phase to end eliminates this conflict. */
-static void audio_mic_deferred_start(void *arg)
+ * Mic setup no longer runs from here — see mic_hw_init()/mic_init() in
+ * app_main(), moved to boot time for the same reason audio stays deferred
+ * would have broken it: mic_task_start()'s internal-RAM stack allocation
+ * hit the same late-boot WiFi/MQTT memory pressure this function's own
+ * 8 s/AP-PIN wait was exposing it to. */
+static void audio_deferred_start(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(8000));   /* 8 s — safely past the WPA2 window */
 
-    /* ── Audio ───────────────────────────────────────────────────────── */
     config_lock();
     const nextube_config_t *cfg = config_get();
     uint8_t vol      = cfg->volume;
     bool    audio_en = cfg->audio_enabled;
-    bool    mic_en   = cfg->mic_enabled;   /* preliminary — re-read after wait */
     config_unlock();
 
     /* audio_init() handles the enabled state directly:
@@ -257,58 +253,7 @@ static void audio_mic_deferred_start(void *arg)
     audio_init(audio_en);
     audio_set_volume(vol);
 
-    /* ── Mic — wait for the AP PIN phase to end ──────────────────────── */
-    bool mic_started = false;
-    if (mic_en) {
-        bool skip_mic = false;
-        if (wifi_manager_ap_pin_visible()) {
-            ESP_LOGI("main", "Mic start deferred: waiting for AP PIN phase to end");
-            /* Poll every second.  wifi_manager_ap_pin_visible() becomes false
-             * once (a) STA associates to the user's router, or (b) a client
-             * connects to the setup AP and the PIN display is dismissed. */
-            bool pin_gone = false;
-            for (int i = 0; i < 600; i++) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                if (!wifi_manager_ap_pin_visible()) { pin_gone = true; break; }
-            }
-            if (pin_gone) {
-                ESP_LOGI("main", "AP PIN phase ended — starting mic");
-            } else {
-                /* Device is still unconfigured after 10 minutes.  The mic is
-                 * not useful without time/WiFi, and the heavy SPIFFS reads for
-                 * the PIN-digit JPEGs are still in progress — skip the mic
-                 * entirely this boot.  A power-cycle after setup completes will
-                 * start it normally. */
-                ESP_LOGW("main", "Mic: device still unconfigured after 10 min — mic left off this boot");
-                skip_mic = true;
-            }
-        }
-
-        if (!skip_mic) {
-            /* Re-read mic config: the user may have changed settings via the
-             * web UI during the AP PIN / setup window. */
-            bool  cal_saved = false;
-            float noise_floor[CFG_MIC_BAND_COUNT];
-            config_lock();
-            cfg       = config_get();
-            mic_en    = cfg->mic_enabled;   /* re-check in case disabled via UI */
-            cal_saved = cfg->mic_calibration_saved;
-            if (cal_saved)
-                memcpy(noise_floor, cfg->mic_noise_floor, sizeof(noise_floor));
-            config_unlock();
-
-            if (mic_en) {
-                mic_init();
-                mic_task_start();
-                if (cal_saved)
-                    mic_apply_calibration(noise_floor);
-                mic_started = true;
-            }
-        }
-    }
-
-    ESP_LOGI("main", "Audio started (deferred)%s",
-             mic_started ? " + mic started" : " — mic not started");
+    ESP_LOGI("main", "Audio started (deferred)");
     ESP_LOGD("main", "audio_defer stack HWM: %u words",
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
     vTaskDelete(NULL);
@@ -371,8 +316,10 @@ void app_main(void)
     config_mgr_init();
 
     /* Read the small boot-time scalars under the config lock.
-     * audio_enabled / volume / mic_* are NOT read here — the deferred audio
-     * task reads them fresh from config at start time (see audio_mic_deferred_start). */
+     * audio_enabled / volume are NOT read here — the deferred audio task
+     * reads them fresh from config at start time (see audio_deferred_start).
+     * mic_* fields are read a little further down, by mic_hw_init()/
+     * mic_init() themselves (each takes the lock internally). */
     bool    boot_weather_enabled;
     bool    boot_update_check_enabled;
     bool    boot_social_enabled;
@@ -416,19 +363,64 @@ void app_main(void)
                             * first render sees a valid wall-clock time instead of a stopwatch */
     display_task_start();          /* launch 5 Hz FreeRTOS display task */
 
-    /* Audio + Microphone — deferred start (see audio_mic_deferred_start).
+    /* Allocate the mic's ADC hardware NOW, before WiFi/MQTT/audio get a
+     * chance to claim MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA memory —
+     * adc_continuous_new_handle() needs ~10 KB from that specific, small,
+     * contended pool, and a failure there aborts the device via an ESP-IDF
+     * internal-cleanup bug with no way for us to catch it (confirmed by
+     * reading esp_adc/adc_continuous.c directly, and by a live repro
+     * 2026-08-14: calling this after WiFi/MQTT connect left only ~2 KB free
+     * with no block bigger than 1.4 KB, and it aborted immediately). This
+     * only allocates the hardware (no-op if mic is disabled in config). */
+    mic_hw_init();
+
+    /* Finish mic setup and start mic_task HERE too, for the exact same
+     * reason as mic_hw_init() above — confirmed live: mic_task_start()'s
+     * xTaskCreatePinnedToCore() (an 8 KB internal-RAM stack) failed with
+     * "mic_task creation failed" when left in the deferred path below,
+     * hitting the identical late-boot WiFi/MQTT memory-pressure window
+     * mic_hw_init() was moved here to dodge — moving the hardware alloc
+     * without also moving the task that uses it only fixed half the
+     * problem.
      *
-     * AUDIO: starts after a fixed 8 s delay (clear of the WPA2 window).
-     * MIC:   additionally waits for wifi_manager_ap_pin_visible() to go false.
-     *        During the AP PIN phase, the display task (Core 1) reads SPIFFS
-     *        rapidly for PIN-digit JPEGs; starting the mic concurrently adds
-     *        SPI0 bus pressure that can trigger the ESP32 PSRAM cache errata
-     *        → IWDT.  Gating on PIN-phase exit eliminates this risk.
+     * Safe to do this early: creating mic_task does not by itself trigger
+     * the AP-PIN-phase / PSRAM-cache-errata risk the old deferred code
+     * guarded against with its wifi_manager_ap_pin_visible() wait (that risk
+     * was always specifically about mic_task's ACTIVE capture — SPI0 bus
+     * pressure from adc_continuous colliding with the display task's rapid
+     * SPIFFS reads for the AP-PIN JPEGs — never about audio, which has no
+     * such wait of its own beyond the unrelated WPA2-window delay below).
+     * mic_task only starts actively capturing once Spectrum mode is
+     * genuinely requested, which requires the device to already be past
+     * initial AP-PIN setup — so the same real-world timing that used to be
+     * enforced by an explicit wait is still true here, just implicitly.
      *
-     * Stack: audio_init() + mic_init() call chains exceed 4 KB combined.
-     * 8 KB matches CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192. */
-    if (xTaskCreate(audio_mic_deferred_start, "audio_defer", 8192, NULL, 4, NULL) != pdPASS)
-        ESP_LOGE(TAG, "audio_defer task creation failed — audio and mic will not start");
+     * This also drops the old "re-read config in case the user changed it
+     * via the web UI during setup" step mic_init() used to need — at this
+     * point in boot neither WiFi nor the web server exist yet, so nothing
+     * could have changed it. mic_init() itself already returns false
+     * harmlessly if mic_hw_init() found the mic disabled, so no outer
+     * enabled-check is needed here either. */
+    if (mic_init()) {
+        mic_task_start();
+        config_lock();
+        bool  cal_saved = config_get()->mic_calibration_saved;
+        float noise_floor[CFG_MIC_BAND_COUNT];
+        if (cal_saved) memcpy(noise_floor, config_get()->mic_noise_floor, sizeof(noise_floor));
+        config_unlock();
+        if (cal_saved) mic_apply_calibration(noise_floor);
+    }
+
+    /* Audio — deferred start (see audio_deferred_start): starts after a
+     * fixed 8 s delay, clear of the WPA2 handshake window. Mic no longer
+     * defers through here — see mic_hw_init()/mic_init() above.
+     *
+     * Stack: sized for audio_init()'s call chain alone now that mic_init()'s
+     * no longer shares this task; kept at the same 8 KB the combined chain
+     * needed rather than guessing a smaller number without measuring
+     * audio_init() in isolation. */
+    if (xTaskCreate(audio_deferred_start, "audio_defer", 8192, NULL, 4, NULL) != pdPASS)
+        ESP_LOGE(TAG, "audio_defer task creation failed — audio will not start");
 
     leds_init();
     leds_task_start();
