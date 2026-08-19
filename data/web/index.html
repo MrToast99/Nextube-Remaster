@@ -159,9 +159,16 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
   <button onclick="dismissOtaRollback()" style="background:none;border:none;color:rgba(255,160,0,.9);font-size:1.1rem;cursor:pointer;padding:0;line-height:1" title="Dismiss">✕</button>
 </div>
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
-  ⚠️ <strong>Web UI update required</strong> — this firmware expects LittleFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
-  Upload <code>nextube-WebUI-v*.zip</code> via <strong>System → Web UI Update</strong> (recommended — config preserved, no reboot),
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap">
+    <span style="flex:1;min-width:200px">⚠️ <strong>Web UI update required</strong> — this firmware expects LittleFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
+    This usually means an earlier update's Web UI step didn't complete after the reboot.</span>
+    <button id="vm-fix-btn" onclick="fixWebuiMismatch()" style="background:rgba(233,69,96,.9);border:none;color:#fff;border-radius:6px;padding:.35rem .8rem;font-size:.8rem;cursor:pointer;white-space:nowrap">Fix now</button>
+  </div>
+  <div id="vm-fix-status" style="display:none;margin-top:.5rem;font-size:.8rem;opacity:.9"></div>
+  <div style="margin-top:.4rem">
+  Or upload <code>nextube-WebUI-v*.zip</code> via <strong>System → Web UI Update</strong>,
   or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → LittleFS Recovery</strong> (⚠️ erases filesystem — back up your config first).
+  </div>
 </div>
 <div id="theme-error-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
   <span style="flex:1">⚠️ <strong>Theme image error</strong> — JPEG decode failed for <code id="te-path"></code>.
@@ -3893,19 +3900,16 @@ async function doFSOTA() {
 }
 
 /* ── Hot Patch (ZIP delta) ───────────────────────────
- * Sends the ZIP raw to /api/update_fs_hotpatch.
- * Firmware writes each STORE entry to /spiffs/ via VFS.
- * config.json is protected server-side; no reboot needed. */
-function doHotPatch() {
-  const file = $('hotpatch-file').files[0];
-  if (!file) return toast(tr('js.no_file_path'), true);
-  if (!file.name.toLowerCase().endsWith('.zip')) {
-    if (!confirm('File doesn\'t look like a ZIP — upload anyway?')) return;
-  }
-
-  const prog = $('hotpatch-progress');
-  const bar  = $('hotpatch-bar');
-  const stat = $('hotpatch-status');
+ * Sends the ZIP raw to /api/update_fs_hotpatch. Firmware writes each STORE
+ * entry to /spiffs/ via VFS. config.json is protected server-side; no
+ * reboot needed.
+ *
+ * applyHotpatchFile() is factored out of doHotPatch() below so any future
+ * caller needing to apply a ZIP by upload (not URL) can reuse it — takes
+ * progress/status element refs and an optional onDone callback rather than
+ * hardcoding the System tab's own element IDs. */
+function applyHotpatchFile(file, ui) {
+  const { progressEl: prog, barEl: bar, statusEl: stat, onDone } = ui;
   prog.style.display = 'block';
   bar.style.width = '0%';
   stat.style.display = '';
@@ -3929,6 +3933,7 @@ function doHotPatch() {
         if (d.skipped) stat.textContent += `  (${d.skipped} skipped)`;
         if (d.failed)  stat.textContent += `  ⚠️ ${d.failed} failed`;
         toast(tr('js.webui_patched', d.written));
+        if (onDone) onDone();
       } else {
         stat.textContent = 'Failed: ' + (d.error || xhr.statusText);
         toast(tr('js.webui_patch_failed', d.error || xhr.statusText), true);
@@ -3946,6 +3951,17 @@ function doHotPatch() {
   xhr.setRequestHeader('Content-Type', 'application/zip');
   _xhrAuthHeader(xhr);
   xhr.send(file);
+}
+
+function doHotPatch() {
+  const file = $('hotpatch-file').files[0];
+  if (!file) return toast(tr('js.no_file_path'), true);
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    if (!confirm('File doesn\'t look like a ZIP — upload anyway?')) return;
+  }
+  applyHotpatchFile(file, {
+    progressEl: $('hotpatch-progress'), barEl: $('hotpatch-bar'), statusEl: $('hotpatch-status')
+  });
 }
 
 /* ── LittleFS file browser ─────────────────────────── */
@@ -4941,6 +4957,133 @@ async function checkForUpdates(silent = false) {
   } catch(e) {
     if (!silent && btn) btn.textContent = prevLabel;
     if (!silent) toast('Update check failed: ' + e.message, true);
+  }
+}
+
+/* Polls /api/webui_pull_status until webui_pull_task reaches done/error.
+ * Shared by both branches of fixWebuiMismatch() below — once a pull has
+ * actually started, waiting for it to finish is identical either way. */
+async function pollWebuiPullDone(status, giveUpMs) {
+  const start = Date.now();
+  for (;;) {
+    await new Promise(res => setTimeout(res, 700));
+    let ws = null;
+    try {
+      const rs = await secureFetch('/api/webui_pull_status', {signal: AbortSignal.timeout(5000)});
+      if (rs && rs.ok) ws = await rs.json();
+    } catch(e) { if (e?.message === 'unauthorized') throw e; }
+    if (ws) {
+      if (ws.state === 'running') status.textContent = 'Applying update to filesystem… (this can take ~1 min)';
+      else if (ws.state === 'done') return;
+      else if (ws.state === 'error') throw new Error(ws.error || 'unknown error');
+    }
+    if (Date.now() - start > giveUpMs) throw new Error('timed out waiting for device');
+  }
+}
+
+/* "Fix now" on the version-mismatch banner — repairs an update whose Web UI
+ * step didn't complete after the reboot. Tries a live, no-reboot pull first
+ * (POST /api/webui_pull); if that fails to even start, falls back to
+ * /api/webui_pull_reboot, which stashes the URL/hash in NVS (same keys a
+ * real firmware OTA uses) and reboots so the pull runs in a fresh heap —
+ * same wait pattern as the online updater's own Phase 3. Resolves the exact
+ * release matching the firmware's expected LittleFS version (that specific
+ * tag, not "latest"), so this can't move the device past what the installed
+ * firmware supports. A pull that starts live and then fails mid-flight (bad
+ * download, SHA mismatch) is surfaced directly rather than retried via
+ * reboot — that class of failure isn't memory-related. */
+async function fixWebuiMismatch() {
+  const btn      = $('vm-fix-btn');
+  const status   = $('vm-fix-status');
+  const expected = $('vm-fw').textContent;
+  btn.disabled = true;
+  status.style.display = 'block';
+  status.textContent = 'Looking up Web UI v' + expected + ' from ' + UPDATE_REPO + '…';
+
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/${UPDATE_REPO}/releases/tags/v${expected}`,
+      { headers: { 'Accept': 'application/vnd.github+json' } }
+    );
+    if (!r.ok) throw new Error('release v' + expected + ' not found (HTTP ' + r.status + ')');
+    const data    = await r.json();
+    const uiAsset = (data.assets || []).find(a => /nextube-WebUI-.*\.zip$/i.test(a.name));
+    if (!uiAsset) throw new Error('no Web UI asset in release v' + expected);
+    const uiSha256_ = (uiAsset.digest || '').replace(/^sha256:/, '');
+    const body = JSON.stringify({url: uiAsset.browser_download_url, sha256: uiSha256_});
+
+    /* ── Try live first ──────────────────────────────────────────────── */
+    status.textContent = 'Applying Web UI v' + expected + '…';
+    let liveStarted = false;
+    try {
+      const rp = await secureFetch('/api/webui_pull', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+        signal: AbortSignal.timeout(12000)
+      });
+      if (rp?.status === 409) throw new Error('An update is already in progress — wait for it to finish.');
+      liveStarted = !!rp?.ok;
+    } catch(e) {
+      if (e?.message === 'unauthorized' || /already in progress/.test(e?.message || '')) throw e;
+      /* Network hiccup etc. — fall through and try the reboot path. */
+    }
+
+    if (liveStarted) {
+      status.textContent = 'Applying update to filesystem… (this can take ~1 min)';
+      await pollWebuiPullDone(status, 120000);
+      status.textContent = 'Done — Web UI updated to v' + expected + '.';
+      toast('Web UI updated to v' + expected + '!');
+      await refreshStatus();
+      setTimeout(() => { status.style.display = 'none'; }, 3000);
+      return;
+    }
+
+    /* ── Live pull didn't even start — fall back to reboot ───────────── */
+    status.textContent = 'Live update unavailable right now — rebooting to apply instead…';
+    const rp2 = await secureFetch('/api/webui_pull_reboot', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+      signal: AbortSignal.timeout(12000)
+    });
+    if (rp2?.status === 409) throw new Error('An update is already in progress — wait for it to finish.');
+    if (!rp2?.ok) throw new Error('failed to stage (HTTP ' + (rp2 ? rp2.status : '?') + ')');
+
+    /* Same reboot-wait pattern as the online updater's own Phase 3: give it
+     * a head start, confirm it actually goes offline (so the status poll
+     * never fires against the pre-reboot firmware), then wait for it back. */
+    status.textContent = 'Rebooting…';
+    await new Promise(res => setTimeout(res, 3000));
+    for (let tries = 0; tries < 25; tries++) {
+      await new Promise(res => setTimeout(res, 2000));
+      try {
+        const rp3 = await fetch('/api/ping', {signal: AbortSignal.timeout(1500)});
+        if (!rp3.ok) break;
+      } catch { break; }
+    }
+    status.textContent = 'Waiting for device to come back…';
+    let backOnline = false;
+    for (let tries = 0; tries < 30; tries++) {
+      await new Promise(res => setTimeout(res, 2000));
+      try {
+        const rp3 = await fetch('/api/ping', {signal: AbortSignal.timeout(2000)});
+        if (rp3.ok) { backOnline = true; break; }
+      } catch { /* expected while rebooting */ }
+    }
+    if (!backOnline) throw new Error('device did not come back online');
+
+    /* Let stale keep-alive connections drain, same margin Phase 4 uses. */
+    await new Promise(res => setTimeout(res, 4000));
+
+    status.textContent = 'Applying update to filesystem… (this can take ~1 min)';
+    await pollWebuiPullDone(status, 120000);
+    status.textContent = 'Done — Web UI updated to v' + expected + '.';
+    toast('Web UI updated to v' + expected + '!');
+    await refreshStatus();
+    setTimeout(() => { status.style.display = 'none'; }, 3000);
+  } catch(e) {
+    if (e?.message === 'unauthorized') { status.style.display = 'none'; return; }
+    status.textContent = 'Failed: ' + (e?.message || e) + ' — try the manual steps below, or retry.';
+    toast('Web UI fix failed: ' + (e?.message || e), true);
+  } finally {
+    btn.disabled = false;
   }
 }
 

@@ -2369,6 +2369,15 @@ static struct {
     char sha256[65];
 } s_webui;
 
+/* Measured peak usage (uxTaskGetStackHighWaterMark, logged at every exit
+ * point below) was ~4.3 KB extracting a 24-file/620 KB release zip — this
+ * gives ~2x margin over that, matching ota_pull_task's proven 8192 for a
+ * comparable HTTPS-download + flash-write task. Was 16384 before being
+ * measured; that had ~2x the margin actually needed and made the internal-
+ * RAM allocation this task's stack requires far more likely to fail under
+ * live (non-rebooted) memory pressure than it needed to be. */
+#define WEBUI_PULL_STACK_SIZE 8192
+
 static void webui_pull_task(void *arg)
 {
     ESP_LOGI(TAG, "[webui] task started on core %d", xPortGetCoreID());
@@ -2584,6 +2593,8 @@ static void webui_pull_task(void *arg)
     s_webui.state = WEBUI_DONE;
     s_ota_active  = false;
     ESP_LOGI(TAG, "[webui] state → DONE");
+    ESP_LOGI(TAG, "[webui] stack high-water mark: %u B unused (of %u allocated)",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)WEBUI_PULL_STACK_SIZE);
     vTaskDelete(NULL);
     return;
 
@@ -2598,7 +2609,22 @@ webui_err:
     display_resume_after_wait();
     s_webui.state = WEBUI_ERROR;
     s_ota_active  = false;
+    ESP_LOGI(TAG, "[webui] stack high-water mark: %u B unused (of %u allocated)",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)WEBUI_PULL_STACK_SIZE);
     vTaskDelete(NULL);
+}
+
+/* webui_pull_task writes to LittleFS (flash), and ESP32 flash writes briefly
+ * disable the cache — which PSRAM access also depends on. Its stack must
+ * stay in internal RAM (a PSRAM-backed stack was tried and crashed exactly
+ * this way: esp_task_stack_is_sane_cache_disabled()), so this is the plain
+ * dynamic allocation, same as every other flash-writing task here. */
+static bool start_webui_pull_task(void)
+{
+    ESP_LOGI(TAG, "webui_pull: internal free=%u largest=%u before create",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    return xTaskCreatePinnedToCore(webui_pull_task, "webui_pull", WEBUI_PULL_STACK_SIZE, NULL, 5, NULL, 0) == pdPASS;
 }
 
 static esp_err_t api_webui_pull_status(httpd_req_t *r)
@@ -2653,7 +2679,7 @@ static esp_err_t api_webui_pull_auto(httpd_req_t *r)
     s_webui.error[0] = '\0';
     s_ota_active     = true;
 
-    if (xTaskCreatePinnedToCore(webui_pull_task, "webui_pull", 16384, NULL, 5, NULL, 0) != pdPASS) {
+    if (!start_webui_pull_task()) {
         s_ota_active = false;
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Task create failed"), ESP_FAIL;
     }
@@ -2701,11 +2727,55 @@ static esp_err_t api_webui_pull(httpd_req_t *r)
     s_webui.error[0] = '\0';
     s_ota_active     = true;
 
-    if (xTaskCreatePinnedToCore(webui_pull_task, "webui_pull", 16384, NULL, 5, NULL, 0) != pdPASS) {
+    if (!start_webui_pull_task()) {
         s_ota_active = false;
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Task create failed"), ESP_FAIL;
     }
     return send_json(r, "{\"status\":\"started\"}");
+}
+
+/* POST /api/webui_pull_reboot — body: {"url":"...", "sha256":"..."}
+ * Fallback for the version-mismatch banner's "Fix now" flow, used only if
+ * a live pull (/api/webui_pull) fails to start under memory pressure.
+ * Stashes the URL/hash in NVS with the same keys ota_pull_task writes
+ * before a real firmware reboot, then reboots — the existing post_ota
+ * boot-time auto-pull path (see the post_ota_boot_pending check near
+ * web_server_start()) picks it up from there, running in the fresh,
+ * unfragmented heap a just-booted device has. */
+static esp_err_t api_webui_pull_reboot(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    if (s_ota_active) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"ota_in_progress\"}");
+    }
+
+    char url_buf[sizeof(s_webui.url)];
+    char sha_buf[sizeof(s_webui.sha256)];
+    if (!read_pull_url_body(r, url_buf, sizeof(url_buf), sha_buf, sizeof(sha_buf), NULL))
+        return ESP_FAIL;
+    if (!url_buf[0])
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "url required"), ESP_FAIL;
+
+    nvs_handle_t nvs_h;
+    if (nvs_open("nextube_sec", NVS_READWRITE, &nvs_h) != ESP_OK)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS open failed"), ESP_FAIL;
+    nvs_set_u8(nvs_h, "post_ota", 1);
+    nvs_set_str(nvs_h, "webui_url", url_buf);
+    if (sha_buf[0]) nvs_set_str(nvs_h, "webui_sha256", sha_buf);
+    else nvs_erase_key(nvs_h, "webui_sha256");
+    esp_err_t ec = nvs_commit(nvs_h);
+    nvs_close(nvs_h);
+    if (ec != ESP_OK)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS commit failed"), ESP_FAIL;
+
+    /* Stays set — same reasoning as every other reboot-bound success path
+     * (ota_pull_task, api_ota_impl): a reboot is imminent, so there's no
+     * "clear after" moment, just a short window to block a duplicate
+     * request in before esp_restart() fires. */
+    s_ota_active = true;
+    ESP_LOGI(TAG, "[webui] staged for post-reboot pull: %.80s", url_buf);
+    return ota_finish_and_reboot(r, "{\"status\":\"rebooting\"}");
 }
 
 /* URL-decode a query-string parameter value in-place.
@@ -4009,6 +4079,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/webui_pull",            api_webui_pull),
     R(HTTP_GET,  "/api/webui_pull_auto",       api_webui_pull_auto),
     R(HTTP_GET,  "/api/webui_pull_status",     api_webui_pull_status),
+    R(HTTP_POST, "/api/webui_pull_reboot",     api_webui_pull_reboot),
     R(HTTP_POST, "/api/social/refresh",         api_social_refresh),
     R(HTTP_POST, "/api/debug/burnin",           api_debug_burnin),
     R(HTTP_POST, "/api/debug/snow",             api_debug_snow),
@@ -4098,7 +4169,7 @@ static void post_ota_autostart_task(void *arg)
     s_ota_active     = true;
 
     ESP_LOGI(TAG, "[post_ota] starting device-driven WebUI pull: %.80s", s_webui.url);
-    if (xTaskCreatePinnedToCore(webui_pull_task, "webui_pull", 16384, NULL, 5, NULL, 0) != pdPASS) {
+    if (!start_webui_pull_task()) {
         s_ota_active = false;
         ESP_LOGE(TAG, "[post_ota] webui_pull task create failed");
     }

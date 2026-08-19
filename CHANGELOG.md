@@ -1,6 +1,11 @@
 # Changelog
 
 
+## [1.17.9] - 2026-08-18
+
+### Added
+- **"Fix now" button on the "Web UI update required" banner** — if a previous update's Web UI step didn't complete after the reboot, you can now repair it with one click directly from the banner instead of manually uploading a zip file. Applies live in most cases; falls back to a brief automatic reboot only if a live repair isn't possible at that moment.
+
 ## [1.17.8] - 2026-08-17
 
 ### Added
