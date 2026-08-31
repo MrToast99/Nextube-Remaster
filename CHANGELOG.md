@@ -1,7 +1,7 @@
 # Changelog
 
 
-## [1.17.10] - Unreleased
+## [1.18.0] - 2026-08-31
 
 ### Added
 - The web UI now warns if a built-in file (a sound, font, or icon that should ship with this firmware) is actually missing from the device, and points you at LittleFS Recovery to restore a complete set — catches gaps a version-number check alone can't see, like a device that skipped an update where a specific file changed.
