@@ -167,7 +167,17 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
   <div id="vm-fix-status" style="display:none;margin-top:.5rem;font-size:.8rem;opacity:.9"></div>
   <div style="margin-top:.4rem">
   Or upload <code>nextube-WebUI-v*.zip</code> via <strong>System → Web UI Update</strong>,
-  or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → LittleFS Recovery</strong> (⚠️ erases filesystem — back up your config first).
+  or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → LittleFS Recovery</strong> (⚠️ erases filesystem — your config is backed up and restored automatically, but as a precaution you can still export it yourself first via <strong>System → Backup &amp; Restore</strong>; custom themes and album photos aren't covered and will be lost unless backed up separately).
+  </div>
+</div>
+<div id="stock-missing-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap">
+    <span style="flex:1;min-width:200px">⚠️ <strong>Missing built-in files</strong> — <span id="sm-count"></span> file(s) that should ship with this firmware, e.g. <code id="sm-example"></code>, aren't on the device (a past update may have missed them, or one was deleted). A version match alone doesn't catch this.</span>
+    <button id="sm-repair-btn" onclick="stockRepair('sm-repair-btn','sm-repair-status')" style="background:rgba(233,69,96,.9);border:none;color:#fff;border-radius:6px;padding:.35rem .8rem;font-size:.8rem;cursor:pointer;white-space:nowrap">Repair now</button>
+  </div>
+  <div id="sm-repair-status" style="display:none;margin-top:.5rem;font-size:.8rem;opacity:.9"></div>
+  <div style="margin-top:.4rem">
+  Or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → LittleFS Recovery</strong> to restore a complete, known-good set regardless of how much is missing. Your config (WiFi, settings) is backed up and restored automatically, but as a precaution you can still export it yourself first via <strong>System → Backup &amp; Restore</strong>. Custom themes or album photos you've uploaded aren't covered by the automatic backup and will be lost unless you back those up separately.
   </div>
 </div>
 <div id="theme-error-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
@@ -962,12 +972,11 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
     <div id="weather-body" style="display:none;margin-top:.9rem">
     <div class="field" style="padding-bottom:4px">
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-weather-en','m-weather');markDirty();markRestartNeeded()">
+        <input type="checkbox" id="f-weather-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-weather-en','m-weather');markDirty()">
         <label for="f-weather-en" style="cursor:pointer" data-i18n="svc.weather_enable">Enable weather</label>
       </div>
       <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.weather_enable_hint">
-        Periodic weather data fetch. Disabling frees ~8 KB RAM and stops HTTPS calls.
-        <strong>Restart required.</strong>
+        Periodic weather data fetch. Takes effect on the next poll cycle — no restart needed.
       </p>
     </div>
     <div class="field"><label data-i18n="svc.source">Source</label>
@@ -1039,8 +1048,8 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
 
     <div id="social-body" style="display:none;margin-top:.9rem">
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.88rem;margin-bottom:.7rem;cursor:pointer">
-        <input type="checkbox" id="f-social-en" style="width:15px;height:15px" onchange="markDirty();markRestartNeeded();updateDashboardVisibility(readEnabledModes())">
-        <span data-i18n="svc.enable">Enable</span> &nbsp;<small style="color:var(--dim)" data-i18n="svc.social_master_hint">(restart required — master switch for all social counters)</small>
+        <input type="checkbox" id="f-social-en" style="width:15px;height:15px" onchange="markDirty();updateDashboardVisibility(readEnabledModes())">
+        <span data-i18n="svc.enable">Enable</span> &nbsp;<small style="color:var(--dim)" data-i18n="svc.social_master_hint">(master switch for all social counters — takes effect on the next poll cycle, no restart needed)</small>
       </label>
 
       <!-- ── Shared settings ───────────────────────────────── -->
@@ -1078,12 +1087,11 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">YouTube / Bilibili</div>
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="f-youtube-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-youtube-en','m-youtube');markDirty();markRestartNeeded();validateSubs()">
+          <input type="checkbox" id="f-youtube-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-youtube-en','m-youtube');markDirty();validateSubs()">
           <label for="f-youtube-en" style="cursor:pointer" data-i18n="svc.yt_enable">Enable YouTube / Bilibili</label>
         </div>
         <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.yt_enable_hint">
-          Periodic subscriber-count fetch. Disabling frees ~8 KB RAM.
-          <strong>Restart required.</strong>
+          Periodic subscriber-count fetch. Takes effect on the next poll cycle — no restart needed.
         </p>
       </div>
       <div class="field"><label data-i18n="svc.platform">Platform</label>
@@ -1117,10 +1125,10 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">Instagram</div>
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="f-insta-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-insta-en','m-instagram');markDirty();markRestartNeeded();validateSubs()">
+          <input type="checkbox" id="f-insta-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-insta-en','m-instagram');markDirty();validateSubs()">
           <label for="f-insta-en" style="cursor:pointer" data-i18n="svc.ig_enable">Enable Instagram follower counter</label>
         </div>
-        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.fetch_follower_hint">Fetches public follower count. <strong>Restart required.</strong></p>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.fetch_follower_hint">Fetches public follower count. Takes effect on the next poll cycle — no restart needed.</p>
       </div>
       <div class="field"><label><span data-i18n="svc.username">Username</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.no_at_prefix">(no @ prefix)</span></label>
         <input id="f-insta-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()" data-i18n-ph="svc.username_ph">
@@ -1142,10 +1150,10 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">TikTok</div>
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="f-tiktok-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-tiktok-en','m-tiktok');markDirty();markRestartNeeded();validateSubs()">
+          <input type="checkbox" id="f-tiktok-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-tiktok-en','m-tiktok');markDirty();validateSubs()">
           <label for="f-tiktok-en" style="cursor:pointer" data-i18n="svc.tt_enable">Enable TikTok follower counter</label>
         </div>
-        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.fetch_follower_hint">Fetches public follower count. <strong>Restart required.</strong></p>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.fetch_follower_hint">Fetches public follower count. Takes effect on the next poll cycle — no restart needed.</p>
       </div>
       <div class="field"><label><span data-i18n="svc.username">Username</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.no_at_prefix">(no @ prefix)</span></label>
         <input id="f-tiktok-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()" data-i18n-ph="svc.username_ph">
@@ -1171,10 +1179,10 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
       <div style="font-size:.92rem;font-weight:600;color:var(--hi);margin-bottom:.6rem">Mastodon</div>
       <div class="field" style="padding-bottom:4px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="f-mast-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-mast-en','m-mastodon');markDirty();markRestartNeeded();validateSubs()">
+          <input type="checkbox" id="f-mast-en" style="width:16px;height:16px;cursor:pointer" onchange="syncCounterMode('f-mast-en','m-mastodon');markDirty();validateSubs()">
           <label for="f-mast-en" style="cursor:pointer" data-i18n="svc.mast_enable">Enable Mastodon follower counter</label>
         </div>
-        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.mast_enable_hint">Uses the official public API — no authentication or relay needed. <strong>Restart required.</strong></p>
+        <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n-html="svc.mast_enable_hint">Uses the official public API — no authentication or relay needed. Takes effect on the next poll cycle — no restart needed.</p>
       </div>
       <div class="field"><label><span data-i18n="svc.username">Username</span> <span style="color:var(--dim);font-size:.8rem" data-i18n="svc.no_at_prefix">(no @ prefix)</span></label>
         <input id="f-mast-user" type="text" placeholder="username" maxlength="47" oninput="validateSubs()" data-i18n-ph="svc.username_ph">
@@ -1389,6 +1397,17 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
     </div>
   </div>
   <div class="card">
+    <!-- Not yet translated (data-i18n omitted deliberately) — same as the
+         hidden debug panel elsewhere in this file; can gain i18n keys later
+         without needing to hold up shipping the feature. -->
+    <h2>Verify &amp; Repair Stock Files</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">
+      Checks every built-in file (sounds, fonts, icons, themes, web UI) against what this firmware's own build actually shipped — catches a <em>stale</em> file the "Missing built-in files" banner above can't (it only checks whether a file exists, not whether its content is current). Only files found missing or different get re-downloaded, directly from the public repo at this device's own installed version — nothing else is touched, and nothing is ever downloaded speculatively.
+    </p>
+    <div class="btn-group"><button id="stock-repair-btn" class="btn btn-primary" onclick="stockRepair()">Check &amp; Repair</button></div>
+    <p id="stock-repair-status" style="font-size:.82rem;color:var(--dim);margin-top:.6rem;display:none"></p>
+  </div>
+  <div class="card">
     <h2 data-i18n="sys.fs_recovery">LittleFS Recovery</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.fs_recovery_help">Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.</p>
     <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5" data-i18n-html="sys.fs_recovery_warn">
@@ -1507,6 +1526,19 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
         <button class="btn btn-primary" onclick="applyDebugWlFps()">Apply</button>
         <button class="btn btn-outline" onclick="applyDebugWlFps(0)">Reset to default</button>
       </div>
+    </div>
+    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
+      <h2 style="color:#ffa000">&#x1F9F5; Per-Task Stack Log</h2>
+      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.6rem">
+        Adds a stack high-water-mark line for every task (~25 lines) to the heap-telemetry
+        log every 5&nbsp;minutes — a smaller number next to a task means its stack has less
+        margin left. Off by default (pure log noise once sizes are settled).
+        <strong>Applied live, not persisted</strong> — resets to off on reboot.
+      </p>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer">
+        <input type="checkbox" id="dbg-stacklog" data-no-dirty="1" onchange="dbgStackLogToggle()">
+        Log per-task stack high-water marks
+      </label>
     </div>
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
       <h2 style="color:#ffa000">&#x1F4CA; Task CPU — windowed average</h2>
@@ -1916,7 +1948,7 @@ Object.assign(I18N.en, {
 /* ── Translation batch: Services tab (pass 1 — Weather/MQTT/WLED/Timer/Album) ── */
 Object.assign(I18N.en, {
   "svc.weather":"Weather","svc.weather_enable":"Enable weather",
-  "svc.weather_enable_hint":"Periodic weather data fetch. Disabling frees ~8 KB RAM and stops HTTPS calls. <strong>Restart required.</strong>",
+  "svc.weather_enable_hint":"Periodic weather data fetch. Takes effect on the next poll cycle — no restart needed.",
   "svc.source":"Source",
   "svc.wsrc_wttr":"wttr.in – free, no key needed","svc.wsrc_openmeteo":"Open-Meteo – free, no key needed",
   "svc.wsrc_metno":"Met.no – free, no key needed","svc.wsrc_openweather":"OpenWeatherMap – free API key required",
@@ -1944,7 +1976,7 @@ Object.assign(I18N.en, {
 });
 /* ── Translation batch: Services tab (pass 2 — Social Media Counters) ── */
 Object.assign(I18N.en, {
-  "svc.social":"Social Media Counters","svc.social_master_hint":"(restart required — master switch for all social counters)",
+  "svc.social":"Social Media Counters","svc.social_master_hint":"(master switch for all social counters — takes effect on the next poll cycle, no restart needed)",
   "svc.polling_interval":"Polling Interval","svc.polling_interval_hint":"(minutes between fetches)","svc.presets":"Presets:",
   "svc.polling_help":"Applies to all platforms. Minimum 5 minutes. Changes take effect after the current sleep expires or reboot.",
   "svc.fetch_now":"Fetch Now",
@@ -1952,7 +1984,7 @@ Object.assign(I18N.en, {
   "svc.relay_help":"Run <code>python helpers/social_relay/social_relay.py</code> on any PC on your network and paste the IP here. Used by YouTube and TikTok when their fetch method is set to Relay.",
   "svc.relay_warn":"⚠ Relay host is required — one or more platforms above use <strong>Relay</strong> as their fetch method but no host is set. Enter the IP shown when you run <code>social_relay.py</code>, or switch the fetch method to a non-relay option.",
   "svc.yt_enable":"Enable YouTube / Bilibili",
-  "svc.yt_enable_hint":"Periodic subscriber-count fetch. Disabling frees ~8 KB RAM. <strong>Restart required.</strong>",
+  "svc.yt_enable_hint":"Periodic subscriber-count fetch. Takes effect on the next poll cycle — no restart needed.",
   "svc.platform":"Platform","svc.yt_channel_id":"YouTube Channel ID",
   "svc.yt_id_warn":"⚠ Channel ID is required. Find yours at <a href=\"https://www.youtube.com/account_advanced\" target=\"_blank\">youtube.com/account_advanced</a>.",
   "svc.fetch_method":"Fetch method",
@@ -1962,7 +1994,7 @@ Object.assign(I18N.en, {
   "svc.yt_key_warn":"⚠ Paste your YouTube Data API v3 key above.",
   "svc.bili_uid":"Bilibili UID","svc.bili_warn":"⚠ Bilibili UID is required for the follower counter to work.",
   "svc.ig_enable":"Enable Instagram follower counter",
-  "svc.fetch_follower_hint":"Fetches public follower count. <strong>Restart required.</strong>",
+  "svc.fetch_follower_hint":"Fetches public follower count. Takes effect on the next poll cycle — no restart needed.",
   "svc.no_at_prefix":"(no @ prefix)","svc.username_ph":"username",
   "svc.ig_method_internal":"Internal — direct Instagram API","svc.ig_method_relay":"Relay — via social_relay.py",
   "svc.ig_internal_hint":"Calls Instagram's internal API directly. No relay needed, but may return 401 if rate-limited.",
@@ -1972,7 +2004,7 @@ Object.assign(I18N.en, {
   "svc.tt_key_hint":"Apply for Research API access at <a href=\"https://developers.tiktok.com\" target=\"_blank\">developers.tiktok.com</a> → Research API → Client Token.",
   "svc.tt_token":"Research API Bearer Token","svc.tt_key_warn":"⚠ Paste your TikTok Research API bearer token above.",
   "svc.mast_enable":"Enable Mastodon follower counter",
-  "svc.mast_enable_hint":"Uses the official public API — no authentication or relay needed. <strong>Restart required.</strong>",
+  "svc.mast_enable_hint":"Uses the official public API — no authentication or relay needed. Takes effect on the next poll cycle — no restart needed.",
   "svc.instance":"Instance","svc.domain_only":"(domain only)","svc.mast_warn":"⚠ Both username and instance are required."
 });
 /* ── Translation batch: Hardware tab ── */
@@ -3771,10 +3803,41 @@ function _otaSetBusy(busy) {
 /* ── Shared OTA/FS flash engine ──────────────────────────────────────────────
  * All upload logic lives here; doOTA/doFSOTA are thin wrappers that supply
  * the parts that differ (file input id, endpoint, messages, validation). */
+/* Polls /api/status until the device actually responds again — real
+ * readiness, not a guessed fixed delay — then reloads the page. A flat
+ * client-side timer here previously showed "page reloads in 15 s" and did
+ * exactly that regardless of how long the device actually took; one real
+ * capture measured ~25.7 s from response-sent to Web UI ready (1.5 s
+ * deferred-reboot delay + ~24 s boot sequence), so the 15 s reload was
+ * firing location.reload() into a device that wasn't listening yet —
+ * ERR_CONNECTION_REFUSED. Polling adapts to however long THIS boot
+ * actually takes instead of assuming every boot matches one measurement. */
+async function waitForDeviceThenReload(statusEl) {
+  const start = Date.now();
+  const giveUpMs = 90 * 1000;   /* generous margin over the ~25.7 s observed */
+  /* The device needs a moment to actually start rebooting (server-side
+   * deferred-reboot delay) before polling it means anything. */
+  await new Promise(res => setTimeout(res, 2000));
+  for (;;) {
+    try {
+      const r = await fetch('/api/status', { signal: AbortSignal.timeout(3000) });
+      if (r.ok) { location.reload(); return; }
+    } catch (e) { /* expected while the device is down/rebooting — keep polling */ }
+    if (Date.now() - start > giveUpMs) {
+      statusEl.textContent = 'Device did not come back online after ' + Math.round(giveUpMs / 1000)
+        + 's — check power/WiFi, then reload this page manually.';
+      return;
+    }
+    statusEl.textContent = 'Rebooting… waiting for device to come back online ('
+      + Math.round((Date.now() - start) / 1000) + 's)';
+    await new Promise(res => setTimeout(res, 1500));
+  }
+}
+
 async function doFlash({
   fileId, progId, barId, statId, endpoint,
   validateFile,        /* fn(file) → bool; return false to abort */
-  flashMsg, slowMsg, slowDelay,
+  flashMsg,
   successKey, failKey, connLostKey, stalledKey
 }) {
   if (_otaInProgress) return toast('An update is already in progress — please wait.', true);
@@ -3805,7 +3868,7 @@ async function doFlash({
     bar.style.background = ok ? 'var(--ok)' : 'var(--hi)';
     stat.style.color = ok ? 'var(--ok)' : 'var(--hi)';
     stat.textContent = msg;
-    if (ok) setTimeout(() => location.reload(), ok === 'fast' ? 15000 : slowDelay);
+    if (ok) waitForDeviceThenReload(stat);
   };
 
   let uploadPct = 0;
@@ -3833,7 +3896,7 @@ async function doFlash({
   xhr.onload = () => {
     if (_xhrHandle401(xhr)) { _otaSetBusy(false); stat.textContent = 'Sign in required'; return; }
     if (xhr.status === 200) {
-      done('fast', 'Rebooting… page reloads in 15 s');
+      done('fast', 'Rebooting…');
       toast(tr(successKey));
     } else {
       done(false, 'Failed: ' + (xhr.responseText || xhr.statusText));
@@ -3869,8 +3932,7 @@ async function doOTA() {
       return true;
     },
     flashMsg:    'Flashing firmware… (do not close this page)',
-    slowMsg:     'Rebooting… page reloads in 20 s',
-    slowDelay:   20000,
+    slowMsg:     'Connection lost (expected — device is rebooting)…',
     successKey:  'js.ota_complete',
     failKey:     'js.ota_failed',
     connLostKey: 'js.ota_conn_lost',
@@ -3890,8 +3952,7 @@ async function doFSOTA() {
       return !!confirm(tr('js.confirm_fs_ota'));
     },
     flashMsg:    'Flashing LittleFS… this can take up to 60 s — do not close this page',
-    slowMsg:     'Rebooting… page reloads in 30 s (LittleFS flash takes time)',
-    slowDelay:   30000,
+    slowMsg:     'Connection lost (expected — device is rebooting)…',
     successKey:  'js.fs_updated',
     failKey:     'js.fs_failed',
     connLostKey: 'js.fs_conn_lost',
@@ -4202,6 +4263,22 @@ async function applyDebugWlFps(forceValue) {
   if (!res?.ok) return toast('Failed to apply', true);
   $('f-dbg-wl-fps').value = fps || '';
   toast(fps ? `WeatherLive now running at ${fps} Hz` : 'Reset to default rate');
+}
+
+/* Per-task stack log toggle — runtime only, not persisted (see
+ * api_debug_stacklog() / web_server_debug_stacklog_enabled() in
+ * web_server.c and main.c's heap_telemetry_task()). Resets to off on
+ * reboot, so this box isn't restored from any saved state on load. */
+async function dbgStackLogToggle() {
+  const cb = $('dbg-stacklog');
+  const enabled = cb.checked;
+  const res = await secureFetch('/api/debug/stacklog', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ enabled })
+  }).catch(() => null);
+  if (!res?.ok) { cb.checked = !enabled; return toast('Failed to apply', true); }
+  toast(enabled ? 'Per-task stack log: on' : 'Per-task stack log: off');
 }
 
 /* ── Task CPU — windowed average ──────────────────────────────────────
@@ -4791,6 +4868,18 @@ async function refreshStatus() {
     $('ver-mismatch').style.display = 'none';
   }
 
+  /* Missing stock-file banner — distinct from the version-string mismatch
+   * above: expected_fs/fs_version can match while an individual file is
+   * still actually gone (skipped hotpatch, manual delete, corrupt write).
+   * See stock_files_check() in web_server.c. */
+  if (s.stock_missing > 0) {
+    $('sm-count').textContent = s.stock_missing;
+    $('sm-example').textContent = s.stock_missing_example || '?';
+    $('stock-missing-banner').style.display = 'block';
+  } else {
+    $('stock-missing-banner').style.display = 'none';
+  }
+
   /* Mic calibration status badge — show when a custom baseline is active */
   const calMsg = $('mic-cal-msg');
   if (calMsg && calMsg.textContent === '') {
@@ -4974,10 +5063,72 @@ async function pollWebuiPullDone(status, giveUpMs) {
     } catch(e) { if (e?.message === 'unauthorized') throw e; }
     if (ws) {
       if (ws.state === 'running') status.textContent = 'Applying update to filesystem… (this can take ~1 min)';
-      else if (ws.state === 'done') return;
+      else if (ws.state === 'done') return ws;   /* callers read ws.written_files */
       else if (ws.state === 'error') throw new Error(ws.error || 'unknown error');
     }
     if (Date.now() - start > giveUpMs) throw new Error('timed out waiting for device');
+  }
+}
+
+/* Polls /api/stock_repair_status until stock_repair_task reaches a terminal
+ * state (done/error/too_many). Shared by both trigger points — the
+ * standalone "Verify & Repair Stock Files" card and the "Repair now" button
+ * on the missing-files banner — same shape as pollWebuiPullDone() below. */
+async function pollStockRepairDone(statusEl, giveUpMs) {
+  const start = Date.now();
+  for (;;) {
+    await new Promise(res => setTimeout(res, 700));
+    let s = null;
+    try {
+      const rs = await secureFetch('/api/stock_repair_status', {signal: AbortSignal.timeout(5000)});
+      if (rs && rs.ok) s = await rs.json();
+    } catch(e) { if (e?.message === 'unauthorized') throw e; }
+    if (s) {
+      if (s.state === 'verifying') statusEl.textContent = `Checking files… (${s.checked}/${s.total})`;
+      else if (s.state === 'fetching') statusEl.textContent = `Repairing ${s.need_repair} file(s)… (${s.fetched + s.failed}/${s.need_repair})`;
+      else return s;
+    }
+    if (Date.now() - start > giveUpMs) throw new Error('timed out waiting for device');
+  }
+}
+
+/* "Check & Repair" / "Repair now" — verifies every built-in file's content
+ * against what this exact firmware build shipped, and re-fetches only what's
+ * actually wrong from the public repo at this device's own version tag (see
+ * stock_repair_task() in web_server.c). btnId/statusId let this be reused
+ * from both the standalone System-tab card and the missing-files banner,
+ * which have their own separate button/status elements on the page. */
+async function stockRepair(btnId = 'stock-repair-btn', statusId = 'stock-repair-status') {
+  const btn    = $(btnId);
+  const status = $(statusId);
+  const prevLabel = btn.textContent;
+  btn.disabled = true;
+  status.style.display = 'block';
+  status.textContent = 'Starting…';
+
+  try {
+    const rp = await secureFetch('/api/stock_repair', { method: 'POST', signal: AbortSignal.timeout(12000) });
+    if (rp?.status === 409) throw new Error('An update is already in progress — wait for it to finish.');
+    if (!rp?.ok) throw new Error('failed to start');
+
+    const s = await pollStockRepairDone(status, 5 * 60 * 1000);
+    if (s.state === 'too_many') {
+      status.textContent = `Too many files need repair (over ${s.max_files}) — use LittleFS Recovery below instead for a complete reflash.`;
+    } else if (s.state === 'done' && s.need_repair === 0) {
+      status.textContent = 'All built-in files are present and current — nothing to repair.';
+    } else if (s.state === 'done') {
+      status.textContent = `Repaired ${s.fetched}/${s.need_repair} file(s).`
+        + (s.repaired_files ? ` Changed: ${s.repaired_files}` : '');
+      refreshStatus();   /* clears/updates the missing-files banner if this fixed it */
+    } else {
+      status.textContent = s.error || 'Some files could not be repaired — try LittleFS Recovery for those.';
+      refreshStatus();
+    }
+  } catch(e) {
+    status.textContent = 'Repair failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
   }
 }
 
@@ -5029,8 +5180,9 @@ async function fixWebuiMismatch() {
 
     if (liveStarted) {
       status.textContent = 'Applying update to filesystem… (this can take ~1 min)';
-      await pollWebuiPullDone(status, 120000);
-      status.textContent = 'Done — Web UI updated to v' + expected + '.';
+      const ws = await pollWebuiPullDone(status, 120000);
+      status.textContent = 'Done — Web UI updated to v' + expected + '.'
+        + (ws?.written_files ? ' Changed: ' + ws.written_files : '');
       toast('Web UI updated to v' + expected + '!');
       await refreshStatus();
       setTimeout(() => { status.style.display = 'none'; }, 3000);
@@ -5073,8 +5225,9 @@ async function fixWebuiMismatch() {
     await new Promise(res => setTimeout(res, 4000));
 
     status.textContent = 'Applying update to filesystem… (this can take ~1 min)';
-    await pollWebuiPullDone(status, 120000);
-    status.textContent = 'Done — Web UI updated to v' + expected + '.';
+    const ws = await pollWebuiPullDone(status, 120000);
+    status.textContent = 'Done — Web UI updated to v' + expected + '.'
+      + (ws?.written_files ? ' Changed: ' + ws.written_files : '');
     toast('Web UI updated to v' + expected + '!');
     await refreshStatus();
     setTimeout(() => { status.style.display = 'none'; }, 3000);
@@ -5227,7 +5380,7 @@ async function onAuthSucceeded() {
   setInterval(() => checkForUpdates(true), 86400000);  /* re-check every 24 h */
 }
 </script>
-<script src="marked.min.js"></script>
+<script src="/marked.min.js"></script>
 
 <!-- ── Online Updater modal ───────────────────────────────────────────── -->
 <style>
@@ -5617,7 +5770,8 @@ async function startAutoUpdate() {
           auDetail('Applying update to filesystem… (this can take ~1 min)');
         } else if (ws.state === 'done') {
           $('au-bar').classList.remove('pulsing');
-          auStep(4,'done'); auProgress(100); auDetail('');
+          auStep(4,'done'); auProgress(100);
+          auDetail(ws.written_files ? 'Changed: ' + ws.written_files : '');
           break;
         } else if (ws.state === 'error') {
           throw new Error('Web UI update failed: ' + (ws.error || 'unknown'));

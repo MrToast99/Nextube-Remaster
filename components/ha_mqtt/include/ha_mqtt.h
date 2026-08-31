@@ -27,6 +27,18 @@ extern "C" {
 void ha_mqtt_start(void);
 
 /**
+ * Pause/resume the underlying esp-mqtt client — for callers that need MQTT
+ * fully quiet for a while (e.g. an OTA/webUI pull), not just the ha_mqtt
+ * task itself paused. Suspending the ha_mqtt FreeRTOS task alone does not
+ * stop esp-mqtt's own internal client task, which keeps reconnecting and
+ * publishing independently once started; these two reach that too.
+ * Both are safe no-ops if ha_mqtt_start() was never called, or its client
+ * failed to initialise.
+ */
+void ha_mqtt_pause(void);
+void ha_mqtt_resume(void);
+
+/**
  * Returns true and copies the active ticker message into @p out when a
  * ticker is pending.  Returns false when idle (no active ticker).
  * Thread-safe — protected by an internal mutex.

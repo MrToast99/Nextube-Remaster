@@ -1,6 +1,35 @@
 # Changelog
 
 
+## [1.17.10] - Unreleased
+
+### Added
+- The web UI now warns if a built-in file (a sound, font, or icon that should ship with this firmware) is actually missing from the device, and points you at LittleFS Recovery to restore a complete set — catches gaps a version-number check alone can't see, like a device that skipped an update where a specific file changed.
+- New "Verify & Repair Stock Files" action (System tab, and a "Repair now" button on the missing-files banner) — checks every built-in file's actual content, not just whether it exists, and re-downloads only the ones that are missing or stale, one at a time, without needing a full filesystem reflash.
+- "Verify & Repair Stock Files" and the Online Updater's Web UI step now tell you exactly which files were changed, not just a count.
+
+### Fixed
+- The web UI could stop responding entirely after several days of uptime on an unstable WiFi connection. The server now recovers stuck connections instead of eventually running out of them.
+- Audio never played while the microphone was in use (Spectrum mode, or the beat-reactive LED option) — the two now work at the same time.
+- The volume slider required a reboot to take effect. It now applies immediately.
+- Both included sound files had an audible pop or click at the start and/or end.
+- Home Assistant MQTT could occasionally fail to connect at boot with several other features enabled.
+- The update banners incorrectly implied you must back up your config before a LittleFS Recovery flash — it's actually backed up and restored automatically. A manual export is now offered as an optional precaution instead.
+- The web UI could briefly show "connection refused" right after a firmware flash, Web UI update, or Verify & Repair even though the device came back online fine a few seconds later — it now waits for the device to actually respond before reloading, instead of reloading on a fixed timer that could fire too early.
+- Rare "Task create failed" error when starting a firmware update, Web UI update, or Verify & Repair shortly after another background check (weather, social counters) had just kicked off its own network activity.
+- `social_relay.py`: serving more than one request at a time (e.g. the web UI's live counters plus a background poll from the device) could throw "Cannot switch to a different thread" and silently fall back to a slower, less reliable fetch method — every request now runs correctly regardless of how many arrive at once.
+- `social_relay.py`: a YouTube handle typed without the leading `@` that happened to start with "UC" (common for organization names) was routed to the wrong URL and failed to fetch.
+- The progress bar during a firmware update's download step could jump straight from 0% to the end instead of animating, and the same applied to the corresponding step in a Web UI update or Verify & Repair.
+- Uploading a whole folder (e.g. a new image theme) via the File Manager failed on every file inside it with "Cannot create file" unless the destination folder already existed on the device, and — even once that was fixed — a large folder could stall for several seconds per file and trip the device's internal watchdog.
+
+### Changed
+- Audio playback rewritten — more reliable, and no longer blocked by the microphone.
+- Replaced the built-in click and bell sounds; the old ones were too quiet and the bell sound had an audible glitch of its own.
+- Web UI Update patches no longer rewrite files that haven't actually changed — faster to apply, and less flash wear for content like fonts and icons that rarely change.
+- Added a Troubleshooting section to the README for diagnosing a device that isn't responding.
+- Weather and Social Media Counters: the master enable/disable switches now apply live — no restart needed in either direction.
+- Internal: a broad pass across nearly every background task's memory footprint — measured real usage instead of assuming it, right-sized several tasks that were carrying more reserved memory than they ever actually used, and consolidated three of them (weather, social media counters, update checking, none of which ever actually ran at the same time) into one shared task. Beyond enabling the live-toggle behavior above, this doesn't change how any feature behaves — it's freeing up a meaningful amount of the device's limited internal memory for everything else running on it.
+
 ## [1.17.9] - 2026-08-18
 
 ### Added

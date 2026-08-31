@@ -86,6 +86,11 @@ jobs:
           fi
           echo "update_type=$TYPE" >> $GITHUB_OUTPUT
           echo "Update type: $TYPE"
+          # Exposed for the "Generate Web UI ZIP" step below — make_Webui_patch.py
+          # diffs data/web/ against this same base rather than always shipping the
+          # full tree. Empty is a legitimate value (first-ever release, or no
+          # usable base found above) — the script's own fallback handles that.
+          echo "base=$BASE" >> $GITHUB_OUTPUT
 
       - name: Build firmware
         shell: bash
@@ -131,6 +136,10 @@ jobs:
         run: |
           SP_VER=${{ steps.version.outputs.fs_version }}
           export BUILD_VER=${{ steps.version.outputs.build_version }}
+          # Same base the "Determine update type" step above already resolved
+          # (previous tag / before-SHA / empty) — make_Webui_patch.py diffs
+          # data/web/ against this instead of always shipping the full tree.
+          export WEBUI_DIFF_BASE="${{ steps.updatetype.outputs.base }}"
 
           # Always stamp the current LittleFS version into web/version.txt so the
           # firmware's version-mismatch banner clears after the patch is applied.
@@ -175,7 +184,7 @@ jobs:
               GUIDANCE="**Firmware changed:** flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**."
               ;;
             spiffs-only)
-              GUIDANCE="**Web UI changed:** upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update** (config-safe, no reboot). If a full filesystem reflash is required it will be noted explicitly — use \`nextube-littlefs-v${SP_VER}.bin\` via **System → LittleFS Recovery** (⚠️ erases filesystem — back up your config first via **System → Backup & Restore**)."
+              GUIDANCE="**Web UI changed:** upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update** (config-safe, no reboot). If a full filesystem reflash is required it will be noted explicitly — use \`nextube-littlefs-v${SP_VER}.bin\` via **System → LittleFS Recovery** (⚠️ erases filesystem — your config is backed up and restored automatically, but as a precaution you can export it yourself first via **System → Backup & Restore**; custom themes and album photos aren't covered and will be lost unless backed up separately)."
               ;;
             full)
               GUIDANCE="**Both partitions changed.** Use the Online updater or Flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**, then upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update**. Alternatively use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
@@ -205,7 +214,9 @@ jobs:
           | \`bootloader.bin\` | Bootloader (USB flash only) |
           | \`partition-table.bin\` | Partition table (USB flash only) |
 
-          > **Before using LittleFS Recovery or USB full flash:** download your config via **System → Backup & Restore** and re-import it after flashing to preserve your WiFi, theme, and display preferences.
+          > **LittleFS Recovery:** your config (WiFi, theme, and display preferences) is backed up and restored automatically around the flash — as a precaution you can still export it via **System → Backup & Restore** first. Custom themes and album photos aren't covered by the automatic backup and will be lost unless you back those up separately.
+          >
+          > **USB full flash:** there's no running firmware to back anything up automatically for this path — download your config via **System → Backup & Restore** before flashing and re-import it after.
           EOF
 
           echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT

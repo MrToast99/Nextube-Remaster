@@ -1186,14 +1186,25 @@ void display_set_debug_wl_fps(int fps)
 #define WEATHER_PANEL_SUN   2   /* sunrise + sunset times */
 #define WEATHER_PANEL_WIND  3   /* wind speed — procedural glyph + digits + unit */
 #define WEATHER_PANEL_HILO  4   /* daily Hi / Lo — internal HI→LO sub-rotation */
-/* Stack: config snapshot (~1900 B) + JPEG decode call chain (~3-4 KB).
- * 8 KB was too tight — panic handler couldn't print a backtrace. */
-/* 12288 was borderline: cfg_snap (~1.9 KB) had to be moved to BSS because the
- * JPEG-decode call chain alone approached the limit (see the static cfg_snap
- * comment in display_task).  The AP-PIN digit renderer (pin_draw_tube) stacks
- * a 1280 B SPI chunk buffer plus the U8g2 draw chain on top of the loop frame
- * — the deepest single path in the task — so give it real headroom. */
-#define DISPLAY_STACK_SIZE   16384
+/* Stack: config snapshot (~1900 B, moved to static cfg_snap in display_task
+ * so it's off the stack) + JPEG decode call chain.
+ * 8 KB was too tight — panic handler couldn't print a backtrace.
+ *
+ * 16384 was originally sized well above a *theoretical* worst case ("12288
+ * was borderline... the JPEG-decode call chain alone approached the limit
+ * ... AP-PIN's pin_draw_tube — the deepest single path in the task — so
+ * give it real headroom"). That estimate predates per-task stack telemetry
+ * (main.c::log_task_stacks). Measured in the field across a single boot
+ * covering WeatherLive (procedural, no JPEG), several JPEG-asset themes
+ * including a cold-cache rotation, AP-PIN (several minutes of continuous
+ * pin_draw_tube marquee draws), Spectrum, and DotMatrix: real peak usage
+ * topped out at 5704 B — nowhere near 12288, let alone 16384. 12288 keeps
+ * the exact number once assumed borderline, now backed by a real ~53%
+ * margin (6584 B) over every path actually measured, and frees 4096 B of
+ * internal RAM. Not exhaustive (no corrupted-JPEG fallback branch, no
+ * every clock face) — if a real panic-with-truncated-backtrace shows up
+ * again, that's the first thing to revert. */
+#define DISPLAY_STACK_SIZE   12288
 
 /* ── Theme error tracking ────────────────────────────────────────────────
  * Holds the path of the last image that failed to decode (e.g. wrong size,
@@ -1480,9 +1491,16 @@ void display_show_image(int tube, const char *path)
             if (!fb) { display_fill(tube, 0x0000); return; }
 
             /* Seed fb with blank.jpg: prefer same directory, then the caller-supplied
-             * override (e.g. theme AMPM/blank.jpg for system-path or Numbers PNGs). */
+             * override (e.g. theme AMPM/blank.jpg for system-path or Numbers PNGs).
+             * /images/system/ is the one directory where the "same-dir blank.jpg"
+             * convention never applies — it holds standalone platform icons
+             * (youtube.png, wait.jpg, ...), not a themed asset set, and no
+             * /images/system/blank.jpg exists or should exist. Probing for it
+             * anyway logs a guaranteed-failing lookup on every system-icon PNG;
+             * skip straight to the override (or black). */
             const char *sl = strrchr(path, '/');
-            if (sl) {
+            bool is_system_icon = (strstr(path, "/images/system/") == path);
+            if (sl && !is_system_icon) {
                 char blank[270];
                 snprintf(blank, sizeof(blank), "%.*sblank.jpg", (int)(sl - path + 1), path);
                 int bw = 0, bh = 0;
@@ -1491,6 +1509,13 @@ void display_show_image(int tube, const char *path)
                     bw = 0; bh = 0;
                     bg = img_cache_get(s_png_bg_override, &bw, &bh);
                 }
+                if (bg && bw == LCD_WIDTH && bh == LCD_HEIGHT)
+                    memcpy(fb, bg, LCD_WIDTH * LCD_HEIGHT * 2);
+                else
+                    memset(fb, 0, LCD_WIDTH * LCD_HEIGHT * 2);
+            } else if (is_system_icon && s_png_bg_override[0]) {
+                int bw = 0, bh = 0;
+                const uint8_t *bg = img_cache_get(s_png_bg_override, &bw, &bh);
                 if (bg && bw == LCD_WIDTH && bh == LCD_HEIGHT)
                     memcpy(fb, bg, LCD_WIDTH * LCD_HEIGHT * 2);
                 else
@@ -1982,8 +2007,17 @@ void display_show_ampm(int tube, const char *name, const char *theme)
     /* Fall back to /images/system/{name}.png (then .jpg) when the theme-specific
      * asset is absent (e.g. a custom theme that predates the social-media icons).
      * Supply the theme's AMPM blank as the compositing background so system-path
-     * PNGs appear over the correct theme background instead of black. */
-    if (!img_cache_get(p, NULL, NULL)) {
+     * PNGs appear over the correct theme background instead of black.
+     *
+     * Only the platform icons have a theme-independent system counterpart —
+     * "blank"/"colon"/digits/etc. do not (there is no /images/system/blank.jpg,
+     * nor should there be one). Without this guard, a theme missing its own
+     * AMPM/blank.jpg would fall through to a system path that can never exist,
+     * logging a second, doomed "Image not found" on top of the first. */
+    if (!img_cache_get(p, NULL, NULL) &&
+        (!strcmp(name, "youtube") || !strcmp(name, "instagram") ||
+         !strcmp(name, "tiktok")  || !strcmp(name, "mastodon")  ||
+         !strcmp(name, "wait"))) {
         if (sys_icon_has_png(name))
             snprintf(p, sizeof(p), "/images/system/%s.png", name);
         else
@@ -7580,7 +7614,9 @@ static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
  * Runs the same 3-pass draw loop but composites directly into fb (RGB565)
  * instead of issuing 3 partial LCD window writes.  Shares s_sun_pos/s_sun_ph/
  * s_sun_cnt with wx_sun_anim_frame so state is never double-advanced.
- * Caller must call display_show_digit() for the single SPI blit.           */
+ * Caller must call display_show_digit() for the single SPI blit.
+ * Same bSun negative-cast guards and horizontal-ray skip as wx_sun_anim_frame
+ * above — see that function's comments for why they're needed. */
 static void wx_sun_anim_frame_buf(uint8_t *fb, bool rising, uint16_t fg)
 {
     if (rising) {
@@ -7622,9 +7658,8 @@ static void wx_sun_anim_frame_buf(uint8_t *fb, bool rising, uint16_t fg)
         }
 
         if (bSun >= 0) {
-            /* i=1..5: skip horizontal rays (i=0 left, i=6 right) — their shadow
-             * bloom creates a wide dark band at the sun centre y that reads as a
-             * "shadow line" in the sky whenever the disc passes that level. */
+            /* i=1..5: skip horizontal rays (i=0 left, i=6 right) — see
+             * wx_sun_anim_frame's comment above for why. */
             for (int i = 1; i < 6; i++) {
                 float ang = (float)M_PI + (float)i * ((float)M_PI / 6.0f);
                 float ca  = cosf(ang), sa = sinf(ang);

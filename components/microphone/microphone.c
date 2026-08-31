@@ -16,10 +16,10 @@
  *     RTOS preemption jitter (esp_timer catch-up clustering) smeared
  *     high-frequency energy into the low bands.  Uniform sampling needs a
  *     hardware clock.  See the ADC_HW_RATE comment for the full history.
- *   • I2S0 is shared with audio playback (dac_continuous): the audio
- *     component brackets DAC use with mic_set_audio_active(true/false);
- *     mic_task releases the peripheral within ~one 100 ms gate poll and the
- *     spectrum freezes for the duration of the clip.
+ *   • I2S0 is held for the life of the device once mic_hw_init() claims it
+ *     — audio no longer shares it (used to, via dac_continuous; see s_acq's
+ *     declaration comment for that history), so capture is never
+ *     interrupted by a clip.
  *
  * Silence gate (runtime, debug panel): cfg->mic_silence_gate — SPECTRAL gate
  * on the sum of post-floor band power (silence <10, quiet audio >50; 0=off).
@@ -65,10 +65,9 @@ static const char *TAG = "mic";
  * at 32 kHz and average every 4 samples down to the 8 kHz design rate —
  * the averaging doubles as a crude anti-alias filter and adds ~1 bit SNR.
  *
- * I2S0 is shared with audio playback (dac_continuous, per-clip): the audio
- * component claims it via mic_set_audio_active(true) before bringing the
- * DAC up and releases it after teardown.  The spectrum freezes for the
- * duration of a clip — same pattern as leds_set_audio_active(). */
+ * I2S0 is ours exclusively (see s_acq's declaration comment for why it no
+ * longer has to be shared with audio playback), so the handle is claimed
+ * once at boot and held for the life of the device. */
 #define ADC_HW_RATE        32000
 #define DECIM              4                       /* 32 kHz → 8 kHz        */
 #define RAW_FRAME_SAMPLES  (FRAME_SIZE * DECIM)    /* 512 raw per frame     */
@@ -162,25 +161,30 @@ static volatile adc_channel_t     s_active_chan = ADC_CHANNEL_7;
 static volatile uint8_t           s_active_ch  = 7;   /* config index */
 
 /* ── Continuous-capture state ────────────────────────────────────────── */
-/* The adc_continuous handle is created ONCE at boot (mic_init) and lives for
- * the device's lifetime, same as the oneshot unit s_adc — only started and
- * stopped per Spectrum-mode session, never deinit'd/recreated. Earlier this
+/* The adc_continuous handle is created at boot (mic_hw_init) and normally
+ * lives for the device's lifetime, same as the oneshot unit s_adc — started
+ * and stopped per Spectrum-mode session, not deinit'd/recreated. Earlier this
  * churned adc_continuous_new_handle()/adc_continuous_deinit() on every
- * session; that hit an ESP-IDF footgun (see acq_start()'s comment) and was
+ * session; that hit an ESP-IDF footgun (see mic_hw_init()'s comment) and was
  * unnecessary anyway — adc_continuous_config() is safe to call repeatedly on
  * the same handle (it just memcpy's into an already-allocated pattern
  * buffer, confirmed by reading esp_adc/adc_continuous.c directly), so a
  * channel change only needs stop → config → start, not a full recreate.
- * s_acq_running (not s_acq's NULLness) is the "is capture active" flag now
- * that s_acq is always valid after init. mic_task is the sole owner (no
- * handle lifecycle races). Other tasks communicate via flags:
- *   s_audio_claims_i2s — set by the audio component around DAC playback
- *                        (dac_continuous also needs I2S0); mic_task tears
- *                        the capture down and acks via s_i2s_released.   */
+ *
+ * s_acq is therefore non-NULL for the whole run after mic_hw_init(), and
+ * s_acq_running (not s_acq's NULLness) is the "is capture active" flag.
+ * mic_task is the sole owner — no handle lifecycle races.
+ *
+ * There used to be one exception: audio playback drove the DAC through
+ * dac_continuous, which needs the same I2S0 controller, so a clip forced this
+ * handle to be deinit'd and re-created around it. That is gone — audio now
+ * clocks dac_oneshot from a gptimer and never touches I2S0. Worth keeping in
+ * mind if anything else ever wants the controller: releasing it means calling
+ * adc_continuous_new_handle() again at runtime, and that call can ABORT the
+ * device from inside itself when memory is tight (see mic_hw_init()). Holding
+ * the handle for the device's lifetime is what avoids that risk entirely. */
 static adc_continuous_handle_t s_acq               = NULL;
 static volatile bool           s_acq_running        = false;
-static volatile bool           s_audio_claims_i2s  = false;
-static SemaphoreHandle_t       s_i2s_released      = NULL;
 
 /* Hann window (precomputed in mic_init) — applied to the Goertzel input to
  * suppress spectral leakage: without it a strong off-band tone (e.g. a loud
@@ -282,15 +286,12 @@ static volatile int s_last_raw = -1;
 /* ── Capture lifecycle (mic_task is the sole owner of s_acq) ─────────── */
 
 /* (Re)configure + start hardware-clocked capture on the active channel.
- * s_acq itself is created once at boot (mic_init) and lives forever — this
- * only starts/reconfigures it, never allocates/frees the handle (see the
- * s_acq declaration comment for why).
+ * s_acq is created once at boot (mic_hw_init) and lives for the run — this
+ * only starts/reconfigures it, never allocates or frees the handle.
  *
- * Returns false (and logs, rate-limited) on any failure — most commonly
- * I2S0 being unavailable a moment after the audio DAC released it, before
- * the peripheral has fully settled; the caller just retries on its next
- * loop pass. Logs the actual esp_err_t from each step so a persistent
- * failure is diagnosable instead of just "unavailable — will retry". */
+ * Returns false (and logs, rate-limited) on any failure; the caller just
+ * retries on its next loop pass. Logs the actual esp_err_t from each step so
+ * a persistent failure is diagnosable instead of just "will retry". */
 static bool acq_start(void)
 {
     if (s_acq_running) return true;
@@ -341,23 +342,6 @@ static void acq_stop(void)
         return;
     }
     s_acq_running = false;
-}
-
-/* Called by the audio component around DAC playback (dac_continuous and
- * adc_continuous both need the I2S0 peripheral on ESP32 and cannot coexist).
- * active=true blocks capture and waits (bounded) for mic_task to release
- * I2S0; active=false lets mic_task re-acquire on its next loop pass.
- * Safe to call when the mic was never initialised (flag-only no-op). */
-void mic_set_audio_active(bool active)
-{
-    s_audio_claims_i2s = active;
-    if (active && s_i2s_released) {
-        /* Drain any stale ack, then wait for mic_task to confirm release.
-         * Bounded: if the ack is late, the caller's dac_continuous bring-up
-         * retries (100 ms apart) absorb the remainder of the handoff. */
-        while (xSemaphoreTake(s_i2s_released, 0) == pdTRUE) { }
-        xSemaphoreTake(s_i2s_released, pdMS_TO_TICKS(400));
-    }
 }
 
 /* ── Goertzel single-bin energy ──────────────────────────────────────── */
@@ -437,10 +421,11 @@ static void mic_task(void *arg)
             mic_enabled &&
             ((spectrum_en && cur_mode == APP_MODE_SPECTRUM) || s_cal_requested);
 
-        if (!want_capture || s_audio_claims_i2s) {
+        if (!want_capture) {
+            /* Stop converting but KEEP the handle: re-running the ~10 KB
+             * DMA allocation at runtime is the failure mode mic_hw_init()
+             * exists to avoid. */
             acq_stop();
-            if (s_audio_claims_i2s && s_i2s_released)
-                xSemaphoreGive(s_i2s_released);   /* ack the audio handoff */
             taskENTER_CRITICAL(&s_mux);
             memset(s_bands, 0, sizeof(s_bands));
             taskEXIT_CRITICAL(&s_mux);
@@ -869,10 +854,6 @@ bool mic_init(void)
 
     ESP_LOGI(TAG, "mic_init: CH%u (GPIO%d), ADC hardware already allocated by mic_hw_init()",
              cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
-
-    /* Audio↔mic I2S0 handoff ack (see mic_set_audio_active). */
-    s_i2s_released = xSemaphoreCreateBinary();
-    configASSERT(s_i2s_released);
 
     /* Raw-frame export completion (see mic_capture_raw_frame). */
     s_dump_done = xSemaphoreCreateBinary();

@@ -37,25 +37,12 @@ static portMUX_TYPE s_net_mux = portMUX_INITIALIZER_UNLOCKED;
  *                  mDNS API in the event handler if the feature is disabled.
  *
  * s_last_mdns_ip:  The IP address seen at the last IP_EVENT_STA_GOT_IP.
- *                  Starts at {0} (all-zeros).  NEVER cleared on disconnect.
- *
- * On GOT_IP we pick one of two mDNS actions:
- *   • New / changed IP  → ENABLE_IP4: full probe + announce so .local
- *                         resolvers learn (or update) the address.
- *   • Same IP (a reconnect on the same DHCP lease) → ANNOUNCE_IP4: re-announce
- *                         without re-probing.  The hostname claim hasn't
- *                         changed, so a fresh probe cycle would just be wasted
- *                         mDNS multicast traffic.
- *
- * Why we track s_last_mdns_ip ourselves instead of using ev->ip_changed:
- * esp_netif_action_disconnected() clears ip_info_old to 0.0.0.0 on every
- * disconnect, so ev->ip_changed is always true after a reconnect — even when
- * the lease IP is unchanged.  Keeping our own last-IP and never clearing it on
- * disconnect lets us tell a genuine address change from a same-IP reconnect.
- * Because s_last_mdns_ip starts at {0}, the very first GOT_IP is always a
- * "changed" IP → ENABLE_IP4 runs first and initialises the interface.
- * (ANNOUNCE_IP4 is a no-op until the interface has been enabled, so it can
- * never fire before that first ENABLE_IP4.)
+ *                  Starts at {0} (all-zeros), NEVER cleared on disconnect —
+ *                  lets the GOT_IP handler tell a genuine address change
+ *                  from a same-IP reconnect (see the handler's own comment,
+ *                  at the ENABLE_IP4/ANNOUNCE_IP4 decision, for why that
+ *                  distinction — and ev->ip_changed not being usable for
+ *                  it — matters).
  *
  * mdns_register_netif() IS called once in wifi_manager_start(), immediately
  * after mdns_init().  With CONFIG_MDNS_PREDEF_NETIF_STA=n the daemon does not

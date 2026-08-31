@@ -394,22 +394,6 @@ void fr_blit(uint8_t *fb, int fb_w, int fb_h,
 
 /* ── Drawing helpers ────────────────────────────────────────────────────────── */
 
-/* Render a single codepoint centred in the framebuffer.
- *
- * px_size  — desired cap height in pixels (pass FR_DIGIT_CAP_PX for full-tube
- *             clock digits).  The function scales from the per-font digit_px
- *             calibration to achieve this cap height automatically for any font.
- *
- * Universal behaviour guarantee:
- *   • Any TTF dropped in /spiffs/fonts/ is auto-calibrated at fr_load_face
- *     time; no per-font tuning is required here.
- *   • '0' is the size reference.  Glyphs taller than '0' (decorative flourishes,
- *     outlier '1' stems, etc.) are height-capped to match '0'.  Descenders are
- *     NOT capped — they extend below the baseline without shifting the cap upward.
- *   • All glyphs share the same baseline, which is positioned so the px_size-pixel
- *     cap band is vertically centred in the framebuffer.  This eliminates the
- *     "1 and 9 appear taller" visual inconsistency caused by bitmap-bounds
- *     centering. */
 /* Compute (or fetch from the memo) the codepoint-independent layout for a
  * face/size/framebuffer: the universal scale univ_adj (size that makes '0' the
  * requested height, then capped so the widest digit fits the tube) and the
@@ -483,6 +467,22 @@ static fr_layout_memo_t *fr_get_layout(uint8_t face_id, uint16_t px_size,
     return m;
 }
 
+/* Render a single codepoint centred in the framebuffer.
+ *
+ * px_size  — desired cap height in pixels (pass FR_DIGIT_CAP_PX for full-tube
+ *             clock digits).  The function scales from the per-font digit_px
+ *             calibration to achieve this cap height automatically for any font.
+ *
+ * Universal behaviour guarantee:
+ *   • Any TTF dropped in /spiffs/fonts/ is auto-calibrated at fr_load_face
+ *     time; no per-font tuning is required here.
+ *   • '0' is the size reference.  Glyphs taller than '0' (decorative flourishes,
+ *     outlier '1' stems, etc.) are height-capped to match '0'.  Descenders are
+ *     NOT capped — they extend below the baseline without shifting the cap upward.
+ *   • All glyphs share the same baseline, which is positioned so the px_size-pixel
+ *     cap band is vertically centred in the framebuffer.  This eliminates the
+ *     "1 and 9 appear taller" visual inconsistency caused by bitmap-bounds
+ *     centering. */
 void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
                              uint8_t face_id, uint32_t codepoint, uint16_t px_size,
                              uint8_t cr, uint8_t cg, uint8_t cb,

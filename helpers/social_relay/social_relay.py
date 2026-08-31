@@ -2,6 +2,8 @@
 """
 social_relay.py — Local social-counter relay for Nextube.
 
+Version: 1.1
+
 Run this script on any PC that is on the same Wi-Fi network as your
 Nextube clock.  It fetches public profile pages with a real browser
 (Playwright/Chromium when available, curl otherwise) and serves the
@@ -41,7 +43,10 @@ Fetch strategy (tried in order, first success wins):
     3. urllib             — pure Python fallback; may be blocked by WAF.
 """
 
+__version__ = "1.1"
+
 import base64
+import contextlib
 import gzip
 import json
 import os
@@ -56,7 +61,8 @@ import ssl
 import threading
 import time
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 # ── Dependency bootstrap ─────────────────────────────────────────────────────
@@ -158,6 +164,40 @@ _pw_pw      = None   # playwright.sync_api.Playwright context manager result
 _pw_browser = None   # playwright.sync_api.Browser
 _pw_ready   = False  # True once _pw_ensure() has run (even if init failed)
 
+# Playwright's sync API is thread-affinitized via greenlets: every call must
+# run on the exact same OS thread that first called sync_playwright().start(),
+# for the life of the process — calling it from a second thread fails with
+# "Cannot switch to a different thread".  ThreadingHTTPServer (below) hands
+# each HTTP request its own thread, so calling Playwright directly from a
+# request thread breaks this.  (It didn't break under the original
+# single-threaded HTTPServer, since every request — and so every Playwright
+# call — ran on that one thread by construction; ThreadingHTTPServer traded
+# that accidental safety for concurrency without preserving it here.)  Route
+# every Playwright call — the one-time browser launch in _pw_ensure(), every
+# fetch, and the shutdown cleanup — through this single persistent worker
+# thread instead, so they always land on the same thread no matter which
+# request thread asked for them.  _pw_lock above still guards the shared
+# browser/context objects themselves; _pw_call only fixes thread identity.
+_pw_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pw-worker")
+
+
+def _pw_call(fn, *args, timeout=60, **kwargs):
+    """
+    Run fn(*args, **kwargs) on the dedicated Playwright worker thread and
+    block until it completes.  Re-raises whatever fn raises, plus
+    concurrent.futures.TimeoutError if it doesn't finish within `timeout`s.
+
+    Default of 60s comfortably covers each fetcher's own worst-case internal
+    wait (e.g. YouTube's 30s page.goto + 20s wait_for_function ≈ 50s) — a
+    tighter default risked this wrapper giving up and falling back to
+    curl/urllib before a still-running Playwright fetch would have
+    succeeded on its own.  Note a timeout here only stops this caller from
+    waiting; it does NOT cancel the job — it keeps running on the worker
+    thread and (since there is only one worker) delays whatever fetch is
+    submitted next until it finishes.
+    """
+    return _pw_executor.submit(fn, *args, **kwargs).result(timeout=timeout)
+
 
 def _pw_ensure():
     """
@@ -228,6 +268,38 @@ def _pw_stealth(page):
     )
 
 
+@contextlib.contextmanager
+def _pw_page():
+    """
+    Open a new Playwright browser context + page with stealth patches applied,
+    yield the page, and guarantee both are closed on the way out — including
+    when context creation, page creation, or stealth patching itself raises.
+
+    Serialises access via _pw_lock (held for the whole call) so concurrent
+    fetch requests don't open overlapping browser pages.  Shared by all three
+    fetchers so the create/patch/close lifecycle only needs to be correct in
+    one place instead of three independently-maintained copies.
+    """
+    with _pw_lock:
+        ctx = None
+        page = None
+        try:
+            ctx = _pw_browser.new_context(user_agent=_UA)
+            page = ctx.new_page()
+            _pw_stealth(page)   # patch webdriver + headless signals before navigation
+            yield page
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            if ctx is not None:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+
 
 def _pw_fetch_tiktok(username):
     """
@@ -245,77 +317,123 @@ def _pw_fetch_tiktok(username):
         return None
 
     print(f"  [relay] Playwright: fetching TikTok @{username}…")
-    with _pw_lock:
-        try:
-            ctx = _pw_browser.new_context(user_agent=_UA)
-            page = ctx.new_page()
-            _pw_stealth(page)   # patch webdriver + headless signals before navigation
+    try:
+        with _pw_page() as page:
+            page.goto(
+                f"https://www.tiktok.com/@{username}",
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+
+            # Dismiss cookie consent banner if present (EU/UK users).  Catches
+            # any Playwright error here (not just PWTimeout) — e.g. a
+            # strict-mode violation if the selector matches more than one
+            # element — since a failed dismiss should never abort the fetch.
             try:
-                page.goto(
-                    f"https://www.tiktok.com/@{username}",
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
+                btn = page.locator('[data-e2e="cookie-banner-accept"]')
+                if btn.is_visible(timeout=2_000):
+                    btn.click()
+            except Exception:
+                pass
+
+            # Attempt 1: follower count element.
+            count = None
+            try:
+                page.wait_for_selector(
+                    '[data-e2e="followers-count"]', timeout=8_000
                 )
+                el = page.query_selector('[data-e2e="followers-count"]')
+                if el:
+                    count = _parse_abbrev_count(el.inner_text().strip())
+            except PWTimeout:
+                pass
 
-                # Dismiss cookie consent banner if present (EU/UK users).
-                try:
-                    btn = page.locator('[data-e2e="cookie-banner-accept"]')
-                    if btn.is_visible(timeout=2_000):
-                        btn.click()
-                except PWTimeout:
-                    pass
+            # Attempt 2: JSON embedded in page source.
+            src = None
+            if count is None:
+                src = page.content()
+                for pat in (
+                    r'"followerCount"\s*:\s*(\d+)',
+                    r'"follower_count"\s*:\s*(\d+)',
+                    r'"fans"\s*:\s*(\d+)',
+                ):
+                    m = re.search(pat, src)
+                    if m:
+                        count = int(m.group(1))
+                        break
 
-                # Attempt 1: follower count element.
-                count = None
-                try:
-                    page.wait_for_selector(
-                        '[data-e2e="followers-count"]', timeout=8_000
-                    )
-                    el = page.query_selector('[data-e2e="followers-count"]')
-                    if el:
-                        count = _parse_abbrev_count(el.inner_text().strip())
-                except PWTimeout:
-                    pass
-
-                # Attempt 2: JSON embedded in page source.
-                if count is None:
-                    src = page.content()
-                    for pat in (
-                        r'"followerCount"\s*:\s*(\d+)',
-                        r'"follower_count"\s*:\s*(\d+)',
-                        r'"fans"\s*:\s*(\d+)',
-                    ):
-                        m = re.search(pat, src)
-                        if m:
-                            count = int(m.group(1))
-                            break
-
-                if count is not None:
-                    print(f"  [relay] Playwright: @{username} → {count:,} followers  ✓")
+            if count is not None:
+                print(f"  [relay] Playwright: @{username} → {count:,} followers  ✓")
+            else:
+                print(f"  [relay] Playwright: count not found for @{username}")
+                # Diagnose WHY: TikTok's bot-detection can silently bounce a
+                # profile request to the plain homepage (or a login/captcha
+                # page) before any follower-count content ever exists — that
+                # looks identical to a stale-selector failure from the
+                # log line above, but has a different cause and no fix on
+                # our end (a page structure change, by contrast, would mean
+                # the extraction patterns need updating).  Landed URL/title
+                # tell them apart at a glance.
+                landed_url = page.url
+                on_profile = f"@{username}".lower() in landed_url.lower()
+                if not on_profile:
+                    print(f"  [relay] Playwright: landed on {landed_url!r} "
+                          f"instead of the profile — looks like TikTok "
+                          f"redirected/blocked the request (bot-detection, "
+                          f"CAPTCHA, or a login wall), not a page-structure "
+                          f"change.")
                 else:
-                    print(f"  [relay] Playwright: count not found for @{username}")
-                return count
+                    print(f"  [relay] Playwright: stayed on the profile page "
+                          f"but no follower count matched.")
+                if src is None:
+                    src = page.content()
 
-            finally:
-                page.close()
-                ctx.close()
+                # Known WAF/challenge markers seen on TikTok's block pages —
+                # a hit here means what came back is a challenge shell, not
+                # the real profile, regardless of what the URL/title say.
+                waf_markers = ("SlardarWAF", "verify you are human", "Access Denied",
+                               "unusual traffic", "id=\"captcha")
+                hit = next((w for w in waf_markers if w.lower() in src.lower()), None)
+                if hit:
+                    print(f"  [relay] Playwright: page contains challenge "
+                          f"marker {hit!r} — this is a bot-check page, not "
+                          f"the real profile.")
 
-        except Exception as exc:
-            print(f"  [relay] Playwright TikTok @{username}: {exc}")
-            return None
+                # Visible text snippet — far more useful than a raw HTML dump
+                # for eyeballing what TikTok actually served (a challenge
+                # message, an age-gate, a genuinely restructured profile,
+                # etc).  Collapsed to one line so it doesn't flood the log.
+                try:
+                    body_text = page.inner_text("body").strip()
+                    snippet = " ".join(body_text.split())[:300]
+                except Exception:
+                    snippet = "(could not read visible text)"
+                print(f"  [relay] Playwright: title={page.title()!r} "
+                      f"({len(src)} chars) — visible text: {snippet!r}")
+            return count
+
+    except Exception as exc:
+        print(f"  [relay] Playwright TikTok @{username}: {exc}")
+        return None
 
 
 def _yt_url(channel_id):
     """
     Build the correct YouTube channel URL for any supported identifier:
-      UC…  — traditional channel ID  →  /channel/UC…
-      @…   — modern handle           →  /@handle
-      bare — handle without @        →  /@handle
+      UC…  — traditional channel ID (exactly 24 chars)  →  /channel/UC…
+      @…   — modern handle                               →  /@handle
+      bare — handle without @                             →  /@handle
+
+    Real channel IDs are always exactly 24 characters ("UC" + a 22-char
+    base64url-ish suffix) — checking the exact length (not just a loose
+    "> 10") is what distinguishes a real channel ID from a bare handle that
+    happens to start with "UC" (e.g. someone typing "UCBerkeleyOfficial"
+    as a handle without the leading @).
     """
     cid = channel_id.strip()
     if cid.startswith("@"):
         return f"https://www.youtube.com/{cid}"
-    if cid.startswith("UC") and len(cid) > 10:
+    if cid.startswith("UC") and len(cid) == 24:
         return f"https://www.youtube.com/channel/{cid}"
     # Bare handle (no @) — treat as @handle
     return f"https://www.youtube.com/@{cid}"
@@ -362,70 +480,63 @@ def _pw_fetch_youtube(channel_id):
         return None
 
     print(f"  [relay] Playwright: fetching YouTube {channel_id}…")
-    with _pw_lock:
-        try:
-            ctx  = _pw_browser.new_context(user_agent=_UA)
-            page = ctx.new_page()
-            _pw_stealth(page)   # patch webdriver + headless signals before navigation
-            try:
-                page.goto(
-                    _yt_url(channel_id),
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
-                )
-                # Dismiss GDPR consent wall before trying to read any content.
-                _yt_dismiss_consent(page)
+    try:
+        with _pw_page() as page:
+            page.goto(
+                _yt_url(channel_id),
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+            # Dismiss GDPR consent wall before trying to read any content.
+            _yt_dismiss_consent(page)
 
-                def _yt_patterns(src):
-                    """Try all known YouTube subscriber count patterns; return int or None."""
-                    for pat, grp in (
-                        # 2024+ metadataParts: "content":"N subscribers"
-                        (r'"content"\s*:\s*"([\d,.]+\.?\d*\s*[KkMmBb]?\s*subscriber[^"]*)"', 1),
-                        # Rendered HTML aria-label
-                        (r'aria-label="([\d,.]+\.?\d*\s*[KkMmBb]?\s*subscriber[^"]*)"', 1),
-                        # Legacy: simpleText nested inside accessibility block
-                        (r'"subscriberCountText"(.{0,600}?)"simpleText"\s*:\s*"([^"]+)"', 2),
-                        # Legacy flat format
-                        (r'"subscriberCountText"\s*:\s*\{"simpleText"\s*:\s*"([^"]+)"', 1),
-                        # Raw numeric string
-                        (r'"subscriberCount"\s*:\s*"(\d+)"', 1),
-                    ):
-                        m = re.search(pat, src, re.DOTALL)
-                        if m:
-                            c = _parse_abbrev_count(m.group(grp))
-                            if c is not None:
-                                return c
-                    return None
+            def _yt_patterns(src):
+                """Try all known YouTube subscriber count patterns; return int or None."""
+                for pat, grp in (
+                    # 2024+ metadataParts: "content":"N subscribers"
+                    (r'"content"\s*:\s*"([\d,.]+\.?\d*\s*[KkMmBb]?\s*subscriber[^"]*)"', 1),
+                    # Rendered HTML aria-label
+                    (r'aria-label="([\d,.]+\.?\d*\s*[KkMmBb]?\s*subscriber[^"]*)"', 1),
+                    # Legacy: simpleText nested inside accessibility block
+                    (r'"subscriberCountText"(.{0,600}?)"simpleText"\s*:\s*"([^"]+)"', 2),
+                    # Legacy flat format
+                    (r'"subscriberCountText"\s*:\s*\{"simpleText"\s*:\s*"([^"]+)"', 1),
+                    # Raw numeric string
+                    (r'"subscriberCount"\s*:\s*"(\d+)"', 1),
+                ):
+                    m = re.search(pat, src, re.DOTALL)
+                    if m:
+                        c = _parse_abbrev_count(m.group(grp))
+                        if c is not None:
+                            return c
+                return None
 
-                # Fast path: ytInitialData is embedded in the initial HTML —
-                # try source patterns immediately without any extra waits.
-                count = _yt_patterns(page.content())
+            # Fast path: ytInitialData is embedded in the initial HTML —
+            # try source patterns immediately without any extra waits.
+            count = _yt_patterns(page.content())
 
-                # Slow path: subscriber count loaded by JS after hydration.
-                # Wait for the DOM element to be populated, then re-scan source.
-                if count is None:
-                    try:
-                        page.wait_for_function(
-                            "() => { const el = document.querySelector('#subscriber-count');"
-                            " return el && el.textContent.trim().length > 0; }",
-                            timeout=20_000,
-                        )
-                        count = _yt_patterns(page.content())
-                    except (PWTimeout, Exception):
-                        pass
+            # Slow path: subscriber count loaded by JS after hydration.
+            # Wait for the DOM element to be populated, then re-scan source.
+            if count is None:
+                try:
+                    page.wait_for_function(
+                        "() => { const el = document.querySelector('#subscriber-count');"
+                        " return el && el.textContent.trim().length > 0; }",
+                        timeout=20_000,
+                    )
+                    count = _yt_patterns(page.content())
+                except Exception:
+                    pass
 
-                if count is not None:
-                    print(f"  [relay] Playwright: {channel_id} → {count:,} subscribers  ✓")
-                else:
-                    print(f"  [relay] Playwright: subscriber count not found for {channel_id}")
-                return count
-            finally:
-                page.close()
-                ctx.close()
+            if count is not None:
+                print(f"  [relay] Playwright: {channel_id} → {count:,} subscribers  ✓")
+            else:
+                print(f"  [relay] Playwright: subscriber count not found for {channel_id}")
+            return count
 
-        except Exception as exc:
-            print(f"  [relay] Playwright YouTube {channel_id}: {exc}")
-            return None
+    except Exception as exc:
+        print(f"  [relay] Playwright YouTube {channel_id}: {exc}")
+        return None
 
 
 def _pw_fetch_instagram(username):
@@ -445,53 +556,47 @@ def _pw_fetch_instagram(username):
         return None
 
     print(f"  [relay] Playwright: fetching Instagram @{username}…")
-    with _pw_lock:
-        try:
-            ctx = _pw_browser.new_context(user_agent=_UA)
-            page = ctx.new_page()
-            _pw_stealth(page)
+    try:
+        with _pw_page() as page:
+            page.goto(
+                f"https://www.instagram.com/{username}/",
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+            src = page.content()
+
+            # JSON patterns embedded in the page source
+            for pat in (
+                r'"edge_followed_by"\s*:\s*\{"count"\s*:\s*(\d+)',
+                r'"follower_count"\s*:\s*(\d+)',
+            ):
+                m = re.search(pat, src)
+                if m:
+                    count = int(m.group(1))
+                    print(f"  [relay] Playwright: @{username} → {count:,} followers  ✓")
+                    return count
+
+            # Meta description fallback: "1.2M Followers, 500 Following, …"
             try:
-                page.goto(
-                    f"https://www.instagram.com/{username}/",
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
-                )
-                src = page.content()
-
-                # JSON patterns embedded in the page source
-                for pat in (
-                    r'"edge_followed_by"\s*:\s*\{"count"\s*:\s*(\d+)',
-                    r'"follower_count"\s*:\s*(\d+)',
-                ):
-                    m = re.search(pat, src)
+                meta = page.locator('meta[name="description"]').get_attribute(
+                    'content', timeout=2_000)
+                if meta:
+                    m = re.match(r'([\d,.]+\s*[KkMmBb]?)\s*[Ff]ollower', meta)
                     if m:
-                        count = int(m.group(1))
-                        print(f"  [relay] Playwright: @{username} → {count:,} followers  ✓")
-                        return count
+                        count = _parse_abbrev_count(m.group(1))
+                        if count is not None:
+                            print(f"  [relay] Playwright: @{username} → {count:,} "
+                                  f"followers (meta)  ✓")
+                            return count
+            except Exception:
+                pass
 
-                # Meta description fallback: "1.2M Followers, 500 Following, …"
-                try:
-                    meta = page.locator('meta[name="description"]').get_attribute(
-                        'content', timeout=2_000)
-                    if meta:
-                        m = re.match(r'([\d,.]+\s*[KkMmBb]?)\s*[Ff]ollower', meta)
-                        if m:
-                            count = _parse_abbrev_count(m.group(1))
-                            if count is not None:
-                                print(f"  [relay] Playwright: @{username} → {count:,} "
-                                      f"followers (meta)  ✓")
-                                return count
-                except Exception:
-                    pass
-
-                print(f"  [relay] Playwright: follower count not found for @{username}")
-                return None
-            finally:
-                page.close()
-                ctx.close()
-        except Exception as exc:
-            print(f"  [relay] Playwright Instagram @{username}: {exc}")
+            print(f"  [relay] Playwright: follower count not found for @{username}")
             return None
+
+    except Exception as exc:
+        print(f"  [relay] Playwright Instagram @{username}: {exc}")
+        return None
 
 
 _insta_cache = {}   # {username: (follower_count, timestamp)}
@@ -513,7 +618,11 @@ def fetch_instagram_followers(username):
 
     # ── 1. Playwright ────────────────────────────────────────────────────────
     if _PLAYWRIGHT_AVAILABLE:
-        count = _pw_fetch_instagram(username)
+        try:
+            count = _pw_call(_pw_fetch_instagram, username)
+        except Exception as exc:
+            print(f"  [relay] Playwright worker error for @{username}: {exc}")
+            count = None
         if count is not None:
             with _cache_lock:
                 _insta_cache[username] = (count, time.time())
@@ -782,7 +891,11 @@ def fetch_followers(username):
 
     # ── 1. Playwright ────────────────────────────────────────────────────────
     if _PLAYWRIGHT_AVAILABLE:
-        count = _pw_fetch_tiktok(username)
+        try:
+            count = _pw_call(_pw_fetch_tiktok, username)
+        except Exception as exc:
+            print(f"  [relay] Playwright worker error for @{username}: {exc}")
+            count = None
         if count is not None:
             with _cache_lock:
                 _cache[username] = (count, time.time())
@@ -917,7 +1030,11 @@ def fetch_yt_subscribers(channel_id):
 
     # ── 1. Playwright ────────────────────────────────────────────────────────
     if _PLAYWRIGHT_AVAILABLE:
-        count = _pw_fetch_youtube(channel_id)
+        try:
+            count = _pw_call(_pw_fetch_youtube, channel_id)
+        except Exception as exc:
+            print(f"  [relay] Playwright worker error for YouTube {channel_id}: {exc}")
+            count = None
         if count is not None:
             return _store(count)
         print(f"  [relay] Playwright failed for YouTube {channel_id}, trying urllib…")
@@ -1024,11 +1141,17 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", PORT), RelayHandler)
+    # ThreadingHTTPServer (not plain HTTPServer): a Playwright fetch can take
+    # up to ~30s, and a single-threaded server would block every other
+    # request — including /health — for that whole duration. _pw_lock already
+    # serialises actual browser use across threads, so this just lets
+    # /health (and requests for a different, cached platform) respond
+    # immediately instead of queuing behind a slow fetch.
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), RelayHandler)
     ip = local_ip()
 
     print("=" * 60)
-    print(f"  Nextube social relay  ->  http://{ip}:{PORT}")
+    print(f"  Nextube social relay  v{__version__}  ->  http://{ip}:{PORT}")
     print("=" * 60)
     print(f'  Enter  "{ip}"  as the relay host')
     print("  in the Nextube web UI (Settings → Social Media Counters).")
@@ -1036,8 +1159,15 @@ if __name__ == "__main__":
 
     # Fetch engine status
     if _PLAYWRIGHT_AVAILABLE:
-        # Trigger lazy init now so startup banner is accurate.
-        ok = _pw_ensure()
+        # Trigger lazy init now so startup banner is accurate.  Routed
+        # through _pw_call (not called directly) so the browser launch — and
+        # so Playwright's greenlet thread affinity — lands on the dedicated
+        # worker thread from the very first call, not this (main) thread.
+        try:
+            ok = _pw_call(_pw_ensure)
+        except Exception as exc:
+            print(f"  [relay] Playwright worker init error: {exc}")
+            ok = False
         if ok:
             if _STEALTH_AVAILABLE:
                 print("  Social Media fetcher : Playwright/Chromium  ✓  (stealth ✓)")
@@ -1076,20 +1206,31 @@ if __name__ == "__main__":
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nRelay stopped.")
-        # Clean up the Playwright browser if it was started.
+        # On Windows, closing Chromium's pipe raises BrokenPipeError (WinError
+        # 232) inside asyncio's proactor.  That exception is attached to an
+        # asyncio Future which nothing ever retrieves, so asyncio's default
+        # exception handler logs a "Future exception was never retrieved"
+        # traceback via the "asyncio" logger — via Future.__del__, which
+        # fires whenever the garbage collector happens to reclaim that
+        # Future, not necessarily before _pw_pw.stop() below returns.
+        # Redirecting stderr only around stop() (the previous approach) is
+        # therefore unreliable — the GC pass, and the resulting log line,
+        # can land after the redirect's `with` block has already exited.
+        # Silencing the logger itself has no such timing dependency: it's
+        # about to be process-exit anyway, so there's no need to restore it.
+        import logging
+        logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+        # Clean up the Playwright browser if it was started.  Routed through
+        # _pw_call, same as every other Playwright call — closing from this
+        # (main) thread instead of the dedicated worker thread would hit the
+        # same "Cannot switch to a different thread" greenlet error.
         if _pw_browser is not None:
             try:
-                _pw_browser.close()
+                _pw_call(_pw_browser.close, timeout=10)
             except Exception:
                 pass
         if _pw_pw is not None:
             try:
-                # On Windows the asyncio proactor raises BrokenPipeError (WinError
-                # 232) when the Chromium pipe closes, and Python prints an
-                # "Future exception was never retrieved" traceback to stderr.
-                # Redirect stderr during stop() to swallow that cosmetic noise.
-                import contextlib, io
-                with contextlib.redirect_stderr(io.StringIO()):
-                    _pw_pw.stop()
+                _pw_call(_pw_pw.stop, timeout=10)
             except Exception:
                 pass

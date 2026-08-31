@@ -2,16 +2,23 @@
  * @file main.c
  * @brief Nextube open-source firmware – main entry
  *
- * Task architecture (mirrors original firmware's FreeRTOS design):
+ * Task architecture (mirrors original firmware's FreeRTOS design — kept
+ * here as a still-useful map of the original 9, not a changelog of every
+ * addition since):
  *   TaskDisplay      – renders clock / modes on 6× ST7735 LCDs
  *   TaskWifiServer   – captive-portal AP + STA, embedded web UI
  *   TaskNtp          – NTP time synchronisation
  *   TaskWeather      – OpenWeatherMap polling
- *   TaskYoutubeAndBili – YouTube / Bilibili subscriber counts
+ *   TaskYoutubeAndBili – subscriber/follower counts; grew past its original
+ *                        name to also cover Instagram, TikTok, and Mastodon
  *   TaskIIC          – RTC + SHT30 I²C sensor polling
  *   TaskLed          – WS2812 LED effects
  *   TaskAudio        – WAV / tone playback via DAC
  *   TaskButton       – Capacitive touch input
+ * Added since: update_check (GitHub release poll), ha_mqtt (Home Assistant),
+ * wled_sync (WLED strip mirroring), mic/spectrum (microphone band capture),
+ * heap_telemetry (periodic heap/stack monitor) — see each one's own
+ * xTaskCreate*()/_start() call site below for what it does.
  */
 
 #include <stdio.h>
@@ -75,7 +82,63 @@ _Static_assert(CFG_MIC_BAND_COUNT == MIC_BAND_COUNT,
  * across ALL caps (internal + PSRAM combined when SPIRAM_USE_MALLOC=y),
  * which is misleading on ESP32-WROVER where internal SRAM is ~320 KB and
  * PSRAM contributes the bulk.  We use heap_caps_get_free_size(CAP_INTERNAL)
- * and CAP_SPIRAM directly so each line is unambiguous. */
+ * and CAP_SPIRAM directly so each line is unambiguous.
+ *
+ * internal largest uses CAP_INTERNAL|CAP_8BIT, not CAP_INTERNAL alone:
+ * CAP_INTERNAL alone also counts reclaimed IRAM, which isn't byte-addressable
+ * and can never hold a real allocation (a task stack, a malloc'd buffer, ...).
+ * A field reading showed a rock-steady "largest=9216" that turned out to be
+ * exactly that IRAM region sitting nearly empty and irrelevant (confirmed via
+ * heap_caps_print_heap_info), while the real, fragmentable ceiling for
+ * anything actually allocatable was lower and in a different region.
+ *
+ * httpd sockets: how many of web_server's max_open_sockets slots are
+ * currently in use. lru_purge_enable (see web_server_start()) stops a
+ * connection that died mid-flight during a WiFi drop from wedging the
+ * server permanently, but doesn't by itself reveal whether that's
+ * happening at all — this line makes a slow climb toward the cap visible
+ * over days of uptime instead of only ever seeing the aftermath (the web
+ * UI going briefly unresponsive right as lru_purge kicks in).
+ *
+ * Per-task stack dump: same idea as the webui_pull_task sizing exercise
+ * (measured peak usage under real load, not a guess) but for every task
+ * at once. uxTaskGetStackHighWaterMark() reports the closest any task has
+ * ever come to overflowing its stack, in words — this multiplies by
+ * sizeof(StackType_t) to log bytes still unused, so a small number next to
+ * a task's name means its xTaskCreate*() stack size has little margin left,
+ * and a large one is a candidate to shrink. One ESP_LOGI per task (~25
+ * lines) every 5 minutes is too much to leave on by default, so it's gated
+ * behind the hidden debug panel's "Per-task stack log" checkbox
+ * (web_server_debug_stacklog_enabled(), POST /api/debug/stacklog) — off
+ * unless someone's actively chasing a stack size, same as every other
+ * debug-panel control: runtime only, resets to off on reboot. */
+static void log_task_stacks(void)
+{
+    UBaseType_t n = uxTaskGetNumberOfTasks() + 2; /* pad: a task can be created between the count and the snapshot */
+    TaskStatus_t *tasks = pvPortMalloc(n * sizeof(TaskStatus_t));
+    if (!tasks) {
+        ESP_LOGW("stack", "task snapshot skipped - alloc failed (%u tasks)", (unsigned)n);
+        return;
+    }
+    n = uxTaskGetSystemState(tasks, n, NULL);
+    for (UBaseType_t i = 0; i < n; i++) {
+#if CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID
+        /* tskNO_AFFINITY (INT_MAX) means "not pinned to a core", not a real
+         * core ID - xTaskCreate() (vs. ...PinnedToCore()) tasks report this. */
+        char core_buf[12] = "any"; /* sized for %d worst-case, not just 0/1 - avoids -Wformat-truncation */
+        if (tasks[i].xCoreID != tskNO_AFFINITY)
+            snprintf(core_buf, sizeof(core_buf), "%d", (int)tasks[i].xCoreID);
+        const char *core_str = core_buf;
+#else
+        const char *core_str = "?";
+#endif
+        ESP_LOGI("stack", "%-16s core=%-3s free=%u B",
+                 tasks[i].pcTaskName, core_str,
+                 (unsigned)(tasks[i].usStackHighWaterMark * sizeof(StackType_t)));
+    }
+    vPortFree(tasks);
+}
+
 static void heap_telemetry_task(void *arg)
 {
     (void)arg;
@@ -87,13 +150,16 @@ static void heap_telemetry_task(void *arg)
          * one periodic line that still anchors "how long has it been up" —
          * wall-clock stamps jump on NTP corrections; this counter never does. */
         ESP_LOGI("heap",
-                 "uptime=%llum  internal: free=%u largest=%u  psram: free=%u largest=%u  (lifetime min total: %u)",
+                 "uptime=%llum  internal: free=%u largest=%u  psram: free=%u largest=%u  (lifetime min total: %u)  httpd sockets: %d",
                  (unsigned long long)(esp_timer_get_time() / 60000000LL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
-                 (unsigned)esp_get_minimum_free_heap_size());
+                 (unsigned)esp_get_minimum_free_heap_size(),
+                 web_server_socket_count());
+        if (web_server_debug_stacklog_enabled())
+            log_task_stacks();
     }
 }
 
@@ -226,19 +292,54 @@ static void init_nvs(void)
 }
 
 /* ── Deferred audio initialisation ───────────────────────────────────── */
-/* Started as a low-priority task from app_main so that audio comes up well
- * after the WiFi AP is broadcasting and any auto-connecting client's WPA2
- * handshake has completed — a fixed 8 s delay, enough to clear that window.
+/* Runs well after the WiFi AP is broadcasting and any auto-connecting
+ * client's WPA2 handshake has completed — a fixed 8 s delay, enough to
+ * clear that window.
+ *
+ * The 8 s wait used to happen INSIDE a task that was created immediately at
+ * boot (xTaskCreate() allocates the TCB + full stack synchronously, at
+ * creation time — the vTaskDelay() inside it doesn't defer that allocation
+ * at all). That meant a ~4 KB block sat allocated for the entire 8 s, then
+ * got freed right as the WPA2 window closed — i.e. exactly the moment this
+ * mechanism exists to protect, with WiFi/WPA2 setup allocations actively
+ * competing for whatever space it just vacated. The deferral protected
+ * audio_init()'s own (tiny) allocations from that window; it did nothing
+ * for the task's own stack, which was present for the whole thing.
+ *
+ * Fixed by deferring the TASK CREATION itself via audio_defer_timer_cb()
+ * (a one-shot esp_timer, started from app_main() below) instead of sleeping
+ * inside an already-created task. The 8 s wait now costs no new allocation
+ * at all — it runs on the existing esp_timer service task's own stack — and
+ * this task's stack is only allocated (briefly) once the sensitive window
+ * has already passed, then freed almost immediately after, in a much
+ * quieter part of boot unlikely to be racing anything else for that space.
  *
  * Mic setup no longer runs from here — see mic_hw_init()/mic_init() in
  * app_main(), moved to boot time for the same reason audio stays deferred
  * would have broken it: mic_task_start()'s internal-RAM stack allocation
  * hit the same late-boot WiFi/MQTT memory pressure this function's own
- * 8 s/AP-PIN wait was exposing it to. */
+ * 8 s/AP-PIN wait was exposing it to.
+ *
+ * audio_init() was briefly moved out of here into app_main()'s early batch
+ * (paired with a persistent playback task) and REVERTED — see the comment
+ * on audio_play_task in audio.c. Short version: it permanently claimed
+ * 16 KB of internal RAM at boot and starved sht30 + wled_sync + MQTT.
+ * audio_init() itself allocates no task, so deferring it costs nothing. */
+/* 3072: reasoned, not measured — audio_init() (2 semaphore creates, a flag,
+ * 2 log lines) and audio_set_volume() (one bounds-checked assignment) are
+ * both trivially shallow, so this task's own logic needs very little. Not
+ * cut further than that: heap_telemetry_task's own stack-size comment below
+ * documents 2 KB overflowing reliably in field testing for a similarly
+ * shallow, logging-heavy task on this codebase's log_vprintf_hook — a real,
+ * measured cautionary data point for this class of task, not a guess, and
+ * this task does comparable logging plus a config_lock()/unlock() cycle on
+ * top. High-water-mark logged below — tighten with that real number once
+ * it's in hand, same as every other task size in this codebase was, rather
+ * than trusting this reasoning alone indefinitely. */
+#define AUDIO_DEFER_STACK_SIZE 3072
+
 static void audio_deferred_start(void *arg)
 {
-    vTaskDelay(pdMS_TO_TICKS(8000));   /* 8 s — safely past the WPA2 window */
-
     config_lock();
     const nextube_config_t *cfg = config_get();
     uint8_t vol      = cfg->volume;
@@ -246,17 +347,27 @@ static void audio_deferred_start(void *arg)
     config_unlock();
 
     /* audio_init() handles the enabled state directly:
-     *   enabled=true  → DAC brought up, APLL locked, DMA ring running.
-     *   enabled=false → GPIO25 driven LOW (amp-input clamp), DAC not started.
+     *   enabled=true  → DAC brought up per clip by the playback task.
+     *   enabled=false → GPIO25 left isolated, DAC never started.
      * audio_set_enabled() is only called later from the web server when the
      * user toggles the setting at runtime — no need to call it here. */
     audio_init(audio_en);
     audio_set_volume(vol);
 
     ESP_LOGI("main", "Audio started (deferred)");
-    ESP_LOGD("main", "audio_defer stack HWM: %u words",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    ESP_LOGI("main", "audio_defer stack high-water mark: %u B unused (of %u allocated)",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)AUDIO_DEFER_STACK_SIZE);
     vTaskDelete(NULL);
+}
+
+/* esp_timer one-shot callback — the actual 8 s wait now happens here, on
+ * the esp_timer service task's own pre-existing stack, so no NEW allocation
+ * exists at all during the WPA2 window this exists to clear. See
+ * audio_deferred_start()'s doc comment above for the full story. */
+static void audio_defer_timer_cb(void *arg)
+{
+    if (xTaskCreate(audio_deferred_start, "audio_defer", AUDIO_DEFER_STACK_SIZE, NULL, 4, NULL) != pdPASS)
+        ESP_LOGE(TAG, "audio_defer task creation failed — audio will not start");
 }
 
 /* ── Application entry ─────────────────────────────────────────────── */
@@ -320,9 +431,7 @@ void app_main(void)
      * reads them fresh from config at start time (see audio_deferred_start).
      * mic_* fields are read a little further down, by mic_hw_init()/
      * mic_init() themselves (each takes the lock internally). */
-    bool    boot_weather_enabled;
     bool    boot_update_check_enabled;
-    bool    boot_social_enabled;
     bool    boot_mqtt_enabled;
     bool    boot_wled_sync_enabled;
     float   boot_sht30_temp_offset;
@@ -335,9 +444,7 @@ void app_main(void)
     uint8_t boot_tube_brightness[6];
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
-    boot_weather_enabled    = cfg_boot->weather_enabled;
     boot_update_check_enabled = cfg_boot->update_check_enabled;
-    boot_social_enabled     = cfg_boot->social_enabled;
     boot_mqtt_enabled       = cfg_boot->mqtt_enabled && cfg_boot->mqtt_broker[0] != '\0';
     boot_wled_sync_enabled  = cfg_boot->wled_sync_enabled;
     boot_sht30_temp_offset  = cfg_boot->sht30_temp_offset;
@@ -411,16 +518,42 @@ void app_main(void)
         if (cal_saved) mic_apply_calibration(noise_floor);
     }
 
-    /* Audio — deferred start (see audio_deferred_start): starts after a
-     * fixed 8 s delay, clear of the WPA2 handshake window. Mic no longer
-     * defers through here — see mic_hw_init()/mic_init() above.
+    /* Low-priority background heap monitor — fires every 5 minutes.
+     * 4 KB stack: ESP_LOGI through the log-ring vprintf hook
+     * (web_server.c::log_vprintf_hook) uses a 160-byte format buffer on
+     * top of vprintf/vsnprintf's own scratch, plus the captured va_list
+     * copy.  2 KB overflowed reliably in field testing.
      *
-     * Stack: sized for audio_init()'s call chain alone now that mic_init()'s
-     * no longer shares this task; kept at the same 8 KB the combined chain
-     * needed rather than guessing a smaller number without measuring
-     * audio_init() in isolation. */
-    if (xTaskCreate(audio_deferred_start, "audio_defer", 8192, NULL, 4, NULL) != pdPASS)
-        ESP_LOGE(TAG, "audio_defer task creation failed — audio will not start");
+     * Created here — right after display/mic, before WiFi/network/MQTT —
+     * not at the very end of app_main() where it used to live. It was found
+     * completely missing from a live task listing (uxTaskGetSystemState()
+     * — not blocked, not suspended, just never created) after MQTT's real
+     * task creation moved earlier and started committing internal RAM
+     * eagerly: heap_tel was the LAST task created in the whole boot
+     * sequence, so it was the most exposed to whatever fragmentation
+     * everything else had already caused, and this xTaskCreatePinnedToCore()
+     * call had no pdPASS check (unlike every sibling call in this file), so
+     * the failure was completely silent — no error, no task, no heap log,
+     * ever, for the rest of that boot. A monitoring task should be one of
+     * the most reliably-created things here, not the least — it's the
+     * thing meant to tell us when something else is starving. */
+    if (xTaskCreatePinnedToCore(heap_telemetry_task, "heap_tel",
+                                4096, NULL, 1, NULL, 0) != pdPASS)
+        ESP_LOGE(TAG, "heap_telemetry_task creation failed");
+
+    /* Audio — deferred start via a one-shot timer (see audio_defer_timer_cb()
+     * / audio_deferred_start() above): the task itself isn't created until
+     * 8 s from now, clear of the WPA2 handshake window — no stack allocation
+     * happens at all until then. Mic no longer defers through here — see
+     * mic_hw_init()/mic_init() above. */
+    {
+        static esp_timer_handle_t audio_defer_timer;
+        const esp_timer_create_args_t a = { .callback = audio_defer_timer_cb, .name = "audio_defer_t" };
+        if (esp_timer_create(&a, &audio_defer_timer) == ESP_OK)
+            esp_timer_start_once(audio_defer_timer, 8000 * 1000ULL);   /* 8 s in µs */
+        else
+            ESP_LOGE(TAG, "audio_defer_timer create failed — audio will not start");
+    }
 
     leds_init();
     leds_task_start();
@@ -432,38 +565,56 @@ void app_main(void)
     sht30_init();               /* probe optional sensor; safe no-op if absent */
     sht30_set_offset(boot_sht30_temp_offset); /* apply saved calibration offset */
 
-    /* Networking – start AP+STA, then web server */
     wifi_manager_start();
+
+    /* web_server_start() runs right after WiFi starts, same as stock —
+     * this is what makes the web UI reachable in ~8 s instead of waiting on
+     * weather/update_check/etc. below. Moving it to the end of this block
+     * once pushed "Web UI ready" from ~8.4 s to ~24.2 s: its
+     * stock_files_check() scan contended on CPU with weather's/
+     * update_check's TLS handshakes instead of running before they'd
+     * started. That scan is now its own timer-deferred call inside
+     * web_server_start() (a separate one-shot from the post_ota timer
+     * below it), so this position is kept for the general case, not out
+     * of necessity — nothing below blocks waiting for the web server. The
+     * fragmentation concern that originally motivated moving this call —
+     * post_ota_autostart_task landing between this batch and the one
+     * below, only on a post-firmware-OTA boot — is fixed the same way:
+     * that spawn is timer-deferred too. */
     web_server_start();
 
-    /* Background services — gated by their respective config flags so users
-     * can disable features they don't use, freeing each task's stack and
-     * stopping the periodic HTTPS polling.  Weather requires a reboot to
-     * enable; the social counter task reads config dynamically each cycle. */
+    /* Background services */
     ntp_time_start();
-    if (boot_weather_enabled) {
-        weather_start();
-    } else {
-        ESP_LOGI(TAG, "Weather disabled in config — task not started");
-    }
+    /* Weather and social counters register with the shared periodic_net_poll
+     * task UNCONDITIONALLY — not gated behind boot_weather_enabled /
+     * boot_social_enabled like update_check below still is.  Their own tick
+     * functions (weather_poll_tick() / subscribers_poll_tick()) already
+     * re-check weather_enabled / social_enabled live from config on every
+     * cycle and no-op (skip the actual fetch, just reschedule) whenever
+     * disabled — see those functions' comments.  Registering unconditionally
+     * here is what makes BOTH directions of the toggle live: previously,
+     * disabling was live but re-enabling wasn't, because a tick that was
+     * never registered here (config was off at boot) had nothing to
+     * re-enable later.  Cost: the shared net_poll task's ~7 KB stack is now
+     * always committed once any boot ever reaches this point, even for a
+     * user who disables both — but update_check below has no user-facing
+     * off switch at all (only its tube-6 display indicator does), so for
+     * every real deployment that task already exists regardless; this just
+     * stops weather/social from being a special case. */
+    weather_start();
     /* Update check — periodic GitHub release poll that drives the tube-6
      * update indicator and the Home Assistant "Nextube Update Available"
-     * topic autonomously (no browser tab required). Same gate pattern as
-     * weather_enabled. */
+     * topic autonomously (no browser tab required).  update_check_enabled
+     * has no exposed WebUI toggle (only the tube-6 indicator does), so this
+     * gate is effectively always true in practice — kept as a real gate
+     * rather than also going unconditional since a config-file edit can
+     * still set it false and that should still fully skip registration. */
     if (boot_update_check_enabled) {
         update_check_start();
     } else {
         ESP_LOGI(TAG, "Update check disabled in config — task not started");
     }
-    /* Social counter task — only started when the user has opted in via the
-     * "Enable Social Media Counters" toggle.  Requires a reboot to take effect
-     * (same gate pattern as weather_enabled).  When disabled, no HTTPS polling
-     * occurs and no stack is allocated for the task. */
-    if (boot_social_enabled) {
-        subscribers_start();
-    } else {
-        ESP_LOGI(TAG, "Social counters disabled in config — task not started");
-    }
+    subscribers_start();
     /* Home Assistant MQTT — only started when enabled and a broker is configured. */
     if (boot_mqtt_enabled) {
         ha_mqtt_start();
@@ -521,14 +672,6 @@ void app_main(void)
      * Calling here — after all hardware and services initialised without panic —
      * is the correct point to declare the image healthy. */
     esp_ota_mark_app_valid_cancel_rollback();
-
-    /* Low-priority background heap monitor — fires every 5 minutes.
-     * 4 KB stack: ESP_LOGI through the log-ring vprintf hook
-     * (web_server.c::log_vprintf_hook) uses a 160-byte format buffer on
-     * top of vprintf/vsnprintf's own scratch, plus the captured va_list
-     * copy.  2 KB overflowed reliably in field testing. */
-    xTaskCreatePinnedToCore(heap_telemetry_task, "heap_tel",
-                            4096, NULL, 1, NULL, 0);
 
     ESP_LOGI(TAG, "All tasks launched – heap free: %u bytes",
              (unsigned)esp_get_free_heap_size());

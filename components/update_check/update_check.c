@@ -1,14 +1,12 @@
 #include "update_check.h"
 #include "config_mgr.h"
-#include "wifi_manager.h"
+#include "periodic_net_poll.h"
 #include "fw_version.h"
 #include "display.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
@@ -188,36 +186,35 @@ static void do_check(void)
              repo, raw, FW_VERSION_STR, avail ? "yes" : "no");
 }
 
-/* 24h in microseconds, matching ntp_time.c's NTP_DNS_REFRESH_US idiom: track
- * elapsed time via esp_timer_get_time() against a daily threshold rather
- * than a single 24h vTaskDelay, whose ms-to-ticks conversion (ms * tick_Hz)
- * is large enough to be a real 32-bit overflow risk depending on the
- * FreeRTOS port's pdMS_TO_TICKS implementation. */
-#define UPDATE_CHECK_INTERVAL_US (24LL * 3600LL * 1000000LL)
+/* 24h in milliseconds — the interval update_check_poll_tick() below hands
+ * back to periodic_net_poll_task() after every check. (Used to be
+ * maintained as microseconds against esp_timer_get_time() with an hourly
+ * wake-and-compare loop, matching ntp_time.c's NTP_DNS_REFRESH_US idiom —
+ * that hourly-granularity bookkeeping is no longer needed now that the
+ * shared scheduler already wakes at least once a minute for its OTHER
+ * registered subsystems and re-checks every entry's own deadline each
+ * time; see periodic_net_poll.h's doc comment for the merge rationale.) */
+#define UPDATE_CHECK_INTERVAL_MS (24LL * 3600LL * 1000LL)
 
-static void update_check_task(void *arg)
+/* Called by periodic_net_poll_task() once due; returns how many ms until it
+ * should be called again — always the flat 24h interval, no backoff (a
+ * failed check just logs a warning and is retried at the normal interval,
+ * same as before the merge). */
+static uint32_t update_check_poll_tick(void)
 {
-    while (!wifi_manager_is_connected()) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    vTaskDelay(pdMS_TO_TICKS(8000));   /* let DNS settle, matches weather_task */
-
-    do_check();   /* once on boot */
-    int64_t last_check = esp_timer_get_time();
-
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(3600000));   /* wake hourly */
-        if (esp_timer_get_time() - last_check >= UPDATE_CHECK_INTERVAL_US) {
-            last_check = esp_timer_get_time();
-            do_check();
-        }
-    }
+    do_check();
+    return (uint32_t)UPDATE_CHECK_INTERVAL_MS;
 }
 
 void update_check_start(void)
 {
     if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
-    xTaskCreate(update_check_task, "update_check", 8192, NULL, 3, NULL);
+    /* No longer a dedicated task (was 6144 B, measured peak 3820 B) — see
+     * weather_start()'s matching comment and periodic_net_poll.h's doc
+     * comment for the full rationale. first_delay_ms=0: check immediately
+     * once the shared WiFi/DNS gate clears, matching this task's original
+     * "do_check() once on boot" behavior. */
+    periodic_net_poll_register(update_check_poll_tick, 0, "update_check");
 }
 
 bool update_check_get_status(char *out, size_t len)

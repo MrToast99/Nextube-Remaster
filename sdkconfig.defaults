@@ -27,16 +27,11 @@ CONFIG_SPIRAM_USE_MALLOC=y
 # MALLOC_CAP_INTERNAL, bypassing this threshold entirely and forcing ALL
 # allocations to SRAM regardless.
 #
-# With MBEDTLS_DEFAULT_MEM_ALLOC=y and threshold=255:
-#   • 16 384 B TLS IN  buffer   > 255 → PSRAM (4 MB free, always succeeds)
-#   • 4 096 B  TLS OUT buffer   > 255 → PSRAM
-#   • 512 B    RSA-4096 MPI     > 255 → PSRAM
-#   • 256 B    RSA-2048 MPI     > 255 → PSRAM
-#   • ~280 B   mbedtls_aes_ctx  > 255 → PSRAM
-#              (hardware AES reads via CPU reg writes, not DMA — safe in PSRAM)
-#   • ≤255 B   WPA2 crypto,     ≤ 255 → SRAM (DMA-accessible, required)
-#              FreeRTOS structs,
-#              lwIP socket state
+# See the "TLS memory strategy" comment further down (near
+# CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC) for the full story — why this project
+# uses DEFAULT_MEM_ALLOC specifically, and exactly which allocation classes
+# (TLS buffers, RSA MPI temporaries, WPA2 crypto, ...) land in PSRAM vs SRAM
+# at this threshold value.
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=255
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_MEMTEST=y
@@ -51,25 +46,68 @@ CONFIG_BT_ENABLED=n
 
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
-CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+# ── FreeRTOS software-timer service task stack ───────────────────────
+# 2048 = the ESP-IDF default (Kconfig: default 2048, range 1536-32768).
+# This was previously 4096 — double the default, with no recorded reason,
+# i.e. the same undocumented defensive padding esp_timer's stack carried
+# (see CONFIG_ESP_TIMER_TASK_STACK_SIZE below). That padding is not free:
+# internal RAM is the binding constraint on this board (task stacks alone
+# total ~140 KB against ~140 KB usable), and unmeasured slack was starving
+# task creation elsewhere.
+#
+# Measured, not guessed: uxTaskGetStackHighWaterMark (per-task telemetry in
+# main.c) reported a 576 B peak for "Tmr Svc" across hours of uptime with
+# every feature active. 2048 leaves ~3.6x that.
+#
+# Do NOT push this to the 1536 minimum: this task runs callbacks we don't
+# own (WiFi / esp_netif / mDNS software timers), so the measured peak only
+# covers callbacks that actually fired, not their worst case. The IDF
+# default is the value Espressif tests those against.
+CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=2048
 # Per-task CPU accounting for GET /api/debug/tasks — names the CPU hog when
 # IDLE-starvation task-WDT warnings appear (negligible overhead: one esp_timer
 # read per context switch).
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
-# Allow heap-allocated task stacks to be placed in SPIRAM so that tasks
-# created with xTaskCreate / xTaskCreatePinnedToCore can have their stacks
-# served from PSRAM when the SPIRAM-aware malloc decides so (i.e. for stack
-# allocations whose size exceeds SPIRAM_MALLOC_ALWAYSINTERNAL=255).  Without
-# this, pvPortMalloc in the IDF FreeRTOS port uses MALLOC_CAP_INTERNAL and
-# forces all task stacks to internal SRAM regardless of the SPIRAM threshold.
-# This keeps SRAM clean for DMA-constrained allocations (lwIP pbufs, WiFi
-# crypto buffers) and for the ≤255-byte mbedTLS allocations that stay in SRAM
-# by design under MBEDTLS_DEFAULT_MEM_ALLOC.  The MQTT integration adds two
-# tasks (ha_mqtt + esp_mqtt internal) with 4 KB stacks each; placing those
-# stacks in PSRAM saves ~8 KB of internal SRAM.
+# Relaxes xTaskCreateStatic()'s pointer-validity check to accept a PSRAM
+# buffer, for tasks created via the STATIC path with a caller-supplied
+# stack. It does NOT affect xTaskCreate()/xTaskCreatePinnedToCore() (the
+# dynamic path almost everything in this codebase uses) — those always
+# allocate stacks from internal RAM regardless of this setting. An earlier
+# version of this comment claimed otherwise (that ha_mqtt/esp_mqtt's stacks
+# "reside in PSRAM" because of this flag); that was disproven both by
+# reading ESP-IDF's xTaskCreate source directly and, empirically, by a real
+# field investigation where MQTT's task creation failed specifically from
+# internal-RAM fragmentation — impossible if the stack were actually in
+# PSRAM. Keep this enabled only if something is actually using (or will
+# use) the static+external-stack path; it isn't a blanket "PSRAM for
+# stacks" switch.
 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
+# app_main()'s own task defaults to priority 1 (ESP-IDF default) — LOWER
+# than several tasks it creates (display=6, mic/ntp=5, ...). FreeRTOS is
+# fully preemptive: the instant xTaskCreate() for a higher-priority task
+# succeeds, that task can preempt app_main() mid-sequence, before it
+# finishes creating whatever comes later in its own list. Confirmed live:
+# sht30_task (4 KB) and audio_play_task (16 KB), both created after
+# ha_mqtt_start() (priority 3) in main.c, failed within 15 s of boot —
+# ha_mqtt_task's immediate client-init/connect work (no longer gated behind
+# a WiFi-connect wait) ran and committed its own footprint in the gap
+# before app_main() got scheduled again to finish its list. Raising this
+# above every priority app_main() creates (7, one above display's 6) makes
+# task creation in main.c a true atomic batch again, instead of one that
+# can be interrupted by whatever it just created.
+#
+# Trade-off: display_task (6) currently renders its first frames WHILE
+# app_main() is still running the rest of boot (WiFi init, web server, the
+# remaining task creations) — that's why the tubes come alive partway
+# through boot in every log, not only at the very end. With main_task
+# outranking it too, display won't get scheduled at all until app_main()
+# fully returns, so the tubes stay blank a few seconds longer at every
+# boot. One-time cost, not a recurring one — accepted in exchange for
+# task creation no longer racing itself.
+CONFIG_ESP_MAIN_TASK_PRIORITY=7
 
 # Wi-Fi
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
@@ -231,9 +269,13 @@ CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
 CONFIG_MBEDTLS_HARDWARE_MPI=y
 
 # MQTT
-# Reduce the esp-mqtt internal task stack from the default 6144 bytes to 4096.
-# With SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y both the ha_mqtt and esp_mqtt
-# stacks reside in PSRAM; this saves ~4 KB of PSRAM vs the 6144-byte default.
+# Currently dead: components/ha_mqtt/ha_mqtt.c sets .task.stack_size=10240
+# explicitly in esp_mqtt_client_config_t, which overrides this Kconfig
+# default at runtime — see that file's comment for why (measured peak usage,
+# and the field-confirmed task-creation-vs-fragmentation history). This value
+# only takes effect if that explicit override is ever removed. Also does NOT
+# place the stack in PSRAM regardless of SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY —
+# see that flag's comment above; this is real internal RAM either way.
 CONFIG_MQTT_TASK_STACK_SIZE=4096
 
 # LWIP
@@ -264,12 +306,25 @@ CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
 CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
 
 # ── esp_timer service task stack ─────────────────────────────────────
-# Bumped to 8 KB (default 4 KB) while the mic sampled via esp_timer
-# callbacks (since replaced by adc_continuous DMA — see microphone.c).
-# Kept at 8 KB: other periodic callbacks (LEDC fades, WiFi internals)
-# share this task and the headroom is cheap insurance against the
-# stack-overflow class of bug this project has hit twice.
-CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192
+# 3584 = the ESP-IDF default (Kconfig: default 3584, range 2048-65536).
+# This was 8192, bumped while the mic sampled via esp_timer callbacks —
+# that reason is gone (replaced by adc_continuous DMA, see microphone.c) —
+# and was then kept purely as "cheap insurance". It is not cheap: internal
+# RAM is the binding constraint on this board (task stacks alone total
+# ~140 KB against ~140 KB usable), and that spare 4.5 KB was contributing
+# to task-creation failures elsewhere.
+#
+# Measured, not guessed: uxTaskGetStackHighWaterMark (per-task telemetry
+# in main.c) reported a peak of 400 B used across ~2 h of uptime with
+# every feature active — LEDC fades and WiFi internals included. 3584
+# leaves ~8x the observed peak.
+#
+# Do NOT push this to the 2048 minimum: this task dispatches callbacks we
+# don't own (IDF internals, LEDC fades, WiFi), so the measured peak only
+# covers callbacks that actually fired, not their worst case — and it runs
+# at priority 22, where an overflow corrupts silently rather than failing
+# cleanly. The IDF default is the value Espressif tests those against.
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=3584
 
 # LittleFS — store mtime as a per-file extended attribute so stat() returns a
 # real modification timestamp.  Each file written after this build gets an

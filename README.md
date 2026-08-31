@@ -76,6 +76,8 @@ Like the work? Help keep me Caffeinated! <br>
   - [Uploading a font](#uploading-a-font)
   - [Reducing font file size](#reducing-font-file-size-with-pyftsubset)
 - [REST API](#rest-api)
+- [Troubleshooting](#troubleshooting)
+  - [The device isn't responding to web requests](#the-device-isnt-responding-to-web-requests)
 - [Hardware](#hardware)
   - [Audio / DAC Notes](#audio--dac-notes)
   - [Microphone Notes](#microphone-notes)
@@ -252,7 +254,7 @@ When the update check finds a newer GitHub release (see [Automatic Update Checks
 1. **Review** — a panel shows the release notes and confirms both assets (firmware + web UI) are present, then you click **Proceed**.
 2. **Firmware** — the device downloads the new firmware from GitHub over HTTPS, **verifies it by SHA-256**, and flashes itself, with live download and flash progress.
 3. **Reboot** — into the new firmware.
-4. **Web UI** — the device then pulls and applies the matching web UI on its own; the browser tracks progress and finishes with **✓ Update finished** and a **Reload page** button.
+4. **Web UI** — the device then pulls and applies the matching web UI on its own; the browser tracks progress and finishes with **✓ Update finished**, a list of which files actually changed, and a **Reload page** button.
 
 
 #### Manual Updating
@@ -275,7 +277,7 @@ The web UI provides three separate update paths under the **System** tab (use th
 
 1. Download `nextube-WebUI-v{ver}.zip` from the same release.
 2. Open **System → Web UI Update**, choose the ZIP, and click **Upload & Apply**.
-3. Changed files are written in place. Your config, custom themes, album images, and audio clips are **never touched**, and **no reboot is needed** — reload the browser page and the new UI is live.
+3. Changed files are written in place. Your config, custom themes, album images, and audio clips are **never touched**, and **no reboot is needed** — reload the browser page and the new UI is live. A file that's already byte-identical on the device (same content, same checksum) is skipped rather than rewritten, so re-applying a patch — or one that ships mostly-unchanged assets like fonts or icons — doesn't cost a flash write for content that hasn't actually changed.
 
 **Updating both (a normal release):** flash the firmware first, let the device reboot, then apply the Web UI ZIP. If you do firmware only, the version-mismatch banner (below) will remind you the web UI is stale.
 
@@ -294,6 +296,14 @@ After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web
 **Settings are preserved automatically (both paths):** the Web UI ZIP never touches `config.json` at all, and a full LittleFS Recovery flash saves your `config.json` to NVS (a separate flash partition that is never erased by a LittleFS update) before wiping the partition, then restores it on the next boot. Either way you do not need to re-enter your Wi-Fi credentials, theme, brightness, or any other settings.
 
 **Custom files are preserved only by the ZIP path:** a full LittleFS Recovery flash erases any themes, album images, or audio files you have uploaded. Back them up using the LittleFS file browser (**System → LittleFS Files**) before a recovery flash; the Web UI ZIP leaves them untouched.
+
+#### Missing stock-file detection
+
+The version-mismatch banner above only catches a *version number* disagreement — it can't tell you that one specific built-in file (a sound, a font, an icon) is actually missing from the device while everything else reports the correct version. That gap is real: a device that skipped over an update where a particular file changed, or had one removed by hand through the LittleFS file browser, can end up on a "matching" version with a genuine hole in it.
+
+The device checks every stock file it shipped with — once at boot, and again right after any Web UI Update or Online Updater pull completes — and shows a **"Missing built-in files"** banner if anything expected is actually gone, naming one example. That check only looks at whether each file exists (a cheap check, safe to run automatically); it can't tell a *stale* file (present, but wrong content — e.g. left over from a version that predates a later change) from a healthy one.
+
+**Repair without a full reflash — "Verify & Repair Stock Files"** (**System** tab, and a **Repair now** button on the missing-files banner itself): a heavier, explicitly user-triggered check that verifies every stock file's actual *content* against what this exact firmware build shipped, then re-downloads only the files found missing or stale — one at a time, directly from the public GitHub repo at the git tag matching the device's own installed version (never a newer tag than what's actually installed). Nothing is ever bundled ahead of time for this: the device's own firmware image already carries the expected checksum for every stock file, so the only network activity is fetching bytes for something already known, locally, to be wrong. The result tells you exactly which files were repaired, not just a count. If too many files need fixing at once (more efficient as one larger transfer than dozens of small ones), it says so and points at LittleFS Recovery instead, which remains the guaranteed-complete fallback for anything this can't handle — no internet reachable, a very old device whose version predates this mechanism, or a repair that partially fails.
 
 #### Automatic Update Checks
 
@@ -801,7 +811,7 @@ By default all platforms use unofficial or keyless fetch methods. Official API k
 
 Both keys are entirely optional. Leave the field blank to use the default keyless method.
 
-**Master switch (`Enable`)** — when unchecked the polling task never starts. Changes require a device restart to take effect. All social counter platforms (including YouTube/Bilibili) are **disabled by default** — enable whichever you use and save; the task only starts if at least one platform is enabled.
+**Master switch (`Enable`)** — turning it off or on takes effect on the next poll cycle; no restart needed. All social counter platforms (including YouTube/Bilibili) are **disabled by default** — enable whichever you use and save. Polling only happens while the master switch and at least one platform are both enabled.
 
 **Polling interval** — applies to all platforms. Preset buttons: 5 m, 10 m, 30 m, 1 h, 6 h, 12 h, 24 h. Default is **1 hour**. Minimum 5 minutes. Changes take effect after the current sleep expires — no restart needed.
 
@@ -968,7 +978,7 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 
 - **Boot-time gate** — MQTT is only started if both **Enable** is checked *and* a broker address is set. Disabling MQTT frees the task stack and stops all polling — useful if you don't use Home Assistant.
 - **Optional publishing groups** — three checkboxes under **Services → MQTT** control extra telemetry: **Clock telemetry** (XTAL drift + RTC max error per NTP sync; default off), **Device health** (WiFi RSSI / free heap / uptime sensors every 60 s; default off), and **Button presses** (touch events as HA device triggers, usable in automations — e.g. "left button → toggle the bedroom lights"; default off). Publishing toggles take effect immediately; HA *entities* for a newly enabled group appear after the next broker reconnect or reboot.
-- **Restart required** — changes to MQTT settings take effect after a reboot (same behaviour as weather and social counter toggles).
+- **Restart required** — changes to MQTT settings take effect after a reboot (unlike the weather and social counter master switches, which apply live).
 - **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
 - **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
 - **Multiple devices** — each Nextube uses its hostname as the unique ID. Give each device a different hostname in **Network Settings** to avoid topic collisions.
@@ -1448,6 +1458,30 @@ GET  /api/debug/micbands     → per-band spectrum state for all 24 Goertzel ban
                                updated even on silence-gated frames
 ```
 
+## Troubleshooting
+
+### The device isn't responding to web requests
+
+If the clock's display still looks normal but the web UI, OTA, or the API stop responding, check the network first, then fall back to the serial console for a live look at what the firmware is actually doing.
+
+1. **Confirm it's actually online.** `ping <device-ip>` (or `ping nextube-remaster.local`). If ping answers but nothing over HTTP does, the network stack is fine and it's specifically the web server that's stuck — worth knowing before you assume the whole device has crashed.
+2. **If the clock is already conencted to a USB and open a serial monitor.** Use PuTTY (or any serial terminal: `screen`, `minicom`, `idf.py monitor`) with:
+   - **Connection type:** Serial
+   - **Serial line:** the device's COM port (Windows Device Manager → Ports (COM & LPT); on Linux/macOS it's `/dev/ttyUSB0` or similar, same port used for flashing)
+   - **Speed (baud rate):** `115200`
+
+> [!IMPORTANT]
+> This only gets you a live look at the *actual* hang, though, if the clock's USB cable was **already** plugged into a computer when it stopped responding — opening a terminal on an existing connection is what can avoid a reset. If the clock normally runs off a wall adapter or power bank and isn't connected to a computer, getting serial access means unplugging it and moving it to one first, which is itself a power cycle — you'll only get a fresh boot log and no crash data, so simply just power-cycle it in place to get running again.
+
+3. **Read what's already there before touching anything.** Every 5 minutes the firmware logs a line like:
+   ```
+   I (169824) heap: uptime=45m  internal: free=142336 largest=98304  psram: free=3604700 largest=3538944  (lifetime min total: 3140180)  httpd sockets: 2
+   ```
+   - `internal: free / largest` — free internal RAM and the largest single contiguous block. A healthy device has these close together; a `largest` much smaller than `free` (e.g. free=140 KB but largest=9 KB) means the internal heap is fragmented, which can cause specific allocations to fail even though there's plenty of memory in total.
+   - `httpd sockets: N` — how many of the web server's connection slots are currently in use (out of 12). Climbing steadily toward 12 over days of uptime, rather than staying low and stable, points at connections not being released properly (e.g. after a WiFi drop) rather than a one-off blip.
+   - A `Guru Meditation Error` block or a `rst:0x...` boot banner instead of normal log lines means the device actually crashed or already rebooted on its own — very different from a hang, and worth including verbatim if you're reporting the issue.
+4. **Only power-cycle after you've looked.** A reboot resets the heap and connection state, so anything above that would have explained *why* it stopped responding is gone once you do. If you don't need the root cause, a power-cycle is a safe, non-destructive fix — this is a memory/connection-state issue, not data corruption.
+
 ## Hardware
 
 Reverse-engineered from PCB Rev **1.31** (2022/01/19):
@@ -1486,46 +1520,52 @@ The LTK8002D is a **pure analog** Class-AB BTL amplifier — it has no I²S,
 PDM, or any other digital audio interface. The ESP32's built-in 8-bit DAC
 on GPIO25 is the only audio source.
 
-#### DAC driver — `dac_continuous`, brought up **per-clip** (ESP-IDF v5)
+#### DAC driver — `dac_oneshot` clocked by a `gptimer`, brought up **per-clip**
 
-The firmware uses `dac_continuous_new_channels()` from ESP-IDF v5, which
-internally configures the I²S0 peripheral in **DAC mode** (`i2s_set_dac_mode`
-equivalent). The I²S peripheral clocks 8-bit unsigned PCM samples from a DMA
-ring buffer directly into the DAC register at **32 kHz**.
+Playback drives the DAC directly: a hardware timer (`gptimer`) fires once per
+sample, and its interrupt writes one byte with `dac_oneshot_output_voltage()` —
+the only DAC API ESP-IDF documents as interrupt-safe. There is no DMA ring and
+no I²S involved.
 
-Crucially, the DAC is **not** left running between sounds. It is created and
-enabled **per clip** by the playback task (`dac_restart()`), and torn down again
-(`dac_teardown()`) the moment the clip — plus its fade-out — finishes. This
-mirrors how the stock firmware behaved: silence means *nothing is clocked*.
-Tearing down also lets the GPIO25 pad return to the isolated idle state between
-clips (the decisive noise factor — see below), and avoids keeping the I²S0
-engine, APLL, and a live DAC output buffer running for no benefit.
+This replaced an earlier `dac_continuous` implementation, which drove the DAC
+through the **I²S0 controller** — the same controller the microphone's
+`adc_continuous` capture needs (see [Microphone Notes](#microphone-notes)).
+They cannot both hold it, so audio and Spectrum mode used to be mutually
+exclusive: with the microphone enabled, every clip failed outright
+(`i2s controller 0 has been occupied by adc`). Clocking the DAC from its own
+timer touches no I²S peripheral at all, so the two now run at the same time
+with nothing to arbitrate. It also removed the DMA path's ~19.6 kHz minimum
+rate — clips now play at their own native sample rate — and removed a
+~4 KB-per-clip allocation from the same small pool of DMA-capable memory the
+microphone and displays also draw from.
+
+As before, the DAC is **not** left running between sounds: the one-shot
+channel and timer are created per clip by the playback task and torn down the
+moment the clip finishes. Silence means *nothing is clocked or driving the
+pad* — matching how the stock firmware behaved.
 
 **Idle state (no clip playing), in *both* the enabled and disabled cases:**
 the GPIO25 pad is **isolated** via `rtc_gpio_isolate()` — input and output
 buffers off, no pulls, pad disconnected from the digital domain. This is the
 exact state the stock firmware's `dac_output_disable()` (IDF 3.3.5) left the
 pad in, and it is the critical detail for a silent idle: any *driven* idle
-state (output LOW was tried, as was digital Hi-Z input) connects the amp's
-AC-coupled input to the ESP32's digital ground/supply through the pin driver,
-and every current transient on the die — the 1 kHz FreeRTOS tick, flash read
-bursts, the per-second clock redraw — couples into the amp as a constant
-static floor, activity hiss, and a 1 Hz tick. With the pad isolated the idle
-is near-silent.
-(The earlier `dac_oneshot` idle was dropped: the `dac_oneshot → dac_continuous`
-transition is unreliable on the original ESP32 — the I²S0 controller does not
-always release state after one-shot use, which then blocks
-`dac_continuous_new_channels()` — so the firmware never mixes the two drivers.)
+state — output LOW, digital Hi-Z, and (confirmed directly with the DAC test
+modes below) **a static one-shot hold at mid-rail** — all measurably hiss.
+Every current transient on the die — the 1 kHz FreeRTOS tick, flash read
+bursts, the per-second clock redraw — couples into the amp through a driven
+pad as a constant static floor, activity hiss, and a 1 Hz tick. With the pad
+isolated the idle is near-silent. The cost of that silence is a small click at
+the pad transition around every clip — see below.
 
 | Parameter | Value |
 |---|---|
-| Sample rate | 32 000 Hz (fixed) |
+| Sample rate | The clip's own native rate (current bundled sounds: 16 000 Hz) — no fixed rate, no resampling |
 | Bit depth | 8-bit unsigned PCM (0–255) |
 | Channels | Mono (DAC channel 0, GPIO25) |
-| Playback operating point | **128** (= VDD/2 ≈ 1.65 V) — the centre the ring is fed around |
-| Idle (between clips, either enabled or disabled) | GPIO25 pad **isolated** (`rtc_gpio_isolate` — stock firmware's idle state), no DMA, no clock |
-| Per-clip fade in/out | **120 ms** cosine S-curve (`PLAY_FADE_MS`) |
-| DMA buffers | 4 × 1024 bytes (allocated per clip, freed on teardown; ring is silence-primed before each clip — onset latency ≈ fade-in + 128 ms) |
+| Playback operating point | **128** (= VDD/2 ≈ 1.65 V) — the level the pad connects and disconnects at |
+| Idle (between clips, either enabled or disabled) | GPIO25 pad **isolated** (`rtc_gpio_isolate`), no timer, no clock |
+| Per-clip ramp in/out | One DAC code step **per sample** between 128 and the clip's own first/last sample — see below |
+| Sample buffer | Two 1024-byte halves in plain internal RAM (not DMA-capable — this engine needs no DMA memory at all); the whole clip is pre-composed in PSRAM and streamed into them |
 
 #### Silence level — why 128, not 0
 
@@ -1537,42 +1577,38 @@ idle DAC voltage actually is.
 
 The pipeline uses **128** because:
 - 128 ÷ 255 × 3.3 V ≈ VDD/2 — the centre of the DAC's linear range
-- All WAV samples are decoded as signed 16-bit, volume-scaled, then offset by
-  128 before writing to the DMA buffer
-- If the idle level were anything other than 128, the coupling cap would charge
-  to a different voltage, and the next sound would start from the wrong
-  operating point, producing an audible pop as the cap re-centres
+- 16-bit WAV samples are down-converted to 8-bit, volume-scaled, and centred
+  on 128 before playback
+- If the pad is isolated at a level other than 128, the coupling cap is left
+  holding the wrong voltage, and the *next* transition — connecting the pad
+  for the following clip — re-centres it as an audible pop. Confirmed directly
+  on hardware: isolating from 128 is silent; isolating from 0 pops.
 
-#### Pop prevention — per-clip fade in/out
+#### Pop/click mitigation — mid-rail parking and fast (not slow) ramps
 
-Each time the DAC ring is brought up for a clip, the output would otherwise
-step from 0 V (the DAC starts at code 0) to 128 (the playback centre). Through the coupling
-cap that step looks like a DC transient — an audible thump. The firmware
-prevents it at **both ends of every clip** with a **cosine S-curve fade** over
-**120 ms** (`PLAY_FADE_MS`):
+Two things reduce the click at each pad transition, and one of them is the
+opposite of the intuitive fix:
 
-```c
-fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * M_PI)));  // 0..128
-```
+- **Park at mid-rail.** The pad connects at 128 when a clip starts and is
+  walked back to 128 before it's released at the end, so the coupling cap
+  never has to re-centre from a level that isn't 128 — see above.
+- **Ramp fast, not slow.** Only if the clip's own first or last sample isn't
+  already 128 does a ramp run at all, and it steps **exactly one DAC code per
+  sample** — as fast as the sample rate allows, not spread over a fixed
+  duration. This is deliberately counter-intuitive: an 8-bit ramp is not a
+  smooth voltage change, it's a staircase of ~13 mV steps, and what the amp
+  hears is the *step rate*. A short, fast ramp puts that staircase at the
+  sample rate — 16 kHz for the current assets, above hearing. A long, gentle
+  ramp puts the same staircase at a few hundred Hz, which is squarely audible
+  as a crackle. Confirmed on hardware by manually stepping the DAC test mode's
+  DC level: every step clicks, regardless of step size — the click is the
+  step, and slowing the ramp down only lowers its frequency into a more
+  audible range instead of removing it.
 
-- **Fade-in (0 → 128)** is written immediately after `dac_continuous_enable()`,
-  before the clip's samples.
-- **Fade-out (128 → 0)** is queued after the clip's last sample; the task then
-  waits out the ring depth before `dac_teardown()` so the fade actually reaches
-  the speaker (otherwise `del_channels()` would cut it off).
-
-This keeps `dV/dt` low enough that the AC-coupled amp sees a gentle ramp rather
-than a step at the start and end of each sound.
-
-#### APLL cold-start delay
-
-The first-ever call to `dac_continuous_new_channels()` after power-on triggers
-ESP32 APLL lock and I²S peripheral initialisation — a one-time ~1.6 s stall.
-Because the DAC is now brought up **per clip** (not at boot), this one-time lock
-is paid on the **first sound played** in a boot session rather than during
-startup. Subsequent clips re-create the channel quickly (APLL already locked).
-When audio output is disabled, the continuous DAC / I²S0 peripheral is never
-touched at all, so the APLL lock and the ~16 KB DMA ring allocation never occur.
+A small click at the pad transition is, as far as this hardware allows,
+unavoidable: it's the price of the silent isolated idle above. Muting the
+amplifier across the transition instead would need its shutdown (SD) pin
+wired to a GPIO — see *LTK8002D hardware limitations* below.
 
 #### LTK8002D hardware limitations
 
@@ -1583,17 +1619,22 @@ touched at all, so the APLL lock and the ~16 KB DMA ring allocation never occur.
 | **Always-on noise floor** | Because the amp is always powered, it amplifies its own thermal noise and any supply noise with no audio playing |
 | **Fixed gain** | ~3× (9.5 dB) set by internal resistors — not adjustable in software |
 
-The firmware's **software volume control** (`audio_set_volume`) works by
-scaling PCM sample values before writing to the DMA buffer — the amplifier
-gain itself is fixed.
+The firmware's **software volume control** (`audio_set_volume`) scales PCM
+sample values before playback — the amplifier gain itself is fixed. Because
+this happens digitally on an 8-bit converter, lowering the volume costs
+resolution (roughly one bit per halving); a source recorded well below full
+scale loses proportionally more headroom before the setting is even applied.
+The bundled `click.wav`/`bell.wav` are normalised to full scale for this
+reason. Volume changes take effect **immediately** — unlike the enable toggle
+below, no reboot is required.
 
 #### `Audio → Enable audio output` toggle
 
 Audio output is **disabled by default**. The toggle takes effect on the **next reboot** — when the web UI saves a change to this setting it triggers a restart so the audio subsystem comes up cleanly in the chosen state.
 
-**Boot with audio disabled (default):** `audio_init(false)` is called. The continuous DAC, I²S0 peripheral, APLL, and DMA ring are never started. The GPIO25 pad stays **isolated** (`rtc_gpio_isolate()`, applied once at the top of `app_main`) — disconnected from the digital domain, no DMA, no clock. The ~16 KB DMA heap and the ~1.6 s APLL cold-start delay are avoided entirely.
+**Boot with audio disabled (default):** `audio_init(false)` is called. Nothing is ever created — no timer, no DAC channel. The GPIO25 pad stays **isolated** (`rtc_gpio_isolate()`, applied once at the top of `app_main`) — disconnected from the digital domain, no clock.
 
-**Boot with audio enabled:** `audio_init(true)` only sets the enabled flag; the pad stays isolated. The DAC is **not** brought up at boot — it is created per clip by the playback task (`dac_restart()` → fade-in → clip → fade-out → `dac_teardown()`, which re-isolates the pad), so idle is identical to the disabled case. This is the key difference from earlier builds, which left the ring running at 128 between sounds.
+**Boot with audio enabled:** `audio_init(true)` only sets the enabled flag; the pad stays isolated. The DAC and its timer are **not** brought up at boot — they're created per clip by the playback task and torn down again afterwards (re-isolating the pad), so idle is identical to the disabled case.
 
 **Note:** the LTK8002D itself remains powered (SD pin tied high) in both cases, so its thermal self-noise floor is still present at a very low level.
 
@@ -1610,8 +1651,8 @@ for the small capacitive residual and for general efficiency:
 
 | Mitigation | Effect |
 |---|---|
-| GPIO25 pad **isolated** at idle (`rtc_gpio_isolate`, between clips, enabled *and* disabled) | No I²S/DMA/clock running, and the pad is disconnected from the digital domain — no conduction path for ground/supply transients into the amp (see toggle section) |
-| DAC created/destroyed **per clip** (`dac_restart` / `dac_teardown`) | The DMA/I²S engine only runs while a sound is actually playing, then is fully torn down — matching the stock firmware's silent idle |
+| GPIO25 pad **isolated** at idle (`rtc_gpio_isolate`, between clips, enabled *and* disabled) | No timer/clock running, and the pad is disconnected from the digital domain — no conduction path for ground/supply transients into the amp (see toggle section) |
+| DAC channel and timer created/destroyed **per clip** | The engine only runs while a sound is actually playing, then is fully torn down — matching the stock firmware's silent idle |
 | `WIFI_PS_NONE` (radio always on) | MIN_MODEM was used while GPIO25 was clamped LOW, because the radio's continuous current was audible through that clamp's ground path. With the pad isolated the noise cost is gone — and MIN_MODEM's ~80% radio sleep was dropping downlink frames (MQTT `No PING_RESP` every keepalive, esp-tls `select() timeout` on handshakes), so the receiver now stays on |
 | Bulk LCD pixel pushes use `spi_device_transmit()` (interrupt/DMA) instead of `spi_device_polling_transmit()` | The DMA path **yields the CPU** while each chunk clocks out, instead of busy-waiting with interrupts hot. This lowered the SPI-induced switching component of the noise floor during every clock-face/ticker redraw. Small command/parameter writes (≤8 bytes) stay on the polling path, where DMA setup would cost more than it saves |
 | Colon-blink **partial push** (diff-box) | The once-per-second colon blink rewrites only the two changed colon-dot rectangles instead of repainting the whole tube — far less per-second SPI traffic (and CPU) on the shared rail |
@@ -1643,7 +1684,7 @@ Capture is driven by the ESP32's **digital ADC controller via I²S0 DMA** (`adc_
 - `esp_timer` + `adc_oneshot_read()` at 125 µs: each read costs **300–600 µs** (driver mutex, per-read reconfiguration), so the timer ran in permanent catch-up — the *real* sample rate was ~1.7 kHz, making every band above the true ~850 Hz Nyquist **aliased noise** (measured ~78 % of Core 0 for the privilege).
 - Register-level SAR reads fixed the rate and cut CPU to ~16 %, but RTOS preemption produced **sampling jitter** (esp_timer catch-up clusters samples back-to-back, then they're treated as uniform) — a swept-tone test showed high-frequency energy smeared into the low bands and nothing detected above ~450 Hz.
 
-**I²S0 sharing with audio:** `dac_continuous` (audio playback) uses the same peripheral. Audio claims it via `mic_set_audio_active(true)` before each clip and releases it after teardown — the spectrum freezes for the duration of a button click or alarm and resumes automatically (same pattern as the LED pause during playback).
+**I²S0 is not shared with anything.** Audio playback used to drive the DAC through this same controller, so a clip and Spectrum mode couldn't run at once — see [Audio / DAC Notes](#audio--dac-notes). Playback now clocks the DAC from its own hardware timer instead, so the microphone holds this handle for the device's entire uptime with nothing to hand it back to.
 
 | Parameter | Value |
 |---|---|

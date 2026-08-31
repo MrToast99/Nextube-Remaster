@@ -348,13 +348,12 @@ static void discipline_tick(void)
 
     } else if (mode == 2) {
         /* PCF8563 slaving.  Edge-sync: poll the seconds register until it
-         * ticks over, capturing the system time at that instant so the
-         * PCF's whole-second value has a known (~0) sub-second phase. */
-        /* Edge-sync: poll until the RTC seconds register ticks, then capture
-         * gettimeofday() immediately — before any further I²C reads overwrite
-         * the timestamp.  The previous do-while captured sysnow AFTER the
-         * continue read, biasing every correction by one extra I²C round-trip
-         * (~1-3 ms) that discipline could never self-cancel. */
+         * ticks over, then capture gettimeofday() immediately — before any
+         * further I²C reads overwrite the timestamp — so the PCF's
+         * whole-second value has a known (~0) sub-second phase. The previous
+         * do-while captured sysnow AFTER the continue read, biasing every
+         * correction by one extra I²C round-trip (~1-3 ms) that discipline
+         * could never self-cancel. */
         struct tm a, b;
         if (!rtc_get_time(&a)) return;
         struct timeval sysnow = {0};

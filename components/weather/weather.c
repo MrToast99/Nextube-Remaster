@@ -1,6 +1,6 @@
 #include "weather.h"
 #include "config_mgr.h"
-#include "wifi_manager.h"
+#include "periodic_net_poll.h"
 #include "fw_version.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
@@ -1030,55 +1030,67 @@ static void fetch_weather(void)
     fetch_air_quality();
 }
 
-static void weather_task(void *arg)
+/* Exponential-backoff state for weather_poll_tick() below — 2 s → 4 s →
+ * 8 s → … capped at 5 min, same values weather_task's own inline retry
+ * loop used before periodic_net_poll.c took over owning the actual task
+ * (see periodic_net_poll.h's doc comment for the merge rationale). Reset to
+ * the floor once a fetch actually succeeds, so a LATER failure (provider
+ * outage after hours of good fetches) starts backing off from 2 s again,
+ * not from wherever the very first boot-time backoff happened to leave it. */
+static uint32_t s_wx_retry_ms = 2000;
+
+/* Called by periodic_net_poll_task() once due; returns how many ms until it
+ * should be called again. Mirrors weather_task's old loop exactly: fetch,
+ * and if it failed, come back sooner (backing off) instead of waiting the
+ * full 10 min — the shared scheduler doesn't need to know any of this, it
+ * just does whatever this function asks for next. */
+static uint32_t weather_poll_tick(void)
 {
-    /* Wait until STA actually has an IP before attempting any HTTPS connection. */
-    ESP_LOGI(TAG, "waiting for WiFi...");
-    while (!wifi_manager_is_connected()) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    /* weather_enabled is checked live every cycle (not just once at
+     * registration), so toggling it off or back on in the web UI takes
+     * effect on the next tick — no restart needed in either direction.
+     * weather_start() now registers this tick_fn unconditionally at boot
+     * regardless of weather_enabled's value (see main.c's app_main()), so
+     * there's always a registered tick_fn here to turn back on; this check
+     * is what makes that no-op harmlessly instead of fetching. */
+    config_lock();
+    bool weather_enabled = config_get()->weather_enabled;
+    config_unlock();
+    if (!weather_enabled) {
+        static bool logged_disabled = false;
+        if (!logged_disabled) {
+            ESP_LOGI(TAG, "weather_enabled=false — skipping poll");
+            logged_disabled = true;
+        }
+        return 600000;   /* recheck in 10 min in case it's re-enabled live */
     }
 
-    /* Give the DNS resolver ~8 s to settle after DHCP assigns an IP.
-     * 3 s proved insufficient on some routers — the first geocoding lookup
-     * still hits EAI_AGAIN (getaddrinfo code 202) because the lwIP resolver
-     * isn't ready yet.  8 s matches the audio task's post-WPA2 delay and
-     * eliminates the error in practice.  The exponential backoff below
-     * (2 s → 4 s → 8 s → … capped at 5 min) handles any remaining edge cases
-     * without hammering the resolver with rapid-fire failing queries. */
-    vTaskDelay(pdMS_TO_TICKS(8000));
-
-    /* First fetch: attempt immediately, then retry with exponential backoff
-     * (2 s → 4 s → 8 s → … capped at 5 min) until it succeeds.
-     * If weather is not configured (empty city, no API key) the fetch
-     * functions return immediately without setting s_weather.valid;
-     * the backoff prevents spinning at 2 s forever in that case. */
-    ESP_LOGI(TAG, "WiFi ready – fetching weather");
-    uint32_t retry_ms = 2000;
-    while (!s_weather.valid) {
-        /* External-push source: data arrives via weather_set_external(); the
-         * firmware must not fetch (or it would have nothing to fetch from). */
-        if (weather_source_is_external()) {
+    /* External-push source: data arrives via weather_set_external(); the
+     * firmware must not fetch (or it would have nothing to fetch from).
+     * Still checked periodically (not just once) in case weather_source
+     * flips back to a real provider later without a reboot. */
+    if (weather_source_is_external()) {
+        static bool logged_once = false;
+        if (!logged_once) {
             ESP_LOGI(TAG, "weather_source=external — awaiting POST /api/weather");
-            break;
+            logged_once = true;
         }
-        fetch_weather();
-        if (!s_weather.valid) {
-            ESP_LOGW(TAG, "Weather fetch failed, retrying in %lu s",
-                     (unsigned long)(retry_ms / 1000));
-            vTaskDelay(pdMS_TO_TICKS(retry_ms));
-            if (retry_ms < 300000)
-                retry_ms = (retry_ms * 2 < 300000) ? retry_ms * 2 : 300000;
-        }
+        return 600000;
     }
 
-    /* Subsequent fetches every 10 minutes */
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(600000));
-        if (weather_source_is_external())
-            continue;   /* don't overwrite externally-pushed data */
-        ESP_LOGI(TAG, "fetching weather...");
-        fetch_weather();
+    ESP_LOGI(TAG, "fetching weather...");
+    fetch_weather();
+    if (s_weather.valid) {
+        s_wx_retry_ms = 2000;   /* reset backoff floor for any future failure */
+        return 600000;          /* steady 10-minute interval */
     }
+
+    ESP_LOGW(TAG, "Weather fetch failed, retrying in %lu s",
+             (unsigned long)(s_wx_retry_ms / 1000));
+    uint32_t this_retry = s_wx_retry_ms;
+    if (s_wx_retry_ms < 300000)
+        s_wx_retry_ms = (s_wx_retry_ms * 2 < 300000) ? s_wx_retry_ms * 2 : 300000;
+    return this_retry;
 }
 
 void weather_start(void)
@@ -1098,8 +1110,19 @@ void weather_start(void)
                  (double)s_wx_lat, (double)s_wx_lon);
     }
     config_unlock();
-    if (xTaskCreate(weather_task, "weather", 8192, NULL, 3, NULL) != pdPASS)
-        ESP_LOGE(TAG, "weather_task creation failed");
+    /* No longer a dedicated task (was 6144 B, measured peak 4384 B across
+     * ~2 h of uptime with every feature active) — weather_task, subscribers_
+     * task, and update_check_task were three separate stacks doing the same
+     * "sleep until due, do one HTTPS fetch" shape of work, already
+     * serialised against each other through the shared tls_sem mutex. Now
+     * one shared task (periodic_net_poll.c) does all three; this just
+     * registers weather_poll_tick() with it. See periodic_net_poll.h's doc
+     * comment for the full rationale — this was the task stacks-total-~143 KB-
+     * against-~140-KB-usable finding that motivated the merge in the first
+     * place. first_delay_ms=0: fetch immediately once the shared WiFi/DNS
+     * gate clears, matching this task's original "fetch immediately on
+     * WiFi ready" behavior. */
+    periodic_net_poll_register(weather_poll_tick, 0, "weather");
 }
 
 const weather_data_t *weather_get(void)

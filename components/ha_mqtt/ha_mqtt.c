@@ -61,7 +61,6 @@
 #include "fw_version.h"
 #include "sht30.h"
 #include "weather.h"     /* air-quality sensor (weather_get_aqi)        */
-#include "wifi_manager.h"
 #include "display.h"
 #include "update_check.h" /* autonomous GitHub release check → update binary sensor */
 #include "audio.h"       /* ticker notification chime (audio_play_file) */
@@ -69,6 +68,7 @@
 #include "esp_wifi.h"    /* RSSI for the optional health sensors        */
 #include "esp_system.h"  /* esp_get_free_heap_size                      */
 #include "esp_timer.h"   /* uptime for the health sensors               */
+#include "esp_heap_caps.h" /* heap_caps_get_largest_free_block - diagnostic on client-start failure */
 
 #include <string.h>
 #include <stdio.h>
@@ -1005,10 +1005,26 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 /* ── Main task ─────────────────────────────────────────────────────── */
 static void ha_mqtt_task(void *arg)
 {
-    /* Wait for WiFi station to connect */
-    while (!wifi_manager_is_connected()) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
+    /* Deliberately does NOT wait for WiFi to connect before creating
+     * esp-mqtt's client (and its internal ~10 KB task) below. Every other
+     * task in this firmware gets its stack carved out during app_main()'s
+     * early xTaskCreate batch, while the internal heap is still relatively
+     * unfragmented; this one used to be the sole exception, gated behind
+     * wifi_manager_is_connected() and so deferred until well after WiFi
+     * association, mDNS probing, and the first weather/update_check/
+     * subscribers TLS handshakes had already churned the heap - which is
+     * the likely reason "Error create mqtt task" kept recurring regardless
+     * of a startup delay (see the task.stack_size comment below; a fixed
+     * post-connect delay was tried and field-tested, and did not help).
+     *
+     * esp_mqtt_client_start()'s return value only reflects whether the
+     * task itself was created - not whether the broker is reachable yet.
+     * If WiFi isn't up when this runs, the transport connect attempt fails
+     * asynchronously and is handled by the same "will reconnect
+     * automatically" path already used for any later disconnect - no
+     * different from starting MQTT on a laptop before Ethernet is plugged
+     * in. Task creation itself doesn't need the network, only a place to
+     * put the stack. */
 
     /* Gate MQTT client allocation until no HTTPS connection is in progress.
      *
@@ -1038,7 +1054,37 @@ static void ha_mqtt_task(void *arg)
         /* Default stack (6144) is too small once discovery payloads are generated.
          * publish_discovery() alone allocates ~1.7 KB of locals (payload[768] +
          * dev[192] + 8 topic strings) on top of ~1-2 KB of MQTT library frames.
-         * 10240 gives comfortable headroom for future additions. */
+         * 10240 gives comfortable headroom for future additions.
+         *
+         * DO NOT shrink this without measuring real peak usage under a run
+         * with every feature active first. 8192 was tried (based on a single
+         * earlier ~5.7 KB peak reading that didn't reflect this task's full
+         * discovery payload under heavier entity counts) and produced a
+         * silent stack overflow once the task actually ran — not a clean
+         * failure, but heap corruption that showed up minutes later as
+         * unrelated allocation failures across mDNS, esp-tls, and HTTP client
+         * (confirmed by reverting only this value and watching the entire
+         * cascade disappear, leaving just the task-creation retry below).
+         *
+         * The *creation-time* failure ("Error create mqtt task") is a
+         * separate, real, and still-open issue: xTaskCreate() needs a single
+         * contiguous internal-RAM block of this size.
+         *
+         * NOT a transient startup-burst thing: a 5 s post-connect delay was
+         * tried and did not help - failures still occur many minutes into
+         * uptime. largest_internal has read exactly 9216 B in every field
+         * reading taken this whole investigation, across wildly different
+         * uptimes and total-free values, including one where an unrelated
+         * task's stack was cut by 4096 B (freeing that many bytes of total
+         * internal RAM moved this number by exactly zero). That means this
+         * is a fixed structural boundary between two permanently-resident
+         * allocations, not a "not enough total free RAM" or "hasn't settled
+         * yet" problem - freeing bytes elsewhere or waiting longer won't
+         * touch it. heap_caps_print_heap_info(MALLOC_CAP_INTERNAL) on the
+         * failure path below dumps the actual region/block layout so the
+         * next failure shows what's boxing in that 9216 B gap, instead of
+         * just the one number. Don't guess another stack-size or timing fix
+         * without that. */
         .task.stack_size = 10240,
     };
 
@@ -1062,12 +1108,28 @@ static void ha_mqtt_task(void *arg)
     for (int attempt = 1; attempt <= 5; attempt++) {
         start_err = esp_mqtt_client_start(s_client);
         if (start_err == ESP_OK) break;
-        ESP_LOGE(TAG, "esp_mqtt_client_start failed (%s), attempt %d/5",
-                 esp_err_to_name(start_err), attempt);
+        /* largest_internal: the actual contiguous-block ceiling right now -
+         * the number that decides whether task.stack_size above will fit,
+         * not the total free figure in the periodic heap log.
+         * MALLOC_CAP_8BIT matters here: MALLOC_CAP_INTERNAL alone also
+         * counts reclaimed IRAM, which isn't byte-addressable and can never
+         * actually hold a task stack - a field reading showed a stable
+         * "9216 B" that turned out to be exactly that: an IRAM region
+         * heap_caps_print_heap_info below confirmed was nearly empty and
+         * irrelevant, while the real (fragmentable, byte-addressable)
+         * ceiling sat lower, in a heavily-used D/IRAM region. Querying
+         * without MALLOC_CAP_8BIT would report the unusable number again. */
+        ESP_LOGE(TAG, "esp_mqtt_client_start failed (%s), attempt %d/5 (largest_internal=%u B)",
+                 esp_err_to_name(start_err), attempt,
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
     if (start_err != ESP_OK) {
         ESP_LOGE(TAG, "MQTT client failed to start — MQTT disabled for this boot");
+        /* All 5 retries exhausted — see the stack_size comment above for the
+         * 9216 B investigation this is part of. Dump the actual region/block
+         * breakdown rather than guessing another stack-size or timing fix. */
+        heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
     }
 
     /* ── Publish loop (60 s tick) ── */
@@ -1209,4 +1271,45 @@ void ha_mqtt_start(void)
         ESP_LOGE(TAG, "ha_mqtt_task creation failed");
     else
         ESP_LOGI(TAG, "MQTT task started (broker: %s:%u)", s_broker, (unsigned)s_port);
+}
+
+/* Pause/resume the underlying esp-mqtt client — for callers (web_server.c's
+ * OTA/webUI/stock-repair paths) that need MQTT fully quiet for a while, not
+ * just our own wrapper task.  vTaskSuspend()-ing "ha_mqtt" (the task these
+ * two don't touch) only freezes THIS task's 60 s publish loop and connect-
+ * retry logic; esp-mqtt's own client owns a separate internal task for the
+ * actual TCP/reconnect/keepalive work once esp_mqtt_client_start() has
+ * succeeded, and that keeps running regardless — observed in the field
+ * reconnecting and publishing a full discovery burst several seconds into
+ * an OTA/webUI pull's "suspended" window despite "ha_mqtt" already being on
+ * the suspend list. esp_mqtt_client_stop()/_start() operate on the client
+ * itself, so they reach that internal task too.
+ *
+ * s_connected is cleared synchronously in ha_mqtt_pause(), before
+ * esp_mqtt_client_stop() returns — closes the tiny window where a caller on
+ * another task (e.g. a touch-button press publish, or the 60 s loop if it
+ * happens to be mid-tick right as this runs) could still see s_connected
+ * true and attempt a publish against a client that's mid-stop. */
+void ha_mqtt_pause(void)
+{
+    if (!s_client) return;   /* never started, or esp_mqtt_client_init() failed */
+    s_connected = false;
+    ESP_LOGI(TAG, "MQTT paused");
+    esp_mqtt_client_stop(s_client);   /* blocks until the client's own task has stopped */
+}
+
+/* Resume a client previously paused with ha_mqtt_pause().  s_connected
+ * flips back to true via the normal MQTT_EVENT_CONNECTED handler once the
+ * reconnect actually completes — not set here, since esp_mqtt_client_start()
+ * only kicks off the connection attempt asynchronously. No-op if the client
+ * was never started (ha_mqtt_pause() would also have no-op'd in that case,
+ * so there's nothing to resume). */
+void ha_mqtt_resume(void)
+{
+    if (!s_client) return;
+    esp_err_t e = esp_mqtt_client_start(s_client);
+    if (e != ESP_OK)
+        ESP_LOGW(TAG, "MQTT resume: esp_mqtt_client_start failed (%s)", esp_err_to_name(e));
+    else
+        ESP_LOGI(TAG, "MQTT resumed");
 }

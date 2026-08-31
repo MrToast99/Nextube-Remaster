@@ -1,10 +1,10 @@
 #include "subscribers.h"
 #include "config_mgr.h"
+#include "periodic_net_poll.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include <string.h>
 #include "esp_crt_bundle.h"
@@ -24,9 +24,6 @@ static SemaphoreHandle_t s_tiktok_mutex = NULL;
 
 static sub_count_t       s_mastodon       = {0};
 static SemaphoreHandle_t s_mastodon_mutex = NULL;
-
-/* Binary semaphore used to wake the subscribers task early for a forced poll. */
-static SemaphoreHandle_t s_refresh_sem = NULL;
 
 /* Shared receive buffer — used only by YouTube and Bilibili fetches.
  * Instagram (internal API), TikTok (Research API) and Mastodon use a
@@ -614,100 +611,115 @@ static void fetch_mastodon(void)
     /* ctx.buf is the shared buffer — not freed here, see get_shared_rx_buf(). */
 }
 
-/* ── Main task — polls all configured platforms at the configured interval ── */
-static void subscribers_task(void *arg)
+/* ── Poll tick — polls all configured platforms once, returns the ms until
+ * periodic_net_poll_task() should call this again ────────────────────────
+ * Was subscribers_task's own for(;;) { work; sleep; } loop, running on its
+ * own dedicated 6144 B stack; now called by the shared scheduler instead —
+ * see periodic_net_poll.h's doc comment for the merge rationale. The
+ * original 20 s head-start (courtesy yield so NTP/weather/mDNS finish their
+ * own boot sequences first — concurrent TLS was always safe, tls_sem
+ * serialises it) is now this subsystem's first_delay_ms, registered in
+ * subscribers_start() below. */
+static uint32_t subscribers_poll_tick(void)
 {
-    /* 20 s head-start so NTP, weather, and mDNS can finish their own boot
-     * sequences first.  Concurrent TLS is safe (tls_sem serialises access),
-     * so this is just a courtesy yield — not a hard dependency. */
-    vTaskDelay(pdMS_TO_TICKS(20000));
-    while (1) {
-        ESP_LOGI(TAG, "Social counter poll cycle starting");
+    /* social_enabled (the master switch) is checked live every cycle (not
+     * just once at registration), same pattern weather_poll_tick() uses for
+     * weather_enabled — so toggling it off or back on in the web UI stops
+     * or resumes all four platforms at once on the next tick, no restart
+     * needed either way. subscribers_start() now registers this tick_fn
+     * unconditionally at boot regardless of social_enabled's value (see
+     * main.c's app_main()), so there's always a registered tick_fn here to
+     * turn back on. The four per-platform flags below (youtube/instagram/
+     * tiktok/mastodon_enabled) were already independently live before this
+     * — this just adds the master switch on top, matching what
+     * config_advance_mode() already does for display-mode rotation. */
+    config_lock();
+    bool     social_enabled  = config_get()->social_enabled;
+    uint16_t skip_interval   = config_get()->sub_poll_interval_min;
+    config_unlock();
+    if (skip_interval < 5) skip_interval = 5;   /* floor: avoid hammering APIs */
+    if (!social_enabled) {
+        ESP_LOGI(TAG, "social_enabled=false — skipping poll cycle");
+        return (uint32_t)skip_interval * 60000;
+    }
 
-        /* YouTube / Bilibili — mutually exclusive via video_site config */
-        {
-            bool youtube_enabled;
-            char video_site[16], bili_uid[24], youtube_id[48];
-            config_lock();
-            const nextube_config_t *cfg = config_get();
-            youtube_enabled = cfg->youtube_enabled;
-            strncpy(video_site, cfg->video_site, sizeof(video_site) - 1); video_site[sizeof(video_site) - 1] = '\0';
-            strncpy(bili_uid,   cfg->bili_uid,   sizeof(bili_uid)   - 1); bili_uid[sizeof(bili_uid)     - 1] = '\0';
-            strncpy(youtube_id, cfg->youtube_id, sizeof(youtube_id) - 1); youtube_id[sizeof(youtube_id) - 1] = '\0';
-            config_unlock();
+    ESP_LOGI(TAG, "Social counter poll cycle starting");
 
-            if (!youtube_enabled) {
-                ESP_LOGI(TAG, "YouTube/Bilibili disabled in config — skipping");
-            } else {
-                bool is_bili    = (strcmp(video_site, "bilibili") == 0);
-                /* For YouTube, only the channel ID is required here; fetch_youtube()
-                 * decides whether to use the API key or the relay (and logs a hint
-                 * if neither is configured).  For Bilibili, only the UID is needed. */
-                bool configured = is_bili ? (bili_uid[0] != '\0') : (youtube_id[0] != '\0');
-                if (configured) {
-                    if (is_bili) fetch_bilibili();
-                    else         fetch_youtube();
-                } else {
-                    ESP_LOGI(TAG, "%s enabled but ID/UID not set — skipping",
-                             is_bili ? "Bilibili" : "YouTube");
-                }
-            }
-        }
-
-        /* Instagram */
-        {
-            bool insta_enabled;
-            config_lock();
-            insta_enabled = config_get()->instagram_enabled;
-            config_unlock();
-            if (!insta_enabled) {
-                ESP_LOGI(TAG, "Instagram disabled in config — skipping");
-            } else {
-                fetch_instagram();
-            }
-        }
-
-        /* TikTok */
-        {
-            bool tiktok_enabled;
-            config_lock();
-            tiktok_enabled = config_get()->tiktok_enabled;
-            config_unlock();
-            if (!tiktok_enabled) {
-                ESP_LOGI(TAG, "TikTok disabled in config — skipping");
-            } else {
-                fetch_tiktok();
-            }
-        }
-
-        /* Mastodon */
-        {
-            bool mastodon_enabled;
-            config_lock();
-            mastodon_enabled = config_get()->mastodon_enabled;
-            config_unlock();
-            if (!mastodon_enabled) {
-                ESP_LOGI(TAG, "Mastodon disabled in config — skipping");
-            } else {
-                fetch_mastodon();
-            }
-        }
-
+    /* YouTube / Bilibili — mutually exclusive via video_site config */
+    {
+        bool youtube_enabled;
+        char video_site[16], bili_uid[24], youtube_id[48];
         config_lock();
-        uint16_t interval_min = config_get()->sub_poll_interval_min;
+        const nextube_config_t *cfg = config_get();
+        youtube_enabled = cfg->youtube_enabled;
+        strncpy(video_site, cfg->video_site, sizeof(video_site) - 1); video_site[sizeof(video_site) - 1] = '\0';
+        strncpy(bili_uid,   cfg->bili_uid,   sizeof(bili_uid)   - 1); bili_uid[sizeof(bili_uid)     - 1] = '\0';
+        strncpy(youtube_id, cfg->youtube_id, sizeof(youtube_id) - 1); youtube_id[sizeof(youtube_id) - 1] = '\0';
         config_unlock();
-        if (interval_min < 5) interval_min = 5;   /* floor: avoid hammering APIs */
-        ESP_LOGI(TAG, "Social counter poll cycle done — sleeping %u min", (unsigned)interval_min);
-        /* Sleep in 1-minute slices.  A semaphore give from subscribers_refresh_now()
-         * breaks out of the loop early so a forced poll starts immediately. */
-        for (uint16_t _m = 0; _m < interval_min; _m++) {
-            if (s_refresh_sem &&
-                xSemaphoreTake(s_refresh_sem, pdMS_TO_TICKS(60000)) == pdTRUE) {
-                ESP_LOGI(TAG, "Force-refresh requested — restarting poll cycle");
-                break;   /* exit the sleep loop and start the next poll immediately */
+
+        if (!youtube_enabled) {
+            ESP_LOGI(TAG, "YouTube/Bilibili disabled in config — skipping");
+        } else {
+            bool is_bili    = (strcmp(video_site, "bilibili") == 0);
+            /* For YouTube, only the channel ID is required here; fetch_youtube()
+             * decides whether to use the API key or the relay (and logs a hint
+             * if neither is configured).  For Bilibili, only the UID is needed. */
+            bool configured = is_bili ? (bili_uid[0] != '\0') : (youtube_id[0] != '\0');
+            if (configured) {
+                if (is_bili) fetch_bilibili();
+                else         fetch_youtube();
+            } else {
+                ESP_LOGI(TAG, "%s enabled but ID/UID not set — skipping",
+                         is_bili ? "Bilibili" : "YouTube");
             }
         }
     }
+
+    /* Instagram */
+    {
+        bool insta_enabled;
+        config_lock();
+        insta_enabled = config_get()->instagram_enabled;
+        config_unlock();
+        if (!insta_enabled) {
+            ESP_LOGI(TAG, "Instagram disabled in config — skipping");
+        } else {
+            fetch_instagram();
+        }
+    }
+
+    /* TikTok */
+    {
+        bool tiktok_enabled;
+        config_lock();
+        tiktok_enabled = config_get()->tiktok_enabled;
+        config_unlock();
+        if (!tiktok_enabled) {
+            ESP_LOGI(TAG, "TikTok disabled in config — skipping");
+        } else {
+            fetch_tiktok();
+        }
+    }
+
+    /* Mastodon */
+    {
+        bool mastodon_enabled;
+        config_lock();
+        mastodon_enabled = config_get()->mastodon_enabled;
+        config_unlock();
+        if (!mastodon_enabled) {
+            ESP_LOGI(TAG, "Mastodon disabled in config — skipping");
+        } else {
+            fetch_mastodon();
+        }
+    }
+
+    config_lock();
+    uint16_t interval_min = config_get()->sub_poll_interval_min;
+    config_unlock();
+    if (interval_min < 5) interval_min = 5;   /* floor: avoid hammering APIs */
+    ESP_LOGI(TAG, "Social counter poll cycle done — sleeping %u min", (unsigned)interval_min);
+    return (uint32_t)interval_min * 60000;
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -717,15 +729,21 @@ void subscribers_start(void)
     s_insta_mutex    = xSemaphoreCreateMutex();
     s_tiktok_mutex   = xSemaphoreCreateMutex();
     s_mastodon_mutex = xSemaphoreCreateMutex();
-    s_refresh_sem    = xSemaphoreCreateBinary();
-    if (xTaskCreate(subscribers_task, "subscribers", 8192, NULL, 3, NULL) != pdPASS)
-        ESP_LOGE(TAG, "subscribers_task creation failed");
+    /* No longer a dedicated task (was 6144 B, measured peak 4112 B across
+     * ~2 h of uptime) — see weather_start()'s matching comment and
+     * periodic_net_poll.h's doc comment for the full rationale.
+     * first_delay_ms=20000: same 20 s courtesy head-start subscribers_task
+     * used to give NTP/weather/mDNS to finish their own boot sequences
+     * first, now measured from the shared WiFi/DNS gate instead of from
+     * task-start (this task never explicitly waited on WiFi itself before —
+     * it now gets that guarantee for free from the shared gate too). */
+    periodic_net_poll_register(subscribers_poll_tick, 20000, "subscribers");
 }
 
 /** Wake the subscribers task immediately to start a fresh poll cycle. */
 void subscribers_refresh_now(void)
 {
-    if (s_refresh_sem) xSemaphoreGive(s_refresh_sem);
+    periodic_net_poll_force("subscribers");
 }
 
 const sub_count_t *subscribers_get(void)

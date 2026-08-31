@@ -53,7 +53,7 @@ void mic_task_start(void);
 /**
  * Copy the latest normalised band energies into out[MIC_BAND_COUNT] (thread-safe).
  * Values are in the range 0.0 (silence) to 1.0 (loudest band this frame).
- * Bands are log-spaced 280–3800 Hz, grouped 4 per tube (tube 0 = bands 0-3, etc.).
+ * Band layout: see this file's header comment.
  */
 void mic_get_bands(float out[MIC_BAND_COUNT]);
 
@@ -84,16 +84,6 @@ int mic_gpio_num(void);
 
 /** Number of frames averaged during a manual baseline capture (~320 ms at 8 kHz/128-sample frames). */
 #define MIC_CAL_FRAMES 20
-
-/**
- * Audio playback ↔ microphone I2S0 arbitration (ESP32: dac_continuous and
- * adc_continuous both ride the I2S0 peripheral and cannot coexist).
- * The audio component calls (true) before bringing the DAC up — this blocks
- * spectrum capture and waits (bounded, ≤400 ms) for the mic to release the
- * peripheral — and (false) after DAC teardown so capture resumes.
- * Safe to call when the mic is disabled / never initialised.
- */
-void mic_set_audio_active(bool active);
 
 /**
  * Capture a noise baseline: averages MIC_CAL_FRAMES raw Goertzel frames and

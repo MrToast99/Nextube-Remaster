@@ -75,9 +75,8 @@ bool sht30_is_present(void) { return s_present; }
 /* Internal-only: the actual I2C trigger/wait/receive sequence, called
  * exclusively from sht30_task() below (single writer of s_last, so no
  * mutex is needed here).  Not declared in sht30.h — external callers must
- * go through sht30_get(), which is mutex-protected against the concurrent
- * readers (display task, ha_mqtt, web_server) that made s_mutex necessary
- * in the first place (see its comment). */
+ * go through sht30_get() instead, which IS mutex-protected (see its own
+ * comment for why that matters). */
 static bool sht30_read(sht30_reading_t *out)
 {
     if (!s_present || !out) return false;
@@ -152,7 +151,20 @@ void sht30_set_offset(float offset_c)
 
 void sht30_task_start(void)
 {
-    if (xTaskCreate(sht30_task, "sht30", 4096, NULL, 4, NULL) != pdPASS)
+    /* 3072, down from 4096: sht30_task logs its own stack high-water-mark
+     * on every 30 s sample (see the ESP_LOGI in sht30_task above), so unlike
+     * most tasks in this codebase this one has many independent, in-the-field
+     * readings rather than one or two — consistently 1836-2032 B free (of
+     * 4096) across separate boots over this whole session, i.e. peak usage
+     * a narrow 2064-2260 B band. Trustworthy data, not just a simple-looking
+     * loop assumed safe (that assumption cost a real bug on touch_poll_task
+     * — see its own comment): sht30_read()'s error/CRC-mismatch branches are
+     * all SHORTER than the success path already being measured (they return
+     * early, before the float math), so there's no unexercised deeper branch
+     * hiding here. 3072 leaves ~812 B (36%) over the worst reading seen so
+     * far, and the same per-sample log line keeps reporting forever, so any
+     * future regression shows up immediately rather than silently. */
+    if (xTaskCreate(sht30_task, "sht30", 3072, NULL, 4, NULL) != pdPASS)
         ESP_LOGE(TAG, "sht30_task creation failed");
 }
 

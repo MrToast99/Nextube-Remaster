@@ -12,7 +12,7 @@
  *
  * Strategy: continuous scanning with software IIR filter.  A poll task
  * (CPU 0, 50 ms) compares SMOOTH data against a software-tracked baseline
- * and fires a task-notification to a handler task on rising-edge press
+ * and queues an event for a handler task on rising-edge press
  * (smooth < baseline × 80 %).  The handler calls the user callback, keeping
  * the poll loop unblocked during flash writes.
  */
@@ -55,16 +55,15 @@ static TaskHandle_t touch_task_handle = NULL;
 
 /* ── Poll task ──────────────────────────────────────────────────────── */
 /*
- * Detection uses a software IIR baseline (s_baseline[]) seeded at boot from
- * settled SMOOTH data and slowly tracked toward idle readings at runtime.
- * A press fires when smooth < baseline × 80 % (20 % drop required).
- * ESP32 V1 touch_sens exposes only RAW and SMOOTH — no hardware BENCHMARK.
+ * Detection compares SMOOTH data against a software-tracked baseline (see
+ * s_baseline[] below for how it's seeded/tracked) — a press fires when
+ * smooth < baseline × 80 % (20 % drop required).
  *
  * Running on CPU 0 so JPEG decoding on CPU 1 (display task) cannot starve it.
  *
  * The user callback (which calls config_set_json / save_to_flash) is
- * dispatched via task-notification to a separate handler task, keeping
- * the 50 ms poll loop unblocked during slow flash writes.
+ * dispatched via a queue to a separate handler task, keeping the 50 ms
+ * poll loop unblocked during slow flash writes.
  */
 
 static TaskHandle_t  s_handler_task = NULL;
@@ -264,13 +263,37 @@ void touch_input_init(void)
 
     /* Handler task: drains the touch queue and calls user_cb.
      * Keeps the 50 ms poll loop unblocked during slow flash writes.
-     * Pinned to CPU 0 where other app tasks live. */
+     * Pinned to CPU 0 where other app tasks live.
+     *
+     * Kept at 3072, NOT reduced despite a field measurement showing only
+     * 564 B peak: user_cb (on_touch() in main.c) runs synchronously on THIS
+     * task's own stack and its chain (config_lock, mode-cycling,
+     * audio_play_file's malloc+xTaskCreatePinnedToCore, ha_mqtt_publish_button)
+     * is much deeper than this task's own code — the 564 B reading is almost
+     * certainly the idle "waiting on the queue" baseline from an unattended
+     * window where no touch event fired, not the real worst case. Needs a
+     * measurement taken while actually touching the device before this is
+     * touched. */
     s_touch_queue = xQueueCreate(8, sizeof(touch_pad_id_t));
     if (xTaskCreatePinnedToCore(touch_handler_task, "touch_hdl", 3072, NULL,
                                4, &s_handler_task, 0) != pdPASS)
         ESP_LOGE(TAG, "touch_handler_task creation failed");
 
-    /* Poll task on CPU 0 – away from the display task's JPEG decoding on CPU 1 */
+    /* Poll task on CPU 0 – away from the display task's JPEG decoding on CPU 1.
+     *
+     * REVERTED to 3072 (was briefly cut to 1536 on a first field reading of
+     * 620 B peak, reasoned as "no callback, no variable-depth path, so that's
+     * trustworthy"). Wrong: a second boot, still before any deliberate
+     * reduction, measured 2076 B peak (free=996 of the original 3072) for
+     * this exact task — over 3x the first reading, and comfortably more than
+     * the 1536 it had briefly been cut to would have survived. Whatever
+     * path actually deepens here run-to-run isn't understood yet (not
+     * user_cb — that's touch_hdl above, not this task), so "simple-looking
+     * loop" was not a safe basis for confidence. Left at the original 3072
+     * (~1 KB / 48% margin over the 2076 B reading) rather than trying to
+     * compute a new "right" number from two disagreeing data points — the
+     * next move here should be several real measurements across separate
+     * boots, not a size change. */
     if (xTaskCreatePinnedToCore(touch_poll_task, "touch", 3072, NULL,
                                5, &touch_task_handle, 0) != pdPASS)
         ESP_LOGE(TAG, "touch_poll_task creation failed");

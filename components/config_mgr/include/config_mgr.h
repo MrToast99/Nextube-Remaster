@@ -197,14 +197,18 @@ typedef struct {
 
     /* Background-feature toggles (boot-time gates — restart required to apply).
      * All default true so a config.json from older firmware retains current
-     * behaviour after upgrade.  Disabling frees the per-task stack and stops
-     * the periodic polling — useful for users who don't want weather data,
-     * subscriber counts, or LAN-side mDNS advertisement. */
-    bool             weather_enabled;    /* gate weather_task creation */
-    bool             update_check_enabled; /* gate update_check_task — periodic GitHub release
-                                               check that drives the tube-6 update indicator and
+     * behaviour after upgrade.  Disabling stops that subsystem's periodic
+     * HTTPS polling — useful for users who don't want weather data,
+     * subscriber counts, or LAN-side mDNS advertisement. (weather/
+     * update_check/social share one background task — see
+     * components/periodic_net_poll — so disabling only one of the three
+     * doesn't free a dedicated stack; the shared task stays up until all
+     * three are disabled.) */
+    bool             weather_enabled;    /* gate weather polling (shared net_poll task) */
+    bool             update_check_enabled; /* gate the periodic GitHub release check that
+                                               drives the tube-6 update indicator and
                                                the Home Assistant "Nextube Update Available" topic */
-    bool             social_enabled;     /* master gate — if false, subscribers_task never starts */
+    bool             social_enabled;     /* master gate — if false, social counter polling never starts */
     bool             youtube_enabled;       /* gate subscribers_task YouTube fetch */
     uint16_t         sub_poll_interval_min; /* social counter re-poll interval in minutes (default 30, min 5) */
     bool             instagram_enabled; /* enable Instagram follower fetches (default true) */
@@ -345,8 +349,10 @@ void config_backup_to_nvs(void);
 
 /** Global TLS serialisation – acquire before any esp_http_client HTTPS call,
  *  release after esp_http_client_cleanup().  Guarantees only one mbedTLS
- *  SSL context exists at a time, preventing internal-SRAM exhaustion when
- *  the weather task and the social-counter task would otherwise overlap. */
+ *  SSL context exists at a time, preventing internal-SRAM exhaustion from
+ *  concurrent handshakes — e.g. the shared periodic_net_poll task's own
+ *  fetches (weather/subscribers/update_check) overlapping with an OTA pull,
+ *  a WebUI update, or a stock-file repair running as a separate task. */
 void tls_sem_take(void);
 void tls_sem_give(void);
 
