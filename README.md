@@ -337,13 +337,16 @@ The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi prov
 
 **Connecting to the setup AP:**
 1. The tubes display the 8-digit PIN (or find it in the serial log).
-2. On your phone or laptop, connect to **Nextube-Setup** and enter the PIN **as the WiFi password** when prompted.
+2. **`Nextube-Setup` is a WiFi network, not a page or app** — open the same WiFi settings you'd use to join any network (on a phone: Settings → WiFi; on a laptop: click the WiFi icon in the taskbar/menu bar) and look for **Nextube-Setup** in the list of nearby networks, exactly like connecting to a router at home or a coffee shop. Tap/click it, then enter the PIN **as the WiFi password** when prompted.
 3. Navigate to **http://192.168.4.1**.
 4. A **setup wizard** appears automatically — this step is required and can't be skipped. Choose one:
    - **Restore from backup** — upload a previously-downloaded `nextube-config.json` (downloaded from **System → Backup & Restore** on any Nextube) to restore WiFi credentials along with every other setting in one step.
    - **Set up manually** — scan for your network (or type the SSID directly), enter the password, and connect.
 
    Once connected, optionally set an admin password under **System → Admin Authentication**.
+5. **After you submit, `Nextube-Setup` will disappear from your WiFi list within about a minute.** This is expected and means it worked — the device closes its own setup network once it successfully joins yours (see **AP lifecycle** below), so your phone/laptop will look like it "lost" a WiFi connection for a moment. That's normal. The Nextube is no longer reachable at `192.168.4.1` at that point; go to **http://nextube-remaster.local** or check your router's connected-devices list for its new address instead.
+
+   If `Nextube-Setup` disappears but you can't reach the device at `nextube-remaster.local` or find it on your router either, the WiFi credentials you entered were likely rejected (wrong password, weak signal, or a 5 GHz-only network — the Nextube is 2.4 GHz only). Use the **recovery hotkey** below to bring the setup AP back and try again.
 
 > [!TIP]
 > **No laptop nearby?** A smartphone works perfectly for initial setup. Connect your phone to **Nextube-Setup**, open a browser, and go to **http://192.168.4.1** to complete the WiFi configuration. Once the Nextube joins your home network, manage it from any device on the same network.
