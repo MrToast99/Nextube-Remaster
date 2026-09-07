@@ -187,6 +187,15 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        # Needed for CHANGELOG.md below — this is a separate job on a fresh
+        # runner, so the build job's own checkout doesn't carry over; only
+        # the artifacts/ directory (compiled binaries) does, via the
+        # download step below. Default depth (1) at the tag's own commit is
+        # enough — this job only ever reads files as of that commit, unlike
+        # the build job's `git describe`, which needs full history.
+        uses: actions/checkout@v5
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
