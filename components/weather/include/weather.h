@@ -61,7 +61,7 @@ bool weather_get_location(float *lat, float *lon);
  *  "us" / "eu" / "auto"; auto picks the European AQI inside the Europe bounding
  *  box and the US AQI elsewhere).  Returns -1 if no AQI data has been fetched
  *  yet.  *is_european (if non-NULL) is set to the chosen scale so callers can
- *  pick the matching band colours.  Thread-safe. */
+ *  pick the matching band colors.  Thread-safe. */
 int weather_get_aqi(bool *is_european);
 #ifdef __cplusplus
 }

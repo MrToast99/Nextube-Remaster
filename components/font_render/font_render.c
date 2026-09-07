@@ -352,24 +352,31 @@ void fr_blit(uint8_t *fb, int fb_w, int fb_h,
              const fr_glyph_t *glyph,
              int x0, int y0,
              uint8_t cr, uint8_t cg, uint8_t cb,
-             bool shadow, uint8_t sr, uint8_t sg, uint8_t sb)
+             bool shadow, uint8_t sr, uint8_t sg, uint8_t sb, uint8_t shadow_size)
 {
     if (!glyph || !glyph->bitmap || glyph->width <= 0 || glyph->rows <= 0) return;
 
-    /* Pass 1: shadow bloom */
+    /* Pass 1: shadow bloom. Two-tier falloff (inner ring solid-ish, outer ring
+     * fainter) generalised from what used to be a hardcoded ±2px/d²≤5 blur:
+     * shadow_size==2 reproduces that exact shape (inner_d2=2, outer_d2=5,
+     * loop bound ±2), so existing configs render identically after this
+     * control was added. */
     if (shadow) {
+        const int ss = shadow_size ? shadow_size : 1;
+        const int inner_d2 = ss;
+        const int outer_d2 = 2 * ss + 1;
         for (int gy = 0; gy < glyph->rows; gy++) {
             for (int gx = 0; gx < glyph->width; gx++) {
                 if (glyph->bitmap[gy * glyph->width + gx] < 32) continue;
-                for (int dy = -2; dy <= 2; dy++) {
+                for (int dy = -ss; dy <= ss; dy++) {
                     int fy = y0 + gy + dy;
                     if (fy < 0 || fy >= fb_h) continue;
-                    for (int dx = -2; dx <= 2; dx++) {
+                    for (int dx = -ss; dx <= ss; dx++) {
                         int d2 = dx * dx + dy * dy;
-                        if (d2 == 0 || d2 > 5) continue;
+                        if (d2 == 0 || d2 > outer_d2) continue;
                         int fx = x0 + gx + dx;
                         if (fx < 0 || fx >= fb_w) continue;
-                        int sa = (d2 <= 2) ? 180 : 90;
+                        int sa = (d2 <= inner_d2) ? 180 : 90;
                         fr_blend_px(fb + (fy * fb_w + fx) * 2, sr, sg, sb, sa);
                     }
                 }
@@ -486,7 +493,7 @@ static fr_layout_memo_t *fr_get_layout(uint8_t face_id, uint16_t px_size,
 void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
                              uint8_t face_id, uint32_t codepoint, uint16_t px_size,
                              uint8_t cr, uint8_t cg, uint8_t cb,
-                             bool shadow, uint8_t sr, uint8_t sg, uint8_t sb)
+                             bool shadow, uint8_t sr, uint8_t sg, uint8_t sb, uint8_t shadow_size)
 {
     if (!fr_face_valid(face_id)) return;
 
@@ -523,7 +530,7 @@ void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
     }
     if (y0 < 0) y0 = 0;
 
-    fr_blit(fb, fb_w, fb_h, probe, x0, y0, cr, cg, cb, shadow, sr, sg, sb);
+    fr_blit(fb, fb_w, fb_h, probe, x0, y0, cr, cg, cb, shadow, sr, sg, sb, shadow_size);
 }
 
 /* ── UTF-8 decoder ──────────────────────────────────────────────────────────── */
@@ -651,7 +658,7 @@ void fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
                   uint8_t face_id, uint16_t px_size,
                   const char *utf8_str,
                   uint8_t cr, uint8_t cg, uint8_t cb,
-                  bool shadow, uint8_t sr, uint8_t sg, uint8_t sb)
+                  bool shadow, uint8_t sr, uint8_t sg, uint8_t sb, uint8_t shadow_size)
 {
     if (!utf8_str || !utf8_str[0] || !fr_face_valid(face_id)) return;
 
@@ -674,7 +681,7 @@ void fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
             y0 -= (adj_px / 8); 
         }
 
-        fr_blit(fb, fb_w, fb_h, g, x0, y0, cr, cg, cb, shadow, sr, sg, sb);
+        fr_blit(fb, fb_w, fb_h, g, x0, y0, cr, cg, cb, shadow, sr, sg, sb, shadow_size);
         pen_x += g->advance;
     }
 }

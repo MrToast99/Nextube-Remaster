@@ -2,25 +2,22 @@
  * @file periodic_net_poll.h
  * @brief Shared task for periodic, non-latency-sensitive network polling.
  *
- * weather_task, subscribers_task, and update_check_task used to be three
- * separate permanent FreeRTOS tasks, each doing the exact same shape of
- * work: sleep until due, do one HTTPS fetch, sleep again. All three
- * already serialise their real network work through the same tls_sem
- * mutex (see config_mgr.h), so they were never actually concurrent in the
- * way three separate stacks implies — they were just paying for three
- * separate stacks to run work that was already effectively sequential.
- * One shared task does the same job on a fraction of the permanent stack
- * cost, because it never runs more than one subsystem's tick_fn at a time
- * — see periodic_net_poll.c's NET_POLL_STACK_SIZE comment for the actual
- * numbers.
+ * weather, subscribers, and update_check all do the same shape of work
+ * (sleep until due, do one HTTPS fetch, sleep again) and already serialise
+ * their real network work through the same tls_sem mutex, so three
+ * separate task stacks were paying for concurrency that never existed.
+ * One shared task does the job on a fraction of the stack cost.
  *
- * Each subsystem keeps its own component, its own state, its own fetch/
- * parse logic, and its own public API (weather_get(), subscribers_get(),
- * update_check_get_status(), ...) completely unchanged — only the "own a
- * dedicated FreeRTOS task" part moved here. A subsystem's existing
- * _start() (still called the same way, still gated by the same
- * boot_X_enabled config flag in main.c) now registers a tick function
- * instead of calling xTaskCreate() directly.
+ * Each subsystem keeps its own component, state, fetch/parse logic, and
+ * public API unchanged — only task ownership moved here. A subsystem's
+ * _start() now registers a tick function instead of calling xTaskCreate()
+ * directly.
+ *
+ * Also shares WiFi-outage handling: the main loop checks
+ * wifi_manager_is_connected() before every dispatch round and skips
+ * calling any tick_fn while it's down, instead of each subsystem hitting
+ * the same connect failure and logging it separately. A tick_fn doesn't
+ * need to know about this — it just wasn't called this round.
  */
 #pragma once
 #include <stdint.h>

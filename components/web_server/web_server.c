@@ -53,65 +53,43 @@ static httpd_handle_t s_server = NULL;
 static bool s_server_restart_pending = false;   /* set when a WiFi reconnect stops the server */
 
 /* LittleFS usage stats (fs_total/fs_used in /api/status) — cached until
- * explicitly invalidated. esp_littlefs_info() walks every block in the
- * filesystem to compute used space (no cheap counter API exists), which
- * measured ~2.7s on this device's file count (issue #82) — recomputing it
- * on every /api/status poll (every 5s from the dashboard) meant the
- * single-threaded httpd task spent roughly half its life blocked in this
- * one call, unable to accept any other connection.
+ * explicitly invalidated. esp_littlefs_info() walks every block to compute
+ * used space (no cheap counter API exists), ~2.7s on this device's file
+ * count — too slow to recompute on every 5s dashboard poll.
  *
- * Computed lazily (first /api/status call — effectively "once at boot",
- * since that's the first request the device serves) and only recomputed
- * when fs_usage_invalidate() is called after an operation that can actually
- * change free space: file upload, file delete, hotpatch. A full LittleFS
- * OTA (api_fs_ota) always ends in esp_restart(), which resets this cache
- * for free — no explicit invalidation needed there. mkdir/rename are NOT
- * invalidation points: they don't meaningfully change used bytes (a stale
- * reading there is off by, at most, a few bytes of directory metadata).
- * Only ever touched from the httpd task, so no lock is needed. */
+ * Computed lazily on the first /api/status call and only recomputed when
+ * fs_usage_invalidate() is called after upload/delete/hotpatch. A full
+ * LittleFS OTA always ends in esp_restart(), resetting this cache for
+ * free. mkdir/rename don't meaningfully change used bytes, so they're not
+ * invalidation points. Only touched from the httpd task, so no lock
+ * needed. */
 static bool    s_fs_cache_valid   = false;
 static size_t  s_fs_total_cached  = 0;
 static size_t  s_fs_used_cached   = 0;
 static void fs_usage_invalidate(void) { s_fs_cache_valid = false; }
 
 /* ── Stock-file integrity check ────────────────────────────────────────
- * STOCK_FILES (generated, see stock_files.h / root CMakeLists.txt) is every
- * file that shipped in data/ at build time — audio, fonts, icons, themes,
- * web UI. Detects one actually missing from LittleFS: a device that skipped
- * past a hotpatch that would have delivered it, a file removed by hand via
- * the File Manager, or a corrupted/aborted write. Complements the
- * version-string mismatch banner below (expected_fs vs fs_version) rather
- * than replacing it — that catches "wrong overall version"; this catches
- * "right version, but something specific is actually gone", which a single
- * version string can't reveal. Points the user at a full LittleFS Recovery
- * specifically, not a hotpatch retry: a hotpatch only ships what's listed in
- * hotpatch_extras.txt for the delta since some release, which is exactly the
- * mechanism that can leave a gap; a full reflash writes every stock file
- * unconditionally, so it's the only path that's guaranteed to fix this.
+ * STOCK_FILES (generated, see stock_files.h) is every file shipped in data/
+ * at build time. Detects one actually missing from LittleFS — a skipped
+ * hotpatch, a manual delete, a corrupted write. Complements the
+ * version-string mismatch banner (that catches "wrong overall version";
+ * this catches "right version, something specific is gone"). Points the
+ * user at a full LittleFS Recovery, not a hotpatch retry: a hotpatch only
+ * ships the delta since some release, which is exactly the mechanism that
+ * can leave a gap, while a full reflash writes every stock file
+ * unconditionally.
  *
- * This check is existence-only (stat()) — it can't tell a STALE file (wrong
- * content, right path) from a healthy one. That heavier job — content
- * verification against STOCK_SHA256, and fetching only what's actually wrong
- * straight from the public repo at this firmware's own version tag — is a
- * separate, explicitly user-triggered mechanism (POST /api/stock_repair, see
- * stock_repair_task() and its doc comment further down this file). This
- * cheap check keeps driving the passive boot-time banner; that one is what
- * actually fixes things a hotpatch never delivered.
+ * Existence-only (stat()) — can't tell a stale file from a healthy one;
+ * that heavier job (content verification + selective re-fetch) is the
+ * separate, user-triggered POST /api/stock_repair (see stock_repair_task()
+ * further down this file).
  *
- * Deliberately NOT computed lazily inside api_status() the way fs cache
- * above is: issue #82 (the comment right above this one) is the reason —
- * ~380 stat() calls is a lot cheaper per-call than esp_littlefs_info()'s
- * full-filesystem walk, but running it inside a request handler still risks
- * becoming the next version of that same bug. Instead it's run explicitly,
- * off the httpd request path: once at boot (web_server_start()), and again
- * after a hotpatch/webui-pull actually completes (api_fs_hotpatch,
- * webui_pull_task) since that's precisely the moment most likely to have
- * just fixed it. NOT re-run after a plain file upload/delete — those are
- * frequent, casual actions where a stale reading until next reboot is a
- * better trade than adding checking latency to every one of them; deleting
- * a stock file by hand through the File Manager is rare enough, and
- * self-evident enough to whoever just did it, not to need an immediate
- * banner update. */
+ * Run explicitly, off the httpd request path (once at boot, and again
+ * after a hotpatch/webui-pull completes), not lazily inside api_status()
+ * — ~380 stat() calls is cheaper than esp_littlefs_info()'s full walk, but
+ * still risks becoming the same kind of blocking cost inside a request
+ * handler. Not re-run after a plain file upload/delete — a stale reading
+ * until next reboot is an acceptable trade there. */
 static int  s_stock_missing_count       = 0;
 static char s_stock_missing_example[128] = "";
 
@@ -559,16 +537,37 @@ static esp_err_t api_post_settings(httpd_req_t *r)
                         (old_mdns_en    != new_mdns_en)    ||
                         (old_mic_en     != new_mic_en)     ||
                         (old_audio_en   != new_audio_enabled);
+    bool ssid_changed = (strcmp(old_ssid, new_ssid) != 0);
+    bool pass_changed = (strcmp(old_pass, new_pass)  != 0);
+
     if (needs_reboot) {
+        if (ssid_changed && strlen(new_ssid) > 0) {
+            /* Don't gamble this reboot on credentials nobody has tried yet
+             * just to pick up an unrelated boot-time flag change (this is
+             * the "restore from backup during onboarding" case — a restored
+             * backup's hostname/weather/etc. fields almost always differ
+             * from a factory-reset device's, forcing this branch even
+             * though the SSID itself needs no reboot). Start the same live
+             * reconnect a plain SSID-only change uses (setup AP stays up
+             * and reachable throughout) and defer the actual reboot until
+             * wifi_manager_reboot_once_connected() sees STA confirm it.
+             * Falls back to the immediate mark_untested_sta()
+             * reboot-with-AP-fallback if STA doesn't confirm within 45s, so
+             * genuinely wrong restored credentials still can't wedge the
+             * device. */
+            schedule_wifi_reconnect();
+            wifi_manager_reboot_once_connected(45000);
+            send_json(r, ok ? "{\"status\":\"ok\",\"reboot\":true}"
+                            : "{\"status\":\"error\",\"reboot\":false}");
+            return ESP_OK;
+        }
+        /* No SSID change involved — no WiFi risk, reboot immediately as before. */
         send_json(r, ok ? "{\"status\":\"ok\",\"reboot\":true}"
                         : "{\"status\":\"error\",\"reboot\":false}");
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_restart();
         return ESP_OK;
     }
-
-    bool ssid_changed = (strcmp(old_ssid, new_ssid) != 0);
-    bool pass_changed = (strcmp(old_pass, new_pass)  != 0);
 
     if (ssid_changed && strlen(new_ssid) > 0) {
         /* SSID changed — need to switch networks; full disconnect + reconnect */
@@ -783,6 +782,10 @@ static esp_err_t api_wifi_regen_pin(httpd_req_t *r)
     return send_json(r, body);
 }
 
+/* Forward declaration: defined further down (OTA section) but needed here
+ * too — see the esp_wifi_restore() race below. */
+static void ota_suspend_tasks(void);
+
 /* POST /api/factory_reset_full — wipes admin password + AP PIN + user
  * config, then reboots.  Distinct from /api/reset which only clears user
  * config (and WiFi credentials).  Returns the device to fresh-from-box
@@ -802,6 +805,17 @@ static esp_err_t api_factory_reset_full(httpd_req_t *r)
 
     auth_factory_reset();
     wifi_manager_factory_reset_ap_pin();
+
+    /* esp_wifi_restore() below tears down the WiFi driver, firing a STA
+     * disconnect event — ha_mqtt's handler for that tries to gracefully
+     * pause/disconnect the MQTT client over the very socket being torn out
+     * at that exact moment, which can hang badly enough to trip the
+     * interrupt watchdog before config_reset() ever runs (the reset then
+     * looks like it silently "didn't take"). ota_suspend_tasks() already
+     * solves this for the OTA flash paths by stopping ha_mqtt's client
+     * task first; reusing it here is safe since this path always ends in
+     * esp_restart(), so nothing it suspends needs to resume. */
+    ota_suspend_tasks();
     esp_wifi_restore();        /* clear WiFi driver's NVS namespace */
     config_reset();            /* clear /spiffs/config.json */
 
@@ -881,13 +895,18 @@ static esp_err_t api_auth_disable(httpd_req_t *r)
 static esp_err_t api_reset(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
+    send_json(r, "{\"status\":\"ok\"}");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    /* Same esp_wifi_restore()-vs-ha_mqtt race as api_factory_reset_full()
+     * above — see its comment. Response is sent first here too, same
+     * reasoning as that handler: the network can still drop it if the
+     * WiFi-teardown race below interrupts TCP before the client reads it. */
+    ota_suspend_tasks();
     /* Wipe the WiFi driver's own NVS namespace so the device cannot
      * reconnect to the old network after reboot.  Must be called while
      * the WiFi stack is running (before esp_restart). */
     esp_wifi_restore();
     config_reset();
-    send_json(r, "{\"status\":\"ok\"}");
-    vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
     return ESP_OK;
 }
@@ -904,27 +923,20 @@ static esp_err_t api_reboot(httpd_req_t *r)
 
 static esp_err_t api_status(httpd_req_t *r)
 {
-    /* NOT REQUIRE_AUTH'd, deliberately — this looked at first like the same
-     * unauthenticated-disclosure issue as /api/network_info (OTA-rollback
-     * state, admin_set), but frontend bootAuth() (data/web/index.html) does
-     * a plain unauthenticated fetch('/api/status') on every page load
-     * specifically to read admin_set and decide whether to show the login
-     * modal at all — gating this endpoint would make that check unable to
-     * run before the user has a token, i.e. a chicken-and-egg lockout.
-     * onboardConnectWifi() also polls this unauthenticated mid-onboarding,
-     * before any admin password necessarily exists yet.  admin_set is
-     * intentionally the only auth-relevant field here; the AP PIN itself is
-     * on the separate auth'd route /api/wifi/ap_pin. Leave this endpoint open.
+    /* NOT REQUIRE_AUTH'd, deliberately — frontend bootAuth() does a plain
+     * unauthenticated fetch('/api/status') on every page load specifically
+     * to read admin_set and decide whether to show the login modal at all,
+     * and onboardConnectWifi() polls this mid-onboarding before any admin
+     * password necessarily exists. Gating this endpoint would make that
+     * check unable to run before the user has a token — a chicken-and-egg
+     * lockout. admin_set is intentionally the only auth-relevant field
+     * here; the AP PIN itself is on the separate auth'd
+     * /api/wifi/ap_pin route.
      *
-     * Timing instrumentation — issue #82 (community-reported multi-second
-     * /api/status latency, captured via PCAPdroid: consistently ~5s, while
-     * the much larger static GET / is ~2s). The payload-size mismatch argues
-     * against a pure network/TCP-ACK cause and points at server-side time in
-     * this handler; these checkpoints narrow down which section is slow.
-     * DEBUG level — silent by default, silent even under the System tab's
-     * per-subsystem "enabled" checkboxes (those only reach INFO). Visible
-     * once the "Debug logging" checkbox in System → Device Logs is checked,
-     * which raises the runtime default to DEBUG via /api/debug/loglevel. */
+     * Timing instrumentation (DEBUG level, silent unless the "Debug
+     * logging" checkbox in System → Device Logs is on) — narrows down
+     * which section of this handler is slow when this endpoint's latency
+     * regresses. */
     int64_t t0 = esp_timer_get_time();
     cJSON *root = cJSON_CreateObject();
     struct tm t; ntp_get_local(&t);
@@ -983,8 +995,21 @@ static esp_err_t api_status(httpd_req_t *r)
     int64_t t_heap = esp_timer_get_time();
     {
         if (!s_fs_cache_valid) {
-            esp_littlefs_info("littlefs", &s_fs_total_cached, &s_fs_used_cached);
-            s_fs_cache_valid = true;
+            /* This lazy first call fires on the first /api/status poll
+             * after boot, right as display_task is doing its own SPI/LEDC
+             * work — the block-walk's raw flash reads force ESP32's
+             * flash-cache-disable path to park the other core with
+             * interrupts masked, which can trip the watchdog if that core
+             * is display_task mid critical section. Pausing display_task
+             * first removes it from the race; on a timeout, skip the read
+             * and let the next poll retry. */
+            if (display_pause_for_spi(5000)) {
+                esp_littlefs_info("littlefs", &s_fs_total_cached, &s_fs_used_cached);
+                s_fs_cache_valid = true;
+                display_unpause();
+            } else {
+                ESP_LOGW(TAG, "fs usage: display task did not pause — skipping this poll, will retry");
+            }
         }
         cJSON_AddNumberToObject(root, "fs_total", (double)s_fs_total_cached);
         cJSON_AddNumberToObject(root, "fs_used",  (double)s_fs_used_cached);
@@ -1125,58 +1150,29 @@ static esp_err_t api_network_info(httpd_req_t *r)
 }
 
 /* ── OTA task suspension ─────────────────────────────────────────────────────
- * Suspend every non-essential background task before any flash write so we
- * reduce CPU/bus contention during esp_ota_write()'s sector erase+program
- * cycles.  Each erase (≈25 ms) disables the ESP32 data cache; concurrent SPI
- * DMA (LED RMT), I2S (mic), HTTPS polls (weather / subscribers / ntp) and I2C
- * reads (sht30) all compete for CPU during those windows, contributing to TCP
- * packet loss that stretches OTA transfers and eventually trips the recv timeout.
- *
- * We resolve tasks by their registered FreeRTOS name — no task handle needs to
- * be exposed from each component (INCLUDE_xTaskGetHandle is always 1 in the
- * ESP-IDF FreeRTOS build).  Since both OTA paths always end with esp_restart(),
- * there is no matching resume call.
- *
- * The display task is handled separately by display_show_wait(), which also
- * ensures the SPI bus is free before the first flash write.
- *
- * Shared by ota_suspend_tasks() (suspends) and webui_resume_tasks() (resumes,
- * used by the webui-pull path, which — unlike OTA — doesn't end in
- * esp_restart() on the happy path).  Single source of truth so a future
- * addition only has to happen once (previously "ha_mqtt" had to be added by
- * hand to two independently-maintained copies of this list). */
+ * Suspend every non-essential background task before any flash write to
+ * reduce CPU/bus contention during esp_ota_write()'s erase+program cycles —
+ * each erase disables the ESP32 data cache, and concurrent SPI DMA/I2S/I2C/
+ * HTTPS traffic competing for CPU in that window can stretch OTA transfers
+ * into a recv timeout. Resolved by FreeRTOS task name, not handle, so no
+ * component needs to expose one. Both OTA paths end in esp_restart(), so
+ * there's no matching resume call there; webui_resume_tasks() (used by the
+ * webui-pull path, which doesn't restart on success) does the resume from
+ * this same list. The display task is handled separately by
+ * display_show_wait(). */
 static const char *const k_paused_task_names[] = {
     "net_poll",   /* HTTPS polling (weather + subscribers + update_check,
-                   * merged onto one shared task — see periodic_net_poll.h)
-                   * — competes with OTA TCP stream + heap. update_check
-                   * wasn't in this list before the merge (its own dedicated
-                   * task never was) — now that it shares net_poll's stack
-                   * with the two that WERE, it gets suspended too. Harmless:
-                   * a 24 h-interval GitHub check has no reason to be running
-                   * DURING an active OTA/repair anyway, and this was more an
-                   * oversight than a deliberate omission the first time. */
+                   * merged onto one shared task) — competes with OTA TCP
+                   * stream + heap. */
     "ntp",        /* SNTP/UDP      — adds lwIP load during flash writes  */
     "sht30",      /* I2C sensor    — periodic wakeups, CPU cycles        */
     "leds",       /* RMT DMA       — Core 1 bus traffic during writes    */
     "mic",        /* I2S/ADC DMA   — continuous DMA, CPU interrupts      */
     "audio_play", /* DAC/I2S       — ephemeral, only present if playing  */
-    "ha_mqtt",    /* MQTT broker connect/publish — was missing entirely;
-                   * observed in the field retrying esp_mqtt_client_start()
-                   * every 5 s throughout an entire webui-pull download +
-                   * extraction window, each attempt trying to spawn a new
-                   * internal esp-mqtt task and failing ("Error create mqtt
-                   * task") — the same transient internal-SRAM contention
-                   * class as the mDNS receive-buffer failures, just
-                   * landing on MQTT's task creation instead.  Suspending
-                   * this only pauses OUR wrapper task (its own connect
-                   * retry loop + 60 s publish loop) — esp-mqtt's own
-                   * internal client task is separate and keeps running
-                   * regardless, which a later field log caught actively
-                   * reconnecting AND publishing a full HA discovery burst
-                   * several seconds into a "suspended" webUI-pull window.
-                   * ha_mqtt_pause()/ha_mqtt_resume() (called explicitly
-                   * below, not through this name-based list) reach that
-                   * separate task too — see their own comments. */
+    "ha_mqtt",    /* MQTT connect/publish — our wrapper task only; the
+                   * separate esp-mqtt internal client task keeps running
+                   * regardless (reached instead by ha_mqtt_pause()/
+                   * ha_mqtt_resume(), called explicitly below). */
     NULL,
 };
 
@@ -1238,23 +1234,17 @@ static void webui_resume_tasks(void)
 }
 
 /* ── OTA double-flash guard + clean deferred reboot ────────────────────────
- * Two protections against an OTA being applied twice (observed when the
- * browser tab is backgrounded during a flash):
- *
- *  1. s_ota_active — rejects a second /api/update_firmware (or /api/update_fs)
- *     while one is already running, returning HTTP 409.  Set by the api_ota /
- *     api_fs_ota wrappers and cleared only if the flash FAILS; a successful
- *     flash reboots, so it intentionally stays set until then.
- *
- *  2. Deferred reboot — calling esp_restart() inside the handler tears the TCP
- *     socket with an RST before a slow/backgrounded browser has read the 200.
- *     The browser then sees a broken connection with no response and
- *     transparently retries the POST → a second flash.  Instead we send the
- *     response, set "Connection: close", return ESP_OK so the HTTP server
- *     flushes the body and closes the socket cleanly, and fire esp_restart()
- *     from a one-shot timer ~1.5 s later — by which time the browser has its
- *     answer and has no reason to retry.  (The esp_timer task is not suspended
- *     by ota_suspend_tasks(), so this callback still runs.) */
+ * Two protections against an OTA being applied twice (a backgrounded
+ * browser tab retrying mid-flash):
+ *  1. s_ota_active — rejects a second update request (HTTP 409) while one
+ *     is already running; cleared only if the flash fails, since a
+ *     successful flash reboots anyway.
+ *  2. Deferred reboot — esp_restart() inside the handler would RST the TCP
+ *     socket before a slow/backgrounded browser reads the 200, causing it
+ *     to retry the POST. Instead: send the response with "Connection:
+ *     close", return so httpd closes the socket cleanly, then fire
+ *     esp_restart() from a one-shot timer ~1.5s later (the esp_timer task
+ *     isn't suspended by ota_suspend_tasks(), so this still runs). */
 static volatile bool s_ota_active    = false;
 /* Hidden debug panel's "Per-task stack log" toggle — see api_debug_stacklog()
  * and web_server_debug_stacklog_enabled() below. Runtime only, off by default;
@@ -1734,14 +1724,11 @@ static uint32_t hp_crc32_update(uint32_t crc, const uint8_t *buf, size_t len)
 }
 
 /* Read+CRC latency here is dominated by LittleFS's own per-directory
- * metadata-traversal cost (first file touched in a not-yet-open directory
- * pays a real, roughly-flat ~70-500 ms penalty regardless of file size;
- * later files in the same still-open directory are far cheaper) rather
- * than the byte-copying/CRC math itself — confirmed via temporary
- * per-file WARNING timing during a real investigation (see
- * extract_zip_to_littlefs's caller for the aggregate "extraction took
- * N ms" figure that's kept; the noisier per-file breakdown was removed
- * once the pattern was understood, not because the cost went away). */
+ * metadata-traversal cost, not the byte-copying/CRC math itself: the
+ * first file touched in a not-yet-open directory pays a roughly-flat
+ * ~70-500ms penalty regardless of file size, while later files in the
+ * same still-open directory are far cheaper. See extract_zip_to_littlefs's
+ * caller for the aggregate "extraction took N ms" figure. */
 static bool hp_file_unchanged(const char *vpath, uint32_t want_crc, uint32_t want_size)
 {
     struct stat st;
@@ -2023,17 +2010,11 @@ static esp_err_t api_fs_hotpatch_impl(httpd_req_t *r)
     cJSON *files_arr = cJSON_CreateArray();
     int ok = 0, skipped = 0, failed = 0, unchanged = 0;
 
-    /* Timed: a real field log showed this call alone take ~22s for a ZIP
-     * where only 1 of 16 entries actually needed writing — WITH every
-     * other task already suspended above, ruling out task contention as
-     * the (sole) explanation despite that having been the original theory
-     * behind suspending tasks here in the first place. hp_file_unchanged()
-     * (called once per "unchanged" entry) now separately logs any single
-     * file whose read+CRC pass exceeds 50 ms; this total is the other half
-     * of that picture — compare the two on the next slow run to see
-     * whether it's one or two outlier files or a roughly-even cost spread
-     * across all of them (the latter would point at fopen/fclose overhead
-     * on this LittleFS partition itself, not any particular file). */
+    /* Timed: extraction can take far longer than task contention alone
+     * explains, even with every other task already suspended above.
+     * hp_file_unchanged() separately logs any single file whose read+CRC
+     * pass exceeds 50 ms, for comparing outlier-file vs. fopen/fclose
+     * overhead on this LittleFS partition. */
     int64_t extract_t0 = esp_timer_get_time();
     extract_zip_to_littlefs(zip, (size_t)rx, "hotpatch:", /*success_at_info=*/true,
                              files_arr, &ok, &skipped, &failed, &unchanged);
@@ -2175,27 +2156,20 @@ static void resolve_update_repo(char *out, size_t out_sz)
 }
 
 /* Hard backstop for esp_http_client calls that can apparently hang past
- * their own configured .timeout_ms without ever returning — observed in the
- * field: webui_pull_task stuck for minutes inside esp_http_client_fetch_headers()
- * right after an "HTTP_HEADER: Buffer length is small to fit all the
- * headers" warning, holding tls_sem the entire time. Nothing else sharing
- * tls_sem (weather, subscribers, update_check, MQTT) could recover on its
- * own — they all started failing within 30s, cascading for 40+ seconds
- * until an unrelated abort() finally forced a reboot the hard way. A
+ * their own configured .timeout_ms without ever returning, holding tls_sem
+ * the whole time — which starves every other HTTPS-using task (weather,
+ * subscribers, update_check, MQTT) sharing that same semaphore. A
  * deliberate, bounded reboot here is a strictly better outcome than an
- * indefinite hang that silently breaks every other HTTPS-using task on the
- * device for as long as it lasts.
+ * indefinite hang that silently breaks every other HTTPS task on the
+ * device.
  *
- * Reuses ota_reboot_timer_cb() (defined above, near ota_finish_and_reboot())
- * rather than a near-duplicate callback — both just need esp_restart() with
- * nothing to clean up first, since a reboot cleans up everything by
- * definition. Deadline is the caller's own timeout_ms plus 30s margin: long
- * enough that a well-behaved timeout resolves through the NORMAL error path
- * first in the ordinary case (this is a backstop, not a replacement for
- * that path) — it only fires once that mechanism has already failed to
- * return control at all. A NULL return (esp_timer_create failed) is
- * survivable: the caller proceeds without a backstop for that one call,
- * which is not itself a reason to fail the operation. Used by both
+ * Reuses ota_reboot_timer_cb() rather than a near-duplicate callback —
+ * both just need esp_restart() with nothing to clean up first. Deadline is
+ * the caller's own timeout_ms plus 30s margin, so a well-behaved timeout
+ * resolves through the normal error path first in the ordinary case; this
+ * only fires once that mechanism has already failed to return control at
+ * all. A NULL return (esp_timer_create failed) is survivable — the caller
+ * just proceeds without a backstop for that one call. Used by both
  * hp_https_open() and hp_https_read_body() below. */
 static esp_timer_handle_t hp_arm_hard_deadline(int caller_timeout_ms)
 {
@@ -2236,23 +2210,14 @@ static bool hp_https_open(const char *url, const char *user_agent, int timeout_m
         .crt_bundle_attach     = esp_crt_bundle_attach,
         .max_redirection_count = 3,
         .buffer_size           = 16384,   /* Azure Blob returns many x-ms-* headers */
-        /* 4096, was 1024 — this, not buffer_size above, was what actually
-         * printed "HTTP_HEADER: Buffer length is small to fit all the
-         * headers" on every OTA/webUI/stock-repair pull that follows the
-         * GitHub→Azure redirect (easy mix-up: this sizes the OUTGOING
-         * request write, buffer_size sizes the incoming response read).
-         * esp_http_client_request_send() builds "GET <url> HTTP/1.1\r\n" +
-         * headers into one buffer sized by this field — Azure Blob's
-         * SAS-signed redirect URLs run several hundred bytes of query
-         * string alone, subtracted from the 1024 budget before our own
-         * headers (Host, User-Agent, …) get any room. Harmless in
-         * practice — http_header_generate_string() degrades gracefully,
-         * sending what fits and looping for the rest — but it logged that
-         * error on every affected pull and cost an extra write+parse round
-         * trip for something that should fit in one. 4096 comfortably
-         * covers a long SAS URL plus our short header set in one pass;
-         * transient like buffer_size above, freed on
-         * esp_http_client_cleanup(), not a permanent allocation. */
+        /* Sizes the OUTGOING request write (buffer_size above sizes the
+         * incoming response read) — esp_http_client_request_send() builds
+         * the whole "GET <url> HTTP/1.1\r\n" + headers into one buffer this
+         * size. Azure Blob's SAS-signed redirect URLs run several hundred
+         * bytes of query string alone, so a smaller budget here leaves no
+         * room for our own headers and forces an extra write+parse round
+         * trip. 4096 covers a long SAS URL plus our header set in one
+         * pass; transient, freed on esp_http_client_cleanup(). */
         .buffer_size_tx        = 4096,
     };
     esp_http_client_handle_t client = esp_http_client_init(&hcfg);
@@ -2635,21 +2600,11 @@ pull_err:
  * flash/network-affecting tasks below (ota_pull, webui_pull, stock_repair)
  * whose stack request can transiently exceed the largest contiguous
  * internal-RAM block during a concurrent TLS/mDNS/WiFi burst rather than
- * from genuine sustained exhaustion.
- *
- * Confirmed on real hardware, not theoretical: a stock_repair run finished
- * cleanly (1600 B margin), resumed weather/subscribers/etc., and within
- * the next ~15s two separate task-create attempts got a real
- * "Task create failed" 500 — landing squarely in weather's own TLS-fetch
- * burst. A heap dump minutes earlier had already shown DMA-capable
- * largest_free_block at 4864 B — under every one of these tasks' stack
- * sizes (6144 B) — so this isn't a rare edge case on this device, it's a
- * predictable consequence of how many subsystems here do concurrent HTTPS
- * work. A short-lived TLS buffer or mDNS packet buffer freeing a few
- * hundred ms later is often enough; this rides out that common transient
- * dip instead of failing the user's request over bad timing. It does NOT
- * fix genuine sustained exhaustion — MAX_ATTEMPTS still gives up and
- * returns the same 500 either way. */
+ * from genuine sustained exhaustion — several subsystems here do
+ * concurrent HTTPS work, so a short-lived TLS or mDNS buffer freeing a few
+ * hundred ms later is often enough to ride out. Does NOT fix genuine
+ * sustained exhaustion — MAX_ATTEMPTS still gives up and returns the same
+ * 500 either way. */
 static bool create_task_with_retry(TaskFunction_t fn, const char *name, uint32_t stack,
                                     void *arg, UBaseType_t prio, BaseType_t core)
 {
@@ -2915,23 +2870,18 @@ static void webui_pull_task(void *arg)
     tls_sem_take();
     ESP_LOGD(TAG, "[webui] TLS semaphore acquired");
 
-    /* Suspend competing background tasks for the duration of the download and
-     * extraction — reduces network/flash contention and prevents WDT triggers
-     * during the long LittleFS write phase.  Resumed at all exit points.
+    /* Suspend competing background tasks for the duration of the download
+     * and extraction — reduces network/flash contention and prevents WDT
+     * triggers during the long LittleFS write phase. Resumed at all exit
+     * points.
      *
-     * MUST run AFTER tls_sem_take() above, never before: ota_suspend_tasks()
-     * suspends "net_poll" (weather + subscribers + update_check's shared
-     * task — see periodic_net_poll.h), which independently takes this SAME
-     * tls_sem for its own HTTPS fetches.  If it ran first and net_poll
-     * was mid-handshake (holding tls_sem) at that instant, vTaskSuspend would
-     * freeze it there forever without releasing the semaphore, and our
-     * tls_sem_take() above would then burn its full 30 s timeout and proceed
-     * UNSERIALIZED — reintroducing the internal-RAM-fragmentation /
-     * MBEDTLS_ERR_RSA_PUBLIC_FAILED risk tls_sem exists to prevent (see the
-     * TLS memory strategy comment in sdkconfig.defaults).  Suspending them
-     * here, once we already hold the semaphore ourselves, closes that
-     * window entirely while still keeping them off the bus for the download
-     * + extraction that follows. */
+     * Must run AFTER tls_sem_take() above, never before: ota_suspend_tasks()
+     * suspends "net_poll", which independently takes this same tls_sem for
+     * its own HTTPS fetches — if it ran first while net_poll held the
+     * semaphore mid-handshake, vTaskSuspend would freeze it there without
+     * releasing it, and our own tls_sem_take() would burn its full timeout
+     * and proceed unserialized, reintroducing the fragmentation risk
+     * tls_sem exists to prevent. */
     ota_suspend_tasks();
     tasks_suspended = true;
 
@@ -3242,39 +3192,23 @@ static esp_err_t api_webui_pull_reboot(httpd_req_t *r)
 }
 
 /* ── Live-source stock-file repair ───────────────────────────────────────
- * stock_files_check() (near the top of this file) is a cheap presence-only
- * check — it can tell a file is MISSING, but a present-and-stale file (a
- * partially-applied hotpatch, or a device old enough to predate a change
- * that never reached it) looks identical to a healthy one under a plain
- * stat(). This mechanism does the heavier, correct thing: verify every
- * STOCK_FILES entry's actual on-device content against STOCK_SHA256[i] —
- * the SHA-256 this exact firmware build's data/ tree produced (see
- * stock_files.h / CMakeLists.txt) — and fetch ONLY the ones that don't
- * match, directly from the public repo at the git tag matching THIS
- * firmware's own FS_VERSION_STR (never `main` — a device must never pull
- * content newer than what its installed firmware actually expects).
+ * stock_files_check() is a cheap presence-only check — a present-but-stale
+ * file (a partially-applied hotpatch, or a device old enough to predate a
+ * change) looks identical to a healthy one under a plain stat(). This
+ * mechanism verifies every STOCK_FILES entry's actual content against
+ * STOCK_SHA256[i], fetching only the ones that don't match, from the
+ * public repo at the git tag matching THIS firmware's FS_VERSION_STR
+ * (never `main`).
  *
- * Deliberately explicit/user-triggered (POST /api/stock_repair), not
- * automatic on boot: hashing the full content of ~380 files is real work
- * (unlike stock_files_check()'s stat()-only pass) and has no business
- * running unattended, on a schedule, or in a request path — same
- * discipline as fs_usage_invalidate()'s cache existing at all (issue #82).
- * A user pressing a button and watching a progress readout for a few
- * seconds is a completely different cost/UX tradeoff than the same work
- * happening silently on every boot.
- *
- * No manifest is ever fetched over the network — STOCK_SHA256 baked into
- * THIS firmware image already IS the manifest, so the only network
- * activity is fetching bytes for files already known (locally, for free)
- * to be wrong. Escape hatch: if more than STOCK_REPAIR_MAX_FILES need
- * fixing, this doesn't attempt that many serial small HTTPS fetches —
- * it stops and tells the UI to recommend LittleFS Recovery instead, since
- * a single larger transfer beats dozens of small ones past that point.
- *
- * Obsolete files (present on-device but no longer part of STOCK_FILES at
- * all — e.g. a renamed/removed theme) are explicitly NOT this mechanism's
- * job: verifying a known path's content can't discover an unknown stray
- * path. Those are left for a full LittleFS Recovery, same as today. */
+ * Explicit/user-triggered (POST /api/stock_repair), not automatic on
+ * boot: hashing ~380 files' full content is real work with no business
+ * running unattended or in a request path. No manifest is ever fetched —
+ * STOCK_SHA256 baked into this firmware image already is the manifest.
+ * If more than STOCK_REPAIR_MAX_FILES need fixing, this stops and
+ * recommends a full LittleFS Recovery instead of many small serial
+ * fetches. Obsolete files (no longer part of STOCK_FILES at all) aren't
+ * this mechanism's job — verifying a known path can't discover an unknown
+ * stray one; those are left for LittleFS Recovery too. */
 #define STOCK_REPAIR_MAX_FILES 25
 #define STOCK_REPAIR_MAX_FILE_BYTES (1 * 1024 * 1024)   /* sanity cap — largest stock file today is ~90 KB */
 
@@ -3393,18 +3327,13 @@ static bool hp_fetch_verify_write(size_t idx, const char *user_agent)
 
 /* Checks whether a GitHub Release tagged v{FS_VERSION_STR} exists in `repo`
  * before Phase 2 below attempts even one per-file fetch. hp_fetch_verify_write()
- * pins every raw-content URL to that exact tag
- * (raw.githubusercontent.com/<repo>/v<ver>/data/<path>) — a tag that hasn't
- * been published yet makes EVERY file 404 identically to a genuinely
+ * pins every raw-content URL to that exact tag — a tag that hasn't been
+ * published yet makes every file 404 identically to a genuinely
  * missing/corrupt one, with no way to tell the difference from a single
- * file's response. Confirmed on real hardware: a repair run against a repo
- * without a v1.17.10 release logged "images/system/mastodon.png: HTTP 404"
- * that read exactly like a stale/corrupt file, and the SAME repair
- * succeeded the moment a matching release was actually pushed — nothing
- * about that file was ever wrong. Reuses hp_https_open() (same TLS/redirect/
- * hard-deadline handling as every other fetch here); on success the client
- * is left open by that helper and just needs closing since we only care
- * that the tag resolved, not the release JSON body. */
+ * file's response. Reuses hp_https_open() (same TLS/redirect/hard-deadline
+ * handling as every other fetch here); on success the client is left open
+ * by that helper and just needs closing since we only care that the tag
+ * resolved, not the release JSON body. */
 static bool stock_repair_tag_exists(const char *repo, char *err, size_t err_sz)
 {
     char url[160];
@@ -3750,7 +3679,7 @@ static esp_err_t api_themes(httpd_req_t *r)
     strlcpy(names[count++], "WeatherLive", THEME_NAME_MAX);
     strlcpy(names[count++], "WeatherLive Demo", THEME_NAME_MAX);
     /* "DotMatrix" — procedural 7x14-cell dot-matrix glyphs (display.c's
-     * dm_render_asset()/dm_draw_text()), independently on/off colourable.
+     * dm_render_asset()/dm_draw_text()), independently on/off colorable.
      * Also ships with no asset folder, for the same reason. */
     strlcpy(names[count++], "DotMatrix", THEME_NAME_MAX);
 
@@ -3859,30 +3788,22 @@ static esp_err_t api_file_download(httpd_req_t *r)
 #define MAX_UPLOAD_BYTES (2 * 1024 * 1024)
 
 /* fs_mkdir_parents – ensure every directory component of `file_path` exists,
- * creating any that don't (like `mkdir -p $(dirname file_path)`).  Needed
- * because the web UI's "upload folder" control (uploadFiles() in index.html,
- * preservePath=true) preserves each file's webkitRelativePath and uploads
- * straight to its final nested path — e.g. a brand-new theme folder posts
- * .../images/themes/Nixie/Numbers/1.jpg before either "Nixie" or "Numbers"
- * has ever existed on the device.  That never needed handling under the old
- * SPIFFS backend (a flat key/value store — a "/" in a path was just part of
- * the key, nothing to create), but LittleFS has true directory entries and
+ * creating any that don't (like `mkdir -p $(dirname file_path)`). Needed
+ * because the web UI's "upload folder" control preserves each file's
+ * webkitRelativePath and uploads straight to its final nested path — e.g. a
+ * brand-new theme folder posts .../images/themes/Nixie/Numbers/1.jpg before
+ * either directory exists. LittleFS has true directory entries, so
  * fopen(..., "wb") fails with ENOENT if the parent chain isn't already
- * there.  mkdir() failures are ignored here (EEXIST for an ancestor that
- * already exists is the common case even here, and any real problem — e.g.
- * a read-only or full filesystem — still surfaces clearly from the fopen()
- * retry right after this returns).
+ * there.
  *
  * ONLY call this after a first fopen() attempt has actually failed with
- * ENOENT (see api_file_upload()) — never unconditionally before every
- * upload. Each mkdir() in the chain pays LittleFS's real per-directory-open
- * lookup cost even when the directory already exists (same mechanism as the
- * hp_file_unchanged() finding elsewhere in this file), so calling this on
- * every file of a many-file, many-directory folder upload turned a few KB
- * write into several seconds of blocking per file and tripped the IDLE0
- * task watchdog partway through a real theme upload — confirmed live
- * 2026-08-31. Gating on ENOENT keeps that cost to once per new directory
- * instead of once per file. */
+ * ENOENT — never unconditionally before every upload. Each mkdir() in the
+ * chain pays LittleFS's real per-directory-open lookup cost even when the
+ * directory already exists, so calling this on every file of a many-file
+ * folder upload turns a few KB write into seconds of blocking per file and
+ * can trip the IDLE task watchdog partway through a real upload. Gating on
+ * ENOENT keeps that cost to once per new directory instead of once per
+ * file. */
 static void fs_mkdir_parents(const char *file_path)
 {
     char buf[320];
@@ -3917,12 +3838,25 @@ static esp_err_t api_file_upload(httpd_req_t *r)
 
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
 
-    /* Reject the upload if the declared size exceeds available free space. */
+    /* Reject the upload if the declared size exceeds available free space.
+     * Same display_task pause as api_status()'s cached lookup above (see its
+     * comment) — this is the SAME raw esp_littlefs_info() block-walk, just
+     * on a rarer, user-initiated path rather than every boot; the
+     * interrupt-watchdog risk from racing display_task's SPI/LEDC critical
+     * sections is identical either way. On a pause timeout, skip the free-
+     * space check rather than risk it — fopen() below still catches an
+     * actually-full filesystem, just as a write failure instead of this
+     * friendlier pre-check. */
     {
         size_t total = 0, used = 0;
-        esp_littlefs_info("littlefs", &total, &used);
-        if ((size_t)r->content_len > (total - used))
-            return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Not enough space"), ESP_FAIL;
+        if (display_pause_for_spi(5000)) {
+            esp_littlefs_info("littlefs", &total, &used);
+            display_unpause();
+            if ((size_t)r->content_len > (total - used))
+                return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Not enough space"), ESP_FAIL;
+        } else {
+            ESP_LOGW(TAG, "fs usage: display task did not pause — skipping pre-upload space check");
+        }
     }
 
     /* Try the plain open first — the destination directory already exists
@@ -3936,11 +3870,21 @@ static esp_err_t api_file_upload(httpd_req_t *r)
         f = fopen(spiffs_path, "wb");
     }
     if (!f) {
+        /* Diagnostic only — same display_task pause as the two call sites
+         * above, same reason. Log without the littlefs totals rather than
+         * risk the read if the pause times out; the fopen failure itself is
+         * still reported either way. */
         size_t total = 0, used = 0;
-        esp_littlefs_info("littlefs", &total, &used);
-        ESP_LOGE(TAG, "fopen(%s, wb) failed: errno=%d (%s)  littlefs total=%u used=%u free=%u",
-                 spiffs_path, errno, strerror(errno),
-                 (unsigned)total, (unsigned)used, (unsigned)(total - used));
+        if (display_pause_for_spi(5000)) {
+            esp_littlefs_info("littlefs", &total, &used);
+            display_unpause();
+            ESP_LOGE(TAG, "fopen(%s, wb) failed: errno=%d (%s)  littlefs total=%u used=%u free=%u",
+                     spiffs_path, errno, strerror(errno),
+                     (unsigned)total, (unsigned)used, (unsigned)(total - used));
+        } else {
+            ESP_LOGE(TAG, "fopen(%s, wb) failed: errno=%d (%s)  (littlefs usage unavailable — display task did not pause)",
+                     spiffs_path, errno, strerror(errno));
+        }
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create file"), ESP_FAIL;
     }
 
@@ -4540,19 +4484,15 @@ static esp_err_t api_debug_micframe(httpd_req_t *r)
 /* GET /api/debug/heap — dump the per-region internal-heap breakdown to the
  * serial console.
  *
- * This is the view that distinguishes "the heap is FRAGMENTED" from "the heap
- * is FULL", which look identical from the single largest-free-block number in
- * /api/status. The discriminator is free_blocks per region: many small free
- * blocks scattered among allocations = fragmentation; a handful of free blocks
- * against hundreds of allocated ones = simply exhausted, packed tight. (This
- * board measured the latter — ~7 free blocks against ~624 allocated, 96%
- * utilised — which is why demand reduction moved the numbers and allocation
- * reordering did not.)
- *
- * It also shows WHICH of the six physical regions the free space is stranded
- * in. They are non-contiguous address ranges, so free space in one can never
- * satisfy an allocation that has to come from another — an aggregate "free
- * bytes" figure hides that completely.
+ * This is the view that distinguishes "the heap is FRAGMENTED" from "the
+ * heap is FULL", which look identical from the single largest-free-block
+ * number in /api/status. The discriminator is free_blocks per region: many
+ * small free blocks scattered among allocations means fragmentation; a
+ * handful of free blocks against hundreds of allocated ones means simply
+ * exhausted and packed tight. It also shows WHICH of the six physical
+ * regions the free space is stranded in — they're non-contiguous address
+ * ranges, so free space in one can never satisfy an allocation that has to
+ * come from another, which an aggregate "free bytes" figure hides.
  *
  * Output goes to UART only: heap_caps_print_heap_info() writes via printf,
  * and the web UI's log ring hooks ESP_LOG's vprintf, not stdout. Watch the
@@ -4791,28 +4731,41 @@ static esp_err_t api_wifi_scan_post(httpd_req_t *r)
     return send_json(r, "{\"status\":\"scanning\"}");
 }
 
+/* Response shape: {"scanning":bool,"networks":[...]}.  "scanning" lets the
+ * web UI poll for real completion (wifi_manager_scan_in_progress()) instead
+ * of the fixed few-second delay it used to guess before reading results —
+ * channel count and nearby AP density both affect how long a scan actually
+ * takes, so no fixed number was ever reliably right. "networks" reflects
+ * whatever esp_wifi's scan-result cache currently holds — the previous
+ * scan's results while one is still running, empty before the first scan
+ * ever completes. */
 static esp_err_t api_wifi_scan_get(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
+    bool scanning = wifi_manager_scan_in_progress();
     uint16_t cnt = 0;
     esp_wifi_scan_get_ap_num(&cnt);
-    if (cnt == 0) return send_json(r, "[]");
     if (cnt > 20) cnt = 20;
-    wifi_ap_record_t *list = calloc(cnt, sizeof(wifi_ap_record_t));
-    if (!list) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
-    esp_wifi_scan_get_ap_records(&cnt, list);
     cJSON *arr = cJSON_CreateArray();
-    for (int i = 0; i < cnt; i++) {
-        cJSON *ap = cJSON_CreateObject();
-        cJSON_AddStringToObject(ap, "ssid", (char*)list[i].ssid);
-        cJSON_AddNumberToObject(ap, "rssi", list[i].rssi);
-        cJSON_AddNumberToObject(ap, "auth", list[i].authmode);
-        cJSON_AddItemToArray(arr, ap);
+    if (cnt > 0) {
+        wifi_ap_record_t *list = calloc(cnt, sizeof(wifi_ap_record_t));
+        if (!list) { cJSON_Delete(arr); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
+        esp_wifi_scan_get_ap_records(&cnt, list);
+        for (int i = 0; i < cnt; i++) {
+            cJSON *ap = cJSON_CreateObject();
+            cJSON_AddStringToObject(ap, "ssid", (char*)list[i].ssid);
+            cJSON_AddNumberToObject(ap, "rssi", list[i].rssi);
+            cJSON_AddNumberToObject(ap, "auth", list[i].authmode);
+            cJSON_AddItemToArray(arr, ap);
+        }
+        free(list);
     }
-    free(list);
-    char *json = cJSON_PrintUnformatted(arr);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "scanning", scanning);
+    cJSON_AddItemToObject(root, "networks", arr);
+    char *json = cJSON_PrintUnformatted(root);
     esp_err_t ret = send_json(r, json);
-    free(json); cJSON_Delete(arr);
+    free(json); cJSON_Delete(root);
     return ret;
 }
 
@@ -5051,22 +5004,21 @@ static const httpd_uri_t uris[] = {
 
 /* Device-driven WebUI pull after a firmware OTA reboot.
  *
- * Background: the WebUI ZIP is applied AFTER the firmware reboot.  The old
- * design relied on the browser re-connecting through the post-reboot network
- * churn (mDNS re-registration + httpd connection resets) to call
- * api_webui_pull_auto.  In practice that trigger lands during the unstable
- * window right after boot and gets reset (errno 104) before the handler runs,
- * so webui_pull_task never starts and the update silently stalls.
+ * The WebUI ZIP is applied AFTER the firmware reboot. Relying on the
+ * browser to re-connect through the post-reboot network churn (mDNS
+ * re-registration + httpd connection resets) and call api_webui_pull_auto
+ * itself is unreliable — that trigger can land during the unstable window
+ * right after boot and get reset before the handler runs, silently
+ * stalling the update. Instead the device starts the pull itself:
+ * ota_pull_task already stored webui_url + webui_sha256 in NVS before
+ * rebooting, so this task just waits for connectivity, then spawns
+ * webui_pull_task exactly as api_webui_pull_auto would. The browser's
+ * Phase 4 only has to poll /api/webui_pull_status for progress, not
+ * trigger anything.
  *
- * Fix: the device starts the pull itself.  ota_pull_task already stored
- * webui_url + webui_sha256 in NVS before rebooting, so everything needed is on
- * hand.  This task waits for connectivity, then spawns webui_pull_task exactly
- * as api_webui_pull_auto would.  The browser's Phase 4 only has to poll
- * /api/webui_pull_status for progress — it no longer has to TRIGGER anything.
- *
- * s_ota_active is set before spawning, so a stray browser trigger that does
- * arrive hits the 409 guard in api_webui_pull_auto/api_webui_pull and cannot
- * double-spawn. */
+ * s_ota_active is set before spawning, so a stray browser trigger that
+ * does arrive hits the 409 guard in api_webui_pull_auto/api_webui_pull
+ * and cannot double-spawn. */
 static void post_ota_autostart_task(void *arg)
 {
     ESP_LOGI(TAG, "[post_ota] auto-WebUI task started — waiting for network…");
@@ -5147,7 +5099,25 @@ static void post_ota_autostart_timer_cb(void *arg)
  * instead of straight from the timer callback. */
 static void stock_files_check_task(void *arg)
 {
-    stock_files_check();
+    /* stock_files_check()'s stat() loop is 384 individual LittleFS lookups —
+     * each one a directory-block read through the same raw esp_flash_read()
+     * path esp_littlefs_info() uses (see api_status()'s comment / the
+     * boot-crash memory note), which forces ESP32's flash-cache-disable
+     * mechanism to park the OTHER core with its interrupts masked for each
+     * read's duration. This task's own per-32-files vTaskDelay(1) only
+     * prevents ITS task from starving the watchdog — it does nothing about
+     * that cross-core parking hitting display_task mid an SPI/LEDC critical
+     * section, which is the actual interrupt-watchdog risk. Same pause for
+     * the same reason, for the whole call rather than per-read: cheaper
+     * than pausing/resuming 384 times, and this task already isn't
+     * SPI/LCD-sensitive itself, so parking display_task around the whole
+     * thing costs nothing extra. */
+    if (display_pause_for_spi(5000)) {
+        stock_files_check();
+        display_unpause();
+    } else {
+        ESP_LOGW(TAG, "stock_files_check: display task did not pause — skipping this boot's check");
+    }
     ESP_LOGI(TAG, "stock_files_check_task stack high-water mark: %u B unused (of %u allocated)",
              (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)STOCK_CHECK_STACK_SIZE);
     vTaskDelete(NULL);
@@ -5158,40 +5128,15 @@ static void stock_files_check_task(void *arg)
  * stock_files_check_timer_cb()) doesn't need its own separate timer. */
 static esp_timer_handle_t s_stock_check_timer;
 
-/* Timer callback for the deferred stock_files_check() — see its call site
- * inside web_server_start()'s one-time setup block for why this moved off
- * the synchronous boot path entirely.
- *
- * Spawns a task rather than calling stock_files_check() directly: this
- * callback runs on the esp_timer service task, which dispatches EVERY
- * registered timer in this firmware (audio_defer, post_ota_defer, the OTA
- * hard-deadline/reboot timers, WiFi reconnect, ...) sequentially, one
- * after another, on a single task. stock_files_check() itself blocks —
- * it contains the vTaskDelay() yields added earlier this session to stop
- * its 384-file loop from starving the watchdog — so calling it directly
- * here would stall every OTHER timer queued behind it for as long as that
- * loop takes. Confirmed by a real boot log: this callback (6s defer) and
- * audio_defer_timer_cb (8s defer, registered independently in main.c)
- * both fired within 2ms of each other at ~34s in, instead of their
- * nominal ~14s/~16s — and audio_defer's own xTaskCreate() failed outright
- * once it finally ran, landing in the middle of a real network/TLS
- * contention window (weather geocoding + update_check's TLS handshake +
- * subscribers all active) it was specifically deferred to avoid. Spawning
- * a task here keeps this callback itself fast and non-blocking, same as
- * post_ota_autostart_timer_cb() above.
- *
- * s_ota_active guard: this scan touches the SAME LittleFS/SPI-flash bus a
- * concurrent OTA firmware pull, webUI pull, or stock-repair is actively
- * writing to — a real post-OTA-reboot field log showed this callback's task
- * finally completing ~20 s into an active webUI-pull's download+extraction
- * window (itself starved that long fighting the pull for CPU/flash access),
- * squarely inside the exact concurrent-flash-access window ota_suspend_tasks()
- * exists to prevent for every task IT knows about — this one just wasn't on
- * that list, since it doesn't exist yet at suspend-time (spawned fresh by
- * this timer, which can fire at any point). Rather than skip the check for
- * that boot entirely (the missing-files recovery banner still needs it to
- * run once), reschedule a few seconds out and re-check — harmless if it has
- * to loop a few times while a long extraction finishes. */
+/* Timer callback for the deferred stock_files_check(). Spawns a task rather
+ * than calling it directly: this callback runs on the shared esp_timer
+ * service task, and stock_files_check()'s 384-file loop blocking here would
+ * stall every other timer queued behind it. s_ota_active guard: this scan
+ * touches the same LittleFS/flash bus a concurrent OTA/webUI/repair write
+ * is using, and isn't on ota_suspend_tasks()'s list (it doesn't exist yet at
+ * suspend-time — spawned fresh by this timer). Reschedules a few seconds
+ * out rather than skipping the check for this boot, since the missing-files
+ * recovery banner still needs it to run once. */
 static void stock_files_check_timer_cb(void *arg)
 {
     if (s_ota_active) {
@@ -5200,20 +5145,22 @@ static void stock_files_check_timer_cb(void *arg)
             esp_timer_start_once(s_stock_check_timer, 10000 * 1000ULL);  /* 10 s in µs */
         return;
     }
-    /* Priority 2 — deliberately BELOW every network task this scan could
-     * otherwise delay (net_poll/ha_mqtt/wled_sync all run at 3; httpd
-     * higher still). It was at 4 — HIGHER than all three — meaning this
-     * low-urgency, no-user-facing-deadline scan could actually preempt
-     * them whenever it was runnable, not the other way around. The
-     * s_ota_active guard above only covers one specific contention source
-     * (an active OTA/webUI/repair flash write); a strictly-lower priority
-     * fixes the general case too — this task now only gets CPU when
-     * nothing more time-sensitive currently wants it, automatically, with
-     * no need to know in advance what else might be running. The
-     * vTaskDelay(1) yields inside stock_files_check() itself are a
-     * separate, still-needed mechanism: they prevent this task from
-     * starving the IDLE task (and so the watchdog it feeds) during
-     * stretches where NOTHING else happens to be ready to run either. */
+    /* stock_files_check_task pauses display_task for the whole scan — a
+     * generic hitch elsewhere in the UI, but the AP-PIN marquee redraws
+     * every ~200ms, so a pause here reads as the tubes visibly stuttering.
+     * Same defer-and-retry pattern as the s_ota_active guard above. */
+    if (wifi_manager_ap_pin_visible()) {
+        ESP_LOGI(TAG, "stock-file check: AP PIN visible — deferring 5 s to avoid stalling its redraw");
+        if (s_stock_check_timer)
+            esp_timer_start_once(s_stock_check_timer, 5000 * 1000ULL);  /* 5 s in µs */
+        return;
+    }
+    /* Priority 2 — below every network task this scan could otherwise delay
+     * (net_poll/ha_mqtt/wled_sync run at 3; httpd higher), so it only gets
+     * CPU when nothing more time-sensitive wants it. The vTaskDelay(1)
+     * yields inside stock_files_check() itself are separate and still
+     * needed: they stop this task starving the IDLE task (and its
+     * watchdog) when nothing else is ready to run either. */
     if (xTaskCreate(stock_files_check_task, "stock_chk", STOCK_CHECK_STACK_SIZE, NULL, 2, NULL) != pdPASS)
         ESP_LOGE(TAG, "stock_files_check_task creation failed — recovery banner will not update");
 }
@@ -5251,28 +5198,15 @@ void web_server_start(void)
          * it runs here rather than lazily inside api_status(). LittleFS is
          * already mounted by the time main.c calls web_server_start().
          *
-         * Timer-deferred (6s), NOT called inline here: this whole one-time
-         * block runs synchronously on the main task, *before* httpd_start()
-         * below — so a call here doesn't just delay stock_files_check()'s
-         * own result, it delays the httpd socket itself from opening, i.e.
-         * "Web UI ready". Real boot log showed exactly how bad this gets:
-         * web_server_start() now runs right after wifi_manager_start() (see
-         * the call site's comment), which means this 384-file LittleFS scan
-         * — yielding via vTaskDelay(1) every 32 files, added earlier this
-         * session to stop it starving the watchdog — was running smack in
-         * the middle of the WiFi auth/assoc/DHCP negotiation storm. That
-         * storm's own tasks run at higher priority (wifi driver task is
-         * prio 23), so each of our ~12 yields could lose the CPU for far
-         * longer than its nominal 1 tick: auth_init() logged at 8096ms,
-         * stock_files_check()'s own result didn't log until 22044ms — a
-         * ~14s stall for a loop that took 164ms once run after the storm
-         * settled (confirmed from an earlier boot where this call happened
-         * later, post-WiFi-settle, by coincidence of a since-reverted
-         * ordering). 6s comfortably clears the negotiation window seen in
-         * real logs (settled by ~12.1s here) without reintroducing the
-         * "moved the whole web_server_start() call late" regression this
-         * session already found and reverted — httpd_start() below runs
-         * immediately, unblocked by this scan either way. */
+         * Timer-deferred (6s), not called inline: this whole one-time block
+         * runs synchronously before httpd_start() below, so a call here
+         * would delay the httpd socket itself from opening ("Web UI ready"),
+         * not just this check's own result. 6s clears the WiFi auth/assoc/
+         * DHCP negotiation storm this scan would otherwise compete with
+         * (higher-priority WiFi driver tasks can stretch its per-32-file
+         * yields far past their nominal delay) without moving
+         * web_server_start() itself later, which costs boot-to-Web-UI time
+         * directly. */
         {
             const esp_timer_create_args_t sa = {
                 .callback = stock_files_check_timer_cb,
@@ -5300,23 +5234,15 @@ void web_server_start(void)
                 /* Drive the WebUI pull ourselves rather than waiting for the
                  * browser to reach us through the post-reboot network churn.
                  *
-                 * Timer-deferred creation (same pattern as main.c's
-                 * audio_deferred_start()), not an immediate xTaskCreate here:
-                 * web_server_start() itself runs early in app_main() (right
-                 * after wifi_manager_start(), restored there after moving it
-                 * later regressed boot-to-Web-UI time from ~8.4s to ~24.2s —
-                 * see the call site's comment), so this point is still
-                 * mid-way through app_main()'s permanent-task-creation block.
-                 * A same-boot xTaskCreate here would land post_ota_auto's
-                 * 4096B stack right between this batch and the ntp/weather/
-                 * update_check/subscribers/ha_mqtt/wled_sync/sht30 batch that
-                 * follows it — freed later into exactly the gap the next
-                 * growth burst competes for, only on this one rare
-                 * post-firmware-OTA boot. Deferring 3s pushes the actual
-                 * xTaskCreate() well past app_main()'s return (confirmed
-                 * <1s of wall time from here to "All tasks launched" in real
-                 * boot logs), with no cost: post_ota_autostart_task already
-                 * opens by waiting for network internally. */
+                 * Timer-deferred creation, not an immediate xTaskCreate here:
+                 * web_server_start() runs early in app_main(), still mid-way
+                 * through its permanent-task-creation block, so a same-boot
+                 * xTaskCreate here would land post_ota_auto's stack right in
+                 * the middle of that batch's own allocations — only on this
+                 * one rare post-firmware-OTA boot. Deferring 3s pushes the
+                 * actual xTaskCreate() well past app_main()'s return, with no
+                 * cost: post_ota_autostart_task already opens by waiting for
+                 * network internally. */
                 static esp_timer_handle_t post_ota_defer_timer;
                 const esp_timer_create_args_t pa = {
                     .callback = post_ota_autostart_timer_cb,
@@ -5333,14 +5259,11 @@ void web_server_start(void)
     if (s_server) return;   /* already running */
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    /* Route count + headroom.  MUST exceed the uris[] table size + 1 for the
-     * static wildcard registered after it: when this cap is hit, the excess
-     * registrations fail and — because the wildcard registers LAST — the
-     * symptom is "Nothing matches the given URI" on every web UI page while
-     * the APIs still work.  The loop below now logs any failure loudly.
-     * uris[] is exactly 64 entries as of the stock_repair endpoints (2026-08)
-     * — bumped to 70 for headroom past the +1 wildcard requirement instead of
-     * riding the exact edge again. */
+    /* Route count + headroom. Must exceed uris[] table size + 1 for the
+     * static wildcard registered after it — if this cap is hit, the excess
+     * registrations fail and, since the wildcard registers last, every web
+     * UI page 404s while the APIs still work. The loop below logs any
+     * failure loudly. */
     cfg.max_uri_handlers = 70;
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     cfg.stack_size       = 8192;

@@ -3,7 +3,7 @@
  * @brief WLED UDP Notifier v2 receiver implementation.
  *
  * Listens for WLED UDP Notifier v2 broadcasts on the configured port
- * (default 21324) and stores the primary colour + brightness so the LED
+ * (default 21324) and stores the primary color + brightness so the LED
  * task can mirror WLED-controlled strips in real time.
  */
 

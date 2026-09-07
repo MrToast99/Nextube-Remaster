@@ -31,27 +31,21 @@ static uint8_t      s_last_disconnect_reason = 0;
 static int64_t      s_connected_since_us = 0;
 static portMUX_TYPE s_net_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* Set true by wifi_manager_scan_start() right before kicking off the async
+ * scan, cleared by the WIFI_EVENT_SCAN_DONE case in wifi_event_handler().
+ * Lets the web UI poll for real completion (see wifi_manager_scan_in_progress()
+ * below) instead of the fixed few-second delay it used to guess before —
+ * scans can finish faster or slower than any one guessed number depending on
+ * channel count and nearby AP density. */
+static volatile bool s_scan_in_progress = false;
+
 /* mDNS state — set once in wifi_manager_start() based on config.
- *
- * s_mdns_on:       true when mDNS was enabled at boot.  Avoids touching the
- *                  mDNS API in the event handler if the feature is disabled.
- *
- * s_last_mdns_ip:  The IP address seen at the last IP_EVENT_STA_GOT_IP.
- *                  Starts at {0} (all-zeros), NEVER cleared on disconnect —
- *                  lets the GOT_IP handler tell a genuine address change
- *                  from a same-IP reconnect (see the handler's own comment,
- *                  at the ENABLE_IP4/ANNOUNCE_IP4 decision, for why that
- *                  distinction — and ev->ip_changed not being usable for
- *                  it — matters).
- *
- * mdns_register_netif() IS called once in wifi_manager_start(), immediately
- * after mdns_init().  With CONFIG_MDNS_PREDEF_NETIF_STA=n the daemon does not
- * auto-populate its s_esp_netifs[] table, so without this call
- * get_if_from_netif() cannot find s_sta_netif and every mdns_netif_action()
- * returns ESP_ERR_INVALID_STATE (mDNS never announces).  In the refactored
- * (2025) espressif/mdns component the call ONLY stores the esp_netif_t pointer
- * in that table — it installs no LWIP netif-ext callback and no esp-event
- * handler. */
+ * s_mdns_on:      mDNS enabled at boot; skips the mDNS API entirely if not.
+ * s_last_mdns_ip: last GOT_IP address, starts {0}, never cleared on
+ *                 disconnect — lets the handler tell a real address change
+ *                 from a same-IP reconnect (ev->ip_changed can't: esp_netif
+ *                 clears ip_info_old on every disconnect, so it's always
+ *                 true). */
 static bool         s_mdns_on      = false;
 static esp_ip4_addr_t s_last_mdns_ip = {0};
 
@@ -79,6 +73,15 @@ static esp_ip4_addr_t s_last_mdns_ip = {0};
  * an external sticker / label on the device. */
 #define AP_PIN_NVS_NS         "nextube_sec"
 #define AP_PIN_NVS_KEY        "ap_pin"
+
+/* One-shot flag: the STA credentials due on the next boot have never been
+ * tried live. Set before a reboot that also needs a reboot-only field
+ * applied (hostname, weather/youtube/mdns/mic/audio_enabled) — that path
+ * skips the live-reconnect path and reboots straight onto untested
+ * credentials. Without it, wifi_manager_start()'s normal policy (saved
+ * SSID → STA-only, no AP) would leave no fallback if they're wrong.
+ * Consumed (read + erased) once by wifi_manager_start(). */
+#define WIFI_UNTESTED_STA_NVS_KEY "untested_sta"
 
 #define AP_PIN_LEN            8     /* must be ≥ 8 — WPA2_PSK minimum length */
 
@@ -124,6 +127,36 @@ static bool s_manual_reconnect = false;
  * blocking this event-handler context with vTaskDelay. */
 static uint32_t           s_reconnect_fail_count     = 0;
 static esp_timer_handle_t s_reconnect_backoff_timer  = NULL;
+
+/* ── Deferred post-connect reboot (see wifi_manager_reboot_once_connected()
+ * in the header) ──────────────────────────────────────────
+ * s_reboot_after_confirm:  armed until GOT_IP confirms, or the timeout below
+ *                          fires the old mark-untested-sta fallback reboot.
+ * s_reboot_confirm_timer:  that timeout fallback.
+ * s_reboot_after_ip_timer: settle delay after GOT_IP before esp_restart(),
+ *                          so the onboarding wizard's poll can see success.
+ * s_reboot_settle_pending: true for the whole reconnect→reboot window;
+ *                          suppresses the AP-PIN redraw during it. */
+static volatile bool     s_reboot_after_confirm    = false;
+static volatile bool     s_reboot_settle_pending   = false;
+static esp_timer_handle_t s_reboot_confirm_timer    = NULL;
+static esp_timer_handle_t s_reboot_after_ip_timer   = NULL;
+
+static void reboot_confirm_timeout_cb(void *arg)
+{
+    if (!s_reboot_after_confirm) return;   /* already satisfied by GOT_IP */
+    s_reboot_after_confirm = false;
+    ESP_LOGW(TAG, "Deferred settings reboot: STA never confirmed — falling back "
+                  "to immediate reboot with AP fallback (mark_untested_sta)");
+    wifi_manager_mark_untested_sta();
+    esp_restart();
+}
+
+static void reboot_after_ip_cb(void *arg)
+{
+    ESP_LOGI(TAG, "Deferred settings reboot: STA confirmed earlier — rebooting now");
+    esp_restart();
+}
 
 /* ──────— AP PIN helpers ──────────────────────────────────────────── */
 
@@ -178,6 +211,14 @@ bool wifi_manager_ap_active(void)
 
 bool wifi_manager_ap_pin_visible(void)
 {
+    /* Suppressed during a deferred settings-reboot's reconnect/settle window
+     * — the channel switch onto the new network can transiently drop the
+     * AP's own client, which would otherwise flash the PIN back up right
+     * before the device reboots anyway. Not folded into a blanket "hide
+     * whenever STA is connected" rule: wifi_manager_force_ap() can bring the
+     * AP up while STA is still on an old network, and the PIN needs to show
+     * there too. */
+    if (s_reboot_settle_pending) return false;
     return wifi_manager_ap_active() && (s_ap_client_count == 0);
 }
 
@@ -220,6 +261,36 @@ void wifi_manager_factory_reset_ap_pin(void)
     ESP_LOGW(TAG, "AP PIN factory-reset — fresh PIN will be generated on next boot");
 }
 
+/* Call right before rebooting with a config save that changed the SSID (see
+ * the flag's own comment above) — makes wifi_manager_start() bring the setup
+ * AP up on the very next boot even though a saved SSID would normally skip
+ * it, so a client sitting on the setup AP doesn't lose the device outright
+ * if the new credentials turn out wrong or slow to associate. One-shot: the
+ * next boot consumes (erases) this regardless of outcome. */
+void wifi_manager_mark_untested_sta(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(AP_PIN_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, WIFI_UNTESTED_STA_NVS_KEY, 1);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+void wifi_manager_reboot_once_connected(uint32_t timeout_ms)
+{
+    s_reboot_after_confirm = true;
+    /* Armed here, at request time, not on GOT_IP — the channel switch onto
+     * the new network (and the AP-client drop it causes) happens before STA
+     * actually connects, so arming later would leave that lead-in window
+     * unprotected. */
+    s_reboot_settle_pending = true;
+    if (!s_reboot_confirm_timer) {
+        esp_timer_create_args_t a = { .callback = reboot_confirm_timeout_cb, .name = "reboot_confirm_to" };
+        esp_timer_create(&a, &s_reboot_confirm_timer);
+    }
+    esp_timer_stop(s_reboot_confirm_timer);
+    esp_timer_start_once(s_reboot_confirm_timer, (uint64_t)timeout_ms * 1000);
+}
 
 static void ap_disable_cb(void *arg)
 {
@@ -311,6 +382,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             }
             break;
         }
+        case WIFI_EVENT_SCAN_DONE:
+            /* Flips wifi_manager_scan_in_progress() back to false so the web
+             * UI can poll for real completion instead of guessing a fixed
+             * delay before reading results — see that function's comment. */
+            s_scan_in_progress = false;
+            break;
         case WIFI_EVENT_AP_STACONNECTED: {
             wifi_event_ap_staconnected_t *ev = data;
             s_ap_client_count++;
@@ -353,30 +430,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 esp_timer_start_once(s_ap_disable_timer, AP_DISABLE_DELAY_US);
             }
         }
-        /* mDNS probe or re-announce on GOT_IP.
-         *
-         * ip_actually_changed = true  → new IP (boot, DHCP reassign, new
-         *   network): call ENABLE_IP4 so the daemon probes for uniqueness and
-         *   then announces the address.  .local resolvers update their caches.
-         *
-         * ip_actually_changed = false → reconnect on the same DHCP lease:
-         *   call ANNOUNCE_IP4 to re-announce without re-probing.  The hostname
-         *   claim hasn't changed, so a fresh probe cycle would be wasted
-         *   multicast traffic.
-         *
-         * ANNOUNCE_IP4 is guarded by mdns_priv_if_ready() inside the daemon
-         * and is a silent no-op when the interface has not been enabled yet.
-         * Because s_last_mdns_ip starts at 0, the very first GOT_IP always
-         * has ip_actually_changed = true → ENABLE_IP4 runs first, so the
-         * interface is always enabled before ANNOUNCE_IP4 can fire.
-         *
-         * ev->ip_changed is NOT used: esp_netif_action_disconnected() clears
-         * ip_info_old to 0.0.0.0 on every disconnect, making ev->ip_changed
-         * always true — even for a same-IP reconnect.
-         *
-         * mdns_register_netif() is called once at startup (see wifi_manager_start)
-         * so that get_if_from_netif() can locate s_sta_netif and these
-         * mdns_netif_action() calls succeed. */
+        /* New IP → ENABLE_IP4 (probe + announce). Same IP (reconnect, same
+         * lease) → ANNOUNCE_IP4 only, no re-probe needed. s_last_mdns_ip
+         * starts at 0 so the first-ever GOT_IP always takes the ENABLE_IP4
+         * path, enabling the interface before any ANNOUNCE_IP4 can fire.
+         * ev->ip_changed isn't usable here — esp_netif clears ip_info_old on
+         * every disconnect, so it's always true. */
         if (s_mdns_on && s_sta_netif) {
             bool ip_actually_changed = (ev->ip_info.ip.addr != s_last_mdns_ip.addr);
             s_last_mdns_ip = ev->ip_info.ip;   /* update before action so re-entrant GOT_IP is safe */
@@ -393,6 +452,25 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 if (e != ESP_OK) ESP_LOGW(TAG, "mDNS ANNOUNCE_IP4: %s", esp_err_to_name(e));
                 else ESP_LOGI(TAG, "mDNS: re-announced → http://%s.local", s_hostname);
             }
+        }
+        /* A deferred settings reboot was waiting on this event — credentials
+         * are proven, so it can go ahead without the AP-fallback safety net.
+         * Settle 10s before actually rebooting: a channel switch onto this
+         * network can briefly drop the AP's client and bounce the httpd
+         * server, so the onboarding wizard's poll needs real time in this
+         * window to see success first. The AP itself already lingers 60s
+         * (armed above), so this doesn't compete with that. */
+        if (s_reboot_after_confirm) {
+            s_reboot_after_confirm  = false;
+            s_reboot_settle_pending = true;   /* defensive; already armed by wifi_manager_reboot_once_connected() */
+            if (s_reboot_confirm_timer) esp_timer_stop(s_reboot_confirm_timer);
+            ESP_LOGI(TAG, "Deferred settings reboot: STA confirmed (%s) — rebooting in 10 s", s_ip_str);
+            if (!s_reboot_after_ip_timer) {
+                esp_timer_create_args_t a = { .callback = reboot_after_ip_cb, .name = "reboot_after_ip" };
+                esp_timer_create(&a, &s_reboot_after_ip_timer);
+            }
+            esp_timer_stop(s_reboot_after_ip_timer);
+            esp_timer_start_once(s_reboot_after_ip_timer, 10000 * 1000);  /* 10 s in µs */
         }
     }
 }
@@ -575,20 +653,51 @@ void wifi_manager_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP,  &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
 
+    /* One-shot consume — always erased regardless of outcome, so it only
+     * ever affects the one boot right after it was set. */
+    bool untested_sta = false;
+    {
+        nvs_handle_t h;
+        if (nvs_open(AP_PIN_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+            uint8_t v = 0;
+            if (nvs_get_u8(h, WIFI_UNTESTED_STA_NVS_KEY, &v) == ESP_OK && v)
+                untested_sta = true;
+            nvs_erase_key(h, WIFI_UNTESTED_STA_NVS_KEY);   /* no-op if absent */
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
+
     /* Mode policy:
-     *   No SSID configured  → APSTA from boot.  AP stays up indefinitely so
-     *                          the user can configure WiFi via the web UI.
-     *   SSID configured     → demote to STA only.  The setup AP is NOT
-     *                          brought up automatically on failure; the user
-     *                          summons it on demand with the LEFT+RIGHT touch
-     *                          hotkey (→ wifi_manager_force_ap()).
+     *   No SSID configured           → APSTA from boot.  AP stays up
+     *                                   indefinitely so the user can
+     *                                   configure WiFi via the web UI.
+     *   SSID configured, untested    → APSTA, same as above but STA also
+     *                                   attempts these credentials immediately.
+     *                                   Keeps a client on the setup AP from
+     *                                   losing the device outright if they're
+     *                                   wrong — the usual IP_EVENT_STA_GOT_IP
+     *                                   handler closes the AP 60 s after they
+     *                                   turn out right, same as any other
+     *                                   time the AP happens to be up when STA
+     *                                   connects.
+     *   SSID configured, previously-
+     *   working                      → demote to STA only.  The setup AP is
+     *                                   NOT brought up automatically on
+     *                                   failure; the user summons it on
+     *                                   demand with the LEFT+RIGHT touch
+     *                                   hotkey (→ wifi_manager_force_ap()).
      *
      * Avoids unnecessarily broadcasting "Nextube-Setup" — the setup AP only
-     * appears on first boot or when the user explicitly requests it. */
-    if (have_creds) {
+     * appears on first boot, for untested credentials, or when the user
+     * explicitly requests it. */
+    if (have_creds && !untested_sta) {
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         s_ap_active = false;
         ESP_LOGI(TAG, "STA: connecting to \"%s\" (hold LEFT+RIGHT touch 15 s for setup AP)", ssid);
+    } else if (have_creds) {
+        s_ap_active = true;
+        ESP_LOGI(TAG, "STA: connecting to \"%s\" with untested credentials — keeping setup AP up as a fallback", ssid);
     } else {
         s_ap_active = true;
         ESP_LOGI(TAG, "No STA credentials — AP-only mode for first-boot setup");
@@ -596,22 +705,13 @@ void wifi_manager_start(void)
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* WiFi power-save: NONE (radio always on).
-     *
-     * History: PS_NONE was tried early, then reverted to MIN_MODEM because the
-     * radio's continuous rail current raised the audio noise floor.  We now
-     * know WHY it was audible: the noise conducted into the amplifier through
-     * the GPIO25 LOW clamp (amp input referenced to digital ground via the
-     * pin's pull-down FET).  That path was severed — GPIO25 is now isolated at
-     * idle via rtc_gpio_isolate() — so PS_NONE no longer carries a noise cost.
-     *
-     * Meanwhile MIN_MODEM had a real connectivity cost: the radio slept ~80%
-     * of the time (log: "pm stop, total sleep time") and dropped downlink
-     * frames — observed as MQTT "No PING_RESP" disconnects every keepalive
-     * interval and esp-tls select() timeouts on inbound handshake data, while
-     * uplink (connect/publish) worked.  PS_NONE keeps the receiver on and
-     * fixes the RX loss.  (Power cost: ~120 mA steady vs ~20–40 mA average —
-     * acceptable for a mains-powered clock.) */
+    /* WiFi power-save: NONE (radio always on) — MIN_MODEM slept the radio
+     * ~80% of the time and dropped downlink frames (MQTT keepalive
+     * timeouts, missed inbound TLS data) while uplink still worked. The
+     * noise-floor cost PS_NONE used to carry is gone now that GPIO25 is
+     * isolated at idle, severing its ground-return path into the amp.
+     * Power cost: ~120mA steady vs ~20-40mA average — fine for a
+     * mains-powered clock. */
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     ESP_LOGI(TAG, "WiFi started (PS=NONE).  AP SSID: Nextube-Setup (WPA2) %s",
@@ -762,6 +862,20 @@ void wifi_manager_apply_sta_credentials(void)
 
 void wifi_manager_scan_start(void)
 {
+    /* Set before starting, not after: esp_wifi_scan_start()'s async (false)
+     * mode can complete and fire WIFI_EVENT_SCAN_DONE before this function
+     * even returns on a fast/empty-air scan — setting the flag after the
+     * call would risk clearing-before-setting and leaving it stuck true. */
+    s_scan_in_progress = true;
     wifi_scan_config_t scan = { .show_hidden = true };
     esp_wifi_scan_start(&scan, false);
+}
+
+/* True from wifi_manager_scan_start() until the scan actually completes
+ * (WIFI_EVENT_SCAN_DONE). Lets a caller poll for real completion instead of
+ * guessing how long a scan takes — channel count and nearby AP density both
+ * affect it, so no fixed delay is reliably right. */
+bool wifi_manager_scan_in_progress(void)
+{
+    return s_scan_in_progress;
 }

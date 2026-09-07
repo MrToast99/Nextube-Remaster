@@ -72,46 +72,27 @@ _Static_assert(CFG_MIC_BAND_COUNT == MIC_BAND_COUNT,
                "CFG_MIC_BAND_COUNT in config_mgr.h must equal MIC_BAND_COUNT in microphone.h");
 
 /* ── Heap telemetry ───────────────────────────────────────────────────
- * Logs internal-RAM and PSRAM free-size + largest-block every 5 minutes.
- * largest-block is the real fragmentation indicator: a healthy device with
- * 200 KB free / 180 KB largest is fine; 200 KB free / 8 KB largest is in
- * trouble even though aggregate free looks the same.  The same numbers
- * are exposed via /api/status so the System tab can chart them.
+ * Logs internal-RAM and PSRAM free-size + largest-block every 5 minutes,
+ * also exposed via /api/status for the System tab's chart. largest-block
+ * is the real fragmentation indicator: 200KB free / 180KB largest is
+ * fine; 200KB free / 8KB largest is in trouble despite the same aggregate
+ * free. Uses heap_caps_get_free_size(CAP_INTERNAL/CAP_SPIRAM) directly
+ * rather than esp_get_free_heap_size(), which combines both caps and is
+ * misleading on this board's internal-SRAM/PSRAM split. internal largest
+ * uses CAP_INTERNAL|CAP_8BIT, not CAP_INTERNAL alone, since CAP_INTERNAL
+ * alone also counts reclaimed IRAM (not byte-addressable, can't hold a
+ * real allocation).
  *
- * Note on the per-cap queries: esp_get_free_heap_size() returns the total
- * across ALL caps (internal + PSRAM combined when SPIRAM_USE_MALLOC=y),
- * which is misleading on ESP32-WROVER where internal SRAM is ~320 KB and
- * PSRAM contributes the bulk.  We use heap_caps_get_free_size(CAP_INTERNAL)
- * and CAP_SPIRAM directly so each line is unambiguous.
+ * httpd sockets: how many of web_server's max_open_sockets slots are in
+ * use — makes a slow climb toward the cap visible over days of uptime
+ * instead of only seeing the aftermath once lru_purge kicks in.
  *
- * internal largest uses CAP_INTERNAL|CAP_8BIT, not CAP_INTERNAL alone:
- * CAP_INTERNAL alone also counts reclaimed IRAM, which isn't byte-addressable
- * and can never hold a real allocation (a task stack, a malloc'd buffer, ...).
- * A field reading showed a rock-steady "largest=9216" that turned out to be
- * exactly that IRAM region sitting nearly empty and irrelevant (confirmed via
- * heap_caps_print_heap_info), while the real, fragmentable ceiling for
- * anything actually allocatable was lower and in a different region.
- *
- * httpd sockets: how many of web_server's max_open_sockets slots are
- * currently in use. lru_purge_enable (see web_server_start()) stops a
- * connection that died mid-flight during a WiFi drop from wedging the
- * server permanently, but doesn't by itself reveal whether that's
- * happening at all — this line makes a slow climb toward the cap visible
- * over days of uptime instead of only ever seeing the aftermath (the web
- * UI going briefly unresponsive right as lru_purge kicks in).
- *
- * Per-task stack dump: same idea as the webui_pull_task sizing exercise
- * (measured peak usage under real load, not a guess) but for every task
- * at once. uxTaskGetStackHighWaterMark() reports the closest any task has
- * ever come to overflowing its stack, in words — this multiplies by
- * sizeof(StackType_t) to log bytes still unused, so a small number next to
- * a task's name means its xTaskCreate*() stack size has little margin left,
- * and a large one is a candidate to shrink. One ESP_LOGI per task (~25
- * lines) every 5 minutes is too much to leave on by default, so it's gated
- * behind the hidden debug panel's "Per-task stack log" checkbox
- * (web_server_debug_stacklog_enabled(), POST /api/debug/stacklog) — off
- * unless someone's actively chasing a stack size, same as every other
- * debug-panel control: runtime only, resets to off on reboot. */
+ * Per-task stack dump: uxTaskGetStackHighWaterMark() reports the closest
+ * any task has come to overflowing its stack; this logs bytes still
+ * unused per task, so a small number is a stack-size candidate to grow
+ * and a large one a candidate to shrink. Gated behind the hidden debug
+ * panel's "Per-task stack log" checkbox — one ESP_LOGI per task every 5
+ * minutes is too much to leave on by default. */
 static void log_task_stacks(void)
 {
     UBaseType_t n = uxTaskGetNumberOfTasks() + 2; /* pad: a task can be created between the count and the snapshot */
@@ -293,49 +274,31 @@ static void init_nvs(void)
 
 /* ── Deferred audio initialisation ───────────────────────────────────── */
 /* Runs well after the WiFi AP is broadcasting and any auto-connecting
- * client's WPA2 handshake has completed — a fixed 8 s delay, enough to
- * clear that window.
+ * client's WPA2 handshake has completed — a fixed 8s delay, enough to
+ * clear that window. Deferred via audio_defer_timer_cb() (a one-shot
+ * esp_timer) rather than sleeping inside an already-created task: an
+ * xTaskCreate() allocates its full stack synchronously at creation time,
+ * so sleeping inside the task would leave that stack allocated for the
+ * whole 8s wait — competing with WiFi/WPA2 setup allocations for exactly
+ * the memory this delay exists to protect. Deferring the task creation
+ * itself means the 8s wait costs no new allocation at all (it runs on the
+ * esp_timer service task's own stack), and this task's own stack is only
+ * allocated once the sensitive window has already passed.
  *
- * The 8 s wait used to happen INSIDE a task that was created immediately at
- * boot (xTaskCreate() allocates the TCB + full stack synchronously, at
- * creation time — the vTaskDelay() inside it doesn't defer that allocation
- * at all). That meant a ~4 KB block sat allocated for the entire 8 s, then
- * got freed right as the WPA2 window closed — i.e. exactly the moment this
- * mechanism exists to protect, with WiFi/WPA2 setup allocations actively
- * competing for whatever space it just vacated. The deferral protected
- * audio_init()'s own (tiny) allocations from that window; it did nothing
- * for the task's own stack, which was present for the whole thing.
- *
- * Fixed by deferring the TASK CREATION itself via audio_defer_timer_cb()
- * (a one-shot esp_timer, started from app_main() below) instead of sleeping
- * inside an already-created task. The 8 s wait now costs no new allocation
- * at all — it runs on the existing esp_timer service task's own stack — and
- * this task's stack is only allocated (briefly) once the sensitive window
- * has already passed, then freed almost immediately after, in a much
- * quieter part of boot unlikely to be racing anything else for that space.
- *
- * Mic setup no longer runs from here — see mic_hw_init()/mic_init() in
- * app_main(), moved to boot time for the same reason audio stays deferred
- * would have broken it: mic_task_start()'s internal-RAM stack allocation
- * hit the same late-boot WiFi/MQTT memory pressure this function's own
- * 8 s/AP-PIN wait was exposing it to.
- *
- * audio_init() was briefly moved out of here into app_main()'s early batch
- * (paired with a persistent playback task) and REVERTED — see the comment
- * on audio_play_task in audio.c. Short version: it permanently claimed
- * 16 KB of internal RAM at boot and starved sht30 + wled_sync + MQTT.
- * audio_init() itself allocates no task, so deferring it costs nothing. */
-/* 3072: reasoned, not measured — audio_init() (2 semaphore creates, a flag,
- * 2 log lines) and audio_set_volume() (one bounds-checked assignment) are
- * both trivially shallow, so this task's own logic needs very little. Not
- * cut further than that: heap_telemetry_task's own stack-size comment below
- * documents 2 KB overflowing reliably in field testing for a similarly
- * shallow, logging-heavy task on this codebase's log_vprintf_hook — a real,
- * measured cautionary data point for this class of task, not a guess, and
- * this task does comparable logging plus a config_lock()/unlock() cycle on
- * top. High-water-mark logged below — tighten with that real number once
- * it's in hand, same as every other task size in this codebase was, rather
- * than trusting this reasoning alone indefinitely. */
+ * Mic setup does NOT defer this way — see mic_hw_init()/mic_init() in
+ * app_main(), which run at boot time instead, since mic_task_start()'s
+ * stack allocation needs to happen before the same late-boot WiFi/MQTT
+ * memory pressure this delay is protecting audio from. audio_init() keeps
+ * a persistent playback task out of this path on purpose — see the
+ * comment on audio_play_task in audio.c for why a persistent task here
+ * would starve sht30/wled_sync/MQTT of internal RAM instead. */
+/* 3072: audio_init() (2 semaphore creates, a flag, 2 log lines) and
+ * audio_set_volume() (one bounds-checked assignment) are both trivially
+ * shallow, so this task needs very little — but not cut further, since a
+ * similarly shallow, logging-heavy task elsewhere in this codebase has
+ * overflowed a 2KB stack in the field, and this task does comparable
+ * logging plus a config_lock()/unlock() cycle on top. High-water-mark
+ * logged below — tighten with that real number once it's in hand. */
 #define AUDIO_DEFER_STACK_SIZE 3072
 
 static void audio_deferred_start(void *arg)
@@ -387,31 +350,20 @@ void app_main(void)
     ESP_LOGI(TAG, "╚═════════════════════════════════════════════════════╝");
 
     /* ── Isolate the DAC output pad at idle ──────────────────────────────
-     * GPIO25 (DAC_CHAN_0 → LTK8002D amplifier).  Idle state matters enormously:
+     * GPIO25 (DAC_CHAN_0 → LTK8002D amplifier). rtc_gpio_isolate() (RTC mux,
+     * input/output buffers off, no pulls — pad fully disconnected from the
+     * digital domain) is the quietest idle state measured: driving it LOW
+     * references the amp's AC-coupled input to digital ground through the
+     * pull-down FET, so die current spikes appear as ground bounce (static
+     * floor, hiss, beeps); Hi-Z input is noisier still for broadband
+     * pickup. If audio is enabled, dac_restart() in the deferred task
+     * reconfigures the pad for DAC use per clip; dac_teardown() re-isolates
+     * it after.
      *
-     *   • Driven LOW (previous approach): references the amp's AC-coupled
-     *     input to the ESP32's DIGITAL GROUND through the pin's pull-down
-     *     FET.  Every current spike on the die then appears at the amp input
-     *     as ground bounce — measured as a constant static floor (1 kHz tick
-     *     wake-ups), hiss during flash reads, beeps during panel init, and a
-     *     1 Hz tick from the per-second redraw.
-     *
-     *   • Digital INPUT (Hi-Z): input buffer + GPIO-matrix connection stay
-     *     alive; measured noisier than LOW for broadband pickup.
-     *
-     *   • rtc_gpio_isolate(): RTC mux, input/output buffers off, no pulls —
-     *     pad fully disconnected from the digital domain.  This is the exact
-     *     state IDF 3.3.5's dac_output_disable() left the pad in, i.e. the
-     *     stock firmware's idle.  Measured near-silent: no static floor, no
-     *     activity hiss, no boot pop (no DC step into the coupling cap).
-     *
-     * If audio is enabled, dac_restart() in the deferred task reconfigures
-     * the pad for DAC use per clip; dac_teardown() re-isolates it after.
-     *
-     * GPIO26 (DAC_CHAN_1) is dual-use on this PCB: it is also PIN_LCD2_CS.  The stock
-     * firmware time-shares it between LCD CS and audio DAC.  We use it only as SPI CS;
-     * the DAC driver must not claim it (dac_oneshot on DAC_CHAN_1 would conflict with
-     * the SPI driver asserting CS on the same pin).  Leave it to the SPI driver only. */
+     * GPIO26 (DAC_CHAN_1) is dual-use on this PCB — also PIN_LCD2_CS. We
+     * use it only as SPI CS; the DAC driver must not claim it, or
+     * dac_oneshot on DAC_CHAN_1 would conflict with the SPI driver
+     * asserting CS on the same pin. */
     rtc_gpio_isolate(PIN_AUDIO_DAC);
 
     /* Allow power rails and SPI peripherals to fully settle. */
@@ -474,40 +426,29 @@ void app_main(void)
      * chance to claim MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA memory —
      * adc_continuous_new_handle() needs ~10 KB from that specific, small,
      * contended pool, and a failure there aborts the device via an ESP-IDF
-     * internal-cleanup bug with no way for us to catch it (confirmed by
-     * reading esp_adc/adc_continuous.c directly, and by a live repro
-     * 2026-08-14: calling this after WiFi/MQTT connect left only ~2 KB free
-     * with no block bigger than 1.4 KB, and it aborted immediately). This
-     * only allocates the hardware (no-op if mic is disabled in config). */
+     * internal-cleanup bug with no way for us to catch it. This only
+     * allocates the hardware (no-op if mic is disabled in config). */
     mic_hw_init();
 
     /* Finish mic setup and start mic_task HERE too, for the exact same
-     * reason as mic_hw_init() above — confirmed live: mic_task_start()'s
-     * xTaskCreatePinnedToCore() (an 8 KB internal-RAM stack) failed with
-     * "mic_task creation failed" when left in the deferred path below,
-     * hitting the identical late-boot WiFi/MQTT memory-pressure window
-     * mic_hw_init() was moved here to dodge — moving the hardware alloc
-     * without also moving the task that uses it only fixed half the
-     * problem.
+     * reason as mic_hw_init() above — mic_task_start()'s own 8KB stack
+     * allocation hits the identical late-boot WiFi/MQTT memory-pressure
+     * window mic_hw_init() was moved here to dodge, so moving the hardware
+     * alloc alone only fixed half the problem.
      *
-     * Safe to do this early: creating mic_task does not by itself trigger
-     * the AP-PIN-phase / PSRAM-cache-errata risk the old deferred code
-     * guarded against with its wifi_manager_ap_pin_visible() wait (that risk
-     * was always specifically about mic_task's ACTIVE capture — SPI0 bus
-     * pressure from adc_continuous colliding with the display task's rapid
-     * SPIFFS reads for the AP-PIN JPEGs — never about audio, which has no
-     * such wait of its own beyond the unrelated WPA2-window delay below).
-     * mic_task only starts actively capturing once Spectrum mode is
-     * genuinely requested, which requires the device to already be past
-     * initial AP-PIN setup — so the same real-world timing that used to be
-     * enforced by an explicit wait is still true here, just implicitly.
+     * Safe to do this early: creating mic_task doesn't by itself trigger
+     * the AP-PIN-phase SPI0 bus pressure the old deferred code's
+     * wifi_manager_ap_pin_visible() wait guarded against — that risk is
+     * specifically about mic_task's ACTIVE capture, and mic_task only
+     * starts actively capturing once Spectrum mode is genuinely requested,
+     * which requires the device to already be past initial AP-PIN setup.
      *
      * This also drops the old "re-read config in case the user changed it
-     * via the web UI during setup" step mic_init() used to need — at this
-     * point in boot neither WiFi nor the web server exist yet, so nothing
-     * could have changed it. mic_init() itself already returns false
-     * harmlessly if mic_hw_init() found the mic disabled, so no outer
-     * enabled-check is needed here either. */
+     * via the web UI during setup" step — at this point in boot neither
+     * WiFi nor the web server exist yet, so nothing could have changed it.
+     * mic_init() itself already returns false harmlessly if mic_hw_init()
+     * found the mic disabled, so no outer enabled-check is needed here
+     * either. */
     if (mic_init()) {
         mic_task_start();
         config_lock();
@@ -519,23 +460,16 @@ void app_main(void)
     }
 
     /* Low-priority background heap monitor — fires every 5 minutes.
-     * 4 KB stack: ESP_LOGI through the log-ring vprintf hook
-     * (web_server.c::log_vprintf_hook) uses a 160-byte format buffer on
-     * top of vprintf/vsnprintf's own scratch, plus the captured va_list
-     * copy.  2 KB overflowed reliably in field testing.
+     * 4 KB stack: ESP_LOGI through the log-ring vprintf hook uses a
+     * 160-byte format buffer on top of vprintf/vsnprintf's own scratch,
+     * plus the captured va_list copy — 2KB overflowed reliably in field
+     * testing.
      *
      * Created here — right after display/mic, before WiFi/network/MQTT —
-     * not at the very end of app_main() where it used to live. It was found
-     * completely missing from a live task listing (uxTaskGetSystemState()
-     * — not blocked, not suspended, just never created) after MQTT's real
-     * task creation moved earlier and started committing internal RAM
-     * eagerly: heap_tel was the LAST task created in the whole boot
-     * sequence, so it was the most exposed to whatever fragmentation
-     * everything else had already caused, and this xTaskCreatePinnedToCore()
-     * call had no pdPASS check (unlike every sibling call in this file), so
-     * the failure was completely silent — no error, no task, no heap log,
-     * ever, for the rest of that boot. A monitoring task should be one of
-     * the most reliably-created things here, not the least — it's the
+     * not at the very end of app_main(): a task created last in the boot
+     * sequence is the most exposed to whatever fragmentation everything
+     * else has already caused, and a monitoring task should be one of the
+     * most reliably-created things here, not the least, since it's the
      * thing meant to tell us when something else is starving. */
     if (xTaskCreatePinnedToCore(heap_telemetry_task, "heap_tel",
                                 4096, NULL, 1, NULL, 0) != pdPASS)
@@ -567,40 +501,25 @@ void app_main(void)
 
     wifi_manager_start();
 
-    /* web_server_start() runs right after WiFi starts, same as stock —
-     * this is what makes the web UI reachable in ~8 s instead of waiting on
-     * weather/update_check/etc. below. Moving it to the end of this block
-     * once pushed "Web UI ready" from ~8.4 s to ~24.2 s: its
-     * stock_files_check() scan contended on CPU with weather's/
-     * update_check's TLS handshakes instead of running before they'd
-     * started. That scan is now its own timer-deferred call inside
-     * web_server_start() (a separate one-shot from the post_ota timer
-     * below it), so this position is kept for the general case, not out
-     * of necessity — nothing below blocks waiting for the web server. The
-     * fragmentation concern that originally motivated moving this call —
-     * post_ota_autostart_task landing between this batch and the one
-     * below, only on a post-firmware-OTA boot — is fixed the same way:
-     * that spawn is timer-deferred too. */
+    /* web_server_start() runs right after WiFi starts, same as stock — this
+     * is what makes the web UI reachable in ~8s instead of waiting on
+     * weather/update_check/etc. below. Its stock_files_check() scan is its
+     * own timer-deferred call inside web_server_start(), so it doesn't
+     * contend with weather's/update_check's TLS handshakes for CPU even
+     * though this call happens before them; nothing below blocks waiting
+     * for the web server. */
     web_server_start();
 
     /* Background services */
     ntp_time_start();
     /* Weather and social counters register with the shared periodic_net_poll
-     * task UNCONDITIONALLY — not gated behind boot_weather_enabled /
-     * boot_social_enabled like update_check below still is.  Their own tick
-     * functions (weather_poll_tick() / subscribers_poll_tick()) already
-     * re-check weather_enabled / social_enabled live from config on every
-     * cycle and no-op (skip the actual fetch, just reschedule) whenever
-     * disabled — see those functions' comments.  Registering unconditionally
-     * here is what makes BOTH directions of the toggle live: previously,
-     * disabling was live but re-enabling wasn't, because a tick that was
-     * never registered here (config was off at boot) had nothing to
-     * re-enable later.  Cost: the shared net_poll task's ~7 KB stack is now
-     * always committed once any boot ever reaches this point, even for a
-     * user who disables both — but update_check below has no user-facing
-     * off switch at all (only its tube-6 display indicator does), so for
-     * every real deployment that task already exists regardless; this just
-     * stops weather/social from being a special case. */
+     * task unconditionally — not gated behind boot_weather_enabled /
+     * boot_social_enabled like update_check below still is. Their own tick
+     * functions already re-check weather_enabled/social_enabled live from
+     * config every cycle and no-op when disabled, so registering
+     * unconditionally is what makes BOTH directions of the toggle live: a
+     * tick never registered here (config off at boot) would have nothing
+     * to re-enable later if the user turns it back on. */
     weather_start();
     /* Update check — periodic GitHub release poll that drives the tube-6
      * update indicator and the Home Assistant "Nextube Update Available"

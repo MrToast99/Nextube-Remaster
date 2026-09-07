@@ -280,20 +280,11 @@ void touch_input_init(void)
         ESP_LOGE(TAG, "touch_handler_task creation failed");
 
     /* Poll task on CPU 0 – away from the display task's JPEG decoding on CPU 1.
-     *
-     * REVERTED to 3072 (was briefly cut to 1536 on a first field reading of
-     * 620 B peak, reasoned as "no callback, no variable-depth path, so that's
-     * trustworthy"). Wrong: a second boot, still before any deliberate
-     * reduction, measured 2076 B peak (free=996 of the original 3072) for
-     * this exact task — over 3x the first reading, and comfortably more than
-     * the 1536 it had briefly been cut to would have survived. Whatever
-     * path actually deepens here run-to-run isn't understood yet (not
-     * user_cb — that's touch_hdl above, not this task), so "simple-looking
-     * loop" was not a safe basis for confidence. Left at the original 3072
-     * (~1 KB / 48% margin over the 2076 B reading) rather than trying to
-     * compute a new "right" number from two disagreeing data points — the
-     * next move here should be several real measurements across separate
-     * boots, not a size change. */
+     * Stack usage here varies more between boots than a simple polling loop
+     * would suggest (peak measured as high as 2076 B of the 3072 allocated),
+     * so don't shrink this without several real measurements across
+     * separate boots — a single low reading isn't trustworthy for this
+     * task. */
     if (xTaskCreatePinnedToCore(touch_poll_task, "touch", 3072, NULL,
                                5, &touch_task_handle, 0) != pdPASS)
         ESP_LOGE(TAG, "touch_poll_task creation failed");

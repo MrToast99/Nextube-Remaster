@@ -140,7 +140,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | LittleFS file browser with upload/delete/mkdir/rename | ✅ Working |
 | Automatic firmware update check (compares against latest GitHub release) | ✅ Working |
 | Home Assistant MQTT integration (sensor + mode + display + brightness) | ✅ Working |
-| WLED Sync — receive UDP Notifier broadcasts; accent LEDs follow WLED colour | ✅ Working |
+| WLED Sync — receive UDP Notifier broadcasts; accent LEDs follow WLED color | ✅ Working |
 | Weather Panel 3 — animated sunrise/sunset (20 Hz rising/setting sun + mountains) | ✅ Working |
 | Multilingual web UI — 11 languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI) with per-browser preference | ✅ Working |
 | Tube display localisation — day-of-week abbreviation in 11 languages on clock/date panels | ✅ Working |
@@ -344,9 +344,11 @@ The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi prov
    - **Set up manually** — scan for your network (or type the SSID directly), enter the password, and connect.
 
    Once connected, optionally set an admin password under **System → Admin Authentication**.
-5. **After you submit, `Nextube-Setup` will disappear from your WiFi list within about a minute.** This is expected and means it worked — the device closes its own setup network once it successfully joins yours (see **AP lifecycle** below), so your phone/laptop will look like it "lost" a WiFi connection for a moment. That's normal. The Nextube is no longer reachable at `192.168.4.1` at that point; go to **http://nextube-remaster.local** or check your router's connected-devices list for its new address instead.
+5. **After you submit (either path — manual entry or a restored backup), the wizard shows a "Connecting…" screen and waits for the device to join your network** — this can take up to 40 seconds. Once it does, the screen shows the device's actual new IP address as a tappable link (plus its `.local` hostname as a fallback), and quietly tries to open that address for you automatically as soon as your own phone/laptop is back on the same network. It can't do this the instant the device connects — your browser is still on the temporary `Nextube-Setup` network at that point, a separate subnet with no route to the new one — so nothing will happen until *you've* reconnected too; the page just keeps trying in the background for about a minute in case your OS switches networks automatically.
 
-   If `Nextube-Setup` disappears but you can't reach the device at `nextube-remaster.local` or find it on your router either, the WiFi credentials you entered were likely rejected (wrong password, weak signal, or a 5 GHz-only network — the Nextube is 2.4 GHz only). Use the **recovery hotkey** below to bring the setup AP back and try again.
+   **`Nextube-Setup` will disappear from your WiFi list within about a minute of that.** This is expected and means it worked — the device closes its own setup network once it successfully joins yours (see **AP lifecycle** below), so your phone/laptop will look like it "lost" a WiFi connection for a moment. That's normal. Once you're back on your own WiFi, tap the address shown on that screen (or go to **http://nextube-remaster.local**, or check your router's connected-devices list) if the automatic redirect didn't already get there first.
+
+   If `Nextube-Setup` disappears but you can't reach the device at the address shown, `nextube-remaster.local`, or on your router either, the WiFi credentials you entered (or that were in the restored backup) were likely rejected (wrong password, weak signal, or a 5 GHz-only network — the Nextube is 2.4 GHz only). Use the **recovery hotkey** below to bring the setup AP back and try again.
 
 > [!TIP]
 > **No laptop nearby?** A smartphone works perfectly for initial setup. Connect your phone to **Nextube-Setup**, open a browser, and go to **http://192.168.4.1** to complete the WiFi configuration. Once the Nextube joins your home network, manage it from any device on the same network.
@@ -370,11 +372,11 @@ The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
 - **Display**
   - Theme — populated dynamically from LittleFS; add a folder to `/images/themes/` and it appears in the dropdown automatically
-  - **Custom Face** — select a TrueType font as the clockface digit renderer and weather-panel text font; choose from any `.ttf` uploaded to `/fonts/` on the device; selecting **None** reverts to the theme's JPEG digit artwork. Configure drop shadow colour and toggle under this section (see [Custom TTF Fonts](#custom-ttf-fonts))
-  - Brightness; LED accent lighting (Static / Breath / Rainbow / Off / **Follow Sun/Moon**) with per-tube colour pickers — see [Follow Sun/Moon LED mode](#follow-sunmoon-led-mode)
+  - **Custom Face** — select a TrueType font as the clockface digit renderer and weather-panel text font; choose from any `.ttf` uploaded to `/fonts/` on the device; selecting **None** reverts to the theme's JPEG digit artwork. Configure drop shadow color and toggle under this section (see [Custom TTF Fonts](#custom-ttf-fonts))
+  - Brightness; LED accent lighting (Static / Breath / Rainbow / Off / **Follow Sun/Moon**) with per-tube color pickers — see [Follow Sun/Moon LED mode](#follow-sunmoon-led-mode)
   - Enabled mode toggles; auto mode rotation; auto theme rotation (cycle all or selected themes on a timer)
-  - Spectrum settings — LED source (amplitude-modulated glow colour **or** follow accent mode), LCD bar colour (fixed **or** follow live WLED primary), Noise Floor threshold
-  - **Advanced Display** — per-tube gamma, VCOM, panel profile, brightness trim, colour inversion, window offsets, anti-burn-in (see below)
+  - Spectrum settings — LED source (amplitude-modulated glow color **or** follow accent mode), LCD bar color (fixed **or** follow live WLED primary), Noise Floor threshold
+  - **Advanced Display** — per-tube gamma, VCOM, panel profile, brightness trim, color inversion, window offsets, anti-burn-in (see below)
 - **Network** — WiFi SSID/password, hostname, timezone, NTP server, optional static IP (see [Static IP & Network Diagnostics](#static-ip--network-diagnostics)). Only reconnects when credentials actually change, preserving the live connection for all other saves.
 - **Services**
   - Weather (source, city, units, panel rotation interval, per-panel enable/disable)
@@ -448,7 +450,7 @@ Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, on
 | Setting | Per-tube | Values | Default | Description |
 |---|---|---|---|---|
 | **Profile** | ✅ Yes | Standard · Vivid | Standard | Selects the hardware gamma curve (register 0xE0/0xE1) written to the ST7735 during init. **Standard** is tuned for the original Green-Tab panels; **Vivid** uses a recalibrated curve for ST7735S replacement panels. Changing the profile triggers a per-tube software reset (SWRESET) + full reinit — the display task is briefly suspended for the duration. |
-| **VCOM** | ✅ Yes | 0–63 | 14 | Sets the VMCTR1 AC driving voltage (register 0xC5). Higher values increase contrast and colour saturation. Original panels use **14** (0x0E). For ST7735S replacements, start at **40** and tune from there — increase toward 60 if still washed, decrease toward 25 if over-saturated. Also requires a SWRESET+reinit to take effect (handled automatically). |
+| **VCOM** | ✅ Yes | 0–63 | 14 | Sets the VMCTR1 AC driving voltage (register 0xC5). Higher values increase contrast and color saturation. Original panels use **14** (0x0E). For ST7735S replacements, start at **40** and tune from there — increase toward 60 if still washed, decrease toward 25 if over-saturated. Also requires a SWRESET+reinit to take effect (handled automatically). |
 
 > **Why SWRESET is needed:** The ST7735S only latches VCOM and the hardware gamma registers during the `SLPOUT → DISPON` initialisation window. Writes issued while the display is already on are silently ignored. The firmware performs a CS-gated software reset on the affected tube only — the other five tubes are unaffected.
 
@@ -458,11 +460,11 @@ Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, on
 |---|---|---|---|---|
 | **Brightness** | ✅ Yes | 0–100 % | 100 % | Scales RGB565 pixel components (R5, G6, B5) by `value / 100` in the render loop. Use when a replacement panel is noticeably brighter than the originals. Applied in the same integer-only pixel pass as gamma — no additional overhead. |
 
-#### Colour Inversion
+#### Color Inversion
 
 | Setting | Per-tube | Description |
 |---|---|---|
-| **Invert** | ✅ Yes (per-tube checkbox) | Sends INVON (0x21) to tubes that need colour inversion. Some ST7735S batches default to an inverted colour space — whites appear black without this. Takes effect immediately (no SWRESET needed; INVON/INVOFF survive normal display-on mode). |
+| **Invert** | ✅ Yes (per-tube checkbox) | Sends INVON (0x21) to tubes that need color inversion. Some ST7735S batches default to an inverted color space — whites appear black without this. Takes effect immediately (no SWRESET needed; INVON/INVOFF survive normal display-on mode). |
 
 #### Window Offsets
 
@@ -475,8 +477,8 @@ Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, on
 
 | Setting | Description |
 |---|---|
-| **Colour Cycle** | Cycles each selected tube through red → green → blue → white → black (30 s per step) to exercise every sub-pixel at both voltage extremes. Can run for 1–4 hours or until manually stopped. |
-| **Static Snow** | Writes truly random RGB565 pixels to every selected tube each frame (5 Hz) — more thorough than the colour cycle because every pixel address receives an independent random level. Tube selection and duration are the same as colour cycle. |
+| **Color Cycle** | Cycles each selected tube through red → green → blue → white → black (30 s per step) to exercise every sub-pixel at both voltage extremes. Can run for 1–4 hours or until manually stopped. |
+| **Static Snow** | Writes truly random RGB565 pixels to every selected tube each frame (5 Hz) — more thorough than the color cycle because every pixel address receives an independent random level. Tube selection and duration are the same as color cycle. |
 | **Scheduled** | Automatic overnight burn-in recovery. Fires at a configured hour on a **weekly** (Sunday midnight) or **monthly** (1st of month) schedule. Tube bitmask, session duration, and trigger hour are all configurable. Disabled by default. |
 
 The CASET window also drifts ±2 px every hour automatically (synchronized to the real-time hour value) as a passive column-shift anti-burn-in measure — no configuration needed.
@@ -509,7 +511,7 @@ Sessions are **RAM-only** and lost on reboot — you will be asked to log in onc
 | **Mastodon** | Live follower count. Fetched directly from the configured Mastodon instance API — no relay required. |
 | **Weather** | Up to three panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon; **Panel 3** — animated sunrise/sunset (rising/setting sun + mountain silhouettes at 20 Hz, solar times in HH:MM). Any combination of panels can be enabled; at least one must remain on. Temperatures rounded to whole degrees; leading zeros suppressed; minus sign shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
-| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard electret capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring colour**, **LCD bar colour**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
+| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard electret capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring color**, **LCD bar color**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
 
 ### Mode Rotation
 
@@ -726,7 +728,7 @@ curl -X POST "http://nextube.local/api/cx_image?tube=6" --data-binary @frame.jpg
 
 ## Air Quality panel
 
-An outdoor **Air Quality Index** info panel for tube 5/6, available on both the **WeatherLive** face and the asset themes (rendered over the theme's `blank.jpg`). It shows a large **"AQI"** label over the index value, sized to fit 1–3 digits and **colour-coded by health band**.
+An outdoor **Air Quality Index** info panel for tube 5/6, available on both the **WeatherLive** face and the asset themes (rendered over the theme's `blank.jpg`). It shows a large **"AQI"** label over the index value, sized to fit 1–3 digits and **color-coded by health band**.
 
 **Data source:** the free, keyless **Open-Meteo Air Quality API**, reusing the same geocoded location as the weather provider — so it works with any weather source (Met.no, Open-Meteo, wttr.in, OWM, external) and needs **no API key**. The value refreshes on the weather poll (every 10 min, but AQI itself is only hourly in nature).
 
@@ -738,7 +740,7 @@ An outdoor **Air Quality Index** info panel for tube 5/6, available on both the 
 | **US AQI** | Always the US EPA index (0–500): green → yellow → orange → red → purple → maroon |
 | **European AQI** | Always the CAMS/EEA index (0–100+): good → fair → moderate → poor → very poor → extremely poor |
 
-The number is drawn in its band colour; the "AQI" label uses the theme/Custom-Face font colour. Until the first fetch completes it shows `--`.
+The number is drawn in its band color; the "AQI" label uses the theme/Custom-Face font color. Until the first fetch completes it shows `--`.
 
 **Enable it:** Display → **24H Custom**, tick **Air Quality** for tube 6 (and/or tube 5 in dual-panel mode), and pick the **AQI scale**. Also exposed to Home Assistant as the **Nextube Air Quality** sensor — see [Home Assistant MQTT](#home-assistant-mqtt).
 
@@ -1002,7 +1004,7 @@ mosquitto_pub -h <broker> -t "nextube/nextube-remaster/ticker/set" -m "Good morn
 | **New message while scrolling** | The current scroll stops and the new message starts from the right edge. |
 | **Font** | `u8g2_font_logisoso28_tf` rendered with 2× pixel scaling (effective ~56 px) — full Latin character set including accented glyphs (é á ö ü ñ etc.). |
 | **Background** | All tubes are blanked to solid black for the duration of the scroll, so the marquee shows on a clean background regardless of the previous mode. |
-| **Colour** | Matches the currently loaded theme's digit colour. |
+| **Color** | Matches the currently loaded theme's digit color. |
 | **Mode rotation** | Paused for the duration of the ticker; resumes when the text finishes scrolling. |
 | **Not persistent** | Ticker text is RAM-only; clears on device reboot. |
 | **Notification sound** | Optional (off by default): when **Ticker Sound** is enabled, each non-empty `ticker/set` plays the configured sound file (default `/spiffs/audio/bell.wav`, changeable under **Hardware → Ticker Notification Sound**). Toggle via the HA **Nextube Ticker Sound** switch, `ticker_sound/set`, or the web UI; persists across reboots. Requires **audio output** enabled in device settings. |
@@ -1012,7 +1014,7 @@ In Home Assistant, the **Nextube Ticker** appears as a `text` entity on the Next
 
 ## Follow Sun/Moon LED Mode
 
-The accent LEDs can track the sun during the day and the moon at night instead of running a fixed animation. Select **Follow Sun/Moon** under **Display → LED Accent Lighting**. The LEDs are mostly off — only the tube(s) nearest the sun/moon's current position across the sky glow, fading smoothly as it passes between two adjacent tubes (e.g. the sun sitting exactly between tube 2 and tube 3 lights both at half intensity; as it drifts toward tube 3, tube 2 fades out while tube 3 brightens). Sun and moon each get their own configurable colour. The moon default (pale blue-white), while tThe sun default is a saturated warm yellow tuned for the LEDs specifically,.
+The accent LEDs can track the sun during the day and the moon at night instead of running a fixed animation. Select **Follow Sun/Moon** under **Display → LED Accent Lighting**. The LEDs are mostly off — only the tube(s) nearest the sun/moon's current position across the sky glow, fading smoothly as it passes between two adjacent tubes (e.g. the sun sitting exactly between tube 2 and tube 3 lights both at half intensity; as it drifts toward tube 3, tube 2 fades out while tube 3 brightens). Sun and moon each get their own configurable color. The moon default (pale blue-white), while tThe sun default is a saturated warm yellow tuned for the LEDs specifically,.
 
 Position is computed from the same real geocoded sunrise/sunset the WeatherLive theme uses (see [Time-of-day sky](#weatherlive-theme)), independently of which clock face is actually selected — Follow Sun/Moon LEDs work with any theme. Set a location under **Services → Weather** for accurate timing; without one, a fixed 6 AM–7 PM approximation is used instead. Moon position (and whether it's visible at all — it isn't shown near new moon) uses the same phase-based approximation as WeatherLive's on-screen moon, not a precise lunar-position calculation.
 
@@ -1029,9 +1031,9 @@ Position is computed from the same real geocoded sunrise/sunset the WeatherLive 
 
 ## WLED Sync
 
-The accent LEDs can mirror a WLED-controlled LED strip on your LAN in real time. When enabled, Nextube listens on the WLED UDP Notifier broadcast port and applies the primary colour + brightness to all 6 WS2812B accent LEDs whenever WLED changes state — no target IP or extra configuration on the WLED side.
+The accent LEDs can mirror a WLED-controlled LED strip on your LAN in real time. When enabled, Nextube listens on the WLED UDP Notifier broadcast port and applies the primary color + brightness to all 6 WS2812B accent LEDs whenever WLED changes state — no target IP or extra configuration on the WLED side.
 
-The **Spectrum mode LCD bars** can also follow the WLED primary colour: enable **Follow WLED primary colour** next to the LCD Bar Colour picker in Spectrum settings. The bars track WLED live (changing the WLED colour recolours the bars within a second) and fall back to the configured fixed colour whenever no WLED data is available — sync disabled, no packet received yet, the strip turned off, or a palette effect that leaves WLED's primary colour black.
+The **Spectrum mode LCD bars** can also follow the WLED primary color: enable **Follow WLED primary color** next to the LCD Bar Color picker in Spectrum settings. The bars track WLED live (changing the WLED color recolors the bars within a second) and fall back to the configured fixed color whenever no WLED data is available — sync disabled, no packet received yet, the strip turned off, or a palette effect that leaves WLED's primary color black.
 
 ### Setup (Nextube side)
 
@@ -1047,8 +1049,8 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 
 | Behaviour | Detail |
 |---|---|
-| **Colour fidelity** | Solid effects: the exact solid colour is mirrored. Single-colour animations (Breath, Chase, Blink, etc.): the configured primary colour is shown statically — WLED UDP Notifier sends state, not per-frame pixel data. Palette-based animations (Rainbow, Fire, Ocean, Color Cycle, etc.): Nextube runs its own rainbow animation, because these effects don't publish a meaningful primary colour in the sync packet. |
-| **WLED offline** | Nextube holds the last received colour indefinitely — no crash, no fallback to black. |
+| **Color fidelity** | Solid effects: the exact solid color is mirrored. Single-color animations (Breath, Chase, Blink, etc.): the configured primary color is shown statically — WLED UDP Notifier sends state, not per-frame pixel data. Palette-based animations (Rainbow, Fire, Ocean, Color Cycle, etc.): Nextube runs its own rainbow animation, because these effects don't publish a meaningful primary color in the sync packet. |
+| **WLED offline** | Nextube holds the last received color indefinitely — no crash, no fallback to black. |
 | **First boot** | Before any packet is received `wled_sync_get()` returns false → the accent LEDs run their normal config-driven effect (Static/Breath/Rainbow/Off). No delay or dark flash. |
 | **Boot-time gate** | The UDP listener task is only created if **Enable** is checked at boot. Restart required after toggling. |
 | **No TLS / HTTP** | Pure UDP receive — no `tls_sem` contention. Stack 3 KB, Core 0, priority 3. |
@@ -1104,9 +1106,9 @@ Notes:
 
 **DotMatrix** is a second built-in **procedural** theme (no JPEG assets, like WeatherLive) — every glyph is drawn at runtime from a 7×14 dot grid, so the whole display reads like a classic scoreboard or departure-board panel instead of photo-realistic digit art.
 
-**Settings:** when DotMatrix is selected, two colour pickers appear under the theme picker:
-- **Dot colour (on)** — colour of lit dots.
-- **Dot colour (off)** — colour of unlit dots. Every cell in a glyph is always painted one or the other, never left transparent, so the display always shows a full lit/unlit grid rather than glyphs floating on black.
+**Settings:** when DotMatrix is selected, two color pickers appear under the theme picker:
+- **Dot color (on)** — color of lit dots.
+- **Dot color (off)** — color of unlit dots. Every cell in a glyph is always painted one or the other, never left transparent, so the display always shows a full lit/unlit grid rather than glyphs floating on black.
 
 **Coverage:**
 - Clock digits, AM/PM, colon/dot/minus, and the °C/°F unit mark all render from the dot-matrix font.
@@ -1114,7 +1116,7 @@ Notes:
 - **24H Custom info panels** (tube 5/6): weekdate, indoor/outdoor temperature & humidity, wind, air quality, and sunrise/sunset all render in this theme's blocky style, each panel sharing one consistent dot pitch across its elements (larger icons are drawn at a coarser sub-grid so they don't look mismatched against smaller text) over a tiled unlit-dot background instead of a black one.
 - Wind speed is labelled **kph** (not km/h), **mph**, or **m/s**.
 - The Outdoor Temperature panel shows a dot-matrix progress bar between today's low and high instead of the smooth gradient track used by other themes.
-- Hi/Lo and sunrise/sunset icons always use the configured **dot colour (on)** rather than the semantic red/blue or sun-crossing-horizon animation other themes use.
+- Hi/Lo and sunrise/sunset icons always use the configured **dot color (on)** rather than the semantic red/blue or sun-crossing-horizon animation other themes use.
 - This theme never applies drop shadows, regardless of the Custom Face shadow setting.
 
 Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image panel options — Weather Icon uses the same dot-matrix condition pictograms as the other weather panels, and Pushed Image shows the raw pushed JPG/PNG as-is (unaffected by theme, same as any asset theme). In non-Clock modes (weather, follower counts, …) social-media platform logos still load from the built-in system assets; anything else with no dedicated dot-matrix glyph falls back to a plain unlit grid.
@@ -1127,20 +1129,20 @@ Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image
 |---|---|
 | **Background** | **WeatherLive (animated sky)** — the fully procedural animated sky described above; **Custom color / gradient** — a solid fill or gradient you configure yourself (see below); or any installed **theme name** — that theme's static background artwork with no animation. |
 | **Digit font** | Any `.ttf` uploaded to `/fonts/` on the device, or **Logisoso (built-in)**. Click **↺** to refresh the list after uploading a new font. |
-| **Font colour** | Colour applied to clock digits rendered by the TTF engine. |
-| **Glyph colour** | Colour for weather-panel glyphs and info-panel text rendered with the TTF engine. |
-| **Shadow** | Toggle drop shadow on/off and pick its colour. Applies to clock digits, panel text, and the graphical weather elements (Hi/Lo range bar, current-temperature marker, and humidity teardrop). |
-| **Night color set** | A second Font colour / Digit colour / Shadow set the display crossfades to through twilight, tracking the WeatherLive sky's real sunrise/sunset. Only active on the WeatherLive background — see the note in [WeatherLive theme](#weatherlive-theme). |
+| **Font color** | Color applied to clock digits rendered by the TTF engine. |
+| **Glyph color** | Color for weather-panel glyphs and info-panel text rendered with the TTF engine. |
+| **Shadow** | Toggle drop shadow on/off and pick its color. Applies to clock digits, panel text, and the graphical weather elements (Hi/Lo range bar, current-temperature marker, and humidity teardrop). |
+| **Night color set** | A second Font color / Digit color / Shadow set the display crossfades to through twilight, tracking the WeatherLive sky's real sunrise/sunset. Only active on the WeatherLive background — see the note in [WeatherLive theme](#weatherlive-theme). |
 
-**Custom color / gradient background:** when selected, a **Fill style** dropdown and one or two colour pickers appear:
+**Custom color / gradient background:** when selected, a **Fill style** dropdown and one or two color pickers appear:
 
 | Fill style | Result |
 |---|---|
-| **Solid color** | One flat colour fills the background. Only **Fill color** is shown. |
+| **Solid color** | One flat color fills the background. Only **Fill color** is shown. |
 | **Linear gradient (vertical)** | Fades top → bottom between **Fill color** (start) and **Gradient end color**. |
-| **Linear gradient (horizontal)** | Fades left → right between the two colours. |
-| **Linear gradient (diagonal)** | Fades corner → corner between the two colours. |
-| **Radial gradient** | Fades centre → edge between the two colours. |
+| **Linear gradient (horizontal)** | Fades left → right between the two colors. |
+| **Linear gradient (diagonal)** | Fades corner → corner between the two colors. |
+| **Radial gradient** | Fades centre → edge between the two colors. |
 
 The background is rendered once and shared identically across every tube, the same as the procedural WeatherLive sky and a static theme background — not recomputed per tube.
 
@@ -1149,7 +1151,7 @@ The background is rendered once and shared identically across every tube, the sa
 - **Any asset theme (NixieOY, FlipClock, etc.)** — the TTF font renders digits; all other panel assets (weather icons, social media logos, WeekDate images) continue loading from the theme.
 - **WeatherLive** — the TTF font renders all panel text: temperature, Hi/Lo, sunrise/sunset, date, and humidity. The shadow setting also controls the graphical range track, temperature marker, and humidity teardrop. The procedural sky background is unaffected.
 
-**Shadow without a custom font:** the shadow checkbox and colour operate independently of the font selection — on WeatherLive the shadow applies to the procedural graphical elements even when **Digit font → **Logisoso (built-in)** is selected.
+**Shadow without a custom font:** the shadow checkbox and color operate independently of the font selection — on WeatherLive the shadow applies to the procedural graphical elements even when **Digit font → **Logisoso (built-in)** is selected.
 
 **Time formats and 24H Custom panels** determine which info panels appear on tubes 5/6 alongside the clock digits:
 
@@ -1171,7 +1173,7 @@ The background is rendered once and shared identically across every tube, the sa
 | Weather Icon | Condition icon (sun, clouds, rain, snow, …) |
 | Outdoor Humidity | Outdoor relative humidity (teardrop symbol + %) |
 | Wind | Wind speed (wind symbol + value; km/h, mph, or m/s) |
-| Air Quality | Outdoor AQI, big value colour-coded by health band — see [Air Quality panel](#air-quality-panel) |
+| Air Quality | Outdoor AQI, big value color-coded by health band — see [Air Quality panel](#air-quality-panel) |
 | Pushed Image | Custom 80×160 JPG pushed via `POST /api/cx_image?tube=5\|6` — see [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom) |
 
 **Dual-panel mode** (`cx_dual_panel`): drops the colon tube so the layout becomes `H H  M M [tube 5] [tube 6]`. Tubes 5 and 6 each have an independent enabled-panel set and cycle through it on the shared rotation interval.
@@ -1252,7 +1254,7 @@ All tube images must be exactly **80 × 160 pixels** (portrait), saved as JPEG. 
 | Width | 80 px |
 | Height | 160 px |
 | Format | JPEG (any quality; 80–90 % is a good balance of size vs. artefacts) |
-| Colour space | RGB (no CMYK) |
+| Color space | RGB (no CMYK) |
 
 > [!TIP]
 > Keep individual JPEGs under ~15 KB where possible. A full theme with all required images typically sits between 500 KB and 2 MB, well within the 7 MB LittleFS partition.
@@ -1304,7 +1306,7 @@ The WeatherLive theme and all custom clock faces support user-supplied TrueType 
 
 ### Shadow
 
-When a Custom Face font is active a **drop shadow** can be drawn around glyphs. **Digit shadow** and **Font shadow** are independent controls — each has its own On/Off toggle and colour under **Display → Custom Face** (and independent day/night variants if Night color set is enabled). Splitting them lets you, for example, run a dark digit colour with a matching dark digit shadow while keeping font/label text light with a lighter (or disabled) font shadow, without the two fighting each other. Both are a soft bloom (±2 px) behind each rendered character.
+When a Custom Face font is active a **drop shadow** can be drawn around glyphs. **Digit shadow** and **Font shadow** are independent controls — each has its own On/Off toggle and color under **Display → Custom Face** (and independent day/night variants if Night color set is enabled). Splitting them lets you, for example, run a dark digit color with a matching dark digit shadow while keeping font/label text light with a lighter (or disabled) font shadow, without the two fighting each other. Both are a soft bloom (±2 px) behind each rendered character.
 
 - **Digit shadow** — the clock face numerals only.
 - **Font shadow** — info-panel and label text, plus the graphical weather-panel elements that are visually part of the same text:
@@ -1315,7 +1317,7 @@ When a Custom Face font is active a **drop shadow** can be drawn around glyphs. 
   | Current-temperature marker (tube 4) | Drop shadow offset below the circle |
   | Humidity teardrop (tube 5) | Halo around the teardrop outline |
 
-Set either colour to pure black for a classic engraved look, or to a tinted hue to complement the theme palette. Turn a shadow off entirely by setting its On/Off toggle to Off — no need to fight with color values.
+Set either color to pure black for a classic engraved look, or to a tinted hue to complement the theme palette. Turn a shadow off entirely by setting its On/Off toggle to Off — no need to fight with color values.
 
 ### Uploading a font
 
@@ -1452,7 +1454,7 @@ POST /api/debug/pwm          → override backlight PWM: {"freq_hz":10000,"brigh
                                or {"restore":true}
 POST /api/debug/loglevel     → runtime per-tag log verbosity: {"tag":"ntp","level":4}
                                (0=none … 5=verbose) or {"tag":"…","enabled":false}; resets on reboot
-POST /api/debug/burnin       → trigger the burn-in / colour-cycle routine (see Advanced Display)
+POST /api/debug/burnin       → trigger the burn-in / color-cycle routine (see Advanced Display)
 POST /api/debug/snow         → trigger the static-snow routine (see Advanced Display)
 GET  /api/debug/micframe     → atomic snapshot of one DMA capture: {"samples":[512 raw ADC values],
                                "dec":[128 decimated values]} — both arrays come from the same frame
@@ -1660,7 +1662,7 @@ for the small capacitive residual and for general efficiency:
 | Bulk LCD pixel pushes use `spi_device_transmit()` (interrupt/DMA) instead of `spi_device_polling_transmit()` | The DMA path **yields the CPU** while each chunk clocks out, instead of busy-waiting with interrupts hot. This lowered the SPI-induced switching component of the noise floor during every clock-face/ticker redraw. Small command/parameter writes (≤8 bytes) stay on the polling path, where DMA setup would cost more than it saves |
 | Colon-blink **partial push** (diff-box) | The once-per-second colon blink rewrites only the two changed colon-dot rectangles instead of repainting the whole tube — far less per-second SPI traffic (and CPU) on the shared rail |
 | RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
-| Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
+| Static-mode change detection | No periodic RMT refresh when LED color/brightness is unchanged |
 
 **Optional hardware hardening** (no longer required for quiet idle): a
 **100 µF + 100 nF** decoupling cap close to the ESP32 `VDD3P3_RTC` pin further
@@ -1729,10 +1731,10 @@ The LED ring behaviour in Spectrum mode is independently configurable under **Di
 
 | Source | Behaviour |
 |---|---|
-| **Custom glow colour** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. The colour is set by the **LED Glow Colour** picker and is the same for all LEDs. |
-| **Follow accent mode** | The LEDs animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colours from the LED settings, ignoring the audio by default. The LCD bars still respond to the microphone normally. |
+| **Custom glow color** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. The color is set by the **LED Glow Color** picker and is the same for all LEDs. |
+| **Follow accent mode** | The LEDs animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colors from the LED settings, ignoring the audio by default. The LCD bars still respond to the microphone normally. |
 
-The **LCD Bar Colour** picker is separate from the LED source and always applies — it controls the colour of the frequency bars drawn on the LCDs regardless of which LED source is selected.
+The **LCD Bar Color** picker is separate from the LED source and always applies — it controls the color of the frequency bars drawn on the LCDs regardless of which LED source is selected.
 
 **Beat-reactive nudge (optional):** with **Follow accent mode** selected, an additional **Beat-reactive nudge for Breath / Rainbow** checkbox appears. When enabled, those two accent modes get an extra push (brightness surge for Breath, an extra hue jump for Rainbow) each time the microphone detects a percussive hit, on top of their normal animation. This is a lightweight broadband-transient detector, not true beats-per-minute tracking — the spectrum analyser's bands start at 280 Hz, so it reacts to snare/hihat/kick harmonics rather than a resolved sub-bass kick drum, and it won't lock to tempo the way a dedicated beat-detection algorithm would. Off by default; only has any effect for Breath and Rainbow specifically.
 
@@ -1765,7 +1767,7 @@ Note the connector when purchasing
 | **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (Requires Invert Set)| [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
 | **LY096X1608TBBIG09C08** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (No Invert Required) | [Alibaba listing](https://www.alibaba.com/product-detail/TFT-LCD-0-96-Inch-80X160_1600462526823.html) |
 
-ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colours on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
+ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colors on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
 
 > [!TIP]
 > **LCD swap guide:** For a step-by-step video walkthrough of the physical panel replacement process, see the [community discussion thread](https://github.com/MrToast99/Nextube-Remaster/discussions/35).
@@ -1775,9 +1777,9 @@ ST7735S panels are electrically identical to the original ST7735 but have a diff
 1. Flash firmware, open the web UI
 2. Go to **Display → Advanced Display → Panel Profile**
 3. For each replaced tube set **Profile → Vivid** and **VCOM → 40** as a starting point
-4. Click **Save** and evaluate — if colours are still washed raise VCOM toward 50–60; if they look over-saturated or too dark lower it toward 25–30
-5. If colours remain washed even at high VCOM, raise **Gamma Correction** for that tube to **1.8–2.2**
-6. If colours are inverted (white background appears black), tick **Colour Inversion** for that tube
+4. Click **Save** and evaluate — if colors are still washed raise VCOM toward 50–60; if they look over-saturated or too dark lower it toward 25–30
+5. If colors remain washed even at high VCOM, raise **Gamma Correction** for that tube to **1.8–2.2**
+6. If colors are inverted (white background appears black), tick **Color Inversion** for that tube
 7. If there is a 1-pixel static border on the right or bottom edge, set **Column Offset → +2** and **Row Offset → +1** for that tube
 8. Click **Save** — changes take effect immediately without a reboot
 

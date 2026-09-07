@@ -65,7 +65,10 @@
 #include "update_check.h" /* autonomous GitHub release check → update binary sensor */
 #include "audio.h"       /* ticker notification chime (audio_play_file) */
 #include "ntp_time.h"    /* NTP sync-stats listener → HA sensors        */
-#include "esp_wifi.h"    /* RSSI for the optional health sensors        */
+#include "esp_wifi.h"    /* RSSI for the optional health sensors, and
+                          * WIFI_EVENT for the outage-detection handler  */
+#include "esp_netif.h"   /* IP_EVENT for the outage-detection handler   */
+#include "esp_event.h"   /* esp_event_handler_register                 */
 #include "esp_system.h"  /* esp_get_free_heap_size                      */
 #include "esp_timer.h"   /* uptime for the health sensors               */
 #include "esp_heap_caps.h" /* heap_caps_get_largest_free_block - diagnostic on client-start failure */
@@ -73,6 +76,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <dirent.h>  /* opendir/readdir — build_theme_options_json()       */
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -85,6 +89,12 @@ static const char *TAG = "ha_mqtt";
 /* ── File-scope state ──────────────────────────────────────────────── */
 static esp_mqtt_client_handle_t s_client = NULL;
 static volatile bool            s_connected = false;
+
+/* Defined near ha_mqtt_pause()/_resume() below, alongside the rest of the
+ * WiFi-outage-detection doc comment — forward-declared here so ha_mqtt_start()
+ * can register it before its definition point in the file. */
+static void ha_mqtt_wifi_event_handler(void *arg, esp_event_base_t base,
+                                       int32_t event_id, void *event_data);
 
 /* ── Topic helpers ─────────────────────────────────────────────────── */
 #define TOPIC_MAXLEN 96
@@ -125,11 +135,82 @@ static void sanitize_mqtt_token(char *s)
     }
 }
 
+/* True current brightness of the panels right now — NOT simply
+ * cfg->lcd_brightness, which is just the primary/daytime SETTING. The
+ * actual output can differ from it in two cases the display task itself
+ * already accounts for (see its own target_brt computation in display.c,
+ * around the "Apply backlight on/off" comment): the backlight switched off
+ * (real output is 0 regardless of the configured brightness), and Night
+ * Mode currently active (real output is night_brightness, not
+ * lcd_brightness). Reported here so the MQTT "Nextube Brightness" number's
+ * STATE always matches reality.
+ *
+ * Writing to it (brightness/set, in mqtt_event_handler() below) still
+ * always sets lcd_brightness regardless of which of these is currently
+ * overriding it — so moving the slider during Night Mode may appear to
+ * "snap back" on the very next publish. That's intentional, not a bug:
+ * Night Mode is still in effect either way and the display task will keep
+ * enforcing it, so the reported state should say so rather than show a
+ * number the panels aren't actually running at. Must be called with
+ * config_lock() already held, same as every other cfg-> field read here. */
+static uint8_t effective_brightness(const nextube_config_t *cfg)
+{
+    if (!cfg->backlight_on) return 0;
+    if (cfg->auto_brightness &&
+        ntp_is_night_window(cfg->night_start_hour, cfg->night_end_hour))
+        return cfg->night_brightness;
+    return cfg->lcd_brightness;
+}
+
 /* ── Publish helpers ───────────────────────────────────────────────── */
 static void publish(const char *topic, const char *payload, int retain)
 {
     if (!s_connected || !s_client) return;
     esp_mqtt_client_publish(s_client, topic, payload, 0, 1, retain);
+}
+
+/* Builds the CONTENTS of the Theme select's "options":[...] array (no
+ * brackets) into `out` — mirrors web_server.c's api_themes(): the same
+ * three procedural built-ins, then every directory under
+ * /spiffs/images/themes/ (custom/uploaded themes). A select entity's state
+ * has to be one of its configured options or HA reports "unknown"
+ * regardless of what's on the state topic, so a custom theme needs to
+ * appear here too. Deliberately duplicates api_themes()'s scan rather than
+ * sharing code across components — too small a duplicate to be worth a
+ * cross-component refactor. Stops adding names once `out` is full rather
+ * than overflowing it. */
+static void build_theme_options_json(char *out, size_t out_sz)
+{
+    out[0] = '\0';
+    size_t used = 0;
+
+    /* On overflow, sets used = out_sz as a "stop, buffer is full" sentinel
+     * instead of returning directly — an early return here would skip
+     * closedir(dp) below when the overflow happens mid-scan, leaking a
+     * directory handle every time a device has enough custom themes to
+     * fill this. The caller's loop condition below checks `used < out_sz`
+     * so it winds down normally (still reaching closedir()) instead of
+     * needing its own check after every single call. */
+#define ADD_THEME(name) do { \
+        int n = snprintf(out + used, out_sz - used, "%s\"%s\"", used ? "," : "", (name)); \
+        if (n < 0 || (size_t)n >= out_sz - used) { out[used] = '\0'; used = out_sz; } \
+        else { used += (size_t)n; } \
+    } while (0)
+
+    ADD_THEME("WeatherLive");
+    ADD_THEME("WeatherLive Demo");
+    ADD_THEME("DotMatrix");
+
+    DIR *dp = opendir("/spiffs/images/themes");
+    if (dp) {
+        struct dirent *e;
+        while (used < out_sz && (e = readdir(dp)) != NULL) {
+            if (e->d_type == DT_DIR && e->d_name[0] != '.')
+                ADD_THEME(e->d_name);
+        }
+        closedir(dp);
+    }
+#undef ADD_THEME
 }
 
 /* ── Discovery payloads ────────────────────────────────────────────── */
@@ -141,7 +222,13 @@ static void publish(const char *topic, const char *payload, int retain)
 static void publish_discovery(bool include_sensors)
 {
     char topic[TOPIC_MAXLEN];
-    char payload[768];
+    /* 1024, not the 768 every other payload in this function actually needs:
+     * the Theme select's payload alone (skeleton + dev[] + both topics +
+     * theme_opts[440] below) runs up to ~845 B worst case once a device
+     * hostname near its 32-char cap and a handful of custom themes are both
+     * in play — bumped here, once, for the whole function rather than
+     * fighting for scraps inside 768 for just that one entity. */
+    char payload[1024];
 
     /* Device block — reused in every payload.
      * sw_version appears in HA → Devices → device card as "Firmware version". */
@@ -271,6 +358,15 @@ static void publish_discovery(bool include_sensors)
     char theme_state[TOPIC_MAXLEN], theme_cmd[TOPIC_MAXLEN];
     make_topic(theme_state, sizeof(theme_state), "theme/state");
     make_topic(theme_cmd,   sizeof(theme_cmd),   "theme/set");
+    /* 440 keeps the full theme payload below (skeleton + dev[] + both
+     * topics + this) comfortably under sizeof(payload) even at each field's
+     * worst case (~845 B total — see payload[]'s own comment above) — not
+     * that themes are expected to ever need anywhere near this many bytes.
+     * See build_theme_options_json()'s doc comment — it stops cleanly
+     * rather than overflowing if a device somehow has more custom themes
+     * than even this fits. */
+    char theme_opts[440];
+    build_theme_options_json(theme_opts, sizeof(theme_opts));
     snprintf(topic, sizeof(topic),
              "homeassistant/select/%s_theme/config", s_hostname);
     snprintf(payload, sizeof(payload),
@@ -279,17 +375,11 @@ static void publish_discovery(bool include_sensors)
              "\"unique_id\":\"%s_theme\","
              "\"state_topic\":\"%s\","
              "\"command_topic\":\"%s\","
-             "\"options\":["
-               "\"NixieOY\",\"FlipClock\",\"DarkSlate\","
-               "\"DotMatrix\",\"Formula1\","
-               "\"GlitchGR\",\"LightFuture\",\"NotionRain\","
-               "\"RedDigits\",\"RetroPaper\",\"WireMesh\","
-               "\"WeatherLive\",\"WeatherLive Demo\""
-             "],"
+             "\"options\":[%s],"
              "\"icon\":\"mdi:palette\","
              "\"device\":{%s}"
              "}",
-             s_hostname, theme_state, theme_cmd, dev);
+             s_hostname, theme_state, theme_cmd, theme_opts, dev);
     publish(topic, payload, 1);
 
     /* ── Mode rotation switch ── */
@@ -369,18 +459,29 @@ static void publish_discovery(bool include_sensors)
 }
 
 /* ── State publishers ─────────────────────────────────────────────── */
+/* Retained: mode/display/brightness/theme/rotation/ticker_speed/ticker_sound
+ * are all "current value of a user setting" topics, not fast-changing
+ * telemetry — they only change when the user actually picks something
+ * different, same category as update/state and firmware/state below. Left
+ * as retain=0 originally, which meant Home Assistant showed these as
+ * "unknown" from a restart (or on first adding the entity) until the ESP32
+ * happened to reconnect to MQTT or the user changed the value again — the
+ * value WAS being published right after every connect (see
+ * MQTT_EVENT_CONNECTED below), just never cached by the broker for a late
+ * subscriber to pick up. Confirmed live: HA reported mode and theme as
+ * unknown while the device's own state was correct the whole time. */
 static void publish_mode(app_mode_t mode)
 {
     char topic[TOPIC_MAXLEN];
     make_topic(topic, sizeof(topic), "mode/state");
-    publish(topic, app_mode_name(mode), 0);
+    publish(topic, app_mode_name(mode), 1);
 }
 
 static void publish_display(bool on)
 {
     char topic[TOPIC_MAXLEN];
     make_topic(topic, sizeof(topic), "display/state");
-    publish(topic, on ? "ON" : "OFF", 0);
+    publish(topic, on ? "ON" : "OFF", 1);
 }
 
 static void publish_brightness(uint8_t val)
@@ -389,26 +490,26 @@ static void publish_brightness(uint8_t val)
     char buf[8];
     make_topic(topic, sizeof(topic), "brightness/state");
     snprintf(buf, sizeof(buf), "%u", val);
-    publish(topic, buf, 0);
+    publish(topic, buf, 1);
 }
 
 static void publish_theme(const char *theme)
 {
     char topic[TOPIC_MAXLEN];
     make_topic(topic, sizeof(topic), "theme/state");
-    publish(topic, theme, 0);
+    publish(topic, theme, 1);
 }
 
 static void publish_rotation(bool enabled)
 {
     char topic[TOPIC_MAXLEN];
     make_topic(topic, sizeof(topic), "rotation/state");
-    publish(topic, enabled ? "ON" : "OFF", 0);
+    publish(topic, enabled ? "ON" : "OFF", 1);
 }
 
-/* Retained — unlike the frequently-changing fields above, "an update is
- * pending" is a slow-changing status the user wants visible immediately on
- * HA reconnect, same treatment as firmware/state. */
+/* Retained — same reasoning as the block above: "an update is pending" is a
+ * slow-changing status the user wants visible immediately on HA reconnect,
+ * same treatment as firmware/state. */
 static void publish_update_available(bool avail)
 {
     char topic[TOPIC_MAXLEN];
@@ -429,14 +530,37 @@ static void publish_ticker_speed(int px)
     char buf[8];
     make_topic(topic, sizeof(topic), "ticker_speed/state");
     snprintf(buf, sizeof(buf), "%d", px);
-    publish(topic, buf, 0);
+    publish(topic, buf, 1);
 }
 
 static void publish_ticker_sound(bool enabled)
 {
     char topic[TOPIC_MAXLEN];
     make_topic(topic, sizeof(topic), "ticker_sound/state");
-    publish(topic, enabled ? "ON" : "OFF", 0);
+    publish(topic, enabled ? "ON" : "OFF", 1);
+}
+
+/* Publishes the ticker's CURRENT text as a retained state — shared by
+ * ha_mqtt_ticker_clear(), the ticker/set MQTT handler, and the
+ * MQTT_EVENT_CONNECTED block below, so all three places that need to
+ * publish the ticker's state go through one retain=1 call instead of each
+ * hand-rolling its own. The two pre-existing call sites both used
+ * retain=0 and neither ran on connect — so a device that booted (or
+ * reconnected) without the ticker ever being actively set left HA with no
+ * cached state at all for that entity: same underlying bug as mode/theme
+ * reporting "Unknown", just manifesting as no state ever published rather
+ * than a stale one. An empty string IS the correct "no ticker set" state —
+ * HA's text entity shows that as blank, not "Unknown", once it's actually
+ * been published at least once. */
+static void publish_ticker_state(void)
+{
+    if (!s_ticker_mutex) return;
+    char snapshot[TICKER_MAX_LEN + 1];
+    xSemaphoreTake(s_ticker_mutex, portMAX_DELAY);
+    strncpy(snapshot, s_ticker_text, sizeof(snapshot) - 1);
+    snapshot[sizeof(snapshot) - 1] = '\0';
+    xSemaphoreGive(s_ticker_mutex);
+    publish(s_topic_ticker_state, snapshot, 1);
 }
 
 /* ── NTP sync-stats → HA sensors ─────────────────────────────────────
@@ -736,8 +860,7 @@ void ha_mqtt_ticker_clear(void)
     xSemaphoreTake(s_ticker_mutex, portMAX_DELAY);
     s_ticker_text[0] = '\0';
     xSemaphoreGive(s_ticker_mutex);
-    /* Publish empty state so HA reflects the cleared ticker */
-    publish(s_topic_ticker_state, "", 0);
+    publish_ticker_state();   /* reflects the now-cleared (empty) ticker, retained */
     ESP_LOGI(TAG, "Ticker cleared");
 }
 
@@ -789,7 +912,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             const nextube_config_t *cfg = config_get();
             app_mode_t  cur_mode     = cfg->current_mode;
             bool        cur_on       = cfg->backlight_on;
-            uint8_t     cur_br       = cfg->lcd_brightness;
+            uint8_t     cur_br       = effective_brightness(cfg);
             bool        cur_rot      = cfg->rotation_enabled;
             bool        cur_tsnd     = cfg->ticker_sound;
             char        cur_theme[32];
@@ -804,6 +927,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             publish_rotation(cur_rot);
             publish_ticker_speed(display_get_ticker_speed());
             publish_ticker_sound(cur_tsnd);
+            publish_ticker_state();   /* current text (or empty) — see its doc comment */
             if (sht30_is_present()) publish_sensors();
 
             /* Firmware version — retained so HA has it after broker restart */
@@ -971,7 +1095,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 memcpy(s_ticker_text, event->data, ticker_n);
                 s_ticker_text[ticker_n] = '\0';
                 xSemaphoreGive(s_ticker_mutex);
-                publish(s_topic_ticker_state, s_ticker_text, 0);
+                publish_ticker_state();   /* retained — see its own doc comment */
                 ESP_LOGI(TAG, "Ticker set: \"%.*s\"", ticker_n, event->data);
 
                 /* Optional notification chime.  audio_play_file() returns
@@ -1006,25 +1130,17 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 static void ha_mqtt_task(void *arg)
 {
     /* Deliberately does NOT wait for WiFi to connect before creating
-     * esp-mqtt's client (and its internal ~10 KB task) below. Every other
-     * task in this firmware gets its stack carved out during app_main()'s
-     * early xTaskCreate batch, while the internal heap is still relatively
-     * unfragmented; this one used to be the sole exception, gated behind
-     * wifi_manager_is_connected() and so deferred until well after WiFi
-     * association, mDNS probing, and the first weather/update_check/
-     * subscribers TLS handshakes had already churned the heap - which is
-     * the likely reason "Error create mqtt task" kept recurring regardless
-     * of a startup delay (see the task.stack_size comment below; a fixed
-     * post-connect delay was tried and field-tested, and did not help).
+     * esp-mqtt's client (and its internal ~10 KB task) below — gets its
+     * stack carved out in app_main()'s early xTaskCreate batch, same as
+     * every other task, while internal heap is still relatively
+     * unfragmented, rather than after WiFi/mDNS/TLS handshakes have already
+     * churned it (see the task.stack_size comment below).
      *
-     * esp_mqtt_client_start()'s return value only reflects whether the
-     * task itself was created - not whether the broker is reachable yet.
-     * If WiFi isn't up when this runs, the transport connect attempt fails
-     * asynchronously and is handled by the same "will reconnect
-     * automatically" path already used for any later disconnect - no
-     * different from starting MQTT on a laptop before Ethernet is plugged
-     * in. Task creation itself doesn't need the network, only a place to
-     * put the stack. */
+     * esp_mqtt_client_start()'s return value only reflects whether the task
+     * itself was created, not whether the broker is reachable — if WiFi
+     * isn't up yet, the transport connect fails asynchronously and is
+     * handled by the same "will reconnect automatically" path as any later
+     * disconnect. */
 
     /* Gate MQTT client allocation until no HTTPS connection is in progress.
      *
@@ -1051,40 +1167,26 @@ static void ha_mqtt_task(void *arg)
         .broker.address.uri = uri,
         .session.keepalive  = 30,
         .network.reconnect_timeout_ms = 5000,
-        /* Default stack (6144) is too small once discovery payloads are generated.
-         * publish_discovery() alone allocates ~1.7 KB of locals (payload[768] +
-         * dev[192] + 8 topic strings) on top of ~1-2 KB of MQTT library frames.
-         * 10240 gives comfortable headroom for future additions.
+        /* Default stack (6144) is too small once discovery payloads are
+         * generated — publish_discovery() alone allocates ~2.4 KB of locals
+         * on top of ~1-2 KB of MQTT library frames. 10240 gives headroom
+         * for future additions.
          *
          * DO NOT shrink this without measuring real peak usage under a run
-         * with every feature active first. 8192 was tried (based on a single
-         * earlier ~5.7 KB peak reading that didn't reflect this task's full
-         * discovery payload under heavier entity counts) and produced a
-         * silent stack overflow once the task actually ran — not a clean
-         * failure, but heap corruption that showed up minutes later as
-         * unrelated allocation failures across mDNS, esp-tls, and HTTP client
-         * (confirmed by reverting only this value and watching the entire
-         * cascade disappear, leaving just the task-creation retry below).
+         * with every feature active — a smaller value here previously
+         * caused a silent stack overflow (heap corruption surfacing later
+         * as unrelated mDNS/esp-tls/HTTP client allocation failures, not a
+         * clean failure at the point of overflow).
          *
-         * The *creation-time* failure ("Error create mqtt task") is a
-         * separate, real, and still-open issue: xTaskCreate() needs a single
-         * contiguous internal-RAM block of this size.
-         *
-         * NOT a transient startup-burst thing: a 5 s post-connect delay was
-         * tried and did not help - failures still occur many minutes into
-         * uptime. largest_internal has read exactly 9216 B in every field
-         * reading taken this whole investigation, across wildly different
-         * uptimes and total-free values, including one where an unrelated
-         * task's stack was cut by 4096 B (freeing that many bytes of total
-         * internal RAM moved this number by exactly zero). That means this
-         * is a fixed structural boundary between two permanently-resident
-         * allocations, not a "not enough total free RAM" or "hasn't settled
-         * yet" problem - freeing bytes elsewhere or waiting longer won't
-         * touch it. heap_caps_print_heap_info(MALLOC_CAP_INTERNAL) on the
-         * failure path below dumps the actual region/block layout so the
-         * next failure shows what's boxing in that 9216 B gap, instead of
-         * just the one number. Don't guess another stack-size or timing fix
-         * without that. */
+         * The separate, still-open *creation-time* failure ("Error create
+         * mqtt task") is a fixed structural internal-RAM boundary, not a
+         * "not enough total free RAM yet" problem — largest_internal reads
+         * the same ~9216 B ceiling regardless of total free RAM or uptime,
+         * so freeing bytes elsewhere or adding a startup delay won't help.
+         * heap_caps_print_heap_info(MALLOC_CAP_INTERNAL) on the failure
+         * path below dumps the actual region/block layout for diagnosing
+         * what boxes in that gap — check that before guessing another
+         * stack-size or timing fix. */
         .task.stack_size = 10240,
     };
 
@@ -1108,17 +1210,12 @@ static void ha_mqtt_task(void *arg)
     for (int attempt = 1; attempt <= 5; attempt++) {
         start_err = esp_mqtt_client_start(s_client);
         if (start_err == ESP_OK) break;
-        /* largest_internal: the actual contiguous-block ceiling right now -
-         * the number that decides whether task.stack_size above will fit,
-         * not the total free figure in the periodic heap log.
-         * MALLOC_CAP_8BIT matters here: MALLOC_CAP_INTERNAL alone also
-         * counts reclaimed IRAM, which isn't byte-addressable and can never
-         * actually hold a task stack - a field reading showed a stable
-         * "9216 B" that turned out to be exactly that: an IRAM region
-         * heap_caps_print_heap_info below confirmed was nearly empty and
-         * irrelevant, while the real (fragmentable, byte-addressable)
-         * ceiling sat lower, in a heavily-used D/IRAM region. Querying
-         * without MALLOC_CAP_8BIT would report the unusable number again. */
+        /* largest_internal: the actual contiguous-block ceiling that decides
+         * whether task.stack_size above will fit — not the total free
+         * figure in the periodic heap log. MALLOC_CAP_8BIT matters:
+         * MALLOC_CAP_INTERNAL alone also counts reclaimed IRAM, which isn't
+         * byte-addressable and can't hold a task stack, so it would report
+         * an unusably large but irrelevant number. */
         ESP_LOGE(TAG, "esp_mqtt_client_start failed (%s), attempt %d/5 (largest_internal=%u B)",
                  esp_err_to_name(start_err), attempt,
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -1132,7 +1229,18 @@ static void ha_mqtt_task(void *arg)
         heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
     }
 
-    /* ── Publish loop (60 s tick) ── */
+    /* ── Publish loop ──────────────────────────────────────────────────
+     * State that Home Assistant should reflect promptly (mode/display/
+     * brightness/theme/rotation/update-available) is checked every tick —
+     * "Clock to MQTT interval" in the web UI's MQTT card, 1-60 s, default 30 —
+     * instead of a fixed 60 s, which is what made mode changes (touch
+     * button, Quick Action, auto-rotation) look "delayed" in HA by up to a
+     * minute. Sensor readings and health/NTP telemetry don't need that
+     * freshness and are the more expensive/spammy side of this loop, so they
+     * still run on a real ~60 s period regardless of the chosen interval —
+     * slow_tick counts ticks up to slow_every (recomputed each iteration
+     * since the interval can change live from a settings save) rather than
+     * that period being the loop's own sleep. */
     app_mode_t last_mode       = (app_mode_t)-1;
     bool       last_on         = true;
     uint8_t    last_brightness = 255;   /* sentinel — forces publish on first tick */
@@ -1141,9 +1249,15 @@ static void ha_mqtt_task(void *arg)
     int        last_update_avail = -1;  /* impossible bool value — forces publish on first tick,
                                             same trick as last_mode above (0/1 are both real values) */
     char       last_update_ver[16] = {0};
+    int        slow_tick = 0;   /* counts ticks up to slow_every for the sensor/health/NTP block */
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        config_lock();
+        uint8_t interval_s = config_get()->mqtt_publish_interval_s;
+        config_unlock();
+        if (interval_s < 1) interval_s = 1;   /* defensive — config_mgr already clamps to 1-60 */
+
+        vTaskDelay(pdMS_TO_TICKS((uint32_t)interval_s * 1000));
 
         if (!s_connected) continue;
 
@@ -1152,29 +1266,37 @@ static void ha_mqtt_task(void *arg)
         const nextube_config_t *cfg = config_get();
         app_mode_t  cur_mode   = cfg->current_mode;
         bool        cur_on     = cfg->backlight_on;
-        uint8_t     cur_br     = cfg->lcd_brightness;
+        uint8_t     cur_br     = effective_brightness(cfg);
         bool        cur_rot    = cfg->rotation_enabled;
         char        cur_theme[32];
         strncpy(cur_theme, cfg->theme, sizeof(cur_theme) - 1);
         cur_theme[sizeof(cur_theme) - 1] = '\0';
         config_unlock();
 
-        /* Sensor readings */
-        if (sht30_is_present()) {
-            publish_sensors();
-        }
+        /* Ceiling-divide so the slow block still lands on ~60 s regardless
+         * of interval_s (e.g. interval_s=10 → every 6th tick; interval_s=60
+         * → every tick, matching this block's original fixed-60s cadence). */
+        int slow_every = (60 + interval_s - 1) / interval_s;
+        if (++slow_tick >= slow_every) {
+            slow_tick = 0;
 
-        /* Optional health telemetry (RSSI / heap / uptime) + deferred NTP
-         * sync stats (stashed by the SNTP-context listener — see
-         * on_ntp_sync_stats for why it cannot publish directly). */
-        config_lock();
-        bool pub_health = config_get()->mqtt_pub_health;
-        bool pub_ntp    = config_get()->mqtt_pub_ntp;
-        config_unlock();
-        if (pub_health) publish_health();
-        if (s_ntp_pend) {
-            if (pub_ntp) publish_ntp_stats();
-            s_ntp_pend = false;
+            /* Sensor readings */
+            if (sht30_is_present()) {
+                publish_sensors();
+            }
+
+            /* Optional health telemetry (RSSI / heap / uptime) + deferred NTP
+             * sync stats (stashed by the SNTP-context listener — see
+             * on_ntp_sync_stats for why it cannot publish directly). */
+            config_lock();
+            bool pub_health = config_get()->mqtt_pub_health;
+            bool pub_ntp    = config_get()->mqtt_pub_ntp;
+            config_unlock();
+            if (pub_health) publish_health();
+            if (s_ntp_pend) {
+                if (pub_ntp) publish_ntp_stats();
+                s_ntp_pend = false;
+            }
         }
 
         /* Mode — publish when changed */
@@ -1266,6 +1388,16 @@ void ha_mqtt_start(void)
      * handler no-ops until the broker connection is up. */
     ntp_register_sync_listener(on_ntp_sync_stats);
 
+    /* WiFi-outage detection (see ha_mqtt_wifi_event_handler()'s doc comment
+     * near ha_mqtt_pause()/_resume() below) — registered here, before the
+     * client task even exists, so a disconnect that happens before the first
+     * successful connect is still tracked correctly (both handler calls
+     * no-op safely against a NULL s_client either way — see ha_mqtt_pause()). */
+    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
+                               ha_mqtt_wifi_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                               ha_mqtt_wifi_event_handler, NULL);
+
     if (xTaskCreatePinnedToCore(ha_mqtt_task, "ha_mqtt",
                                4096, NULL, 3, NULL, 0) != pdPASS)
         ESP_LOGE(TAG, "ha_mqtt_task creation failed");
@@ -1273,26 +1405,26 @@ void ha_mqtt_start(void)
         ESP_LOGI(TAG, "MQTT task started (broker: %s:%u)", s_broker, (unsigned)s_port);
 }
 
-/* Pause/resume the underlying esp-mqtt client — for callers (web_server.c's
- * OTA/webUI/stock-repair paths) that need MQTT fully quiet for a while, not
- * just our own wrapper task.  vTaskSuspend()-ing "ha_mqtt" (the task these
- * two don't touch) only freezes THIS task's 60 s publish loop and connect-
- * retry logic; esp-mqtt's own client owns a separate internal task for the
- * actual TCP/reconnect/keepalive work once esp_mqtt_client_start() has
- * succeeded, and that keeps running regardless — observed in the field
- * reconnecting and publishing a full discovery burst several seconds into
- * an OTA/webUI pull's "suspended" window despite "ha_mqtt" already being on
- * the suspend list. esp_mqtt_client_stop()/_start() operate on the client
- * itself, so they reach that internal task too.
+/* Pause/resume the underlying esp-mqtt client — for callers that need MQTT
+ * fully quiet, not just our own wrapper task. Suspending "ha_mqtt" only
+ * freezes this task's 60s publish loop and connect-retry logic; esp-mqtt
+ * owns a separate internal task for TCP/reconnect/keepalive once
+ * esp_mqtt_client_start() succeeds, which keeps running regardless.
+ * esp_mqtt_client_stop()/_start() operate on the client itself, reaching
+ * that internal task too.
  *
- * s_connected is cleared synchronously in ha_mqtt_pause(), before
- * esp_mqtt_client_stop() returns — closes the tiny window where a caller on
- * another task (e.g. a touch-button press publish, or the 60 s loop if it
- * happens to be mid-tick right as this runs) could still see s_connected
- * true and attempt a publish against a client that's mid-stop. */
+ * Two independent callers can want this paused at once: web_server.c's
+ * OTA/webUI/stock-repair paths, and ha_mqtt_wifi_event_handler() below
+ * (stops esp-mqtt's own reconnect loop from retrying through a WiFi/DNS
+ * outage). Tracked as a refcount so the two compose safely if they overlap
+ * — e.g. WiFi flapping back mid-OTA must not resume MQTT into that
+ * flash-write window just because the WiFi side thinks it's clear. */
+static volatile int s_pause_refcount = 0;
+
 void ha_mqtt_pause(void)
 {
     if (!s_client) return;   /* never started, or esp_mqtt_client_init() failed */
+    if (s_pause_refcount++ > 0) return;   /* another reason already has it paused */
     s_connected = false;
     ESP_LOGI(TAG, "MQTT paused");
     esp_mqtt_client_stop(s_client);   /* blocks until the client's own task has stopped */
@@ -1307,9 +1439,42 @@ void ha_mqtt_pause(void)
 void ha_mqtt_resume(void)
 {
     if (!s_client) return;
+    if (s_pause_refcount == 0) return;          /* not paused, or already balanced */
+    if (--s_pause_refcount > 0) return;         /* still paused by another reason */
     esp_err_t e = esp_mqtt_client_start(s_client);
     if (e != ESP_OK)
         ESP_LOGW(TAG, "MQTT resume: esp_mqtt_client_start failed (%s)", esp_err_to_name(e));
     else
         ESP_LOGI(TAG, "MQTT resumed");
+}
+
+/* ── WiFi-outage detection ─────────────────────────────────────────────
+ * WIFI_EVENT_STA_DISCONNECTED can fire repeatedly during a single outage —
+ * once per failed reconnect attempt wifi_manager makes — while
+ * IP_EVENT_STA_GOT_IP fires exactly once per actual recovery.  So this is
+ * tracked as a level (currently down or not), not a per-event counter: only
+ * an actual up→down or down→up transition touches ha_mqtt_pause()/_resume()
+ * above, keeping their refcount balanced 1:1 regardless of how many
+ * DISCONNECTED events land in between. Without this, esp-mqtt's own
+ * transport-connect retry (network.reconnect_timeout_ms, 5 s) would keep
+ * trying — and MQTT_EVENT_ERROR/DISCONNECTED would keep logging — for the
+ * entire length of any WiFi/DNS outage, not just the moment it started. */
+static bool s_wifi_down = false;
+
+static void ha_mqtt_wifi_event_handler(void *arg, esp_event_base_t base,
+                                       int32_t event_id, void *event_data)
+{
+    if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (!s_wifi_down) {
+            s_wifi_down = true;
+            ESP_LOGI(TAG, "WiFi lost — pausing MQTT until it's back");
+            ha_mqtt_pause();
+        }
+    } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        if (s_wifi_down) {
+            s_wifi_down = false;
+            ESP_LOGI(TAG, "WiFi back — resuming MQTT");
+            ha_mqtt_resume();
+        }
+    }
 }

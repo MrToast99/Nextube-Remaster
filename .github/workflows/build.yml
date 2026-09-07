@@ -12,6 +12,12 @@ on:
     paths-ignore:
       - 'README.md'
       - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      keep_elf:
+        description: 'Include the unstripped nextube-fw.elf in build artifacts (needed to symbolicate a crash backtrace with addr2line/idf.py monitor). Not included in tagged releases — this only affects the raw Actions-run artifact, manually triggered runs only.'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -132,6 +138,23 @@ jobs:
           echo "Build v${BUILD_VER} (Firmware v${FW_VER} / LittleFS v${SP_VER}) / Update type: ${TYPE}" \
             > artifacts/build_info.txt
 
+      - name: Copy debug ELF (manual test runs only)
+        # workflow_dispatch's boolean input arrives as the string "true"/"false"
+        # here, not a real boolean — compare as a string. On push/pull_request
+        # runs github.event.inputs is unset entirely, so this stays false by
+        # default; the .elf only ever gets kept when someone deliberately runs
+        # this workflow by hand with the box checked, and even then it never
+        # reaches the tagged-release zip below (release job downloads this same
+        # artifacts/ dir, but only nextube-fw.bin/littlefs.bin/etc. are ever
+        # zipped or attached to the release — an extra file sitting in
+        # artifacts/ that nothing references there is simply never picked up).
+        if: github.event.inputs.keep_elf == 'true'
+        run: |
+          FW_VER=${{ steps.version.outputs.fw_version }}
+          cp build/nextube-fw.elf artifacts/nextube-fw-v${FW_VER}.elf
+          echo "Included nextube-fw-v${FW_VER}.elf — symbolicate a crash backtrace with:"
+          echo "  xtensa-esp32-elf-addr2line -e nextube-fw-v${FW_VER}.elf -f -C -i <addr> <addr> ..."
+
       - name: Generate Web UI ZIP
         run: |
           SP_VER=${{ steps.version.outputs.fs_version }}
@@ -187,12 +210,33 @@ jobs:
               GUIDANCE="**Web UI changed:** upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update** (config-safe, no reboot). If a full filesystem reflash is required it will be noted explicitly — use \`nextube-littlefs-v${SP_VER}.bin\` via **System → LittleFS Recovery** (⚠️ erases filesystem — your config is backed up and restored automatically, but as a precaution you can export it yourself first via **System → Backup & Restore**; custom themes and album photos aren't covered and will be lost unless backed up separately)."
               ;;
             full)
-              GUIDANCE="**Both partitions changed.** Use the Online updater or Flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**, then upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update**. Alternatively use \`nextube-fw-v${FW_VER}-full.bin\` for a clean USB re-flash."
+              GUIDANCE=$(printf '%b' "**Both partitions changed.** Use one of the update methods:\n\n1. Online updater\n\n\n2. Flash \`nextube-fw-v${FW_VER}-ota.bin\` via **System → Firmware Update**, then upload \`nextube-WebUI-v${BUILD_VER}.zip\` via **System → Web UI Update**.\n\n\n3. Flash \`nextube-fw-v${FW_VER}-full.bin\` for a full clean re-flash.")
               ;;
             *)
               GUIDANCE="Refer to the included binaries."
               ;;
           esac
+
+          # Pull this release's own section straight out of CHANGELOG.md —
+          # everything between the "## [${BUILD_VER}] - ..." heading and the
+          # next "## [" heading (its own ### Added/### Fixed/### Changed
+          # sub-headings come along as-is, so no extra wrapper heading is
+          # added around it below). index() does a literal substring match
+          # rather than a regex ~ match so BUILD_VER's dots can't accidentally
+          # act as regex wildcards. Falls back to a pointer at the file if
+          # this build's version has no matching entry yet (e.g. a tag pushed
+          # before CHANGELOG.md was updated for it).
+          CHANGELOG_SECTION=$(awk -v ver="$BUILD_VER" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "[" ver "]") > 0) { found = 1 }
+              next
+            }
+            found { print }
+          ' CHANGELOG.md)
+          if [ -z "$(echo "$CHANGELOG_SECTION" | tr -d '[:space:]')" ]; then
+            CHANGELOG_SECTION="_No CHANGELOG.md entry found for v${BUILD_VER} yet — see [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)._"
+          fi
 
           cat > release_notes.md <<EOF
           ## Nextube-Remaster v${BUILD_VER}
@@ -202,9 +246,11 @@ jobs:
           | **Firmware** | v${FW_VER} |
           | **LittleFS / Web UI** | v${SP_VER} |
 
+          ${CHANGELOG_SECTION}
+
           ### ${GUIDANCE}
 
-          ### Files
+          ### Files in Nextube-Remaster.v${BUILD_VER}.zip
           | File | Purpose |
           |---|---|
           | \`nextube-fw-v${FW_VER}-ota.bin\` | Firmware OTA — **System → Firmware Update** |

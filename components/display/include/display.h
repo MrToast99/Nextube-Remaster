@@ -33,11 +33,28 @@ extern "C" {
 /* ── Low-level hardware ────────────────────────────────────────────── */
 void display_init(void);
 void display_set_brightness(uint8_t pct);
-void display_fill(int tube, uint16_t colour);
+
+/** Cooperatively pause the display task at its loop boundary (guaranteed no
+ *  SPI transaction in flight) so the caller can either transmit on the LCD
+ *  bus itself, or do anything else display_task's own SPI/LEDC activity
+ *  must not run concurrently with — including a raw SPI flash op
+ *  (esp_flash_read/write/erase), which forces the OTHER core to sit with
+ *  its own interrupts masked for the op's duration (ESP32 esp_flash cache-
+ *  disable behaviour) and can trip the interrupt watchdog if that other
+ *  core is display_task mid-critical-section at the same moment.
+ *  Returns true once genuinely paused (or immediately, pre-boot); false on
+ *  timeout, in which case the caller must not proceed with whatever it was
+ *  avoiding a race with. Always pair with display_unpause(). */
+bool display_pause_for_spi(uint32_t timeout_ms);
+
+/** Undo display_pause_for_spi() — resumes the display task from exactly
+ *  where it parked. No-op if the display task isn't running (pre-boot). */
+void display_unpause(void);
+void display_fill(int tube, uint16_t color);
 void display_show_digit(int tube, const uint8_t *rgb565_data, int w, int h);
 
 /** Send INVON (0x21) or INVOFF (0x20) to each tube according to mask.
- *  Bit N set → tube N gets INVON (colour-inverted replacement panel).
+ *  Bit N set → tube N gets INVON (color-inverted replacement panel).
  *  Takes effect immediately; no reboot required.
  *  Call after display_init() and again when lcd_invert_mask changes. */
 void display_apply_invert_mask(uint8_t mask);
@@ -52,7 +69,7 @@ void display_apply_invert_mask(uint8_t mask);
 void display_apply_init_profiles(const uint8_t profiles[6]);
 
 /** Set per-tube VMCTR1 VCOM value (0x00–0x3F; default 0x0E = 14).
- *  VCOM controls the AC driving voltage; raising it restores contrast and colour
+ *  VCOM controls the AC driving voltage; raising it restores contrast and color
  *  saturation on replacement panels that look washed at the original 0x0E setting.
  *  Changes require a per-tube SWRESET + full register reload (same as profile
  *  changes) because VMCTR1 is only latched during the SLPOUT→DISPON window.
@@ -141,7 +158,7 @@ void display_set_debug_wl_fps(int fps);
 void display_set_update_indicator(bool active);
 
 /* ── Anti burn-in ──────────────────────────────────────────────────── */
-/** Start or stop per-tube burn-in colour-cycle mode.
+/** Start or stop per-tube burn-in color-cycle mode.
  *  mask:       bitmask, bit N = tube N.  0x3F = all six.  0x00 = restore all.
  *  duration_s: 0 = run until manually stopped (mask=0 call required).
  *              Non-zero = auto-restore after this many seconds
@@ -156,8 +173,8 @@ void display_set_burnin_mask(uint8_t mask, uint32_t duration_s);
 
 /** Static-snow burn-in mode: each display tick writes truly random RGB565
  *  pixels to every tube in mask, exercising each sub-pixel independently.
- *  More thorough than the colour-cycle because every pixel address receives
- *  a unique random level on every frame rather than a global solid colour.
+ *  More thorough than the color-cycle because every pixel address receives
+ *  a unique random level on every frame rather than a global solid color.
  *  mask:       6-bit field, bit N = tube N (0x3F = all six tubes).
  *  duration_s: session length in seconds; 0 = run until stopped (mask = 0).
  *  Calling with mask = 0 stops an active session immediately.
@@ -235,7 +252,7 @@ void display_busy_clear(void);
 /** Signal that a settings save just completed.  Clears any busy backoff,
  *  forces a full re-render on the very next display tick (same effect as a
  *  mode change but without blanking the tubes), and wakes the display task
- *  immediately.  Ensures live config edits — shadow colour, glyph colour,
+ *  immediately.  Ensures live config edits — shadow color, glyph color,
  *  custom font, etc. — appear within one tick regardless of change-detection
  *  cursor state.  Safe to call from any task. */
 void display_config_changed(void);

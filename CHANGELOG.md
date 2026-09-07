@@ -1,6 +1,38 @@
 # Changelog
 
 
+## [1.18.1] - pending
+
+### Fixed
+- Home Assistant showed the clock's Mode and Theme as "Unknown" until the next MQTT reconnect, or until you changed them again — both are now retained so Home Assistant shows the current value immediately, including right after a Home Assistant restart.
+- A custom or uploaded theme always showed as "Unknown" in Home Assistant even with the fix above, since the Theme dropdown's list of valid options was a hardcoded list that never included it. It's now built from the same on-device theme list the web UI's own picker uses.
+- The Ticker text entity showed "Unknown" whenever no ticker message had been actively set since the last MQTT reconnect (including right after flashing, or after a Home Assistant restart) — it now always reports its actual current text, or blank if there isn't one.
+- The Home Assistant brightness slider reported the configured daytime brightness even when Night Mode had the panels dimmed or off — it now reports what the panels are actually doing. Adjusting it from Home Assistant still changes the daytime setting, so it may visibly snap back if Night Mode is still active — that's Night Mode working as intended, not a bug.
+- A mode change, along with display on/off, brightness, theme, and rotation, could take up to 60 seconds to reach Home Assistant, since the MQTT publish task only checked for changes once a minute. It now checks every 30 seconds by default, and as often as every second via the new "Clock to MQTT interval" setting (below). Sensor and health/NTP telemetry keep their original ~60 second cadence.
+- Spectrum mode could show a couple of columns of the previous mode's content (most visibly WeatherLive's sky) bleeding in on the left edge of a tube after switching into Spectrum.
+- System → Web UI Update looked stuck on "Uploading…" for the whole operation, even though the upload itself (a small ZIP) finished almost instantly and the device was actually spending up to a minute extracting and writing files. It now shows a distinct "writing files to the device" state as soon as the upload completes, so it's clear the transfer succeeded and the device is working, not hung.
+- A Partial or Full Factory Reset could crash the device mid-reset, before the config file was actually cleared, so the reset appeared to silently "not take" — clearing the WiFi driver's stored network disconnects it immediately, and the Home Assistant MQTT client's own disconnect handler could hang badly enough to trip the watchdog racing to close its connection over that same socket. Both reset paths now cleanly stop MQTT (and everything else network/flash-sensitive) before touching WiFi at all.
+- A Partial or Full Factory Reset could also silently fail to clear your settings if a pending config backup happened to be sitting in NVS at the time (a safety net written just before a filesystem update, normally cleaned up on the next boot) — the reset cleared your config, but the very next reboot would quietly restore it right back from that leftover backup. Both reset paths now also clear it.
+
+### Added
+- **"Clock to MQTT interval" setting** (Services → Home Assistant MQTT) — controls how often mode/display/brightness/theme/rotation changes are checked and published to Home Assistant, 1-60 seconds, default 30. Lower it for near-instant updates, or raise it toward 60 for fewer MQTT messages; sensor/health/NTP telemetry keeps its own ~60 second cadence regardless.
+- **Live color preview** (Display → Custom Face) — a row of tube-shaped tiles renders your Font/Digit colors, shadows, and background live as you edit them. When the night color set is on, a ☀️/🌙 switch next to the preview flips it between day and night sets on demand, instead of waiting for real twilight (or Drift's timer).
+- **Settings search** — a "Find a setting" box above the tabs jumps straight to a matching label, heading, or button anywhere on the page, instead of hunting through six tabs by hand; a query matching more than one setting shows a dropdown to pick from.
+- **First-time setup now shows (and tries to open) the clock's new address** — once it joins your home WiFi, the "Connecting…" screen shows a proper tappable link to its new IP instead of just describing it, and automatically tries to jump there once your own device reconnects to the same network. Restoring a config backup during setup gets the same treatment, since it carries new WiFi credentials too.
+- **Per-tab unsaved-changes indicator** — a small dot appears on any tab button with a pending edit, so you can tell which tab needs attention without switching to each one.
+- **Night color set "Drift" mode** (Display → Custom Face) — an alternative to Follow Sun: continuously oscillates between the day and night color sets on a fixed timer (5 s to 1 hour, default 5 min), for an ambient effect independent of your location or time of day.
+- **Shadow size** (Display → Custom Face, Font and Digit, day and night sets) — a 1-4 slider next to each shadow color controls how wide the drop shadow's blur spreads, independently for info-panel text vs. clock digits, and for day vs. night. Default (2) matches every existing config's prior fixed blur.
+- A brief power-on glow when the clock boots — the backlight fades up from off instead of snapping straight to full brightness, over 3 seconds.
+
+### Changed
+- Web UI: System → Danger Zone now reads as a distinct hazard zone at a glance — a red-tinted card background/border, and the reset buttons match the gradient treatment every other important button already uses.
+- Web UI: general accessibility and code-quality pass (screen-reader/keyboard support, reduced code duplication in the settings page).
+- Web UI: visual refresh across cards, buttons, dashboard stats, dialogs, and color pickers for a more polished, consistent look.
+- Web UI: Save buttons briefly show a checkmark on a successful save, alongside the existing toast.
+- README: clarified the first-time WiFi setup steps — that `Nextube-Setup` is a WiFi network you join from your own device's WiFi settings, and that the network disappearing after you submit your credentials means it worked, not that something broke.
+- Web UI: all 11 languages regenerated to add strings that had been English-only, including this update's new "Clock to MQTT interval" setting.
+- Crossing the Night Mode brightness boundary now glides over about 45 seconds instead of snapping instantly, matching the smooth crossfade the WeatherLive night color set already does through real twilight.
+
 ## [1.18.0] - 2026-08-31
 
 ### Added
@@ -226,7 +258,7 @@ Small bug fix but an important one as it missed the final merge before v1.16.0 w
 
   - **True moon** — real phase shape (crescent→full) + geolocation-anchored position (absent near new moon, full moon up all night)
 
-  - **Drifting clouds** — density/colour by condition (few → overcast/storm)
+  - **Drifting clouds** — density/color by condition (few → overcast/storm)
 
   - **Precipitation** — rain streaks and snow, condition-driven
 
@@ -676,7 +708,7 @@ Changes this release
 ### Added
 
 ### Spectrum Mode — LED Source Selector
-- Web UI: LED Source dropdown in Spectrum Mode card; custom colour picker hides automatically when "Follow accent mode" is selected
+- Web UI: LED Source dropdown in Spectrum Mode card; custom color picker hides automatically when "Follow accent mode" is selected
 
 ### Theme Rotation
 - Automatically cycles through installed themes on a configurable timer (1 min → 4 hrs, default 5 min)
@@ -808,7 +840,7 @@ Changes this release:
 
 ### Display
 
-- Scheduled Anti Burn-in / LCD Refresh — new Display Settings card; fires the colour-cycle recovery session automatically at a user-configured day, hour, and duration
+- Scheduled Anti Burn-in / LCD Refresh — new Display Settings card; fires the color-cycle recovery session automatically at a user-configured day, hour, and duration
 
   - Schedule: weekly (every Sunday) or monthly (1st of month)
 
@@ -893,7 +925,7 @@ Changes this Release:
 
 - Added Noise Floor threshold slider to Display → Spectrum Mode — previously only accessible in the debug panel
 
-- Aligned LED Glow Colour and LCD Bar Colour pickers using CSS grid for consistent layout
+- Aligned LED Glow Color and LCD Bar Color pickers using CSS grid for consistent layout
 
 ## [1.1.3] - 2026-05-04
 

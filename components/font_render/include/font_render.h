@@ -50,20 +50,24 @@ const fr_glyph_t *fr_get_glyph(uint8_t face_id, uint32_t codepoint, uint16_t px_
 
 /* ── Blit ─────────────────────────────────────────────────────────────────────
  * Composite a glyph into a big-endian RGB565 framebuffer.
- * x0, y0  : top-left corner of the glyph bitmap in framebuffer coordinates.
- * cr/cg/cb: glyph fill colour.
- * shadow  : when true, paints a dark bloom ring around the glyph. */
+ * x0, y0     : top-left corner of the glyph bitmap in framebuffer coordinates.
+ * cr/cg/cb   : glyph fill color.
+ * shadow     : when true, paints a dark bloom ring around the glyph.
+ * shadow_size: bloom radius, 1 (tight) .. 4 (wide); 2 reproduces the blur this
+ *              function always drew before the size control existed. Callers
+ *              outside a UI slider's 1-4 range should still pass a sane value
+ *              — the loop bound scales directly off it, unclamped here. */
 void  fr_blit(uint8_t *fb, int fb_w, int fb_h,
               const fr_glyph_t *glyph,
               int x0, int y0,
               uint8_t cr, uint8_t cg, uint8_t cb,
-              bool shadow, uint8_t sr, uint8_t sg, uint8_t sb);
+              bool shadow, uint8_t sr, uint8_t sg, uint8_t sb, uint8_t shadow_size);
 
 /* Render a single codepoint visually centred (both axes) in the framebuffer. */
 void  fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
                               uint8_t face_id, uint32_t codepoint, uint16_t px_size,
                               uint8_t cr, uint8_t cg, uint8_t cb,
-                              bool shadow, uint8_t sr, uint8_t sg, uint8_t sb);
+                              bool shadow, uint8_t sr, uint8_t sg, uint8_t sb, uint8_t shadow_size);
 
 /* Render a UTF-8 string horizontally centred at column cx, baseline at baseline_y. */
 void  fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
@@ -71,7 +75,7 @@ void  fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
                    uint8_t face_id, uint16_t px_size,
                    const char *utf8_str,
                    uint8_t cr, uint8_t cg, uint8_t cb,
-                   bool shadow, uint8_t sr, uint8_t sg, uint8_t sb);
+                   bool shadow, uint8_t sr, uint8_t sg, uint8_t sb, uint8_t shadow_size);
 
 /* Return the total pixel advance of utf8_str rendered at face_id/px_size,
  * applying the same norm_ratio and width-fit as fr_draw_text.

@@ -40,32 +40,63 @@ static spi_device_handle_t spi_dev;
  * NULL until display_task_start() is called; checked before use. */
 static TaskHandle_t s_display_task_handle = NULL;
 
-/* Cooperative park handshake for OTA (see display_show_wait): the display
- * task checks s_park_req at its loop boundary — never mid-render, never with
- * an SPI transaction in flight — sets s_parked, and suspends itself.
- * display_pause_for_spi()/display_unpause() reuse the same handshake as a
- * RESUMABLE variant for the appliers that must own the LCD bus (VCOM /
- * panel-profile reinit, invert mask). */
+/* Cooperative park handshake: display_task checks s_park_req at its loop
+ * boundary (never mid-render, never mid-SPI-transaction), sets s_parked, and
+ * suspends itself. Used by OTA (display_show_wait) and by
+ * display_pause_for_spi()/display_unpause() for callers that need the LCD
+ * bus (VCOM/profile/invert appliers) or just need display_task to sit still
+ * — notably around a raw SPI flash op (esp_flash_read/write/erase), which
+ * forces ESP32's cache-disable path to park the OTHER core with its
+ * interrupts masked. If that core is display_task mid a backlight PWM
+ * critical section, both cores can end up interrupt-masked at once long
+ * enough to trip the watchdog; pausing display_task first removes it from
+ * the picture. Exported so web_server.c can wrap its own raw-flash calls
+ * (e.g. api_status()'s esp_littlefs_info() walk) the same way. */
 static volatile bool s_park_req = false;
 static volatile bool s_parked   = false;
 
+/* Reference-counted: multiple callers (an /api/status poll, a file upload,
+ * the boot-time stock-files check, the VCOM/profile/invert appliers) can
+ * overlap, and a plain boolean flag lets whichever finishes first resume
+ * display_task while another is still relying on it staying parked.
+ * display_task now only resumes once the last holder releases it.
+ * Spinlock, not a mutex — the critical section is just an int inc/dec, same
+ * as s_busy_mux below. */
+static volatile int  s_pause_refcount = 0;
+static portMUX_TYPE  s_pause_mux = portMUX_INITIALIZER_UNLOCKED;
+
 /* Cooperatively pause the display task at its loop boundary so the caller
- * may transmit on the LCD SPI bus itself.  Returns true when the task is
- * genuinely suspended (or not running yet — boot path); false on timeout,
- * in which case the caller MUST NOT touch the bus.
+ * may transmit on the LCD SPI bus itself, or do anything else display_task's
+ * own SPI/LEDC activity must not run concurrently with (see the block
+ * comment above). Returns true when the task is genuinely suspended (or not
+ * running yet — boot path); false on timeout, in which case the caller MUST
+ * NOT touch the bus / proceed with whatever it was avoiding a race with.
+ * Safe to call from multiple tasks at once — see s_pause_refcount above.
  *
  * Why not vTaskSuspend() from outside: an asynchronous suspend can land
  * mid-transmit, holding the spi_master bus lock.  The caller's first
  * lcd_cmd() then blocks forever on that lock and the vTaskResume() that
  * would free it is never reached — both tasks wedged until power cycle. */
-static bool display_pause_for_spi(uint32_t timeout_ms)
+bool display_pause_for_spi(uint32_t timeout_ms)
 {
     if (!s_display_task_handle) return true;   /* boot: task not started yet */
-    s_park_req = true;
+
+    taskENTER_CRITICAL(&s_pause_mux);
+    bool are_first = (++s_pause_refcount == 1);
+    taskEXIT_CRITICAL(&s_pause_mux);
+    if (are_first) s_park_req = true;   /* only the first concurrent caller actually requests it */
+
+    /* Every caller — first or joining an already-successful pause — waits
+     * for confirmation display_task is really suspended before proceeding.
+     * If s_parked is already true (another caller got there first), both
+     * loops below fall through immediately; no double-wait cost. */
     for (uint32_t i = 0; i < timeout_ms / 10 && !s_parked; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
     if (!s_parked) {
-        s_park_req = false;   /* withdraw — task keeps running normally */
+        taskENTER_CRITICAL(&s_pause_mux);
+        bool are_last = (--s_pause_refcount == 0);
+        taskEXIT_CRITICAL(&s_pause_mux);
+        if (are_last) s_park_req = false;   /* withdraw only if no one else is still waiting on it */
         return false;
     }
     /* s_parked is set just BEFORE the task's vTaskSuspend(NULL); make sure
@@ -76,9 +107,14 @@ static bool display_pause_for_spi(uint32_t timeout_ms)
     return true;
 }
 
-static void display_unpause(void)
+void display_unpause(void)
 {
     if (!s_display_task_handle) return;
+    taskENTER_CRITICAL(&s_pause_mux);
+    if (s_pause_refcount > 0) s_pause_refcount--;
+    bool are_last = (s_pause_refcount == 0);
+    taskEXIT_CRITICAL(&s_pause_mux);
+    if (!are_last) return;   /* another concurrent caller still holds the pause */
     s_park_req = false;
     s_parked   = false;
     vTaskResume(s_display_task_handle);
@@ -180,15 +216,15 @@ static int8_t s_burnin_shift_x = 0;
  * band always shows freshly painted content (see wl_paint_edge_margin_full). */
 #define BURNIN_SHIFT_MAX 2
 
-/* Burn-in colour-cycle mask: each bit = one tube (bit 0 = tube 0 … bit 5 =
- * tube 5).  When a bit is set, that tube shows a cycling colour sequence
+/* Burn-in color-cycle mask: each bit = one tube (bit 0 = tube 0 … bit 5 =
+ * tube 5).  When a bit is set, that tube shows a cycling color sequence
  * (red → green → blue → white → black, 30 s per step) to exercise all
  * sub-pixels at both voltage extremes.  Normal rendering runs for unmasked
  * tubes.  Set/cleared via display_set_burnin_mask().                          */
 static volatile uint8_t  s_burnin_mask     = 0;
 static volatile time_t   s_burnin_end_time = 0;  /* 0 = no timer; else epoch s */
 
-/* RGB565 colour cycle — drives each sub-pixel high and low in turn. */
+/* RGB565 color cycle — drives each sub-pixel high and low in turn. */
 static const uint16_t s_burnin_colors[] = {
     0xF800,   /* red   — R max, G=0, B=0 */
     0x07E0,   /* green — R=0, G max, B=0 */
@@ -197,7 +233,7 @@ static const uint16_t s_burnin_colors[] = {
     0x0000,   /* black — all min          */
 };
 #define BURNIN_COLOR_COUNT  ((int)(sizeof(s_burnin_colors)/sizeof(s_burnin_colors[0])))
-#define BURNIN_COLOR_SECS   30   /* seconds per colour step in the cycle */
+#define BURNIN_COLOR_SECS   30   /* seconds per color step in the cycle */
 
 /* SPI pixel transfer chunk height — 8 rows × 80 px × 2 B = 1280 B on the
  * stack (SRAM).  Used by display_show_image().
@@ -244,29 +280,19 @@ static struct {
 
 /* Static-snow burn-in: each frame writes truly random RGB565 pixels to every
  * tube in the mask, exercising each sub-pixel independently rather than as a
- * uniform colour block.  State mirrors the colour-cycle variables above. */
+ * uniform color block.  State mirrors the color-cycle variables above. */
 static volatile uint8_t s_snow_mask     = 0;
 static volatile time_t  s_snow_end_time = 0;
 
 /* ── Panel profiles (VCOM + gamma) ──────────────────────────────────────────
- * The ST7735 "Green Tab" (original Nextube panels) and ST7735S (replacement
- * panels such as LH096NT-IF09W) require different VCOM voltages and gamma
- * curves to achieve proper contrast and colour saturation.
- *
- *  Profile 0 "Standard" — VCOM 0x0E.  Tuned for the original Green Tab panels
- *     shipped with the Nextube.  Colours are accurate and saturated on those.
- *
- *  Profile 1 "Vivid"    — VCOM 0x3C.  For ST7735S replacement panels that
- *     look washed/low-contrast at Standard VCOM.  The higher VCOM raises the
- *     AC driving voltage, restoring contrast and colour depth.  Gamma is also
- *     recalibrated to match the ST7735S response curve.
- *
- * Only VCOM (0xC5) and the two gamma registers (0xE0 / 0xE1) differ between
- * profiles.  All power-control registers (0xC0-0xC4) are identical and are
- * not included here — they are sent once during st7735_init_one().
- *
- * Source: Adafruit ST7735R Red-Tab (VCOM 0x3C) vs Green-Tab (VCOM 0x0E);
- *   TFT_eSPI ST7735S_80x160 gamma table.                                      */
+ * ST7735 "Green Tab" (original panels) and ST7735S (replacements like
+ * LH096NT-IF09W) need different VCOM and gamma to get proper contrast/color.
+ * Profile 0 "Standard" (VCOM 0x0E) is tuned for the original Green Tab
+ * panels; Profile 1 "Vivid" (VCOM 0x3C) raises AC driving voltage to fix the
+ * washed/low-contrast look ST7735S panels have at Standard VCOM, with gamma
+ * recalibrated to match. Only VCOM (0xC5) and the gamma registers (0xE0/E1)
+ * differ — power-control registers (0xC0-0xC4) are identical and sent once
+ * in st7735_init_one(). */
 typedef struct {
     uint8_t vcom;       /* VMCTR1 (0xC5) — AC driving voltage for contrast     */
     uint8_t gmp[16];    /* GMCTRP1 (0xE0) — positive gamma correction          */
@@ -333,7 +359,7 @@ static int8_t  s_row_offsets[LCD_COUNT];     /* user fine-tuning; default 0     
 static volatile bool s_full_repaint_request = false;
 /* Set by display_config_changed() after a settings save.  Forces the display
  * task to treat the next tick as a mode-change (re-render everything) without
- * blanking the tubes, so live config edits (shadow colour, etc.) appear within
+ * blanking the tubes, so live config edits (shadow color, etc.) appear within
  * one tick even if change-detection tracking is momentarily stale. */
 static volatile bool s_settings_saved = false;
 
@@ -349,24 +375,15 @@ static uint8_t s_tube_brightness[LCD_COUNT];
 static uint8_t s_tube_vcom[LCD_COUNT];
 
 /* ── Software gamma + brightness correction ──────────────────────────────────
- * Pre-computed lookup tables that map each possible R5/B5 (0–31) and G6 (0–63)
- * channel value through out = (in*br/100)^gamma before the pixel is sent to
- * the display. Brightness scaling is folded into the same table as gamma —
- * both are rebuilt together — so the per-pixel hot path (wl_apply_px and its
- * duplicates) is a single LUT lookup instead of a "divide by 100, then LUT"
- * sequence. Xtensa has no hardware integer divider, so removing that per-pixel
- * `/100` from every dirty pixel is the point; brightness/gamma only change via
- * a settings apply (boot or web UI), never per frame, so rebuilding the LUT on
- * every brightness OR gamma change is cheap relative to the per-pixel savings.
- *
- * Gamma > 1.0 darkens midtones (fixes washed / low-contrast panels whose native
- * response curve is flatter than expected). br=100 and gamma=1.0 together are
- * identity — the s_gamma_lut_active flag short-circuits the table entirely so
- * there is no per-pixel overhead when neither correction is active.
- *
- * The tables are rebuilt by rebuild_gamma_lut() whenever the gamma OR
- * brightness value changes.  The display task is suspended during the rebuild
- * to avoid reading a partially-updated table.                                 */
+ * Lookup tables mapping each R5/B5 (0-31) and G6 (0-63) value through
+ * out = (in*br/100)^gamma. Brightness is folded into the same table as gamma
+ * so the per-pixel hot path is one LUT lookup, not a divide (Xtensa has no
+ * hardware integer divider) plus a LUT lookup — brightness/gamma only
+ * change on a settings apply, so rebuilding the table then is cheap.
+ * Gamma > 1.0 darkens midtones for washed/low-contrast panels;
+ * s_gamma_lut_active short-circuits the table when br=100/gamma=1.0 (no-op).
+ * Rebuilt by rebuild_gamma_lut() on change, with the display task suspended
+ * to avoid reading a partially-updated table. */
 static float   s_gamma[LCD_COUNT];                  /* per-tube exponent; 1.0 = identity */
 static bool    s_gamma_lut_active[LCD_COUNT];        /* false = LUT skipped (identity)    */
 static uint8_t s_gamma_lut_5bit[LCD_COUNT][32];      /* R and B channels (5-bit, 0–31)    */
@@ -745,40 +762,23 @@ void display_apply_init_profiles(const uint8_t profiles[6])
     }
     if (!any) return;
 
-    /* VCOM (0xC5) and gamma registers (0xE0/0xE1) are only latched by ST7735S
-     * variants during the SLPOUT → DISPON initialisation window; writes issued
-     * during normal display-on mode are silently ignored.  The only reliable
-     * way to change these registers at runtime is a per-tube software reset
-     * (SWRESET, command 0x01) followed by the full init sequence.
+    /* VCOM (0xC5) and gamma (0xE0/0xE1) are only latched during the SLPOUT →
+     * DISPON init window on ST7735S variants — writes during normal
+     * display-on mode are silently ignored, so changing them at runtime
+     * needs a per-tube SWRESET + full init sequence. SWRESET is CS-gated,
+     * so it doesn't affect the other five tubes. After reinit, s_invert_mask
+     * must be re-applied since SWRESET resets INVON/INVOFF too.
      *
-     * SWRESET is CS-gated — sending it to one tube's CS does not affect the
-     * other five tubes.  st7735_init_one() performs:
-     *   SWRESET (150 ms) → SLPOUT (120 ms) → power-ctrl → VCOM → gamma →
-     *   COLMOD → MADCTL → FRMCTR1 → NORON (10 ms) → DISPON (50 ms)
-     * for the already-selected tube and then deselects all.
-     *
-     * After reinit, s_invert_mask must be re-applied because SWRESET clears
-     * every register — including the INVON/INVOFF state — back to POR defaults.
-     *
-     * ── SPI bus ownership ───────────────────────────────────────────────
-     * st7735_init_one() calls select_tube() once at the top, then blocks for
-     * 150 ms (SWRESET) and 120 ms (SLPOUT) via vTaskDelay.  Without
-     * protection, the display task (Core 1) wakes during those delays, calls
-     * select_tube(j) for a different tube, and later deselect_all() — which
-     * drives tube i CS HIGH.  Every register write after the initial SWRESET
-     * (SLPOUT, VCOM, gamma, DISPON) arrives on a deselected bus and is
-     * silently ignored by the panel.  The panel wakes from reset but never
-     * exits sleep mode, leaving the old VCOM and gamma untouched.
-     *
-     * Fix: cooperatively pause the display task for the entire reinit loop so
-     * we have exclusive ownership of the SPI bus and all CS lines.  The task
-     * self-suspends at its loop boundary — guaranteed outside any SPI
-     * transaction, so no bus-lock can be held by the suspended task (an
-     * outside vTaskSuspend could land mid-transmit with the lock held and
-     * deadlock our first lcd_cmd — see display_pause_for_spi).
-     * display_pause_for_spi() returns true immediately at boot
-     * (display_task_start() not yet called), so the boot-time apply path
-     * still works unchanged. */
+     * st7735_init_one() blocks for 150ms (SWRESET) + 120ms (SLPOUT) via
+     * vTaskDelay while holding tube i selected — if display_task woke during
+     * that window and selected/deselected a different tube, it would drive
+     * tube i's CS HIGH mid-sequence and every register write after that
+     * would land on a deselected bus and be ignored, leaving the panel
+     * reset but never fully reinitialized. Pausing the display task for the
+     * whole reinit loop gives exclusive SPI/CS ownership; it self-suspends
+     * at its loop boundary, never mid-transaction (see
+     * display_pause_for_spi()), and returns true immediately at boot before
+     * the task exists. */
     if (!display_pause_for_spi(5000)) {
         ESP_LOGW(TAG, "profile apply: display task did not pause — deferred to next reboot");
         return;   /* s_init_profiles[] is stored; boot-time apply will latch it */
@@ -790,7 +790,7 @@ void display_apply_init_profiles(const uint8_t profiles[6])
         ESP_LOGI(TAG, "tube %d: SWRESET + reinit (profile %u)", i, s_init_profiles[i]);
         st7735_init_one(i);   /* SWRESET + full register reload; deselects_all on return */
 
-        /* Re-apply colour inversion — cleared by SWRESET. */
+        /* Re-apply color inversion — cleared by SWRESET. */
         select_tube(i);
         lcd_cmd((s_invert_mask & (1u << i)) ? 0x21 : 0x20);  /* INVON : INVOFF */
         deselect_all();
@@ -875,7 +875,7 @@ void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     select_tube(tube);
-    /* Fill the whole ±BURNIN_SHIFT_MAX band in one window — solid colour, so
+    /* Fill the whole ±BURNIN_SHIFT_MAX band in one window — solid color, so
      * simply widening the fill covers the shifted window AND every edge
      * column any glass alignment could expose (see wl_paint_edge_margin_full
      * for why the full band matters on the ST7735S replacement panels).
@@ -905,18 +905,12 @@ void display_fill(int tube, uint16_t color)
 static const uint8_t *s_wl_edge_margin_src = NULL;
 
 /* Apply this tube's combined brightness+gamma LUT (see rebuild_gamma_lut) to
- * one RGB565 pixel.  Pure integer math, single LUT lookup per channel — no
- * per-pixel divide.  Single definition shared by every push path so the
- * transform stays consistent — a forgotten copy is what made the burn-in
- * margin render lighter than the adjacent (gamma-corrected) content.
- *
- * always_inline is not optional here: this is called from ~9 sites including
- * the busiest per-pixel loop in the file (display_show_digit_dirty).  Under
- * -Os "static inline" is only a hint — gcc will happily leave a function
- * called from this many places out-of-line, turning every pixel into a real
- * call/ret.  That regression is exactly why this logic used to be duplicated
- * inline at each call site instead of shared; always_inline keeps it shared
- * AND branch-free. */
+ * one RGB565 pixel. Single definition shared by every push path so the
+ * transform stays consistent — a missed copy is what made the burn-in
+ * margin render lighter than adjacent gamma-corrected content once.
+ * always_inline (not just "static inline", a hint gcc can ignore under -Os)
+ * because this is called from ~9 sites including the busiest per-pixel loop
+ * in the file — an out-of-line call/ret per pixel would be a real cost. */
 static inline __attribute__((always_inline)) uint16_t wl_apply_px(uint16_t px, int tube, bool do_px)
 {
     if (!do_px) return px;
@@ -930,26 +924,22 @@ static inline __attribute__((always_inline)) uint16_t wl_apply_px(uint16_t px, i
 }
 
 /* Paint the burn-in edge BANDS — every GRAM column the shifted CASET window
- * can leave exposed on EITHER side across the full shift range
+ * can leave exposed on either side across the full shift range
  * (±BURNIN_SHIFT_MAX), refreshed from marg_src's edge columns with this
- * tube's brightness/gamma applied so they match the main blit.
+ * tube's brightness/gamma applied to match the main blit.
  *
- * Why both full bands instead of just the |shift| columns at the nominal
- * near edge: the nominal geometry assumes the visible glass is EXACTLY the
- * 80 GRAM columns starting at the calibrated base.  The ST7735S replacement
- * panels needed per-profile column offsets precisely because their glass
- * alignment differs — and any visible column that falls outside the painted
- * area keeps whatever was last written there (a frozen rain streak, a bright
- * daytime pixel), showing as a persistent 1-2 px bright line whose side and
- * width track the hourly shift.  Painting the full band [base-MAX, base+s)
- * and [base+s+80, base+80+MAX) makes the maintenance independent of the true
- * glass alignment; off-glass GRAM writes are harmless.
+ * Paints the FULL band, not just the |shift| columns at the nominal edge,
+ * because ST7735S replacement panels' glass alignment varies (that's why
+ * per-profile column offsets exist) — any visible column outside the
+ * painted area keeps stale content, showing as a persistent bright line
+ * that tracks the hourly shift. Painting [base-MAX, base+s) and
+ * [base+s+80, base+80+MAX) makes this independent of true glass alignment;
+ * off-glass GRAM writes are harmless.
  *
- * EXPENSIVE — up to 2 extra SPI window-opens + full-height transmits per
- * call (≈4 GRAM columns total, even at shift=0, since both bands are always
- * >0 wide).  Call this only at low-frequency correctness points (first
- * frame, the hour a shift change lands, non-animated pushes) — NOT from the
- * per-tick animated hot path.  See wl_paint_edge_margin_narrow for that. */
+ * Expensive — up to 2 extra SPI window-opens + full-height transmits per
+ * call. Use only at low-frequency correctness points (first frame, a shift
+ * change), not the per-tick animated hot path — see
+ * wl_paint_edge_margin_narrow for that. */
 static void wl_paint_edge_margin_full(int tube, const uint8_t *marg_src,
                                       uint8_t oy, int h, bool do_px)
 {
@@ -1090,7 +1080,7 @@ void display_set_update_indicator(bool active)
 }
 
 /* ── Anti burn-in API ────────────────────────────────────────────────
- * display_set_burnin_mask() — select which tubes enter colour-cycle mode.
+ * display_set_burnin_mask() — select which tubes enter color-cycle mode.
  * mask bit N = tube N.  0x3F = all six tubes.  0x00 = restore all.
  * duration_s: 0 = run until manually stopped; otherwise auto-clears after
  *             that many seconds (use 3600/7200/10800/14400 for 1–4 h).     */
@@ -1161,6 +1151,12 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 #define DISPLAY_TICK_MS_MED    100   /* WeatherLive sky w/o precip — 10 Hz */
 #define DISPLAY_TICK_MS_SLOW   200   /* all other modes — 5 Hz */
 
+/* Backlight brightness ramp durations — see the brt_ramp_* block for why.
+ * BOOT_BRT_RAMP_MS was 1500 originally; doubled to smooth the power-on glow
+ * out further (still a snap by NIGHT_BRT_RAMP_MS's standard, just less of one). */
+#define BOOT_BRT_RAMP_MS  3000
+#define NIGHT_BRT_RAMP_MS 45000
+
 /* Hidden-debug-panel runtime override for animated WeatherLive's tick rate —
  * lets the FAST/MED split above be replaced with one experimental rate
  * (5-40 Hz) without a rebuild, to explore fluidity beyond the default 20 Hz
@@ -1187,23 +1183,10 @@ void display_set_debug_wl_fps(int fps)
 #define WEATHER_PANEL_WIND  3   /* wind speed — procedural glyph + digits + unit */
 #define WEATHER_PANEL_HILO  4   /* daily Hi / Lo — internal HI→LO sub-rotation */
 /* Stack: config snapshot (~1900 B, moved to static cfg_snap in display_task
- * so it's off the stack) + JPEG decode call chain.
- * 8 KB was too tight — panic handler couldn't print a backtrace.
- *
- * 16384 was originally sized well above a *theoretical* worst case ("12288
- * was borderline... the JPEG-decode call chain alone approached the limit
- * ... AP-PIN's pin_draw_tube — the deepest single path in the task — so
- * give it real headroom"). That estimate predates per-task stack telemetry
- * (main.c::log_task_stacks). Measured in the field across a single boot
- * covering WeatherLive (procedural, no JPEG), several JPEG-asset themes
- * including a cold-cache rotation, AP-PIN (several minutes of continuous
- * pin_draw_tube marquee draws), Spectrum, and DotMatrix: real peak usage
- * topped out at 5704 B — nowhere near 12288, let alone 16384. 12288 keeps
- * the exact number once assumed borderline, now backed by a real ~53%
- * margin (6584 B) over every path actually measured, and frees 4096 B of
- * internal RAM. Not exhaustive (no corrupted-JPEG fallback branch, no
- * every clock face) — if a real panic-with-truncated-backtrace shows up
- * again, that's the first thing to revert. */
+ * so it's off the stack) + JPEG decode call chain. 8 KB was too tight — the
+ * panic handler couldn't print a backtrace. Measured peak across
+ * WeatherLive, JPEG-asset themes, AP-PIN, Spectrum, and DotMatrix: 5704 B —
+ * 12288 keeps a real ~53% margin over that while freeing 4096 B vs 16384. */
 #define DISPLAY_STACK_SIZE   12288
 
 /* ── Theme error tracking ────────────────────────────────────────────────
@@ -1262,7 +1245,7 @@ static void img_cache_flush(void)
     }
     s_cache_clock = 0;
     /* Invalidate the theme-color memo: '1.jpg' has been evicted so the
-     * cached colour no longer matches the new theme. */
+     * cached color no longer matches the new theme. */
     s_theme_color_memo_theme[0] = '\0';
     ESP_LOGI(TAG, "Image cache flushed");
 }
@@ -1278,7 +1261,7 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
 {
     /* WeatherLive ships no JPEG assets.  display_show_image() already renders
      * those procedurally, but several callers hit the cache DIRECTLY for theme
-     * metadata (theme-colour sampling, blank.jpg backgrounds, FlipClock priming,
+     * metadata (theme-color sampling, blank.jpg backgrounds, FlipClock priming,
      * the colon diff box).  Return "absent" silently for any WeatherLive theme
      * path so those callers take their NULL/black fallback without flooding the
      * log with "Image not found" for every #.jpg / blank.jpg every frame. */
@@ -1404,7 +1387,7 @@ static void dm_draw_glyph(uint8_t *fb, int cx, int cy, int cp, int cell, int gap
                            bool clip_edges,
                            int on_r, int on_g, int on_b, int off_r, int off_g, int off_b);
 /* Defined later (with the DotMatrix font block): tiles the whole 80x160
- * canvas with off-colour cells at the given pitch, so every element drawn
+ * canvas with off-color cells at the given pitch, so every element drawn
  * on top (icons, text) at that same pitch shares one continuous dot grid
  * instead of floating on black at a mismatched density. */
 static void dm_paint_grid_bg(uint8_t *fb, int cell, int gap, int off_r, int off_g, int off_b);
@@ -1421,9 +1404,9 @@ static void dm_draw_text_p(uint8_t *fb, int cx, int cy, const char *str, int cel
                             int on_r, int on_g, int on_b, int off_r, int off_g, int off_b);
 /* Defined later (with the DotMatrix font block): "on-only" counterparts to
  * dm_draw_glyph()/dm_draw_text_p()/dm_draw_text() — paint just the
- * on-colour cells (off cells left untouched) with positions snapped to the
+ * on-color cells (off cells left untouched) with positions snapped to the
  * pitch grid, for use over a dm_paint_grid_bg() backdrop instead of
- * redundantly repainting the same off-colour the background already shows. */
+ * redundantly repainting the same off-color the background already shows. */
 static void dm_draw_glyph_on(uint8_t *fb, int cx, int cy, int cp, int cell, int gap,
                               bool clip_edges, int on_r, int on_g, int on_b);
 static void dm_draw_text_p_on(uint8_t *fb, int cx, int cy, const char *str, int cell,
@@ -1476,7 +1459,7 @@ void display_show_image(int tube, const char *path)
         dm_render_asset(tube, path);
         return;
     }
-    /* Skip any tube that is currently held by the colour-cycle or snow burn-in.
+    /* Skip any tube that is currently held by the color-cycle or snow burn-in.
      * Both modes overwrite the tube in the display task after normal rendering
      * completes, so writing a JPEG here would be immediately discarded.
      * Skipping avoids the image-cache lookup, JPEG decode (on miss), and the
@@ -2082,7 +2065,7 @@ static void colon_box_compute(const char *theme)
 /* Per-second colon blink: push only the colon-dot diff box instead of the full
  * tube.  Falls back to a full display_show_ampm() if the box is unavailable.
  * Applies the same per-tube brightness/gamma as display_show_digit so the dots
- * match the digit colour.  The non-box background is already on-screen from the
+ * match the digit color.  The non-box background is already on-screen from the
  * last full render (identical in both images), so it needs no repaint. */
 static void display_show_colon_blink(int tube, const char *theme, bool show_colon)
 {
@@ -2162,7 +2145,7 @@ static uint16_t ht_sample_theme_color(const char *theme);
  * artwork required, so the PIN is always legible regardless of which theme
  * is active or whether any theme images have been cached yet.
  *
- * Colour is auto-sampled from the theme's Numbers/0.jpg centre pixel
+ * Color is auto-sampled from the theme's Numbers/0.jpg centre pixel
  * (falls back to white 0xFFFF when the image cache is cold, e.g. first
  * boot before any theme image has been decoded).
  *
@@ -2308,19 +2291,26 @@ static void render_ap_pin(const nextube_config_t *cfg)
     int64_t now_ms = esp_timer_get_time() / 1000;
     int     scroll  = (int)((now_ms / step_ms) % seq_len);
 
-    /* Sample theme colour once; white fallback when cache is cold. */
+    /* Sample theme color once; white fallback when cache is cold. */
     uint16_t fg = ht_sample_theme_color(cfg->theme);
 
-    /* Skip the repaint when neither the scroll step nor the colour changed
+    /* Skip the repaint when neither the scroll step nor the color changed
      * since the last tick — saves 6 full-tube SPI pushes on 4 of 5 ticks. */
     if (scroll == s_pin_last_scroll && fg == s_pin_last_fg) return;
     s_pin_last_scroll = scroll;
     s_pin_last_fg     = fg;
 
+    /* Yield between tubes, same as every other back-to-back per-tube SPI
+     * loop in this file (see WL_YIELD() in wl_ensure_scene()) — each
+     * pin_draw_tube() call disables interrupts for its SPI transfers, and
+     * six in a row with no gap can starve the interrupt watchdog if it
+     * lands against WiFi's own interrupt needs (e.g. a client's association
+     * handshake). */
     for (int tube = 0; tube < LCD_COUNT; tube++) {
         int  pos = (scroll + tube) % seq_len;
         char ch  = (pos < 3) ? '\0' : pin[pos - 3];
         pin_draw_tube(tube, ch, fg);
+        vTaskDelay(1);
     }
 }
 
@@ -2358,7 +2348,7 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
 /* ── H/T panel helpers (U8g2 embedded-font rendering for kind==2) ────────────
  * render_cx_panel's kind==2 renders temperature and humidity as text using the
  * U8g2 virtual frame buffer (s_u8g2, 128×64, configured in
- * display_init).  The three helpers below handle colour sampling, pixel blitting,
+ * display_init).  The three helpers below handle color sampling, pixel blitting,
  * and string rendering respectively.
  *
  * Tube half geometry:
@@ -2367,7 +2357,7 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
  *   Blit offset    : dst_y + 8 px → centres the 64-row block in each 80-row half
  */
 
-/* Extract the theme's foreground text colour from its '1' digit image.
+/* Extract the theme's foreground text color from its '1' digit image.
  *
  * Strategy:
  *   1. Sample the background brightness from the four corner pixels of the
@@ -2375,7 +2365,7 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
  *   2. If the background is BRIGHT  → return the DARKEST  pixel in the image
  *      (the text stroke on a light-background theme).
  *      If the background is DARK    → return the BRIGHTEST pixel in the image
- *      (the accent colour on a dark-background theme).
+ *      (the accent color on a dark-background theme).
  *
  * This correctly handles both dark-bg/light-text and light-bg/dark-text themes
  * without any per-theme configuration.
@@ -2446,7 +2436,7 @@ static uint16_t ht_sample_theme_color(const char *theme)
         }
     }
 
-    /* Sanity fallback: if the chosen colour is too close to the background
+    /* Sanity fallback: if the chosen color is too close to the background
      * (near-identical luminance), the image is essentially monochrome —
      * fall back to white on dark or black on light. */
     uint16_t color;
@@ -2465,7 +2455,7 @@ static uint16_t ht_sample_theme_color(const char *theme)
 /* Convert the U8g2 1-bpp tile buffer to RGB565 and push 64 rows to tube 5,
  * centred within the physical 80-row half (8 px top margin, 8 px bottom margin).
  *   dst_y  : 0 for top half, LCD_HEIGHT/2 (80) for bottom half
- *   fg     : RGB565 foreground colour; background is always black (0x0000)   */
+ *   fg     : RGB565 foreground color; background is always black (0x0000)   */
 static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
 {
     /* Apply per-tube brightness+gamma to fg once so the inner loop is
@@ -2519,7 +2509,7 @@ static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
      * near the bottom (e.g. HALF+23=103 with rows=64 → 167 > LCD_HEIGHT=160)
      * would (a) read past the end of the 80×160×2-byte bg_rgb565 buffer and
      * (b) send extra pixel data to the ST7735 after its window closes, which
-     * some panel variants wrap to a visible row, producing a phantom colour bar. */
+     * some panel variants wrap to a visible row, producing a phantom color bar. */
     if (y_tube < 0 || y_tube >= LCD_HEIGHT) return;   /* no negative-index bg reads */
     if (rows > LCD_HEIGHT - y_tube) rows = LCD_HEIGHT - y_tube;
 
@@ -2762,7 +2752,7 @@ static void ht_draw_str(const char *str, int dst_y, uint16_t fg)
  *                 centred in 80-px width.
  *
  * y_tube: absolute tube row for the top of the blit (56 rows written).
- * fg: RGB565 foreground colour (from ht_sample_theme_color).
+ * fg: RGB565 foreground color (from ht_sample_theme_color).
  * bg: optional decoded RGB565 background image (LCD_WIDTH × LCD_HEIGHT);
  *     NULL = solid black background for "off" pixels.                          */
 static void ht_draw_suntime(int tube, const char *timestr, bool rising,
@@ -2854,17 +2844,17 @@ static void cx_stamp_update_indicator(int tube)
  *              Rows  80–159 : date "DDMM" or "MMDD" (no separator; follows date_format)
  *                            U8g2 logisoso28, centred in 64-row band (rows 88–151)
  *                            composited over AMPM/blank.jpg background.
- *              Colour auto-sampled from Numbers/0.jpg centre pixel.
+ *              Color auto-sampled from Numbers/0.jpg centre pixel.
  *
  *   INDOOR   — Rows  10– 33 : "In" label   (logisoso20, HT_LABEL_H=24 px, +10 shift)
  *              Rows  34– 89 : indoor temperature   (logisoso28, 56-px band)
  *              Rows  90–153 : indoor humidity       (logisoso28, centred in 64-px blit)
- *              Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
+ *              Color auto-sampled from the theme's Numbers/0.jpg centre pixel.
  *
  *   OUTDOOR H/T — Rows  10– 33 : "Out" label  (logisoso20, HT_LABEL_H=24 px, +10 shift)
  *              Rows  34– 89 : outdoor temperature  (logisoso28, 56-px band)
  *              Rows  90–153 : outdoor humidity     (logisoso28, centred in 64-px blit)
- *              Colour auto-sampled from Numbers/0.jpg centre pixel.
+ *              Color auto-sampled from Numbers/0.jpg centre pixel.
  *              Falls back to black when weather API has no data.
  *
  * panel_id is an index into the ordered list [weather, weekdate, ht, temp,
@@ -2893,18 +2883,24 @@ static uint8_t s_wl_glyph_r = 255, s_wl_glyph_g = 255, s_wl_glyph_b = 255;
 static uint8_t s_wl_font_r  = 255, s_wl_font_g  = 255, s_wl_font_b  = 255;
 static bool    s_wl_shadow   = true;
 static uint8_t s_wl_shadow_r = 0,  s_wl_shadow_g = 0,  s_wl_shadow_b = 0;
+/* Shadow blur radius (1..4), independently of shadow color. Threaded into
+ * every shadow-drawing path (wl_text's u8g2 blur, fr_draw_text/fr_draw_
+ * glyph_centered's shared fr_blit) as `shadow_size`; 2 reproduces the fixed
+ * blur every one of those paths hardcoded before this control existed. */
+static uint8_t s_wl_shadow_size = 2;
 /* Clock-digit-glyph shadow — independent of s_wl_shadow (font/text shadow,
  * above). Split so users can tune digit and font shadows separately (e.g. a
- * dark digit + dark shadow combo alongside a light font colour, which would
+ * dark digit + dark shadow combo alongside a light font color, which would
  * otherwise be forced to share the dark shadow and read as low-contrast). */
 static bool    s_wl_glyph_shadow   = true;
 static uint8_t s_wl_glyph_shadow_r = 0,  s_wl_glyph_shadow_g = 0,  s_wl_glyph_shadow_b = 0;
+static uint8_t s_wl_glyph_shadow_size = 2;  /* independent of s_wl_shadow_size, same 1..4 range */
 static char    s_wl_bg_theme[32] = "";
 static char    s_wl_bg_png_cached[256] = ""; /* path of last successfully decoded PNG bg */
 static uint8_t *s_wl_bg_png_buf        = NULL; /* RGB565 cache in PSRAM for custom PNG bg */
 /* Custom face "CustomColor" background: solid fill or one of a handful of
  * gradients, baked once into a PSRAM cache like the PNG background above,
- * rebaked only when the fill type/colours actually change. */
+ * rebaked only when the fill type/colors actually change. */
 static char    s_wl_bg_fill[16] = "solid";
 static uint8_t s_wl_bg_color1_r = 0, s_wl_bg_color1_g = 0, s_wl_bg_color1_b = 0;
 static uint8_t s_wl_bg_color2_r = 60, s_wl_bg_color2_g = 60, s_wl_bg_color2_b = 120;
@@ -2913,7 +2909,7 @@ static uint8_t *s_wl_bg_color_buf       = NULL;  /* RGB565 cache in PSRAM for so
 /* FreeType face id for the active custom digit font; -1 = no custom font (u8g2 logisoso). */
 static int s_ft_face_id = -1;
 
-/* "DotMatrix" theme's configured on/off colours — refreshed unconditionally
+/* "DotMatrix" theme's configured on/off colors — refreshed unconditionally
  * once per display_task tick (regardless of app mode/theme) so they're
  * always current by the time display_show_image()'s DotMatrix intercept or
  * wl_text()'s dm branch reads them. Defaults match config_mgr's. */
@@ -3047,7 +3043,7 @@ static const uint8_t *cx_load_text_bg(int tube, const nextube_config_t *cfg)
     return bg;
 }
 
-/* Unpack RGB565 colour to 8-bit channels. */
+/* Unpack RGB565 color to 8-bit channels. */
 static void rgb565_to_rgb8(uint16_t c, int *r, int *g, int *b)
 {
     *r = ((c >> 11) & 31) * 255 / 31;
@@ -3055,7 +3051,7 @@ static void rgb565_to_rgb8(uint16_t c, int *r, int *g, int *b)
     *b = ( c        & 31) * 255 / 31;
 }
 
-/* Foreground colour as separate 8-bit RGB channels (used by wl_*_panel helpers). */
+/* Foreground color as separate 8-bit RGB channels (used by wl_*_panel helpers). */
 static void cx_fg_rgb8(const nextube_config_t *cfg, int *r, int *g, int *b)
 {
     if (cx_is_wl_sky(cfg) && s_wl_scene_valid) {
@@ -3162,7 +3158,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
          * DotMatrix theme: all three lines drawn as dot-matrix text into the
          * shared framebuffer instead (see is_dm below); otherwise U8g2
          * logisoso28.  Background: theme's AMPM/blank.jpg (rows between bands
-         * keep the full theme image).  Colour: auto-sampled from Numbers/0.jpg.
+         * keep the full theme image).  Color: auto-sampled from Numbers/0.jpg.
          * Fallback: solid black fill if blank.jpg absent. */
         const char *day = weekday_abbrev(cfg->language, t->tm_wday);
         const char *mon = month_abbrev(cfg->language, t->tm_mon);
@@ -3208,7 +3204,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         /* Rows  10– 33 : "In" label   (logisoso20, HT_LABEL_H=24 rows, +10 shift)
          * Rows  34– 89 : indoor temperature  (logisoso28, 56-row band)
          * Rows  90–153 : indoor humidity     (logisoso28, centred in 64-px blit)
-         * Colour auto-sampled from the theme's Numbers/0.jpg centre pixel.
+         * Color auto-sampled from the theme's Numbers/0.jpg centre pixel.
          * The 60 *-sm.jpg symbol files previously required by this panel are
          * no longer needed and have been removed from the filesystem image.  */
         sht30_reading_t s;
@@ -3289,7 +3285,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
          * Bottom half : sunset  icon + local set  time "HH:MM"
          * Solar times via NOAA algorithm from geocoded lat/lon; falls back to
          * "--:--" until the weather task has resolved the configured city.
-         * Background: AMPM/blank.jpg.  Colour: theme's Numbers/0 centre px.  */
+         * Background: AMPM/blank.jpg.  Color: theme's Numbers/0 centre px.  */
         float lat = 0.0f, lon = 0.0f;
         bool have_loc = weather_get_location(&lat, &lon);
 
@@ -3470,7 +3466,7 @@ cx_tube6_done:
  * each glyph composited on top and outlined for legibility against the bright
  * background.  This proves the compositing path and the 6-tube redraw budget.
  * Later slices add the animated panorama (sun/clouds/rain/snow, day-night),
- * the tube-6 day-date / temp-range panels, and forecast-driven sky colours.
+ * the tube-6 day-date / temp-range panels, and forecast-driven sky colors.
  * ────────────────────────────────────────────────────────────────────────── */
 
 static inline uint16_t wl_rgb565(int r, int g, int b)
@@ -3497,8 +3493,8 @@ static inline uint16_t wl_rgb565(int r, int g, int b)
 /* Stylised weather scene shared across the six tubes (a left→right panorama).
  * Computed once per render in render_weatherlive() and handed to each tube. */
 typedef struct wl_scene_s {
-    int   tr, tg, tb;   /* sky colour at the top     */
-    int   hr, hg, hb;   /* sky colour at the horizon */
+    int   tr, tg, tb;   /* sky color at the top     */
+    int   hr, hg, hb;   /* sky color at the horizon */
     bool  body_show;    /* draw a sun/moon disc?     */
     bool  body_is_moon; /* true = render lunar phase shape; false = solid sun   */
     float moon_term;    /* terminator param = cos(2π·phase)                    */
@@ -3506,10 +3502,10 @@ typedef struct wl_scene_s {
     int   body_x;       /* disc centre X across the whole 6-tube panorama (px) */
     int   body_y;       /* disc centre Y (row 0..159)                          */
     int   body_r;       /* disc radius (px)                                    */
-    int   br, bg, bb;   /* disc core colour                                    */
+    int   br, bg, bb;   /* disc core color                                    */
     float anim_t;       /* continuous animation clock (seconds)                */
     int   ncloud;       /* number of drifting cloud clusters (0 = clear)       */
-    int   cr, cg, cb;   /* cloud colour                                        */
+    int   cr, cg, cb;   /* cloud color                                        */
     int   ca;           /* cloud peak opacity (0..255)                         */
     int   precip;       /* 0 none · 1 rain · 2 snow                            */
     float wind;         /* normalised wind 0..1 (drives drift + rain slant)    */
@@ -3557,7 +3553,7 @@ static void wl_sky_palette(int mins, int sunrise, int sunset, int top[3], int ho
     }
 }
 
-/* Alpha-blend an RGB colour over an existing big-endian RGB565 pixel. */
+/* Alpha-blend an RGB color over an existing big-endian RGB565 pixel. */
 static inline void wl_blend_px(uint8_t *px, int r, int g, int b, int a /*0..255*/)
 {
     if (a <= 0) return;
@@ -3753,7 +3749,7 @@ static int64_t  s_wl_prev_call_us[LCD_COUNT]; /* esp_timer µs of last dirty cal
 /* Cached sky gradient (another 80×160 PSRAM slab).
  * The dither pattern is (x%4, y%4) — identical for every tube since all tubes
  * have x∈[0,79].  We bake the gradient once and memcpy it into each tube's fb,
- * recomputing only when the six sky-colour channels actually change (at most once
+ * recomputing only when the six sky-color channels actually change (at most once
  * per minute during dawn/dusk transitions). */
 static uint8_t *s_wl_sky_cache = NULL;
 static int s_wl_sky_key[6]; /* tr,tg,tb,hr,hg,hb from the last bake */
@@ -3822,7 +3818,7 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
      * used, so the burn-in shift doesn't duplicate an edge rain streak. */
     s_wl_edge_margin_src = NULL;
 
-    /* Custom background: solid colour or gradient fill, baked once and
+    /* Custom background: solid color or gradient fill, baked once and
      * cached like the PNG/JPEG theme background below. Checked first since
      * "CustomColor" isn't a real theme name — the theme-image branch below
      * would otherwise try (and fail) to load
@@ -3899,7 +3895,7 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
      *
      * Without dithering the gradient is computed once per ROW and the 8-bit
      * value is hard-quantised to RGB565 (5/6/5 bits).  At night the whole sky
-     * spans a tiny colour range (top {6,10,28} → horizon {18,22,50}), so many
+     * spans a tiny color range (top {6,10,28} → horizon {18,22,50}), so many
      * adjacent rows collapse to the SAME RGB565 value — the top and bottom
      * extremes become flat ~10–20 px bands that read as a "mask" over the sky.
      * A static per-pixel Bayer offset (±½ quantisation step) spreads the
@@ -3907,7 +3903,7 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
      * no frame-to-frame shimmer. */
     /* Sky gradient — computed once and cached; all 6 tubes share an identical
      * dither pattern (x%4, y%4 with x∈[0,79] for every tube), so the result
-     * only changes when the six colour channels do (at most once per minute). */
+     * only changes when the six color channels do (at most once per minute). */
     static const uint8_t WL_BAYER4[4][4] = {
         {  0,  8,  2, 10 }, { 12,  4, 14,  6 },
         {  3, 11,  1,  9 }, { 15,  7, 13,  5 },
@@ -4117,7 +4113,7 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
 
 /* Render UTF-8 text centred horizontally at `cx`, baseline at `by`, into fb.
  * Two-pass: first blooms a 2px dark halo around every set pixel (inner d²≤2
- * alpha=180, outer d²≤5 alpha=90), then paints the glyph colour on top so
+ * alpha=180, outer d²≤5 alpha=90), then paints the glyph color on top so
  * text always sits above its own shadow.  Uses the shared U8g2 1-bpp buffer. */
 /* ft_px: explicit TTF pixel size; 0 = derive from ft_px_for_u8g2(font).
  * Lets per-element panel code request a different TTF size than the u8g2
@@ -4128,7 +4124,7 @@ static void wl_text(uint8_t *fb, int cx, int by, const uint8_t *font,
     /* "DotMatrix" theme: every shared panel that calls wl_text() (outdoor
      * temp/humidity/wind/AQI/outdoor-H-T — kinds 3/6/7/8/9 in
      * render_cx_panel) becomes dot-matrix styled here, with zero changes to
-     * those five panel functions. Uses the theme's configured on/off colours
+     * those five panel functions. Uses the theme's configured on/off colors
      * rather than the caller's `r,g,b`, since that's whatever cx_fg_rgb8()
      * sampled for a JPEG theme — not meaningful for this one. `by` is treated
      * as the vertical centre rather than a true baseline: a pragmatic
@@ -4154,7 +4150,7 @@ static void wl_text(uint8_t *fb, int cx, int by, const uint8_t *font,
         fr_draw_text(fb, LCD_WIDTH, LCD_HEIGHT, cx, ttf_by,
                      (uint8_t)s_ft_face_id, ttf_px,
                      str, (uint8_t)r, (uint8_t)g, (uint8_t)b,
-                     s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
+                     s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, s_wl_shadow_size);
         return;
     }
 
@@ -4173,28 +4169,33 @@ static void wl_text(uint8_t *fb, int cx, int by, const uint8_t *font,
     if (gh > BUF_H) gh = BUF_H;
     int top = by - asc;                                   /* fb row of buffer row 0 */
 
-    /* Pass 1: dark bloom — for every lit source pixel, paint shadow neighbours */
+    /* Pass 1: dark bloom — for every lit source pixel, paint shadow neighbours.
+     * Same size generalisation as fr_blit(): s_wl_shadow_size==2 reproduces
+     * the fixed ±2px/d²≤5 blur this loop used before the size control existed. */
     if (wl_shadow_on()) {
+        const int ss = s_wl_shadow_size ? s_wl_shadow_size : 1;
+        const int inner_d2 = ss;
+        const int outer_d2 = 2 * ss + 1;
         for (int ry = 0; ry < gh; ry++) {
             int fy = top + ry;
             for (int rx = 0; rx < BUF_W && rx < LCD_WIDTH; rx++) {
                 if (!((tile[(ry / 8) * BUF_W + rx] >> (ry % 8)) & 1)) continue;
-                for (int dy = -2; dy <= 2; dy++) {
+                for (int dy = -ss; dy <= ss; dy++) {
                     int ny = fy + dy;
                     if (ny < 0 || ny >= LCD_HEIGHT) continue;
-                    for (int dx = -2; dx <= 2; dx++) {
+                    for (int dx = -ss; dx <= ss; dx++) {
                         int d2 = dx * dx + dy * dy;
-                        if (d2 == 0 || d2 > 5) continue;
+                        if (d2 == 0 || d2 > outer_d2) continue;
                         int nx = rx + dx;
                         if (nx < 0 || nx >= LCD_WIDTH) continue;
-                        int a = (d2 <= 2) ? 180 : 90;
+                        int a = (d2 <= inner_d2) ? 180 : 90;
                         wl_blend_px(fb + (ny * LCD_WIDTH + nx) * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, a);
                     }
                 }
             }
         }
     }
-    /* Pass 2: glyph colour on top so it always wins over the shadow */
+    /* Pass 2: glyph color on top so it always wins over the shadow */
     for (int ry = 0; ry < gh; ry++) {
         int fy = top + ry;
         if (fy < 0 || fy >= LCD_HEIGHT) continue;
@@ -4253,17 +4254,18 @@ static void wl_degree(uint8_t *fb, int cx, int cy, int rad, int r, int g, int b)
  * blend is inherently per-frame — but rasterising the glyph SHAPE (u8g2 draw +
  * bilinear AA + the 5×5 shadow-halo scan over every empty pixel) depends only
  * on the character, not the sky.  Cache the resulting per-pixel coverage
- * (glyph alpha + shadow-halo alpha) keyed by (ch, shadow) and replay it each
- * frame with cheap blends.  Colour changes do NOT invalidate the cache
- * (coverage is shape-only); the font (logisoso42) and 2× scale are constant on
- * this path.  Applies to the u8g2 fallback only — the FreeType path already
- * caches rasterised bitmaps inside font_render. */
+ * (glyph alpha + shadow-halo alpha) keyed by (ch, shadow, shadow_size) and
+ * replay it each frame with cheap blends.  Color changes do NOT invalidate
+ * the cache (coverage is shape-only); the font (logisoso42) and 2× scale are
+ * constant on this path.  Applies to the u8g2 fallback only — the FreeType
+ * path already caches rasterised bitmaps inside font_render. */
 #define WL_GLYPH_PIXELS  (LCD_WIDTH * LCD_HEIGHT)
 #define WL_GLYPH_CACHE_N 12
 typedef struct {
     bool     valid;
     char     ch;
     bool     shadow;
+    uint8_t  size;   /* shadow blur radius this coverage was rasterised at   */
     uint8_t *cov;    /* glyph alpha per pixel (0 where none)                  */
     uint8_t *halo;   /* shadow alpha per pixel (allocated only when shadow)   */
 } wl_glyph_cache_t;
@@ -4275,7 +4277,7 @@ static int              s_glyph_cache_next = 0;
  *   fb unused).  When cov_out == NULL: blend directly onto `fb` (OOM fallback).
  * The two modes share one copy of the rasterisation math so they can never
  * drift apart. */
-static void wl_glyph_render(uint8_t *fb, char ch, bool shadow,
+static void wl_glyph_render(uint8_t *fb, char ch, bool shadow, uint8_t shadow_size,
                             uint8_t *cov_out, uint8_t *halo_out)
 {
     char s[2] = { ch, '\0' };
@@ -4307,8 +4309,13 @@ static void wl_glyph_render(uint8_t *fb, char ch, bool shadow,
     const float inv_scale = 1.0f / (float)SCALE;
     const float half_inv  = 0.5f * inv_scale;
 
-    const int halo_inner = 2;
-    const int halo_outer = 5;
+    /* Same size generalisation as fr_blit()/wl_text(): shadow_size==2
+     * reproduces the fixed halo_inner=2/halo_outer=5 this scan used before
+     * the size control existed. Operates in pre-scale source-pixel space
+     * (dm/dn below), same as the rest of this function's coordinate math. */
+    const int ss = shadow_size ? shadow_size : 1;
+    const int halo_inner = ss;
+    const int halo_outer = 2 * ss + 1;
 
     for (int oy = 0; oy < OUT_H; oy++) {
         float fys = oy * inv_scale - half_inv;
@@ -4335,8 +4342,8 @@ static void wl_glyph_render(uint8_t *fb, char ch, bool shadow,
                 else wl_blend_px(row + ox * 2, s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b, cov);
             } else if (shadow) {
                 int halo_a = 0;
-                for (int dn = -2; dn <= 2 && halo_a < 200; dn++) {
-                    for (int dm = -2; dm <= 2 && halo_a < 200; dm++) {
+                for (int dn = -ss; dn <= ss && halo_a < 200; dn++) {
+                    for (int dm = -ss; dm <= ss && halo_a < 200; dm++) {
                         int d2 = dm * dm + dn * dn;
                         if (d2 == 0 || d2 > halo_outer) continue;
                         if (!WL_SRC(x0 + dm, y0 + dn)) continue;
@@ -4354,13 +4361,17 @@ static void wl_glyph_render(uint8_t *fb, char ch, bool shadow,
     #undef WL_SRC
 }
 
-/* Return a cached coverage map for (ch, shadow), building one on miss.
- * NULL only if the PSRAM maps could not be allocated (caller renders direct). */
-static wl_glyph_cache_t *wl_glyph_cache_get(char ch, bool shadow)
+/* Return a cached coverage map for (ch, shadow, shadow_size), building one on
+ * miss. NULL only if the PSRAM maps could not be allocated (caller renders
+ * direct). shadow_size only matters (and only varies the cache key) while
+ * shadow is on — the size setting is a config-level knob, not a per-frame
+ * value, so this ring cache re-keying on a size change is a one-time cost. */
+static wl_glyph_cache_t *wl_glyph_cache_get(char ch, bool shadow, uint8_t shadow_size)
 {
     for (int i = 0; i < WL_GLYPH_CACHE_N; i++) {
         wl_glyph_cache_t *e = &s_glyph_cache[i];
-        if (e->valid && e->ch == ch && e->shadow == shadow) return e;
+        if (e->valid && e->ch == ch && e->shadow == shadow &&
+            (!shadow || e->size == shadow_size)) return e;
     }
     /* Miss — claim the next ring slot, reusing its buffers where possible. */
     wl_glyph_cache_t *e = &s_glyph_cache[s_glyph_cache_next];
@@ -4370,8 +4381,8 @@ static wl_glyph_cache_t *wl_glyph_cache_get(char ch, bool shadow)
     if (shadow && !e->halo) return NULL;
     memset(e->cov, 0, WL_GLYPH_PIXELS);
     if (e->halo) memset(e->halo, 0, WL_GLYPH_PIXELS);
-    wl_glyph_render(NULL, ch, shadow, e->cov, e->halo);
-    e->ch = ch; e->shadow = shadow; e->valid = true;
+    wl_glyph_render(NULL, ch, shadow, shadow_size, e->cov, e->halo);
+    e->ch = ch; e->shadow = shadow; e->size = shadow_size; e->valid = true;
     s_glyph_cache_next = (s_glyph_cache_next + 1) % WL_GLYPH_CACHE_N;
     return e;
 }
@@ -4390,15 +4401,16 @@ static void wl_glyph(uint8_t *fb, char ch)
                                (uint8_t)s_ft_face_id, (uint32_t)(unsigned char)ch,
                                WL_FT_BIG_PX,
                                s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b,
-                               s_wl_glyph_shadow, s_wl_glyph_shadow_r, s_wl_glyph_shadow_g, s_wl_glyph_shadow_b);
+                               s_wl_glyph_shadow, s_wl_glyph_shadow_r, s_wl_glyph_shadow_g, s_wl_glyph_shadow_b,
+                               s_wl_glyph_shadow_size);
         return;
     }
 
     bool shadow = s_wl_glyph_shadow;
-    wl_glyph_cache_t *e = wl_glyph_cache_get(ch, shadow);
-    if (!e) { wl_glyph_render(fb, ch, shadow, NULL, NULL); return; }  /* OOM fallback */
+    wl_glyph_cache_t *e = wl_glyph_cache_get(ch, shadow, s_wl_glyph_shadow_size);
+    if (!e) { wl_glyph_render(fb, ch, shadow, s_wl_glyph_shadow_size, NULL, NULL); return; }  /* OOM fallback */
 
-    /* Replay cached coverage.  Colours are read live so glyph/shadow colour
+    /* Replay cached coverage.  Colors are read live so glyph/shadow color
      * changes take effect with no rebuild (coverage is shape-only). */
     for (int i = 0; i < WL_GLYPH_PIXELS; i++) {
         if (e->cov[i] > 4)
@@ -4424,16 +4436,12 @@ static void wl_glyph(uint8_t *fb, char ch)
  * the actual letterform lives in rows 1-12 (7x12), keeping a permanent
  * 1-row top/bottom margin within the nominal 7x14 grid.
  *
- * Row data is rasterized (not hand-drawn) from the "MatrixType Display"
- * TTF (github.com/... user-supplied reference font), styled after the
- * user's request to match its look: each glyph rendered at a fixed
- * reference cell (matching the font's own monospaced glyph metrics — it's
- * a dot-matrix-style face where every character occupies the same cell
- * footprint), area-averaged down to a 7x12 grid, thresholded at ~35%
- * coverage per cell. Á and É aren't in that font (only Ä/Å/Ø are), so
- * they're synthesized: the base letter (A/E) compressed by one row with a
- * small acute-accent tick prepended — same idea as the original hand-drawn
- * font's accent scheme, just now applied to real sampled base letterforms.
+ * Row data is rasterized (not hand-drawn) from the "MatrixType Display" TTF,
+ * a dot-matrix-style monospaced face: each glyph rendered at its own fixed
+ * cell, area-averaged down to a 7x12 grid, thresholded at ~35% coverage per
+ * cell. Á and É aren't in that font (only Ä/Å/Ø are), so they're synthesized
+ * — the base letter (A/E) compressed by one row with a small acute-accent
+ * tick prepended.
  *
  * Coverage: digits, A-Z, colon/dot/minus/percent/slash/degree, and the 5
  * accented letters (Á Ä É Ø Å) actually used by weekday_abbrev()/
@@ -4705,7 +4713,7 @@ static int dm_utf8_decode(const char *s, int *cp_out)
     *cp_out = -1; return 1;   /* stray continuation/invalid byte */
 }
 
-/* Paint one on/off-colour cell (a `cell`x`cell` px square), bounds-checked
+/* Paint one on/off-color cell (a `cell`x`cell` px square), bounds-checked
  * against the 80x160 tube framebuffer. Plain overwrite, not alpha blend —
  * dot-matrix cells are fully opaque. */
 static void dm_paint_cell(uint8_t *fb, int x, int y, int cell, int r, int g, int b)
@@ -4722,7 +4730,7 @@ static void dm_paint_cell(uint8_t *fb, int x, int y, int cell, int r, int g, int
     }
 }
 
-/* Tile the whole 80x160 canvas with off-colour cells at (cell, gap) pitch —
+/* Tile the whole 80x160 canvas with off-color cells at (cell, gap) pitch —
  * a continuous "unlit grid" backdrop, not just the inside of one glyph's own
  * bounding box. Elements drawn on top at the same pitch (icons, text) then
  * share one uniform dot density with the background instead of looking like
@@ -4738,7 +4746,7 @@ static void dm_paint_grid_bg(uint8_t *fb, int cell, int gap, int off_r, int off_
 }
 
 /* Draw one glyph's full 7x14 grid centred at (cx, cy), every cell painted
- * on-colour or off-colour. `cell`/`gap` select the pitch — 9/2 for a
+ * on-color or off-color. `cell`/`gap` select the pitch — 9/2 for a
  * full-tube digit, smaller for multi-char labels (see dm_draw_text).
  * `clip_edges`: force the top and bottom grid row always off, so the glyph
  * itself only ever occupies the inner 7x12 rows while the overall 7x14
@@ -4867,7 +4875,7 @@ static int dm_snap(int v, int pitch)
     return v - r;
 }
 
-/* Like dm_draw_glyph(), but paints ONLY the on-colour cells — off cells are
+/* Like dm_draw_glyph(), but paints ONLY the on-color cells — off cells are
  * left untouched, showing whatever's already there (meant to be drawn over
  * a dm_paint_grid_bg() backdrop, not as a standalone glyph, since nothing
  * paints the "unlit" look otherwise). x0/y0 are snapped to the pitch grid
@@ -5293,7 +5301,7 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
  * sky panorama. */
 static void wl_draw_tube(int tube, char ch, const wl_scene_t *sc)
 {
-    /* Skip any tube held by the colour-cycle or snow burn-in — it gets
+    /* Skip any tube held by the color-cycle or snow burn-in — it gets
      * overwritten by display_fill()/display_fill_snow() in the display task
      * right after normal rendering anyway (see the identical guard and
      * comment in display_show_image()). Avoids a push-then-immediately-
@@ -5361,7 +5369,7 @@ static void wl_render_asset(int tube, const char *path)
 
 /* "DotMatrix" theme's asset dispatcher — same filename-parsing and branch set
  * as wl_render_asset() above, but drawing dot-matrix glyphs (every cell
- * painted on/off-colour) instead of the WeatherLive font. See the DotMatrix
+ * painted on/off-color) instead of the WeatherLive font. See the DotMatrix
  * font block above wl_draw_tube's forward declaration for the rendering
  * primitives. */
 static void dm_render_asset(int tube, const char *path)
@@ -5443,7 +5451,7 @@ static void dm_render_asset(int tube, const char *path)
         dm_draw_glyph(fb, cx, cy, DM_CP_ICON_VOLCANICASH, 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
     } else {
         /* "blank", platform logos (youtube/instagram/etc.) → a full grid of
-         * off-colour cells (dm_glyph_bits returns NULL for an unmapped code
+         * off-color cells (dm_glyph_bits returns NULL for an unmapped code
          * point, which dm_draw_glyph already paints as "every cell off") —
          * the dot-matrix equivalent of wl_render_asset's "leave black". */
         dm_draw_glyph(fb, cx, cy, ' ', 9, 2, true, on_r, on_g, on_b, off_r, off_g, off_b);
@@ -5519,7 +5527,7 @@ static void wl_suntime(uint8_t *fb, int top, bool rising, const char *timestr,
             }
         }
     }
-    /* Pass 2: foreground colour on top */
+    /* Pass 2: foreground color on top */
     for (int ry = 0; ry < 56; ry++) {
         int fy = top + ry;
         if (fy < 0 || fy >= LCD_HEIGHT) continue;
@@ -5599,7 +5607,7 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
         if (show_range) {
             /* Bar sits in the ~24px gap between the temp (ends ~65.5 at
              * cell=2) and the lo/hi numbers (start ~89.5) — one row of
-             * on-colour dots at the shared pitch, filled from the left up
+             * on-color dots at the shared pitch, filled from the left up
              * to today's temp's proportional position in [lo, hi]. */
             int pitch = cell + 1;
             int bx0 = dm_snap(10, pitch), bx1 = dm_snap(70, pitch);
@@ -5739,18 +5747,12 @@ static void wl_humidity_panel(uint8_t *fb, int hum)
         /* DotMatrix theme: dedicated drop glyph instead of the smooth
          * procedural droplet below, so this panel stays consistently
          * blocky. This panel only has the top-half zone (the "%" value
-         * takes the bottom half) — cell=9/gap=2 (a full clock digit's
-         * pitch, ~152px tall) badly overflowed that zone, clipping most of
-         * the glyph off-screen and leaving a black gap above what little
-         * showed. y=50 (originally 40, matching the old procedural
-         * droplet's centre; nudged 10px lower per feedback — dm_snap()
-         * inside dm_draw_glyph_on_scaled() still floors it to the nearest
-         * pitch multiple, so it stays grid-aligned) instead of bcy (54,
-         * tuned for the old shape). Grid backdrop matches whatever pitch
-         * the "%" value needs (dm_fit_cell), but the icon keeps its own
-         * larger footprint (scale=2, each 7x14 cell becomes a 2x2 block of
-         * dots at that pitch) instead of shrinking down to match the value
-         * outright. */
+         * takes the bottom half), so the icon uses its own y=50 and
+         * scale=2 footprint (dm_snap() still floors it to the nearest grid
+         * pitch) rather than the old procedural droplet's centre/size,
+         * which overflowed this zone. Grid backdrop matches the "%" value's
+         * pitch (dm_fit_cell); the icon keeps its own larger footprint
+         * instead of shrinking to match it. */
         char hum_str[8];
         snprintf(hum_str, sizeof(hum_str), "%d%%", hum);
         int cell = dm_fit_cell(hum_str);
@@ -5893,7 +5895,7 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
         dm_draw_glyph_on_scaled(fb, 40, 41, DM_CP_ICON_WIND, 2, 1, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
     } else {
     /* Shadow pass: expanded geometry drawn first so the foreground sits on top.
-     * Gated on the global shadow setting and uses the configured shadow colour. */
+     * Gated on the global shadow setting and uses the configured shadow color. */
     if (wl_shadow_on()) {
         for (int s = 0; s < 3; s++) {
             int x0 = st[s][0], x1 = st[s][1], y = st[s][2], cr = st[s][3];
@@ -5994,7 +5996,7 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
     }
 }
 
-/* US EPA AQI category → display colour (slightly muted so it reads over the
+/* US EPA AQI category → display color (slightly muted so it reads over the
  * sky gradient).  Bands: 0-50 good, 51-100 moderate, 101-150 USG, 151-200
  * unhealthy, 201-300 very unhealthy, 301+ hazardous. */
 static void wl_aqi_band_color(int aqi, int *r, int *g, int *b)
@@ -6007,7 +6009,7 @@ static void wl_aqi_band_color(int aqi, int *r, int *g, int *b)
     else                 { *r = 165; *g =  50; *b =  60; }   /* maroon  */
 }
 
-/* European AQI (EAQI, 0-100+) category → display colour, per the CAMS/EEA scale.
+/* European AQI (EAQI, 0-100+) category → display color, per the CAMS/EEA scale.
  * Bands: 0-20 good, 20-40 fair, 40-60 moderate, 60-80 poor, 80-100 very poor,
  * 100+ extremely poor. */
 static void wl_eaqi_band_color(int aqi, int *r, int *g, int *b)
@@ -6020,9 +6022,9 @@ static void wl_eaqi_band_color(int aqi, int *r, int *g, int *b)
     else                 { *r = 140; *g =  50; *b = 150; }   /* extreme — purple  */
 }
 
-/* Air-quality panel: an "AQI" label over the index, the number coloured by its
- * category.  `european` selects the EAQI (0-100) scale + colours vs the US EPA
- * (0-500) scale.  aqi < 0 → no data yet → dashes in the foreground colour.
+/* Air-quality panel: an "AQI" label over the index, the number colored by its
+ * category.  `european` selects the EAQI (0-100) scale + colors vs the US EPA
+ * (0-500) scale.  aqi < 0 → no data yet → dashes in the foreground color.
  * Mirrors the humidity/wind panels; value is resolved by weather_get_aqi(). */
 static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g, int fg_b)
 {
@@ -6337,12 +6339,29 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
      * used for those backgrounds) free of time-varying colors. Uses the
      * PREVIOUS frame's scene; twilight spans ~55 min, so one frame of lag is
      * invisible. nt==0 (feature off / day / non-WL bg) makes every blend
-     * below collapse to exactly the day values. */
+     * below collapse to exactly the day values.
+     *
+     * "Drift" mode (custom_night_drift) swaps the sun-position source for a
+     * continuous A-B-A triangle wave over custom_night_drift_period_s — an
+     * alternative to sun-tracking, not a variant of it, so it always runs at
+     * this function's own animated tick rate regardless of s_wl_scene_valid
+     * (a static WL scene otherwise only redraws ~1x/min, which would make
+     * the drift visibly step instead of glide). */
     {
         bool wl_sky_bg = !s_wl_is_custom ||
                          strncmp(cfg->custom_bg, "WeatherLive", 11) == 0;
-        int nt = (cfg->custom_night_colors && wl_sky_bg && s_wl_scene_valid)
-                 ? s_wl_last_scene.night : 0;
+        bool night_active = cfg->custom_night_colors && wl_sky_bg;
+        int nt;
+        if (night_active && cfg->custom_night_drift) {
+            uint32_t period_ms = (uint32_t)(cfg->custom_night_drift_period_s
+                                             ? cfg->custom_night_drift_period_s : 300) * 1000;
+            uint32_t phase_ms  = (uint32_t)(esp_timer_get_time() / 1000) % period_ms;
+            float x = (float)phase_ms / (float)period_ms;              /* 0..1 */
+            float tri = (x < 0.5f) ? (x * 2.0f) : (2.0f - x * 2.0f);   /* 0->1->0 */
+            nt = (int)(tri * 255.0f);
+        } else {
+            nt = (night_active && s_wl_scene_valid) ? s_wl_last_scene.night : 0;
+        }
         int day[3], nite[3], out[3];
         for (int i = 0; i < 3; i++) { day[i] = cfg->custom_glyph_color[i];
                                       nite[i] = cfg->custom_glyph_color_night[i]; }
@@ -6356,13 +6375,28 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
                                       nite[i] = cfg->custom_shadow_color_night[i]; }
         wl_lerp3(day, nite, nt, out);
         s_wl_shadow_r = (uint8_t)out[0]; s_wl_shadow_g = (uint8_t)out[1]; s_wl_shadow_b = (uint8_t)out[2];
-        /* Boolean can't blend — flip at mid-twilight. */
-        s_wl_shadow = (nt >= 128) ? cfg->custom_shadow_night : cfg->custom_shadow;
+        /* Boolean can't blend — flip at mid-twilight. Skipped in Drift mode:
+         * an A-B-A cycle would flip this twice per cycle (once rising, once
+         * falling), reading as the shadow blinking on/off mid-drift instead
+         * of a clean color blend — so Drift always keeps the day setting and
+         * only blends the shadow's color, per the deliberate v1 scope. */
+        s_wl_shadow = (!cfg->custom_night_drift && nt >= 128) ? cfg->custom_shadow_night : cfg->custom_shadow;
         for (int i = 0; i < 3; i++) { day[i] = cfg->custom_glyph_shadow_color[i];
                                       nite[i] = cfg->custom_glyph_shadow_color_night[i]; }
         wl_lerp3(day, nite, nt, out);
         s_wl_glyph_shadow_r = (uint8_t)out[0]; s_wl_glyph_shadow_g = (uint8_t)out[1]; s_wl_glyph_shadow_b = (uint8_t)out[2];
-        s_wl_glyph_shadow = (nt >= 128) ? cfg->custom_glyph_shadow_night : cfg->custom_glyph_shadow;
+        s_wl_glyph_shadow = (!cfg->custom_night_drift && nt >= 128) ? cfg->custom_glyph_shadow_night : cfg->custom_glyph_shadow;
+        /* Shadow size, like the on/off toggles above (not the colors, which
+         * blend via wl_lerp3), flips rather than blends at mid-twilight —
+         * a discrete 1-4 level has no meaningful halfway value. Same Drift
+         * exemption: an A-B-A cycle flipping this twice per cycle would
+         * read as the blur snapping in and out mid-drift, so Drift always
+         * keeps the day size. */
+        bool night_size = !cfg->custom_night_drift && nt >= 128;
+        uint8_t shadow_sz       = night_size ? cfg->custom_shadow_size_night       : cfg->custom_shadow_size;
+        uint8_t glyph_shadow_sz = night_size ? cfg->custom_glyph_shadow_size_night : cfg->custom_glyph_shadow_size;
+        s_wl_shadow_size       = shadow_sz       ? shadow_sz       : 2;
+        s_wl_glyph_shadow_size = glyph_shadow_sz ? glyph_shadow_sz : 2;
     }
     wl_refresh_ft_face(cfg->custom_font);
     if (s_wl_is_custom) {
@@ -6754,8 +6788,10 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
     s_wl_font_r = 255; s_wl_font_g = 255; s_wl_font_b = 255;
     s_wl_shadow = true;
     s_wl_shadow_r = 0; s_wl_shadow_g = 0; s_wl_shadow_b = 0;
+    s_wl_shadow_size = 2;
     s_wl_glyph_shadow = true;
     s_wl_glyph_shadow_r = 0; s_wl_glyph_shadow_g = 0; s_wl_glyph_shadow_b = 0;
+    s_wl_glyph_shadow_size = 2;
     s_wl_bg_theme[0] = '\0';
     wl_refresh_ft_face(cfg->custom_font);
 
@@ -6837,7 +6873,7 @@ static bool png_composite_over_sky(uint8_t *fb, const char *path)
  * alpha) or fall back to .jpg black-key compositing if no PNG exists. */
 static void wl_tube_icon(int tube, const char *name)
 {
-    /* Skip any tube held by the colour-cycle or snow burn-in — it gets
+    /* Skip any tube held by the color-cycle or snow burn-in — it gets
      * overwritten by display_fill()/display_fill_snow() in the display task
      * right after normal rendering anyway (see the identical guard and
      * comment in display_show_image()). Avoids a push-then-immediately-
@@ -7018,7 +7054,7 @@ static void render_followers(const nextube_config_t *cfg,
  *   Width:  1px pad | 18px bar | 2px gap | ... × 4 | 1px pad = 80 ✓     *
  *   Height: 3px top + 13 × (10px seg + 2px gap) − 2px + 3px bot = 160 ✓ *
  *                                                                         *
- * Colour: user-configurable single base colour (spectrum_lcd_RGB config). *
+ * Color: user-configurable single base color (spectrum_lcd_RGB config). *
  * Brightness ramp 0.75→1.00 bottom-to-top for visual depth.              *
  * Peak dot: bright-white segment that holds then decays (~1 s at 20 Hz). *
  * Unlit segments: ~6% ghost so the full bar outline is always visible.    */
@@ -7040,7 +7076,7 @@ _Static_assert(LCD_COUNT * SPEC_BARS_PER_TUBE == MIC_BAND_COUNT,
 
 static float s_spec_peak[LCD_COUNT * SPEC_BARS_PER_TUBE];   /* visual peak hold per band */
 
-/* Segment colour: user base colour with brightness ramp, or ghost at ~6%. */
+/* Segment color: user base color with brightness ramp, or ghost at ~6%. */
 static void spec_seg_color(int s, bool lit,
                             uint8_t br, uint8_t bg, uint8_t bb,
                             uint8_t *r, uint8_t *g, uint8_t *b)
@@ -7059,7 +7095,7 @@ static void spec_seg_color(int s, bool lit,
     }
 }
 
-static void render_spectrum(const nextube_config_t *cfg)
+static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repaint)
 {
     float bands[LCD_COUNT * SPEC_BARS_PER_TUBE];
     mic_get_bands(bands);
@@ -7068,9 +7104,9 @@ static void render_spectrum(const nextube_config_t *cfg)
     uint8_t bg = cfg->spectrum_lcd_rgb[1];
     uint8_t bb = cfg->spectrum_lcd_rgb[2];
 
-    /* Optional: follow the WLED primary colour (live).  Falls back to the
-     * configured colour when WLED Sync isn't running / hasn't received a
-     * packet, when the strip is off, or when the received colour is
+    /* Optional: follow the WLED primary color (live).  Falls back to the
+     * configured color when WLED Sync isn't running / hasn't received a
+     * packet, when the strip is off, or when the received color is
      * near-black — palette effects (Rainbow, Fire, …) don't use col[0] and
      * WLED may leave it at (0,0,0), which would render invisible bars (the
      * same caveat the LED task handles via the fx field). */
@@ -7116,7 +7152,7 @@ static void render_spectrum(const nextube_config_t *cfg)
      *   ≈ 150 KB PSRAM writes + 150 KB PSRAM reads per frame → ~25 ms/frame.
      *
      * New path: for each tube, precompute the 52 (4 bars × 13 segs) RGB565
-     * colours once, then fill a 160-byte SRAM line buffer per row and transmit
+     * colors once, then fill a 160-byte SRAM line buffer per row and transmit
      * immediately.  No PSRAM touched; line buffer is always DMA-safe. */
     uint8_t line[LCD_WIDTH * 2];   /* 160 B SRAM line buffer */
 
@@ -7124,10 +7160,18 @@ static void render_spectrum(const nextube_config_t *cfg)
      * needs repainting when s_burnin_shift_x actually changes (or on a
      * tube's first visit) — NOT every 20 Hz frame, which was the previous
      * bug (always re-doing 2 extra SPI window-opens + full-height transmits
-     * per tube even when nothing about the margin had changed). */
+     * per tube even when nothing about the margin had changed).
+     *
+     * force_margin_repaint (true on mode entry, and on a forced full repaint
+     * from display_apply_tube_offsets()/display_invalidate()) also clears
+     * the cache. Without it, re-entering Spectrum mode after WeatherLive (or
+     * any other mode) had painted over those same margin columns left them
+     * showing the previous mode's stale content — invisible on a tube whose
+     * offset tucks the margin behind the bezel, but a real left-edge bleed
+     * on any tube whose col offset shifts the margin into visible glass. */
     static int  s_spec_margin_shift = 1000;   /* sentinel outside the real -2..2 range */
     static bool s_spec_margin_done[LCD_COUNT];
-    if (s_burnin_shift_x != s_spec_margin_shift) {
+    if (s_burnin_shift_x != s_spec_margin_shift || force_margin_repaint) {
         memset(s_spec_margin_done, 0, sizeof(s_spec_margin_done));
         s_spec_margin_shift = s_burnin_shift_x;
     }
@@ -7139,7 +7183,7 @@ static void render_spectrum(const nextube_config_t *cfg)
          * pushing it over SPI would produce no visible output. */
         if ((s_burnin_mask | s_snow_mask) & (1u << tube)) continue;
 
-        /* Precompute RGB565 colour for every (bar, segment) on this tube.
+        /* Precompute RGB565 color for every (bar, segment) on this tube.
          * 52 spec_seg_color() calls here replace 640 calls inside the row loop. */
         uint16_t seg_color[SPEC_BARS_PER_TUBE][SPEC_SEGS];
         for (int bar = 0; bar < SPEC_BARS_PER_TUBE; bar++) {
@@ -7413,7 +7457,7 @@ static int   s_sun_ph  = 0;
 static int   s_sun_cnt = 0;
 
 /* Composite a u8g2 tile buffer into an RGB565 framebuffer in place.
- * Lit bits (1) write fg colour; unlit bits leave the background pixel
+ * Lit bits (1) write fg color; unlit bits leave the background pixel
  * already in fb unchanged.  fg is raw RGB565 — display_show_digit applies
  * per-tube brightness/gamma when the complete buffer is sent to the LCD.
  * Buffer layout: tile[(row/8)*128 + col], bit = row%8 (u8g2 vertical 1bpp). */
@@ -7452,7 +7496,7 @@ static void wl_blit_tile_into_fb(uint8_t *fb, const uint8_t *tile,
  *   4. Horizon line
  *   5. Two mountain triangles (pass 1 only — tube rows 64–127 contain them)
  *
- * fg: theme foreground colour (sun disc, rays, horizon, mountains).
+ * fg: theme foreground color (sun disc, rays, horizon, mountains).
  * bg: theme blank.jpg decoded RGB565 image (or NULL → solid black).  Passed
  *     through to ht_blit_at(); where U8g2 bit=0 the background image pixel is
  *     shown, giving the sky area the theme's texture.                         */
@@ -7567,7 +7611,7 @@ static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
         }
 
         /* ── 3. Mask — erase everything below the horizon ─────────────────
-         * Draw-colour 0 sets bits to 0.  Where bg != NULL, ht_blit_at maps
+         * Draw-color 0 sets bits to 0.  Where bg != NULL, ht_blit_at maps
          * zero-bits to the theme background, so the "sky" region above the
          * horizon shows the theme texture while below-horizon stays black
          * only because the mask is applied AFTER the disc/rays (overwriting
@@ -7605,7 +7649,7 @@ static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
                               80,  (int16_t)(110 - y0));
         }
 
-        /* Blit: fg-colour where U8g2 bit=1, bg image where bit=0 (bg=NULL → black) */
+        /* Blit: fg-color where U8g2 bit=1, bg image where bit=0 (bg=NULL → black) */
         ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), nrow, y0, fg, bg);
     }
 }
@@ -7846,10 +7890,10 @@ static void wx_sun_draw_time_buf(uint8_t *fb, const char *timestr, uint16_t fg)
 /* WeatherLive background helpers for weather-mode panels.
  * Paint the live sky into wl_fb() for the given tube and blit to the LCD.
  * wl_tube_sky  → sky only (blank slot replacement).
- * wl_tube_str  → sky + centred text in the current WL font colour (digit/symbol replacement). */
+ * wl_tube_str  → sky + centred text in the current WL font color (digit/symbol replacement). */
 static void wl_tube_sky(int tube)
 {
-    /* Skip any tube held by the colour-cycle or snow burn-in — it gets
+    /* Skip any tube held by the color-cycle or snow burn-in — it gets
      * overwritten by display_fill()/display_fill_snow() in the display task
      * right after normal rendering anyway (see the identical guard and
      * comment in display_show_image()). Avoids a push-then-immediately-
@@ -7863,7 +7907,7 @@ static void wl_tube_sky(int tube)
 }
 static void wl_tube_str(int tube, const uint8_t *font, const char *str, int by)
 {
-    /* Skip any tube held by the colour-cycle or snow burn-in — it gets
+    /* Skip any tube held by the color-cycle or snow burn-in — it gets
      * overwritten by display_fill()/display_fill_snow() in the display task
      * right after normal rendering anyway (see the identical guard and
      * comment in display_show_image()). Avoids a push-then-immediately-
@@ -7953,7 +7997,7 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
                 dm_draw_hhmm(fb, 40, 80, rise_str, 9, 2, s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
                 display_show_digit(1, fb, LCD_WIDTH, LCD_HEIGHT);
             }
-            /* Full grid of off-colour cells, not a solid fill — same
+            /* Full grid of off-color cells, not a solid fill — same
              * "blank" pattern dm_render_asset() uses (a space character,
              * which dm_glyph_bits() maps to NULL/all-off), so these tubes
              * show individual unlit dots like every other DotMatrix glyph
@@ -8228,7 +8272,7 @@ static void render_weather_wind(const nextube_config_t *cfg)
 /* render_weather_hilo – panel 4: daily Hi (show_hi=true) or Lo (false).
  *
  * Layout mirrors the temperature panel — tube 0 is replaced by a procedural
- * coloured arrow instead of a blank, tubes 1-4 carry sign/digits/degree:
+ * colored arrow instead of a blank, tubes 1-4 carry sign/digits/degree:
  *
  *   positive 1-digit:  [arrow] [blank] [blank]  [units] [°C/F] [blank]
  *   positive 2-digit:  [arrow] [blank] [tens]   [units] [°C/F] [blank]
@@ -8804,13 +8848,15 @@ static void display_task(void *arg)
     app_mode_t    last_mode     = (app_mode_t)-1;
     char          last_theme[32]      = {0};
     char          last_clock_face[32] = {0};   /* track clockface changes alongside theme */
-    /* Custom-face settings — checked independently of theme so colour / font /
+    /* Custom-face settings — checked independently of theme so color / font /
      * background changes apply immediately without a mode or theme switch. */
     char          last_custom_bg[32]          = {0};
     uint8_t       last_custom_glyph_color[3]  = {0};
     uint8_t       last_custom_font_color[3]   = {0};
     bool          last_custom_shadow          = false;
     uint8_t       last_custom_shadow_color[3] = {0};
+    uint8_t       last_custom_shadow_size       = 0;   /* 0 = sentinel, forces first-tick sync (valid range 1-4) */
+    uint8_t       last_custom_glyph_shadow_size = 0;
     char          last_custom_font[64]        = {0};
     /* Night color set (issue #73) — tracked separately so custom_changed
      * fires immediately for these too, not just the day-set fields above. */
@@ -8818,6 +8864,8 @@ static void display_task(void *arg)
     uint8_t       last_custom_font_color_night[3]   = {0};
     bool          last_custom_shadow_night          = false;
     uint8_t       last_custom_shadow_color_night[3] = {0};
+    uint8_t       last_custom_shadow_size_night       = 0;   /* 0 = sentinel, forces first-tick sync */
+    uint8_t       last_custom_glyph_shadow_size_night = 0;
     bool          last_custom_night_colors          = false;
     char          last_time_type[8]   = {0};
     uint32_t      last_subs     = UINT32_MAX;
@@ -8832,6 +8880,13 @@ static void display_task(void *arg)
     bool          last_cx_dual  = false;       /* 24H_CX dual-panel toggle change detection */
     bool          last_bl_on    = true;        /* backlight on/off tracking */
     uint8_t       last_bl_brt   = 255;         /* sentinel: force-apply on first tick */
+    /* Backlight brightness ramp state (boot power-on glow + Night Mode
+     * boundary glide) — see the ramp block below. */
+    uint8_t       brt_ramp_from   = 255;
+    uint8_t       brt_ramp_cur    = 255;       /* last value actually written to the LEDC duty */
+    int64_t       brt_ramp_start_us = 0;
+    int32_t       brt_ramp_duration_ms = 0;
+    bool          brt_ramp_active  = false;
     TickType_t    album_switch        = 0;
     TickType_t    rotation_tick       = 0;     /* tick when current mode started */
     TickType_t    theme_rotation_tick = 0;     /* tick when current theme started */
@@ -8878,7 +8933,7 @@ static void display_task(void *arg)
         cfg_snap = *config_get();
         config_unlock();
         const nextube_config_t *cfg = &cfg_snap;
-        /* Keep the DotMatrix on/off colours current for every app mode, not
+        /* Keep the DotMatrix on/off colors current for every app mode, not
          * just Clock — display_show_image()'s DotMatrix intercept runs from
          * many call sites (weather/timer/follower-count panels too) that
          * don't have direct access to cfg. Cheap unconditional copy. */
@@ -8889,17 +8944,21 @@ static void display_task(void *arg)
         bool theme_changed = (strcmp(cfg->theme,      last_theme)      != 0) ||
                              (strcmp(cfg->clock_face, last_clock_face) != 0);
         /* Custom face settings that don't touch theme or clock_face but still
-         * need an immediate repaint (colour, shadow, font, background swap). */
+         * need an immediate repaint (color, shadow, font, background swap). */
         bool custom_changed = (strcmp(cfg->custom_bg,          last_custom_bg)          != 0) ||
                               (memcmp(cfg->custom_glyph_color,  last_custom_glyph_color,  3) != 0) ||
                               (memcmp(cfg->custom_font_color,   last_custom_font_color,   3) != 0) ||
                               (cfg->custom_shadow              != last_custom_shadow)           ||
                               (memcmp(cfg->custom_shadow_color, last_custom_shadow_color, 3) != 0) ||
+                              (cfg->custom_shadow_size          != last_custom_shadow_size)       ||
+                              (cfg->custom_glyph_shadow_size    != last_custom_glyph_shadow_size) ||
                               (strcmp(cfg->custom_font,         last_custom_font)         != 0)    ||
                               (memcmp(cfg->custom_glyph_color_night,  last_custom_glyph_color_night,  3) != 0) ||
                               (memcmp(cfg->custom_font_color_night,   last_custom_font_color_night,   3) != 0) ||
                               (cfg->custom_shadow_night         != last_custom_shadow_night)     ||
                               (memcmp(cfg->custom_shadow_color_night, last_custom_shadow_color_night, 3) != 0) ||
+                              (cfg->custom_shadow_size_night       != last_custom_shadow_size_night)       ||
+                              (cfg->custom_glyph_shadow_size_night != last_custom_glyph_shadow_size_night) ||
                               (cfg->custom_night_colors         != last_custom_night_colors);
 
         /* ── Forced full repaint ─────────────────────────────────────────────
@@ -9023,11 +9082,52 @@ static void display_task(void *arg)
             ntp_is_night_window(cfg->night_start_hour, cfg->night_end_hour))
             target_brt = cfg->night_brightness;
 
-        if (first || cfg->backlight_on != last_bl_on ||
-                     target_brt != last_bl_brt) {
+        /* Backlight brightness ramp — two distinct triggers share the same
+         * glide mechanism (brt_ramp_*), just with different durations:
+         *   - Boot (first tick): a brief power-on glow from off up to the
+         *     configured brightness. The clock face is already fully
+         *     rendered underneath by this point (nothing else about this
+         *     tick is skipped), so this reads as the panel physically
+         *     waking up rather than snapping straight to full brightness.
+         *   - Night Mode boundary: night_start_hour/night_end_hour used to
+         *     snap the PWM duty instantly — a visible jolt right next to
+         *     the (separate) WeatherLive color crossfade, which already
+         *     blends smoothly through real twilight. Glides instead.
+         * The user's own on/off toggle stays instant either way — there's
+         * no "duration" to glide over for an explicit action. */
+        if (first) {
+            brt_ramp_from         = 0;
+            brt_ramp_start_us     = esp_timer_get_time();
+            brt_ramp_duration_ms  = BOOT_BRT_RAMP_MS;
+            brt_ramp_active       = cfg->backlight_on;
+            last_bl_on            = cfg->backlight_on;
+            last_bl_brt           = target_brt;
+            display_set_brightness(0);
+        } else if (cfg->backlight_on != last_bl_on) {
             display_set_brightness(cfg->backlight_on ? target_brt : 0);
-            last_bl_on  = cfg->backlight_on;
-            last_bl_brt = target_brt;
+            last_bl_on      = cfg->backlight_on;
+            last_bl_brt     = target_brt;
+            brt_ramp_cur    = target_brt;
+            brt_ramp_active = false;
+        } else if (target_brt != last_bl_brt) {
+            brt_ramp_from        = brt_ramp_cur;
+            brt_ramp_start_us    = esp_timer_get_time();
+            brt_ramp_duration_ms = NIGHT_BRT_RAMP_MS;
+            brt_ramp_active      = true;
+            last_bl_brt          = target_brt;
+        }
+        if (brt_ramp_active && cfg->backlight_on) {
+            int64_t elapsed_ms = (esp_timer_get_time() - brt_ramp_start_us) / 1000;
+            if (elapsed_ms >= brt_ramp_duration_ms) {
+                brt_ramp_cur    = last_bl_brt;
+                brt_ramp_active = false;
+            } else {
+                float frac = (float)elapsed_ms / (float)brt_ramp_duration_ms;
+                int   from = brt_ramp_from, to = last_bl_brt;
+                int   cur  = from + (int)((to - from) * frac);
+                brt_ramp_cur = (uint8_t)(cur < 0 ? 0 : (cur > 100 ? 100 : cur));
+            }
+            display_set_brightness(brt_ramp_cur);
         }
 
         /* ── Anti burn-in: hourly pixel shift + scheduled trigger ──────────
@@ -9097,6 +9197,11 @@ static void display_task(void *arg)
          * As soon as a client connects the PIN auto-hides and normal-mode
          * rendering resumes on the next tick. */
         if (wifi_manager_ap_pin_visible()) {
+            /* Must stay unconditional every tick — the boot brightness ramp
+             * above unconditionally zeroes brightness whenever `first` is
+             * true, and `first` is re-set true at the bottom of this same
+             * block on every AP-PIN tick, so nothing else corrects it back
+             * to visible if this call is skipped. */
             display_set_brightness(100);
             render_ap_pin(cfg);
             /* Keep last_theme in sync with the current theme so that
@@ -9118,6 +9223,8 @@ static void display_task(void *arg)
             memcpy(last_custom_font_color,   cfg->custom_font_color,   3);
             last_custom_shadow = cfg->custom_shadow;
             memcpy(last_custom_shadow_color, cfg->custom_shadow_color, 3);
+            last_custom_shadow_size = cfg->custom_shadow_size;
+            last_custom_glyph_shadow_size = cfg->custom_glyph_shadow_size;
             strncpy(last_custom_font, cfg->custom_font, sizeof(last_custom_font) - 1);
             last_custom_font[sizeof(last_custom_font) - 1] = '\0';
             /* Force the remaining change-detection state to "no last frame"
@@ -9168,7 +9275,7 @@ static void display_task(void *arg)
          * Expire masks BEFORE the mode render so the same tick's render_*
          * calls see mask=0 and write JPEGs immediately.  Without this the
          * render skips JPEG writes (mask still set), the expiry fires after,
-         * and the last solid colour sits on screen until the next render tick
+         * and the last solid color sits on screen until the next render tick
          * — up to 2 s for clock modes; indefinitely for YouTube
          * (which only re-render on data changes, not on every tick).
          *
@@ -9261,6 +9368,8 @@ static void display_task(void *arg)
                 memcpy(last_custom_font_color,   cfg->custom_font_color,   3);
                 last_custom_shadow = cfg->custom_shadow;
                 memcpy(last_custom_shadow_color, cfg->custom_shadow_color, 3);
+                last_custom_shadow_size = cfg->custom_shadow_size;
+                last_custom_glyph_shadow_size = cfg->custom_glyph_shadow_size;
                 strncpy(last_custom_font, cfg->custom_font, sizeof(last_custom_font) - 1);
                 last_custom_font[sizeof(last_custom_font) - 1] = '\0';
                 vTaskDelayUntil(&wake, pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW));
@@ -9278,7 +9387,13 @@ static void display_task(void *arg)
         bool wl_sky_animates = cx_is_wl_sky(cfg) &&
                                !(s_wl_is_custom && s_wl_bg_theme[0] != '\0'
                                  && strncmp(s_wl_bg_theme, "WeatherLive", 11) != 0);
-        bool wl_anim_tick = cfg->wlive_animate && wl_sky_animates && s_wl_scene_valid;
+        /* Night color set "Drift" mode forces animated-rate ticks regardless
+         * of the user's own Static/Realtime sky choice — it's a continuous
+         * timer-driven oscillation, not tied to the sky at all, and would
+         * otherwise only advance once per static redraw (~10 min), visibly
+         * stepping instead of gliding. */
+        bool wl_drift_active = cfg->custom_night_colors && cfg->custom_night_drift;
+        bool wl_anim_tick = (cfg->wlive_animate || wl_drift_active) && wl_sky_animates && s_wl_scene_valid;
 
         /* ── Continuous WeatherLive background render ────────────────────────
          * When the sky is animated this single block acts as one unified
@@ -9533,7 +9648,7 @@ static void display_task(void *arg)
                         dual_changed || burnin_force_render) {
                     /* Colon cache: invalidate on any config/mode/theme/layout
                      * change so wl_render_colon_tube() rebuilds the ON/OFF
-                     * pixel buffers with fresh colours and background.
+                     * pixel buffers with fresh colors and background.
                      * Normal second-tick renders (time_changed only) keep
                      * the existing cache and use the fast push path.          */
                     if (first || mode_changed || theme_changed || custom_changed ||
@@ -9736,8 +9851,11 @@ static void display_task(void *arg)
 
 
         case APP_MODE_SPECTRUM:
-            /* Audio changes every frame — always re-render at the display task rate. */
-            render_spectrum(cfg);
+            /* Audio changes every frame — always re-render at the display task rate.
+             * mode_changed also covers a forced full repaint (offset change via
+             * display_apply_tube_offsets()) — see render_spectrum()'s margin-cache
+             * comment for why this needs to force the edge-margin repaint too. */
+            render_spectrum(cfg, first || mode_changed);
             break;
 
         case APP_MODE_ALBUM:
@@ -9866,7 +9984,7 @@ static void display_task(void *arg)
          * by a config save (display_busy_hint) makes render_weatherlive return
          * early without painting — if we advanced the cursor here anyway,
          * custom_changed would clear before the render ran and the
-         * shadow/colour update would be lost until the next mode change. */
+         * shadow/color update would be lost until the next mode change. */
         bool wl_clock_was_busy =
             (mode == APP_MODE_CLOCK) &&
             ((strncmp(cfg->theme, "WeatherLive", 11) == 0) ||
@@ -9879,17 +9997,21 @@ static void display_task(void *arg)
             memcpy(last_custom_font_color,   cfg->custom_font_color,   3);
             last_custom_shadow = cfg->custom_shadow;
             memcpy(last_custom_shadow_color, cfg->custom_shadow_color, 3);
+            last_custom_shadow_size = cfg->custom_shadow_size;
+            last_custom_glyph_shadow_size = cfg->custom_glyph_shadow_size;
             strncpy(last_custom_font, cfg->custom_font, sizeof(last_custom_font) - 1);
             last_custom_font[sizeof(last_custom_font) - 1] = '\0';
             memcpy(last_custom_glyph_color_night,  cfg->custom_glyph_color_night,  3);
             memcpy(last_custom_font_color_night,   cfg->custom_font_color_night,   3);
             last_custom_shadow_night = cfg->custom_shadow_night;
             memcpy(last_custom_shadow_color_night, cfg->custom_shadow_color_night, 3);
+            last_custom_shadow_size_night = cfg->custom_shadow_size_night;
+            last_custom_glyph_shadow_size_night = cfg->custom_glyph_shadow_size_night;
             last_custom_night_colors = cfg->custom_night_colors;
         }
-        /* ── Anti burn-in: colour-cycle masked tubes ───────────────────────
+        /* ── Anti burn-in: color-cycle masked tubes ───────────────────────
          * Runs after normal mode render; unmasked tubes show live content.
-         * Colour advances every BURNIN_COLOR_SECS seconds, cycling through
+         * Color advances every BURNIN_COLOR_SECS seconds, cycling through
          * red→green→blue→white→black to stress every sub-pixel at both
          * voltage extremes.  Timer expiry is handled in the pre-check above. */
         if (s_burnin_mask) {
@@ -9903,7 +10025,7 @@ static void display_task(void *arg)
         }
 
         /* Static-snow burn-in: write random RGB565 pixels to masked tubes.
-         * Runs independently of the colour-cycle above — both modes can be
+         * Runs independently of the color-cycle above — both modes can be
          * active on different tube subsets simultaneously.
          * Timer expiry is handled in the pre-check above. */
         if (s_snow_mask) {

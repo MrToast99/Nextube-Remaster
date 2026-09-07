@@ -8,7 +8,7 @@
  * Timing at 10 MHz resolution (100 ns / tick):
  *   bit-0: T0H = 4 ticks (400 ns), T0L = 9 ticks (900 ns)
  *   bit-1: T1H = 8 ticks (800 ns), T1L = 5 ticks (500 ns)
- * WS2812 bit order: MSB first, colour order: G R B per pixel.
+ * WS2812 bit order: MSB first, color order: G R B per pixel.
  */
 
 #include "leds.h"
@@ -46,11 +46,11 @@ static inline uint8_t night_adjusted_led_brightness(const nextube_config_t *cfg)
 /* Set true by audio driver while a sound is playing.
  * The LED task skips ws2812_write() while this is set, stopping RMT
  * 10 MHz bursts that cause current spikes on the shared 3.3 V rail.
- * WS2812 LEDs latch their last colour and need no refresh to stay on. */
+ * WS2812 LEDs latch their last color and need no refresh to stay on. */
 static volatile bool s_audio_active = false;
 void leds_set_audio_active(bool active) { s_audio_active = active; }
 
-/* GRB pixel buffer (WS2812 colour order) */
+/* GRB pixel buffer (WS2812 color order) */
 static uint8_t led_data[LED_COUNT][3];  /* [G, R, B] */
 static uint8_t brightness = 60;
 
@@ -77,7 +77,7 @@ static void ws2812_write(void)
     };
     /* Use checked returns instead of ESP_ERROR_CHECK: a transient RMT error
      * (channel busy, 100 ms timeout) should log and return gracefully rather
-     * than triggering an abort-and-reboot.  LEDs latch their last colour so
+     * than triggering an abort-and-reboot.  LEDs latch their last color so
      * a skipped frame is invisible. */
     esp_err_t e = rmt_transmit(s_rmt_chan, s_bytes_enc, grb, sizeof(grb), &tx_cfg);
     if (e != ESP_OK) { ESP_LOGW(TAG, "LED transmit failed: %d", e); return; }
@@ -265,7 +265,7 @@ static void led_task(void *arg)
 
         /* ── WLED Sync override ─────────────────────────────────────────────
          * When backlight_mode == BL_MODE_WLED and a UDP Notifier packet has
-         * been received, skip local effects and mirror the WLED primary colour.
+         * been received, skip local effects and mirror the WLED primary color.
          * wled_sync_get() returns false until at least one packet arrives, so
          * the fallthrough below keeps local effects active on first boot.      */
         {
@@ -286,7 +286,7 @@ static void led_task(void *arg)
                         /* Palette-based animation effects (Rainbow, Fire, Ocean,
                          * Color Cycle, etc.) do not use col[0] for rendering.
                          * WLED sends col[0]=(0,0,0) in the notifier packet when
-                         * the user hasn't set an explicit primary colour for that
+                         * the user hasn't set an explicit primary color for that
                          * effect, causing the accent LEDs to go dark.
                          * Mirror with our local rainbow so the strip stays visually
                          * active while WLED is animating. */
@@ -296,7 +296,7 @@ static void led_task(void *arg)
                          * continues before the leds_set_brightness() call in the
                          * main loop body, so without this the global brightness
                          * would keep whatever stale value it last had.
-                         * The WLED colour is already scaled by WLED's own brightness. */
+                         * The WLED color is already scaled by WLED's own brightness. */
                         leds_set_all(ws.r, ws.g, ws.b);
                         leds_update();
                     }
@@ -308,7 +308,7 @@ static void led_task(void *arg)
         }
 
         /* Skip all RMT transmissions while audio is playing.
-         * WS2812 hold their last colour — no visual glitch, no rail noise. */
+         * WS2812 hold their last color — no visual glitch, no rail noise. */
         if (s_audio_active) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
@@ -347,7 +347,7 @@ static void led_task(void *arg)
         leds_set_brightness(led_brightness);
 
         /* ── Spectrum mode: drive each LED at per-band audio brightness ──
-         * spectrum_led_source == 0: amplitude-modulate the custom glow colour.
+         * spectrum_led_source == 0: amplitude-modulate the custom glow color.
          * spectrum_led_source == 1: fall through to the accent mode switch so
          *   the LEDs animate in Static/Breath/Rainbow/Off as configured — the
          *   LCD still shows spectrum bars; only the LED source differs. */
@@ -382,8 +382,8 @@ static void led_task(void *arg)
 
         switch (backlight_mode) {
         case BL_MODE_STATIC: {
-            /* In static mode, transmit once when colour/brightness changes
-             * then stop.  WS2812 latch their last colour indefinitely —
+            /* In static mode, transmit once when color/brightness changes
+             * then stop.  WS2812 latch their last color indefinitely —
              * no periodic refresh needed.  Eliminating continuous RMT
              * bursts reduces periodic noise spikes on the 3.3 V rail. */
             static uint8_t last_rgb[LED_COUNT][3];
@@ -409,7 +409,7 @@ static void led_task(void *arg)
             break;
         }
         case BL_MODE_BREATH: {
-            /* Modulate each tube's configured colour with a sine-wave envelope,
+            /* Modulate each tube's configured color with a sine-wave envelope,
              * respecting the per-tube backlight_RGB settings (unlike a fixed
              * warm-blue palette).
              *
@@ -449,7 +449,7 @@ static void led_task(void *arg)
             static int rainbow_hue = 0;
             rainbow_hue = (rainbow_hue + (int)led_effect_speed) % 360;
             /* Beat nudge: on a detected onset, jump the hue forward extra so
-             * the colour visibly shifts on the hit. Tuned constant, not
+             * the color visibly shifts on the hit. Tuned constant, not
              * calibrated — see beat_react's comment above. */
             if (beat_react && mic_get_beat_pulse()) rainbow_hue = (rainbow_hue + 40) % 360;
             for (int i = 0; i < LED_COUNT; i++) {

@@ -13,7 +13,7 @@ void leds_update(void);
 void leds_effect_rainbow(void);
 void leds_off(void);
 /* Pause/resume RMT transmissions during audio playback.
- * WS2812 LEDs hold their last colour without refresh, so visually
+ * WS2812 LEDs hold their last color without refresh, so visually
  * nothing changes.  Pausing stops RMT 10 MHz bursts and the resulting
  * current spikes on the 3.3 V rail from coupling into the DAC output. */
 void leds_set_audio_active(bool active);

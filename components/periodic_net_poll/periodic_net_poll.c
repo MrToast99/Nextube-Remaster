@@ -37,6 +37,9 @@ static poll_entry_t      s_entries[NET_POLL_MAX_ENTRIES];
 static int               s_entry_count   = 0;
 static SemaphoreHandle_t s_wake_sem      = NULL;
 static bool              s_task_started  = false;
+static bool              s_logged_down   = false;  /* true while the "WiFi down" line has
+                                                      * already been logged for the current
+                                                      * outage — see the main loop below. */
 /* 0 until the shared WiFi-connected + DNS-settle gate clears; read by
  * periodic_net_poll_register() to decide whether a (hypothetical) late
  * registration can compute its own first deadline immediately, or has to
@@ -68,19 +71,46 @@ static void periodic_net_poll_task(void *arg)
             s_entries[i].next_due_us = s_boot_gate_us + (int64_t)s_entries[i].first_delay_ms * 1000;
 
     for (;;) {
-        int64_t now     = esp_timer_get_time();
-        int64_t soonest = now + 60LL * 1000000;   /* re-evaluate at least once a minute */
-        for (int i = 0; i < s_entry_count; i++)
-            if (s_entries[i].next_due_us < soonest) soonest = s_entries[i].next_due_us;
+        int64_t now = esp_timer_get_time();
 
-        int64_t wait_us = soonest - now;
-        if (wait_us < 0) wait_us = 0;
-        /* Times out at `soonest`, OR returns early via
-         * periodic_net_poll_force()'s xSemaphoreGive() — either way we just
-         * fall through and re-check every entry's own next_due_us below, so
-         * a forced wake for one subsystem can't accidentally tick the
-         * others early. */
+        /* WiFi outage mid-uptime (as opposed to the boot gate above, which
+         * only covers startup): weather/subscribers/update_check would
+         * otherwise each keep firing on their normal interval and eating an
+         * HTTPS-connect failure every time — same failure, over and over,
+         * logged by each subsystem's own fetch code with no memory of having
+         * just failed the exact same way seconds ago. Skip dispatch entirely
+         * while disconnected and just recheck on a short fixed interval
+         * instead of computing each entry's real deadline — there's nothing
+         * useful to schedule around while no entry can succeed anyway. */
+        int64_t wait_us;
+        if (!wifi_manager_is_connected()) {
+            wait_us = 5LL * 1000000;
+        } else {
+            int64_t soonest = now + 60LL * 1000000;   /* re-evaluate at least once a minute */
+            for (int i = 0; i < s_entry_count; i++)
+                if (s_entries[i].next_due_us < soonest) soonest = s_entries[i].next_due_us;
+            wait_us = soonest - now;
+            if (wait_us < 0) wait_us = 0;
+        }
+        /* Times out at `soonest` (or the 5 s outage recheck above), OR
+         * returns early via periodic_net_poll_force()'s xSemaphoreGive() —
+         * either way we just fall through and re-check below, so a forced
+         * wake for one subsystem can't accidentally tick the others early. */
         xSemaphoreTake(s_wake_sem, pdMS_TO_TICKS(wait_us / 1000));
+
+        if (!wifi_manager_is_connected()) {
+            if (!s_logged_down) {
+                ESP_LOGW(TAG, "WiFi down — pausing weather/social/update-check polling until it's back");
+                s_logged_down = true;
+            }
+            continue;   /* no entry's next_due_us is touched, so whatever was
+                         * already due fires on the very next iteration once
+                         * WiFi returns, instead of waiting out a fresh interval */
+        }
+        if (s_logged_down) {
+            ESP_LOGI(TAG, "WiFi back — resuming polling");
+            s_logged_down = false;
+        }
 
         now = esp_timer_get_time();
         for (int i = 0; i < s_entry_count; i++) {

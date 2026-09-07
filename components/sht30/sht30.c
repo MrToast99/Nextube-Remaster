@@ -151,19 +151,13 @@ void sht30_set_offset(float offset_c)
 
 void sht30_task_start(void)
 {
-    /* 3072, down from 4096: sht30_task logs its own stack high-water-mark
-     * on every 30 s sample (see the ESP_LOGI in sht30_task above), so unlike
-     * most tasks in this codebase this one has many independent, in-the-field
-     * readings rather than one or two — consistently 1836-2032 B free (of
-     * 4096) across separate boots over this whole session, i.e. peak usage
-     * a narrow 2064-2260 B band. Trustworthy data, not just a simple-looking
-     * loop assumed safe (that assumption cost a real bug on touch_poll_task
-     * — see its own comment): sht30_read()'s error/CRC-mismatch branches are
-     * all SHORTER than the success path already being measured (they return
-     * early, before the float math), so there's no unexercised deeper branch
-     * hiding here. 3072 leaves ~812 B (36%) over the worst reading seen so
-     * far, and the same per-sample log line keeps reporting forever, so any
-     * future regression shows up immediately rather than silently. */
+    /* 3072, down from 4096: sht30_task logs its own stack high-water-mark on
+     * every 30s sample, giving continuous real usage data rather than a
+     * one-off measurement. Peak usage sits in a 2064-2260 B band —
+     * sht30_read()'s error/CRC branches are all shorter than the success
+     * path already being measured, so no deeper branch is hiding unmeasured.
+     * 3072 leaves ~36% margin over the worst reading seen, and the ongoing
+     * per-sample log means any future regression stays visible. */
     if (xTaskCreate(sht30_task, "sht30", 3072, NULL, 4, NULL) != pdPASS)
         ESP_LOGE(TAG, "sht30_task creation failed");
 }

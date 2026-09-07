@@ -65,8 +65,8 @@ typedef struct {
     backlight_mode_t backlight_mode;
     bool             backlight_on;
     uint8_t          backlight_rgb[6][3];
-    uint8_t          sunmoon_sun_rgb[3];    /* Follow Sun/Moon mode — sun glow colour */
-    uint8_t          sunmoon_moon_rgb[3];   /* Follow Sun/Moon mode — moon glow colour */
+    uint8_t          sunmoon_sun_rgb[3];    /* Follow Sun/Moon mode — sun glow color */
+    uint8_t          sunmoon_moon_rgb[3];   /* Follow Sun/Moon mode — moon glow color */
     uint8_t          led_effect_speed;  /* Breath / Rainbow animation speed 1 (slow) – 10 (fast); default 5 */
     bool             led_weather_override; /* let weather events (e.g. thunderstorm lightning) flash the accent LEDs */
     bool             wlive_animate;        /* WeatherLive: true = realtime animation, false = static (redraw only on clock change) */
@@ -78,14 +78,19 @@ typedef struct {
                                             * solid/gradient fill below, else theme name */
     char             custom_bg_fill[16];  /* "solid","linear_v","linear_h","diagonal","radial" —
                                             * only used when custom_bg == "CustomColor" */
-    uint8_t          custom_bg_color1[3]; /* solid fill colour, or gradient start colour */
-    uint8_t          custom_bg_color2[3]; /* gradient end colour (ignored for "solid") */
+    uint8_t          custom_bg_color1[3]; /* solid fill color, or gradient start color */
+    uint8_t          custom_bg_color2[3]; /* gradient end color (ignored for "solid") */
     uint8_t          custom_font_color[3];   /* info-panel / label text RGB */
     uint8_t          custom_glyph_color[3];  /* clock digit glyph RGB */
     bool             custom_shadow;          /* font/text shadow on/off (info panels, labels — NOT clock digits, see custom_glyph_shadow) */
     uint8_t          custom_shadow_color[3]; /* font/text shadow RGB (used when custom_shadow=true) */
+    uint8_t          custom_shadow_size;     /* font/text shadow blur radius, 1 (tight) .. 4 (wide); default 2.
+                                               * Day value — see custom_shadow_size_night below for the night one. */
     bool             custom_glyph_shadow;          /* clock-digit-glyph shadow on/off — independent of custom_shadow (font/text) */
     uint8_t          custom_glyph_shadow_color[3]; /* clock-digit-glyph shadow RGB (used when custom_glyph_shadow=true) */
+    uint8_t          custom_glyph_shadow_size;     /* clock-digit-glyph shadow blur radius, 1..4; default 2 — independent
+                                                     * of custom_shadow_size (font/text). Day value — see
+                                                     * custom_glyph_shadow_size_night below for the night one. */
     /* Night color set (issue #73) — a second font/glyph/shadow set that the
      * WeatherLive sky crossfades to through twilight, tracking the scene's
      * real geocoded sunrise/sunset. Only active while the animated WL sky is
@@ -95,22 +100,37 @@ typedef struct {
     uint8_t          custom_glyph_color_night[3];
     bool             custom_shadow_night;         /* font/text shadow on/off at night (flips at mid-twilight) */
     uint8_t          custom_shadow_color_night[3];
+    uint8_t          custom_shadow_size_night;    /* font/text shadow blur radius at night, 1..4; default 2.
+                                                    * Like the on/off toggle above, this flips (not blends) at
+                                                    * mid-twilight — a discrete 1-4 level has no meaningful
+                                                    * in-between value the way an RGB channel does. Ignored in
+                                                    * Drift mode, same as custom_shadow_night. */
     bool             custom_glyph_shadow_night;         /* clock-digit-glyph shadow on/off at night */
     uint8_t          custom_glyph_shadow_color_night[3];
+    uint8_t          custom_glyph_shadow_size_night;    /* clock-digit-glyph shadow blur radius at night, 1..4;
+                                                          * default 2 — independent of custom_shadow_size_night
+                                                          * (font/text). Same flip-not-blend behaviour. */
+    /* Night color set "Drift" mode: swaps the sun-position-driven crossfade
+     * for a continuous A-B-A timer oscillation between the day and night
+     * sets — an alternative to sun-tracking, not a variant of it. Default
+     * false preserves existing "Follow sun" behaviour for every config that
+     * predates this field. Only meaningful while custom_night_colors is on. */
+    bool             custom_night_drift;
+    uint16_t         custom_night_drift_period_s;  /* full A-B-A cycle length; default 300 (5 min), clamp >= 5 */
     char             custom_font[64];        /* TTF filename in /spiffs/fonts/; "" = logisoso (u8g2 fallback).
                                                * Also applies to 24H_CX asset-theme Outdoor Temp/Humidity/Wind/
                                                * AQI/combined-H-T panels (they share wl_text() with WeatherLive). */
     /* "DotMatrix" theme — procedural 7x14-cell dot-matrix glyphs (ships with
      * no on-disk assets, like WeatherLive).  Every cell in a glyph's grid is
-     * always painted, on or off, so both colours are independently set. */
+     * always painted, on or off, so both colors are independently set. */
     uint8_t          dm_on_color[3];         /* lit-dot RGB */
     uint8_t          dm_off_color[3];        /* unlit-dot RGB */
-    uint8_t          spectrum_rgb[3];       /* LED ring colour for Spectrum mode [R, G, B] */
-    uint8_t          spectrum_lcd_rgb[3];   /* LCD bar colour for Spectrum mode [R, G, B] */
-    bool             spectrum_lcd_wled;     /* true = LCD bars follow the WLED primary colour
+    uint8_t          spectrum_rgb[3];       /* LED ring color for Spectrum mode [R, G, B] */
+    uint8_t          spectrum_lcd_rgb[3];   /* LCD bar color for Spectrum mode [R, G, B] */
+    bool             spectrum_lcd_wled;     /* true = LCD bars follow the WLED primary color
                                                (live, when WLED Sync is receiving packets);
                                                falls back to spectrum_lcd_rgb otherwise */
-    uint8_t          spectrum_led_source;   /* 0 = custom glow colour (amplitude-modulated),
+    uint8_t          spectrum_led_source;   /* 0 = custom glow color (amplitude-modulated),
                                                1 = follow configured accent mode (Static/Breath/Rainbow/Off) */
     bool             spectrum_led_beat_react; /* Breath/Rainbow only, and only while
                                                spectrum_led_source == 1: nudge the animation
@@ -120,7 +140,7 @@ typedef struct {
                                                   firmware update is available.  Driven by the
                                                   web UI via POST /api/update_notify. */
     uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0xFFF (all 12) */
-    uint8_t          lcd_invert_mask;    /* bitmask: bit N = tube N needs INVON (colour-inverted replacement panel) */
+    uint8_t          lcd_invert_mask;    /* bitmask: bit N = tube N needs INVON (color-inverted replacement panel) */
     uint8_t          lcd_init_profile[6];    /* per-tube panel profile: 0=Standard, 1=Vivid (gamma curve selector) */
     uint8_t          lcd_vcom[6];        /* per-tube VMCTR1 VCOM value 0x00–0x3F (0=14, standard; higher=more contrast) */
     float            lcd_gamma[6];       /* per-tube software gamma exponent 0.5–3.0 (1.0=off; >1 darkens midtones for washed panels) */
@@ -239,9 +259,13 @@ typedef struct {
                                             published every 60 s — default off */
     bool             mqtt_pub_buttons;   /* touch presses as HA device triggers
                                             (left/middle/right) — default off */
+    uint8_t          mqtt_publish_interval_s; /* "Clock to MQTT interval" — how often
+                                            the publish task checks mode/display/
+                                            brightness/theme/rotation for changes and
+                                            publishes them; 1-60 s, default 30 */
 
     /* WLED Sync (receive) — listen for WLED UDP Notifier v2 broadcasts
-     * and apply the primary colour + brightness to the local accent LEDs.
+     * and apply the primary color + brightness to the local accent LEDs.
      * Boot-time gate: restart required to start or stop the listener task.
      * Select backlight_mode = BL_MODE_WLED to activate synchronisation.      */
     bool             wled_sync_enabled;  /* start UDP listener task at boot     */
@@ -281,7 +305,7 @@ typedef struct {
     uint8_t          theme_rotation_count;           /* 0 = all themes */
     char             theme_rotation_themes[16][32];  /* selected theme names */
 
-    /* Scheduled Burn-in – automatic LCD colour-cycle recovery.
+    /* Scheduled Burn-in – automatic LCD color-cycle recovery.
      * Fires at midnight on the configured interval (weekly = every Sunday,
      * monthly = 1st of month).  Calls display_set_burnin_mask() autonomously
      * from within the display task — no web UI interaction required. */
@@ -290,7 +314,7 @@ typedef struct {
     uint32_t         burnin_auto_duration_s;   /* session length, 1800–14400 s (default 3600 = 1 hr) */
     char             burnin_auto_interval[8];  /* "weekly" (Sunday) or "monthly" (1st) */
     uint8_t          burnin_auto_hour;         /* hour of day to fire, 0-23 (default 0 = midnight) */
-    char             burnin_auto_mode[16];     /* "colour-cycle" (default) or "snow" */
+    char             burnin_auto_mode[16];     /* "color-cycle" (default) or "snow" */
 
     /* Date display format (Custom Clock / date panels) */
     char             date_format[12];    /* "DD/MM/YY" (default, European) or "MM/DD/YY" (US) */

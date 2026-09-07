@@ -57,8 +57,10 @@ static void set_defaults(void)
     s_cfg.custom_glyph_color[0] = 255; s_cfg.custom_glyph_color[1] = 255; s_cfg.custom_glyph_color[2] = 255;
     s_cfg.custom_shadow         = true;
     s_cfg.custom_shadow_color[0]= 0;   s_cfg.custom_shadow_color[1]= 0;   s_cfg.custom_shadow_color[2]= 0;
+    s_cfg.custom_shadow_size    = 2;   /* matches the blur radius every config predating this field rendered at */
     s_cfg.custom_glyph_shadow          = true;
     s_cfg.custom_glyph_shadow_color[0] = 0; s_cfg.custom_glyph_shadow_color[1] = 0; s_cfg.custom_glyph_shadow_color[2] = 0;
+    s_cfg.custom_glyph_shadow_size     = 2;
     /* Night color set: disabled; colors mirror the day defaults so enabling
      * it is a no-op until the user actually picks night colors. */
     s_cfg.custom_night_colors   = false;
@@ -66,8 +68,12 @@ static void set_defaults(void)
     s_cfg.custom_glyph_color_night[0] = 255; s_cfg.custom_glyph_color_night[1] = 255; s_cfg.custom_glyph_color_night[2] = 255;
     s_cfg.custom_shadow_night         = true;
     s_cfg.custom_shadow_color_night[0]= 0;   s_cfg.custom_shadow_color_night[1]= 0;   s_cfg.custom_shadow_color_night[2]= 0;
+    s_cfg.custom_shadow_size_night    = 2;
     s_cfg.custom_glyph_shadow_night          = true;
     s_cfg.custom_glyph_shadow_color_night[0] = 0; s_cfg.custom_glyph_shadow_color_night[1] = 0; s_cfg.custom_glyph_shadow_color_night[2] = 0;
+    s_cfg.custom_glyph_shadow_size_night     = 2;
+    s_cfg.custom_night_drift            = false;  /* default: Follow Sun, not Drift */
+    s_cfg.custom_night_drift_period_s   = 300;    /* 5 min full A-B-A cycle */
     s_cfg.custom_font[0]        = '\0';
     s_cfg.dm_on_color[0]  = 255; s_cfg.dm_on_color[1]  = 255; s_cfg.dm_on_color[2]  = 255;
     s_cfg.dm_off_color[0] = 25;  s_cfg.dm_off_color[1] = 25;  s_cfg.dm_off_color[2] = 25;
@@ -75,22 +81,22 @@ static void set_defaults(void)
      * can be active simultaneously in the touch cycle. */
     s_cfg.enabled_modes   = 0xFFF;   /* all 12 modes (bits 0–11) */
 
-    /* Spectrum mode LED colour — matches stock firmware spectrum_RGB default */
+    /* Spectrum mode LED color — matches stock firmware spectrum_RGB default */
     s_cfg.spectrum_rgb[0] = 50;
     s_cfg.spectrum_rgb[1] = 80;
     s_cfg.spectrum_rgb[2] = 100;
 
-    /* Spectrum mode LCD bar colour — classic green matches old hardcoded default */
+    /* Spectrum mode LCD bar color — classic green matches old hardcoded default */
     s_cfg.spectrum_lcd_rgb[0] = 30;
     s_cfg.spectrum_lcd_rgb[1] = 220;
     s_cfg.spectrum_lcd_rgb[2] = 30;
-    s_cfg.spectrum_lcd_wled   = false;  /* opt-in: bars follow WLED primary colour */
+    s_cfg.spectrum_lcd_wled   = false;  /* opt-in: bars follow WLED primary color */
 
     /* Follow Sun/Moon LED mode defaults. */
     s_cfg.sunmoon_sun_rgb[0] = 255; s_cfg.sunmoon_sun_rgb[1] = 213; s_cfg.sunmoon_sun_rgb[2] = 46;
     s_cfg.sunmoon_moon_rgb[0] = 230; s_cfg.sunmoon_moon_rgb[1] = 234; s_cfg.sunmoon_moon_rgb[2] = 248;
 
-    /* Spectrum LED source — 0 = custom glow colour (amplitude-modulated),
+    /* Spectrum LED source — 0 = custom glow color (amplitude-modulated),
      * 1 = follow configured accent mode. Default 0 for backward compatibility. */
     s_cfg.spectrum_led_source = 0;
     s_cfg.spectrum_led_beat_react = false;   /* off by default — see config_mgr.h */
@@ -98,7 +104,7 @@ static void set_defaults(void)
     /* Clock-face update indicator — opt-in (off by default) */
     s_cfg.notify_update_on_display = false;
 
-    /* Per-tube colour-inversion mask (0 = all normal; set bit N for replacement
+    /* Per-tube color-inversion mask (0 = all normal; set bit N for replacement
      * panels that default to INVON, e.g. LH096NT-IF09W variants) */
     s_cfg.lcd_invert_mask = 0;
     /* Per-tube panel profile: 0=Standard (original panels), 1=Vivid (ST7735S
@@ -121,7 +127,7 @@ static void set_defaults(void)
      * Replacement panels are often brighter than the originals; reduce to match. */
     for (int i = 0; i < 6; i++) s_cfg.lcd_tube_brightness[i] = 100;
 
-    /* Default rainbow-ish backlight colours */
+    /* Default rainbow-ish backlight colors */
     uint8_t defaults[6][3] = {
         {200,0,0}, {0,200,0}, {0,0,200},
         {110,100,0}, {0,200,200}, {200,0,200}
@@ -200,6 +206,7 @@ static void set_defaults(void)
     s_cfg.mqtt_pub_ntp      = false;  /* clock telemetry — opt-in              */
     s_cfg.mqtt_pub_health   = false;  /* RSSI/heap/uptime each 60 s — opt-in   */
     s_cfg.mqtt_pub_buttons  = false;  /* touch presses as HA triggers — opt-in */
+    s_cfg.mqtt_publish_interval_s = 30; /* Clock to MQTT interval — 30 s default */
 
     /* WLED Sync */
     s_cfg.wled_sync_enabled = false;
@@ -258,7 +265,7 @@ static void set_defaults(void)
     s_cfg.burnin_auto_duration_s = 3600;   /* 1 hour */
     strncpy(s_cfg.burnin_auto_interval, "weekly", sizeof(s_cfg.burnin_auto_interval) - 1);
     s_cfg.burnin_auto_hour       = 0;      /* midnight */
-    strncpy(s_cfg.burnin_auto_mode, "colour-cycle", sizeof(s_cfg.burnin_auto_mode) - 1);
+    strncpy(s_cfg.burnin_auto_mode, "color-cycle", sizeof(s_cfg.burnin_auto_mode) - 1);
 }
 
 /* ── JSON helpers ──────────────────────────────────────────────────── */
@@ -450,6 +457,12 @@ static void parse_json(const char *json, size_t len)
         json_read_bool(root, "mqtt_pub_ntp", &s_cfg.mqtt_pub_ntp);
         json_read_bool(root, "mqtt_pub_health", &s_cfg.mqtt_pub_health);
         json_read_bool(root, "mqtt_pub_buttons", &s_cfg.mqtt_pub_buttons);
+        json_read_u8(root, "mqtt_publish_interval_s", &s_cfg.mqtt_publish_interval_s);
+        /* Clamp to the web UI's 1-60 s range — guards against 0 (which would
+         * make the publish task's slow_tick divisor meaningless) and against
+         * a stale/hand-edited config from before this field existed. */
+        if (s_cfg.mqtt_publish_interval_s < 1)  s_cfg.mqtt_publish_interval_s = 1;
+        if (s_cfg.mqtt_publish_interval_s > 60) s_cfg.mqtt_publish_interval_s = 60;
     }
     {
         json_read_bool(root, "wled_sync_enabled", &s_cfg.wled_sync_enabled);
@@ -537,8 +550,23 @@ static void parse_json(const char *json, size_t len)
     if (s_cfg.custom_bg_fill[0] == '\0') strncpy(s_cfg.custom_bg_fill, "solid", sizeof(s_cfg.custom_bg_fill) - 1);
     {
         json_read_bool(root, "custom_shadow", &s_cfg.custom_shadow);
+        json_read_u8(root, "custom_shadow_size", &s_cfg.custom_shadow_size);
+        if (s_cfg.custom_shadow_size < 1) s_cfg.custom_shadow_size = 1;
+        if (s_cfg.custom_shadow_size > 4) s_cfg.custom_shadow_size = 4;
+        json_read_u8(root, "custom_glyph_shadow_size", &s_cfg.custom_glyph_shadow_size);
+        if (s_cfg.custom_glyph_shadow_size < 1) s_cfg.custom_glyph_shadow_size = 1;
+        if (s_cfg.custom_glyph_shadow_size > 4) s_cfg.custom_glyph_shadow_size = 4;
         json_read_bool(root, "custom_night_colors", &s_cfg.custom_night_colors);
+        json_read_bool(root, "custom_night_drift", &s_cfg.custom_night_drift);
+        json_read_u16(root, "custom_night_drift_period_s", &s_cfg.custom_night_drift_period_s);
+        if (s_cfg.custom_night_drift_period_s < 5) s_cfg.custom_night_drift_period_s = 5;
         json_read_bool(root, "custom_shadow_night", &s_cfg.custom_shadow_night);
+        json_read_u8(root, "custom_shadow_size_night", &s_cfg.custom_shadow_size_night);
+        if (s_cfg.custom_shadow_size_night < 1) s_cfg.custom_shadow_size_night = 1;
+        if (s_cfg.custom_shadow_size_night > 4) s_cfg.custom_shadow_size_night = 4;
+        json_read_u8(root, "custom_glyph_shadow_size_night", &s_cfg.custom_glyph_shadow_size_night);
+        if (s_cfg.custom_glyph_shadow_size_night < 1) s_cfg.custom_glyph_shadow_size_night = 1;
+        if (s_cfg.custom_glyph_shadow_size_night > 4) s_cfg.custom_glyph_shadow_size_night = 4;
         cJSON *v = cJSON_GetObjectItem(root, "custom_glyph_shadow");
         bool have_glyph_shadow = cJSON_IsBool(v);
         if (have_glyph_shadow) s_cfg.custom_glyph_shadow = cJSON_IsTrue(v);
@@ -677,7 +705,7 @@ static void parse_json(const char *json, size_t len)
     else if (strcmp(bl_mode, "WLED")    == 0) s_cfg.backlight_mode = BL_MODE_WLED;
     else if (strcmp(bl_mode, "SunMoon") == 0) s_cfg.backlight_mode = BL_MODE_SUNMOON;
 
-    /* sunmoon_sun_RGB / sunmoon_moon_RGB — Follow Sun/Moon mode colours,
+    /* sunmoon_sun_RGB / sunmoon_moon_RGB — Follow Sun/Moon mode colors,
      * [R,G,B] arrays following the spectrum_RGB pattern. */
     {
         cJSON *sun_arr = cJSON_GetObjectItem(root, "sunmoon_sun_RGB");
@@ -795,9 +823,9 @@ static void parse_json(const char *json, size_t len)
     if (s_cfg.burnin_auto_hour > 23) s_cfg.burnin_auto_hour = 0;
     json_read_str(root, "burnin_auto_mode", s_cfg.burnin_auto_mode,
                   sizeof(s_cfg.burnin_auto_mode));
-    /* Only "colour-cycle" and "snow" are valid; default to "colour-cycle" */
+    /* Only "color-cycle" and "snow" are valid; default to "color-cycle" */
     if (strcmp(s_cfg.burnin_auto_mode, "snow") != 0)
-        strncpy(s_cfg.burnin_auto_mode, "colour-cycle", sizeof(s_cfg.burnin_auto_mode) - 1);
+        strncpy(s_cfg.burnin_auto_mode, "color-cycle", sizeof(s_cfg.burnin_auto_mode) - 1);
 
     /* Backlight RGB array */
     cJSON *bl_rgb = cJSON_GetObjectItem(root, "backlight_RGB");
@@ -834,7 +862,7 @@ static void parse_json(const char *json, size_t len)
         }
     }
 
-    /* spectrum_lcd_RGB — LCD bar colour for Spectrum mode */
+    /* spectrum_lcd_RGB — LCD bar color for Spectrum mode */
     {
         cJSON *sp = cJSON_GetObjectItem(root, "spectrum_lcd_RGB");
         if (cJSON_IsArray(sp) && cJSON_GetArraySize(sp) >= 3) {
@@ -851,13 +879,13 @@ static void parse_json(const char *json, size_t len)
     if (s_cfg.spectrum_led_source > 1) s_cfg.spectrum_led_source = 0;
     json_read_bool(root, "spectrum_led_beat_react", &s_cfg.spectrum_led_beat_react);
 
-    /* spectrum_lcd_wled — LCD bars follow the WLED primary colour */
+    /* spectrum_lcd_wled — LCD bars follow the WLED primary color */
     json_read_bool(root, "spectrum_lcd_wled", &s_cfg.spectrum_lcd_wled);
 
     /* notify_update_on_display — opt-in clock-face update indicator */
     json_read_bool(root, "notify_update_on_display", &s_cfg.notify_update_on_display);
 
-    /* lcd_invert_mask — per-tube INVON flag for colour-inverted replacement panels */
+    /* lcd_invert_mask — per-tube INVON flag for color-inverted replacement panels */
     json_read_u8(root, "lcd_invert_mask", &s_cfg.lcd_invert_mask);
     s_cfg.lcd_invert_mask &= 0x3F;   /* only 6 tubes */
 
@@ -1235,6 +1263,7 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "mqtt_pub_ntp",      s_cfg.mqtt_pub_ntp);
     cJSON_AddBoolToObject  (root, "mqtt_pub_health",   s_cfg.mqtt_pub_health);
     cJSON_AddBoolToObject  (root, "mqtt_pub_buttons",  s_cfg.mqtt_pub_buttons);
+    cJSON_AddNumberToObject(root, "mqtt_publish_interval_s", s_cfg.mqtt_publish_interval_s);
     cJSON_AddNumberToObject(root, "mic_adc_channel",   s_cfg.mic_adc_channel);
     cJSON_AddNumberToObject(root, "mic_silence_gate",  (double)s_cfg.mic_silence_gate);
     {
@@ -1254,9 +1283,15 @@ char *config_to_json(bool include_password)
     cJSON_AddStringToObject(root, "custom_bg",            s_cfg.custom_bg);
     cJSON_AddStringToObject(root, "custom_bg_fill",       s_cfg.custom_bg_fill);
     cJSON_AddBoolToObject  (root, "custom_shadow",        s_cfg.custom_shadow);
+    cJSON_AddNumberToObject(root, "custom_shadow_size",   s_cfg.custom_shadow_size);
     cJSON_AddBoolToObject  (root, "custom_night_colors",  s_cfg.custom_night_colors);
+    cJSON_AddBoolToObject  (root, "custom_night_drift",   s_cfg.custom_night_drift);
+    cJSON_AddNumberToObject(root, "custom_night_drift_period_s", s_cfg.custom_night_drift_period_s);
     cJSON_AddBoolToObject  (root, "custom_shadow_night",  s_cfg.custom_shadow_night);
+    cJSON_AddNumberToObject(root, "custom_shadow_size_night", s_cfg.custom_shadow_size_night);
     cJSON_AddBoolToObject  (root, "custom_glyph_shadow",        s_cfg.custom_glyph_shadow);
+    cJSON_AddNumberToObject(root, "custom_glyph_shadow_size",   s_cfg.custom_glyph_shadow_size);
+    cJSON_AddNumberToObject(root, "custom_glyph_shadow_size_night", s_cfg.custom_glyph_shadow_size_night);
     cJSON_AddBoolToObject  (root, "custom_glyph_shadow_night",  s_cfg.custom_glyph_shadow_night);
     cJSON_AddStringToObject(root, "custom_font",          s_cfg.custom_font);
     {
@@ -1478,6 +1513,24 @@ void config_reset(void)
     char *out = config_to_json(true);
     xSemaphoreGiveRecursive(s_mutex);
     write_config_file(out);   /* flash write outside the lock */
+
+    /* Also purge any pending NVS config backup (see config_backup_to_nvs()).
+     * That backup exists only as a filesystem-OTA safety net — written right
+     * before a full LittleFS reflash, consumed and erased by
+     * config_restore_from_nvs() on the next successful boot. If a reset
+     * happens while one is still sitting there (the restore never got to
+     * run — e.g. a reboot loop, or a reset performed between the flash and
+     * that first boot), config_mgr_init() would silently restore the old
+     * settings right back on top of this reset the very next boot, undoing
+     * it completely with no error logged anywhere. A reset must always win
+     * over a leftover safety-net copy. */
+    nvs_handle_t h;
+    if (nvs_open(NVS_CFG_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, NVS_CFG_KEY);   /* ESP_ERR_NVS_NOT_FOUND if none — fine either way */
+        nvs_commit(h);
+        nvs_close(h);
+    }
+
     ESP_LOGI(TAG, "Config reset to factory defaults");
 }
 

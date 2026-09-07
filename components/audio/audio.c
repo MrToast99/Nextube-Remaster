@@ -2,57 +2,30 @@
  * @file audio.c
  * @brief Nextube audio driver — WAV playback on a software-clocked DAC.
  *
- * Hardware: GPIO25 → 0.1 uF AC coupling cap → LTK8002D amplifier (DAC_CHAN_0).
- * The amp has no shutdown control (SD is strapped high), so it is always live
- * and anything on the pad is audible.
+ * Hardware: GPIO25 → 0.1uF AC coupling cap → LTK8002D amp (DAC_CHAN_0), no
+ * shutdown control — always live, so anything on the pad is audible.
+ * Supports PCM WAV, 8- or 16-bit (16-bit down-converted to 8-bit unsigned).
+ * Playback runs in a task created per clip; a mutex serialises requests.
  *
- * Supports PCM WAV, 8- or 16-bit; 16-bit is down-converted to the 8-bit
- * unsigned the DAC takes. Playback runs in a task created per clip, so
- * audio_play_file() returns immediately; a mutex serialises requests.
+ * dac_oneshot + gptimer, not dac_continuous: dac_continuous needs I2S0, the
+ * same controller the mic's adc_continuous capture needs, so audio and
+ * Spectrum mode would be mutually exclusive. dac_oneshot touches no I2S,
+ * drops the DMA ring, and removes dac_continuous's ~19.6kHz minimum rate.
  *
- * ── Why one-shot + timer rather than dac_continuous ───────────────────────
- * dac_continuous drives the DAC through the I2S0 controller — the same one
- * the microphone's adc_continuous capture needs. They cannot both hold it, so
- * audio and Spectrum mode were mutually exclusive: with the mic enabled every
- * clip failed with "i2s controller 0 has been occupied by adc". Clocking
- * dac_oneshot from a gptimer touches no I2S at all, which removes the
- * conflict rather than scheduling around it.
+ * Idle state: the pad is ISOLATED between clips (buffers off, no pulls) —
+ * every driven idle (LOW, Hi-Z, live DAC buffer) measured noisier. The
+ * isolated↔driven transition itself is an audible step; three things
+ * minimize it: park at MID-RAIL (128 — the coupling cap sits at ~0V against
+ * the amp's bias there, so the transition moves no charge, unlike 0V);
+ * ramp only between 128 and the clip's own first/last sample; ramp FAST, one
+ * LSB per sample — an 8-bit ramp is a staircase, and slowing it down moves
+ * the staircase rate into the audible range instead of above it. A residual
+ * click at the boundary is the price of a silent idle on this hardware;
+ * muting the amp across it would need the SD pin the board doesn't route.
  *
- * It also drops the 4 KB DMA ring (audio no longer competes for the scarce
- * DMA-capable pool), removes dac_continuous's ~19.6 kHz minimum rate so clips
- * play at their own sample rate with no upsampling, and gives exact control of
- * the pad through the start/stop transition.
- *
- * ── Idle state, and why clicks are unavoidable here ───────────────────────
- * Between clips the pad is ISOLATED (rtc_gpio_isolate: buffers off, no pulls).
- * Measured on hardware, every driven idle is worse: OUTPUT-LOW conducts the
- * chip's activity into the amp as a static floor plus a 1 Hz tick, digital
- * Hi-Z picks up broadband coupling, and a live DAC output buffer adds its own
- * reference / 1-f noise — confirmed again with the "dc 128" test mode, which
- * hisses where "normal" is silent.
- *
- * So the pad must transition isolated⇄driven around every clip, and that
- * transition is a step the AC-coupled amp hears. Three things reduce it:
- *   - Park at MID-RAIL (128). At 128 the coupling cap sits at ~0 V against
- *     the amp's bias, so connecting or isolating moves no charge. Measured:
- *     "dc 128 → normal" is silent, "dc 0 → normal" pops.
- *   - Ramp only between 128 and the clip's own first/last sample, keeping the
- *     DC excursion as small as the audio allows.
- *   - Ramp FAST — one LSB per sample. An 8-bit ramp is not smooth, it is a
- *     staircase of ~13 mV steps (stepping "dc" manually clicks at every
- *     step), so what you hear is the STEP RATE. One step per sample puts it
- *     at the sample rate, above hearing; spreading the same ramp over 120 ms
- *     drops it to a few hundred Hz, which is exactly the crackle it was
- *     meant to prevent. Slower is worse here, not better.
- *
- * A residual click at the boundary is the price of a silent idle on this
- * hardware; muting the amp across it would need the SD pin the board does not
- * route.
- *
- * ── Playback shape ────────────────────────────────────────────────────────
- * leds_set_audio_active(true) pauses WS2812 RMT first (its rail transients
- * couple into the DAC), then the whole stream — [fade-in][clip][fade-out] —
- * is composed in PSRAM and fed to the ISR through a small internal-RAM double
+ * Playback: leds_set_audio_active(true) pauses WS2812 RMT first (rail
+ * transients couple into the DAC), then [fade-in][clip][fade-out] is
+ * composed in PSRAM and fed to the ISR through a small internal-RAM double
  * buffer. Nothing touches flash once the timer is running.
  */
 
@@ -96,19 +69,11 @@ static volatile bool           s_dac_test_active = false;
 
 /* ── Sizes ──────────────────────────────────────────────────────────── */
 
-/* audio_play_task's stack.
- *
- * MEASURED, not estimated: a full clip peaks at ~2050 B on the current
- * software-clocked path (the ISR does the per-sample work, so the task only
- * parses the WAV, composes the stream and memcpys halves). 5120 leaves ~60%
- * headroom.
- *
- * History worth keeping: this was 16384, a figure that predated the per-task
- * stack telemetry in main.c and could never be checked against it — the task
- * is created per clip and self-deletes, so it never survives to appear in a
- * 5-minute dump. It was the single largest contiguous internal-RAM request in
- * the firmware and simply stopped fitting once every feature was enabled,
- * dropping clips silently. Measure before trusting a stack size here. */
+/* audio_play_task's stack — measured peak ~2050 B (the ISR does the
+ * per-sample work; the task only parses the WAV, composes the stream, and
+ * memcpys halves). 5120 leaves ~60% headroom. This task self-deletes per
+ * clip, so it never appears in the periodic stack-usage dump — measure
+ * directly before trusting a size here. */
 #define AUDIO_PLAY_STACK_SIZE  5120
 
 /* ── WAV RIFF header (44 bytes, little-endian) ─────────────────────── */
@@ -133,31 +98,19 @@ typedef struct __attribute__((packed)) {
  * shape. */
 
 /* ══ Software-clocked playback engine ══════════════════════════════════
- *
- * See the file header for WHY this replaced dac_continuous. Mechanics:
- *
- * A gptimer alarm fires once per sample and the ISR writes one byte with
- * dac_oneshot_output_voltage() — the one DAC API Espressif documents as
- * ISR-safe. Everything else (channel and timer create/delete) runs from the
- * calling task.
- *
- * Samples come from a two-half buffer in plain internal .bss: the ISR drains
- * one half while the task refills the other, and the ISR notifies the task
- * each time it hands a half back. Deliberately NOT DMA-capable memory — this
- * engine has no DMA at all, which is what keeps audio out of that scarce pool.
- *
- * s_sw_loop switches the ISR from "drain and ask for more" to "replay both
- * halves forever", which is how the tone test mode runs with no task feeding
- * it at all.
- *
- * The ISR is NOT IRAM-safe, so it stalls while the cache is disabled during a
- * flash write. Clips are fully pre-buffered into PSRAM before the timer starts
- * (no file I/O during playback), so this only bites if something ELSE writes
- * flash mid-clip. Making it IRAM-safe is not a drop-in change: this project
- * sets CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y, which puts
+ * A gptimer alarm fires once per sample; the ISR writes one byte via
+ * dac_oneshot_output_voltage() (the one ISR-safe DAC API). Samples come from
+ * a two-half buffer in plain internal .bss — the ISR drains one half while
+ * the task refills the other, deliberately not DMA-capable (this engine
+ * uses no DMA at all). s_sw_loop switches the ISR to replay both halves
+ * forever instead, for the tone test mode with no task feeding it.
+ * The ISR is not IRAM-safe, so it stalls if the cache is disabled by a
+ * flash write mid-clip — clips are fully pre-buffered into PSRAM before the
+ * timer starts, so this only bites if something else writes flash
+ * mid-playback. Making it IRAM-safe isn't a drop-in change:
+ * CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y puts
  * vTaskNotifyGiveFromISR() in flash, so an IRAM-safe ISR calling it during a
- * cache-disable window would crash rather than glitch. That would need the
- * feed handshake restructured to drop the notification first. */
+ * cache-disable window would crash rather than glitch. */
 
 #define SW_HALF_SAMPLES  1024   /* per half-buffer; 64 ms at 16 kHz */
 
@@ -393,24 +346,12 @@ static int pcm16_to_pcm8(uint8_t *buf, int len_bytes)
 typedef struct { char path[128]; } play_arg_t;
 
 /* Created fresh per clip by audio_play_file() and self-deletes when the clip
- * ends, so its 16 KB internal-RAM stack is only held while a sound is
- * actually playing.
- *
- * A persistent queue-fed version of this task was tried and REVERTED. It did
- * fix the real problem it targeted (per-clip creation fails once internal RAM
- * is fragmented — confirmed at ~85 min uptime with every feature active,
- * largest contiguous block down to ~1.9 KB, two silent playback failures),
- * but it fixed it by holding 16 KB permanently from boot on a device whose
- * task stacks already total ~143 KB against ~140 KB of usable internal RAM.
- * Measured cost of that trade, from heap_caps_print_heap_info before/after:
- * +9 KB permanently allocated, and sht30_task (4 KB) + wled_sync_task (3 KB)
- * both failed to create on EVERY boot afterwards, with MQTT starved before it
- * was even reached. Trading two always-on features plus MQTT for occasional
- * button-click audio is the wrong trade.
- *
- * If this is retried later, do it only after there is real headroom, and with
- * a MEASURED stack size (see AUDIO_PLAY_STACK_SIZE and the sizing probe at
- * task_exit below). */
+ * ends, so its stack is only held while a sound is actually playing — a
+ * persistent queue-fed task would hold that stack permanently from boot,
+ * which starves sht30_task/wled_sync_task/MQTT on a device whose task
+ * stacks already total close to usable internal RAM. Per-clip creation can
+ * still fail if internal RAM gets fragmented enough, but that's the safer
+ * failure mode of the two. */
 static void audio_play_task(void *arg)
 {
     play_arg_t *a = (play_arg_t *)arg;
@@ -533,34 +474,22 @@ static void audio_play_task(void *arg)
             }
 
             /* Ramps between MID-RAIL (128) and the clip's own first/last
-             * sample, at EXACTLY ONE LSB PER SAMPLE.
+             * sample, at exactly one LSB per sample.
              *
-             * Two separate findings drive this, both measured on hardware with
-             * the dc/normal test modes:
+             * Mid-rail, not 0: at 128 the coupling cap sits at ~0V against
+             * the amp's bias, so isolating moves no charge; at 0V it holds
+             * ~1.65V and isolating pops.
              *
-             * 1. Mid-rail, not 0. "dc 128 -> normal" (isolate from mid-rail)
-             *    is silent; "dc 0 -> normal" pops. At 128 the coupling cap
-             *    sits at ~0 V against the amp's bias so isolating moves no
-             *    charge; at 0 V it holds ~1.65 V and isolating strands it.
-             *    The original 0->128 / 128->0 ramps were right when the idle
-             *    was "pad driven LOW", and were never updated when the idle
-             *    became rtc_gpio_isolate().
+             * One LSB per sample, not a smooth curve: an 8-bit ramp is a
+             * staircase, and its step RATE is what's audible — spreading it
+             * over more samples lowers the staircase frequency into the
+             * audible range instead of above it. One step per sample puts
+             * the staircase at the sample rate itself (16kHz), above
+             * hearing — counter-intuitively, a LONGER ramp is worse here.
              *
-             * 2. One LSB per sample, i.e. as FAST as the sample rate allows —
-             *    not a long smooth curve. Stepping the level manually
-             *    (0 -> 20 -> 40 -> ...) clicks at every step, so an 8-bit ramp
-             *    is not smooth: it is a staircase of ~13 mV steps, and its
-             *    STEP RATE is what you hear. The previous 120 ms cosine spread
-             *    perhaps 68 steps over 1920 samples — one step every ~28
-             *    samples, a ~570 Hz staircase, squarely audible. Stepping once
-             *    per sample instead puts it at the sample rate (16 kHz), above
-             *    hearing. Counter-intuitively, lengthening this ramp makes the
-             *    artefact WORSE, not better.
-             *
-             * Linear, not cosine: an S-curve would cluster steps at the ends,
-             * which is the opposite of what a uniform 1-LSB/sample step needs.
-             * Ramp length therefore falls out of the audio itself — a clip
-             * starting at mid-rail needs no ramp at all. */
+             * Linear, not cosine: an S-curve clusters steps at the ends,
+             * the opposite of the uniform 1-LSB/sample step this needs. A
+             * clip already starting at mid-rail needs no ramp at all. */
             uint8_t first = clip_n ? clip[0] : 128;
             uint8_t last  = clip_n ? clip[clip_n - 1] : 128;
 
@@ -585,7 +514,7 @@ static void audio_play_task(void *arg)
 
         /* -- Pause LED RMT before driving the pad --------------------------
          * WS2812 current spikes on the 3.3 V rail couple into the DAC output.
-         * Pausing RMT stops all transmissions; LEDs hold their last colour.
+         * Pausing RMT stops all transmissions; LEDs hold their last color.
          * Done while the pad is still isolated so the transient is inaudible. */
         leds_set_audio_active(true);
 
@@ -620,21 +549,13 @@ static void audio_play_task(void *arg)
             s_sw_run = true;
 
             /* Keep servicing hand-backs until BOTH halves have been handed
-             * back empty. Running out of source data is not the end of the
-             * job: a half whose len is left non-zero gets replayed, because
-             * the ISR only holds its last level when it finds len == 0.
-             *
-             * That was a real defect — the loop used to exit at
-             * pos >= total_n and then just wait, during which the ISR looped
-             * the final ~128 ms of audio over and over, and stopping the timer
-             * cut it at an arbitrary sample. sw_dac_stop()'s write of 128 was
-             * then a large step from wherever that landed: the end-of-clip
-             * pop. Draining properly leaves the ISR holding the ramp's own
-             * final mid-rail sample, so there is nothing left to step from.
-             *
-             * `live` (counted during priming above) tracks halves still
-             * holding samples. The guard bounds the loop so a stalled ISR
-             * cannot hang the task. */
+             * back empty, not just until source data runs out — a half
+             * whose len is left non-zero gets replayed forever, since the
+             * ISR only holds its last level when it finds len == 0, and
+             * stopping the timer mid-loop would cut the clip at an
+             * arbitrary sample instead of its own final mid-rail ramp
+             * sample. `live` tracks halves still holding samples; the
+             * guard bounds the loop so a stalled ISR can't hang the task. */
             int guard = (int)(total_n / SW_HALF_SAMPLES) + 8;
             while (live > 0 && !s_stop_flag && guard-- > 0) {
                 ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
@@ -775,39 +696,22 @@ void audio_play_file(const char *path)
      * 16 KB block is left — see audio_play_task's comment. Kept loud rather
      * than silent (the original code dropped the press with no log at all,
      * which is why two dead playback tests took a while to explain). */
-    /* Priority 7 — deliberately ABOVE display_task's 6.
+    /* Priority 7, above display_task's 6: this task refills a double buffer
+     * the sample-clock ISR drains in real time (one half is 64ms at 16kHz),
+     * and display_task's heavy frames (JPEG decode + SPI blit) at a lower
+     * priority preempted playback often enough to audibly wobble the
+     * playback rate. This task is blocked on the ISR's notification almost
+     * all the time, so raising it doesn't meaningfully starve the display.
      *
-     * This task refills a double buffer the sample-clock ISR drains in real
-     * time: one half is 1024 samples, 64 ms at 16 kHz, and missing that window
-     * leaves the ISR holding its last level instead of playing audio.
-     * display_task ticks at 5 Hz and can hold the CPU for a long time on a
-     * heavy frame (JPEG decode plus a six-tube SPI blit), so at the old
-     * priority 5 it preempted playback roughly every 200 ms and modulated the
-     * rate at about that frequency — measured as identical clips taking
-     * 2425 / 2997 / 2425 ms of wall time for 2041 ms of audio. At priority 7
-     * the same clip is consistently 2429 ms, spread under 10 ms.
-     *
-     * Raising it does not starve the display: this task spends nearly all its
-     * time BLOCKED on a notification from the ISR, and only runs for the brief
-     * memcpy of one half. It also lives only for the duration of a clip. A
-     * late clock frame is unnoticeable; a late audio refill is not — which is
-     * the correct way round for these two to sit. */
-    /* Pinned to core 1, and NOT left unpinned: sw_dac_start() allocates the
-     * gptimer interrupt from whichever core this task happens to be running
-     * on, so an unpinned task puts the sample-clock ISR on a different core
-     * from one clip to the next.
-     *
-     * Core 1 specifically, even though display_task also lives there:
-     *   - display is no longer a threat. Priority 7 beats its 6 on any core;
-     *     that is what stopped the rate wobble.
-     *   - What can still delay a 16 kHz ISR is other INTERRUPTS, and core 0
-     *     carries WiFi's — the longest and most frequent on the device. Core 1
-     *     during playback sees only short SPI-completion interrupts, with the
-     *     LED RMT already paused by leds_set_audio_active(true).
-     *   - mic_task is pinned to core 0, and since playback no longer takes
-     *     I2S0 the two can now run at the same time (a click during Spectrum
-     *     mode). Keeping them on separate cores lets that happen in parallel
-     *     instead of this task preempting the mic's Goertzel work. */
+     * Pinned to core 1, not left unpinned: sw_dac_start() allocates the
+     * gptimer interrupt on whichever core this task happens to be running
+     * on, so unpinned would move the sample-clock ISR between cores per
+     * clip. Core 1 specifically because core 0 carries WiFi's interrupts —
+     * the longest and most frequent on the device — while core 1 only sees
+     * short SPI-completion interrupts during playback (LED RMT already
+     * paused). mic_task is pinned to core 0, so the two can now run
+     * concurrently (playback no longer needs I2S0) without this task
+     * preempting the mic's Goertzel work. */
     if (xTaskCreatePinnedToCore(audio_play_task, "audio_play", AUDIO_PLAY_STACK_SIZE,
                                 a, 7, &s_audio_task, 1) != pdPASS) {
         ESP_LOGW(TAG, "audio_play_file: task create failed (largest_internal=%u B) — press dropped",
@@ -837,30 +741,20 @@ void audio_stop(void)
 
 /* ── DAC test API ────────────────────────────────────────────────────── */
 /*
- * All four modes drive the pad through the SAME dac_oneshot + gptimer engine
- * that real playback uses. That is the point: while these ran on
- * dac_continuous and playback ran on one-shot, a passing tone told you nothing
- * about whether a clip would play. None of them touch I2S0, so the microphone
- * keeps its capture handle throughout.
+ * All four modes drive the pad through the same dac_oneshot + gptimer engine
+ * real playback uses, so a passing test actually says something about
+ * whether a clip will play. None touch I2S0, so the microphone is unaffected.
  *
- * "hiz"     : GPIO25 reconfigured as a plain input. DAC output buffer fully
- *             powered down — the most isolated state available.
- *
- * "silence" / "dc" : a single one-shot write latches a constant level and
- *   holds it with no clock running at all. "dc" is the instrument that
- *   characterised the pop — see the ramp comment in audio_play_task for the
- *   actual measurements — by stepping the level manually, which is exactly
- *   what real playback's ramps avoid. "dc 128" also reveals the idle noise
- *   floor of a driven pad — the measurement behind isolating between clips
- *   rather than parking the DAC at mid-rail permanently.
- *
- * "tone"    : the engine's loop mode replays a whole number of sine cycles
- *   from the double buffer, so the wrap is seamless and no task has to keep
- *   up with the ISR. Frequency is quantised by that whole-cycle constraint
- *   and the actual value is logged.
- *
- * "normal"  : return GPIO25 to the quiet isolated-pad idle. Matches the idle
- *   for both enabled and disabled audio — a clip brings the DAC up on demand.
+ * "hiz"            : GPIO25 as a plain input, DAC buffer fully powered down —
+ *                     the most isolated state available.
+ * "silence" / "dc" : one-shot write latches a constant level with no clock
+ *                     running — steps the level manually, exactly what real
+ *                     playback's ramps avoid, for characterising pops.
+ * "tone"           : loop mode replays a whole number of sine cycles from the
+ *                     double buffer for a seamless wrap; frequency is
+ *                     quantised by that and logged.
+ * "normal"         : return to the quiet isolated-pad idle, same as between
+ *                     clips.
  */
 
 /* Helper: release whatever a previous test mode left driving the pad.

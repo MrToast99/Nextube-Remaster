@@ -9,17 +9,12 @@
  *   • The SAR is clocked by the I2S0 digital controller at ADC_HW_RATE
  *     (32 kHz — the ESP32 digital controller's minimum is 20 kHz) and DMA
  *     delivers complete frames; mic_task averages ×4 down to the 8 kHz
- *     analysis rate.  Exact sample spacing, ~zero CPU per sample.
- *   • Every software-timed approach was tried and failed: esp_timer +
- *     adc_oneshot_read could only sustain ~1.7 kHz (each read costs
- *     300–600 µs → aliasing), and even with fast register-level reads the
- *     RTOS preemption jitter (esp_timer catch-up clustering) smeared
- *     high-frequency energy into the low bands.  Uniform sampling needs a
- *     hardware clock.  See the ADC_HW_RATE comment for the full history.
- *   • I2S0 is held for the life of the device once mic_hw_init() claims it
- *     — audio no longer shares it (used to, via dac_continuous; see s_acq's
- *     declaration comment for that history), so capture is never
- *     interrupted by a clip.
+ *     analysis rate. Exact sample spacing, ~zero CPU per sample — a
+ *     software-timed esp_timer + adc_oneshot_read can't sustain uniform
+ *     sampling on a loaded RTOS core (see the ADC_HW_RATE comment).
+ *   • I2S0 is held for the life of the device once mic_hw_init() claims it,
+ *     so capture is never interrupted by an audio clip (see s_acq's
+ *     declaration comment).
  *
  * Silence gate (runtime, debug panel): cfg->mic_silence_gate — SPECTRAL gate
  * on the sum of post-floor band power (silence <10, quiet audio >50; 0=off).
@@ -48,26 +43,21 @@ static const char *TAG = "mic";
 #define FRAME_SIZE      128             /* samples per Goertzel frame (16 ms) */
 #define BAND_COUNT      MIC_BAND_COUNT   /* 24 — must equal MIC_BAND_COUNT in microphone.h */
 /* ── Hardware-clocked capture (adc_continuous → I2S0 DMA) ───────────────
- * History, so nobody walks back into the trap: capture was originally an
- * esp_timer firing adc_oneshot_read() every 125 µs.  Each read costs
- * 300–600 µs (driver mutex, per-read reconfiguration), so the timer ran in
- * permanent catch-up: the real rate was ~1.7 kHz (bands above the true
- * ~850 Hz Nyquist were aliased noise) and the catch-up bursts produced
- * heavy sampling JITTER — clustered samples interpreted as uniform — which
- * smeared high-frequency energy into the low bands (tone-sweep test: dead
- * above ~450 Hz).  A register-level fast read fixed the rate but cannot fix
- * the jitter: software-timed sampling on a loaded RTOS core is never
- * uniform.
+ * A software-timed esp_timer + adc_oneshot_read can't hold uniform
+ * sampling on a loaded RTOS core: each read costs 300-600us, so a fast
+ * timer runs in permanent catch-up (aliasing), and even a fast
+ * register-level read still has RTOS preemption jitter that smears
+ * high-frequency energy into the low bands. Uniform sampling needs a
+ * hardware clock — don't revisit software timing here.
  *
- * adc_continuous clocks the SAR from hardware (the I2S0 peripheral on
- * ESP32) with DMA delivery: exact sample spacing, ~zero CPU per sample.
- * The ESP32 digital ADC controller's minimum rate is 20 kHz, so we capture
- * at 32 kHz and average every 4 samples down to the 8 kHz design rate —
- * the averaging doubles as a crude anti-alias filter and adds ~1 bit SNR.
+ * adc_continuous clocks the SAR from hardware (I2S0) with DMA delivery:
+ * exact sample spacing, ~zero CPU per sample. The ESP32 digital ADC
+ * controller's minimum rate is 20kHz, so capture runs at 32kHz and
+ * averages every 4 samples down to the 8kHz design rate — doubling as a
+ * crude anti-alias filter and adding ~1 bit SNR.
  *
- * I2S0 is ours exclusively (see s_acq's declaration comment for why it no
- * longer has to be shared with audio playback), so the handle is claimed
- * once at boot and held for the life of the device. */
+ * I2S0 is ours exclusively (see s_acq's declaration comment), so the
+ * handle is claimed once at boot and held for the life of the device. */
 #define ADC_HW_RATE        32000
 #define DECIM              4                       /* 32 kHz → 8 kHz        */
 #define RAW_FRAME_SAMPLES  (FRAME_SIZE * DECIM)    /* 512 raw per frame     */
@@ -161,28 +151,23 @@ static volatile adc_channel_t     s_active_chan = ADC_CHANNEL_7;
 static volatile uint8_t           s_active_ch  = 7;   /* config index */
 
 /* ── Continuous-capture state ────────────────────────────────────────── */
-/* The adc_continuous handle is created at boot (mic_hw_init) and normally
- * lives for the device's lifetime, same as the oneshot unit s_adc — started
- * and stopped per Spectrum-mode session, not deinit'd/recreated. Earlier this
- * churned adc_continuous_new_handle()/adc_continuous_deinit() on every
- * session; that hit an ESP-IDF footgun (see mic_hw_init()'s comment) and was
- * unnecessary anyway — adc_continuous_config() is safe to call repeatedly on
- * the same handle (it just memcpy's into an already-allocated pattern
- * buffer, confirmed by reading esp_adc/adc_continuous.c directly), so a
- * channel change only needs stop → config → start, not a full recreate.
+/* The adc_continuous handle is created at boot (mic_hw_init) and lives for
+ * the device's lifetime, same as the oneshot unit s_adc — started and
+ * stopped per Spectrum-mode session, never deinit'd/recreated.
+ * adc_continuous_config() is safe to call repeatedly on the same handle (it
+ * just memcpy's into an already-allocated pattern buffer), so a channel
+ * change only needs stop → config → start, not a full recreate.
  *
  * s_acq is therefore non-NULL for the whole run after mic_hw_init(), and
  * s_acq_running (not s_acq's NULLness) is the "is capture active" flag.
  * mic_task is the sole owner — no handle lifecycle races.
  *
- * There used to be one exception: audio playback drove the DAC through
- * dac_continuous, which needs the same I2S0 controller, so a clip forced this
- * handle to be deinit'd and re-created around it. That is gone — audio now
- * clocks dac_oneshot from a gptimer and never touches I2S0. Worth keeping in
- * mind if anything else ever wants the controller: releasing it means calling
- * adc_continuous_new_handle() again at runtime, and that call can ABORT the
- * device from inside itself when memory is tight (see mic_hw_init()). Holding
- * the handle for the device's lifetime is what avoids that risk entirely. */
+ * Keep this handle held for the device's lifetime: releasing it means
+ * calling adc_continuous_new_handle() again at runtime, which can ABORT
+ * the device from inside itself when memory is tight (see
+ * mic_hw_init()'s comment). Audio playback no longer needs I2S0 (it clocks
+ * dac_oneshot from a gptimer instead), so nothing currently forces a
+ * release — don't reintroduce one without checking that comment first. */
 static adc_continuous_handle_t s_acq               = NULL;
 static volatile bool           s_acq_running        = false;
 
@@ -591,27 +576,17 @@ static void mic_task(void *arg)
         float total_power = 0.0f;
         for (int b = 0; b < BAND_COUNT; b++) total_power += s_gate_smooth[b];
 
-        /* WiFi background-scan RF-coupling spike rejection.
-         * The ESP32 WiFi binary scans ~13 channels every ~5 s for roaming.
-         * RF switching noise during each scan couples into the ADC and produces
-         * a broadband burst appearing as the first frame after a ~3 s HTTP
-         * blackout.  Observed spike magnitudes: 400–3800 total_power.
-         *
-         * Detection signature: previous frame was at moderate-or-lower power
-         * (< 200) AND current frame jumps to > 400.  This runs on total_power,
-         * i.e. s_gate_smooth — kept at the original unchanged α=0.35 (one
-         * loud frame only moves it by 35%) specifically so this "real audio
-         * never makes that jump in one frame" assumption still holds; it
-         * does NOT run on the faster-attack s_disp_smooth used for display.
-         * The 200/400 thresholds are calibrated from field recordings:
-         *   • max legitimate audio peak seen:   ~190 total_power
-         *   • min scan spike seen:              ~533 total_power
-         *   • s_prev at spike onset (scans fire during audio, not just silence):
-         *     observed range 0–83 in recordings → threshold 200 gives margin.
-         * When triggered, reset both smoothed arrays so the spike does not
-         * contaminate future EMA state (s_disp_smooth especially — its fast
-         * attack would otherwise have already jumped toward the spike this
-         * same frame); the silence-gate below then suppresses output. */
+        /* WiFi background-scan RF-coupling spike rejection: the ESP32 WiFi
+         * binary scans channels periodically for roaming, and RF switching
+         * noise couples into the ADC as a broadband burst (observed
+         * 400-3800 total_power). Detection: previous frame moderate-or-lower
+         * (<200) AND current frame jumps to >400 — thresholds calibrated
+         * from field recordings (max legitimate peak ~190, min spike ~533).
+         * Runs on total_power/s_gate_smooth (slow α=0.35 EMA, so real audio
+         * can't make that jump in one frame), not the fast-attack
+         * s_disp_smooth. On trigger, resets both smoothed arrays so the
+         * spike doesn't contaminate future EMA state; the silence gate
+         * below then suppresses output. */
         static float s_prev_total = 0.0f;
         if (s_prev_total < 200.0f && total_power > 400.0f) {
             for (int b = 0; b < BAND_COUNT; b++) {
@@ -770,20 +745,16 @@ void mic_hw_init(void)
     }
 
     /* adc_continuous_new_handle() needs ~10 KB of INTERNAL+DMA-capable RAM
-     * (ring buffer + DMA descriptors + rx buffers, all MALLOC_CAP_INTERNAL |
-     * MALLOC_CAP_DMA — a much smaller, more contended pool than general
-     * heap). If it fails partway through, its own cleanup path unconditionally
-     * calls adc_apb_periph_free() even though it never claimed the periph,
-     * which aborts the device — an ESP-IDF bug (confirmed by reading
-     * esp_adc/adc_continuous.c:163-254 directly) that happens INSIDE this
-     * call, before it can ever return an error to us; no amount of checking
-     * the return value here catches it. The only real fix is calling this
-     * EARLY (from app_main(), before wifi_manager_start()) while the pool is
-     * still abundant — confirmed by a live repro (2026-08-14): called after
-     * WiFi/MQTT connect, only 2163 B was free with no block bigger than
-     * 1396 B, and the allocation aborted the device on the spot. Kept as
-     * ESP_ERROR_CHECK for consistency with other boot-time driver setup, not
-     * because it adds protection beyond a plain call — see above. */
+     * (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA — a smaller, more contended pool
+     * than general heap). If it fails partway through, its own cleanup path
+     * unconditionally calls adc_apb_periph_free() even though it never
+     * claimed the periph, aborting the device — an ESP-IDF bug that happens
+     * inside this call, before it can return an error to us, so no return-
+     * value check here catches it. The only real fix is calling this EARLY
+     * (from app_main(), before wifi_manager_start()) while the pool is
+     * still abundant, not after WiFi/MQTT have fragmented it. Kept as
+     * ESP_ERROR_CHECK for consistency with other boot-time driver setup,
+     * not because it adds protection beyond a plain call. */
     ESP_LOGI(TAG, "mic_hw_init: pre-adc_continuous DMA-capable internal RAM — free %u B, largest block %u B",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));

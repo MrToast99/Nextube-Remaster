@@ -15,6 +15,8 @@ void wifi_manager_apply_sta_credentials(void); /* update driver config without d
 bool wifi_manager_is_connected(void);
 const char *wifi_manager_get_ip(void);
 void wifi_manager_scan_start(void);
+/* True from wifi_manager_scan_start() until WIFI_EVENT_SCAN_DONE fires. */
+bool wifi_manager_scan_in_progress(void);
 
 /* ──────— disconnect/reconnect diagnostics ──────────────────────────
  * Session-scoped counters (reset on reboot), fed by the WIFI_EVENT_STA_
@@ -78,6 +80,32 @@ esp_err_t wifi_manager_regenerate_ap_pin(void);
  * A fresh PIN is auto-generated on the next call to wifi_manager_start
  * (i.e. next boot). */
 void wifi_manager_factory_reset_ap_pin(void);
+
+/* Call right before rebooting a settings save that changed the SSID but
+ * skipped the live-reconnect path (i.e. some OTHER field in the same save
+ * also required a reboot — hostname, weather/youtube/mdns/mic/audio_enabled).
+ * Without this, wifi_manager_start()'s normal policy (any saved SSID → STA
+ * only, no AP) would boot straight into brand-new, never-tried credentials
+ * with no fallback: if they're wrong, a client still on the setup AP loses
+ * the device outright. Makes the very next boot bring the setup AP up
+ * alongside STA instead, so it's still reachable either way; one-shot,
+ * consumed on that next boot regardless of whether STA succeeds. */
+void wifi_manager_mark_untested_sta(void);
+
+/* Defer a needed reboot until STA actually confirms the just-applied
+ * credentials (IP_EVENT_STA_GOT_IP), instead of rebooting immediately with
+ * wifi_manager_mark_untested_sta()'s AP-fallback safety net. Call this
+ * INSTEAD of mark_untested_sta()+reboot when a settings save changed the
+ * SSID and also needs a reboot for something else (hostname/weather/etc.):
+ * it starts a live reconnect on the new credentials (same path as a plain
+ * SSID-only change — the setup AP, if any, stays up and reachable
+ * throughout) and only reboots once that reconnect succeeds, so the reboot
+ * never has to gamble on untested WiFi credentials. Falls back to the old
+ * mark-untested-sta-and-reboot-now behavior if STA doesn't confirm within
+ * timeout_ms, so genuinely wrong restored credentials still can't wedge
+ * the device — caller must still have triggered the live reconnect itself
+ * before calling this. */
+void wifi_manager_reboot_once_connected(uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }
