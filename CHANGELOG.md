@@ -1,7 +1,7 @@
 # Changelog
 
 
-## [1.18.1] - pending
+## [1.18.1] - 2026-09-06
 
 ### Fixed
 - Home Assistant showed the clock's Mode and Theme as "Unknown" until the next MQTT reconnect, or until you changed them again — both are now retained so Home Assistant shows the current value immediately, including right after a Home Assistant restart.

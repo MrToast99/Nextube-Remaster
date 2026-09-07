@@ -250,12 +250,12 @@ jobs:
           cat > release_notes.md <<EOF
           ## Nextube-Remaster v${BUILD_VER}
 
+          ${CHANGELOG_SECTION}
+
           | | Version |
           |---|---|
           | **Firmware** | v${FW_VER} |
           | **LittleFS / Web UI** | v${SP_VER} |
-
-          ${CHANGELOG_SECTION}
 
           ### ${GUIDANCE}
 
