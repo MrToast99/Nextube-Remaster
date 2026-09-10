@@ -55,6 +55,19 @@ static TaskHandle_t s_display_task_handle = NULL;
 static volatile bool s_park_req = false;
 static volatile bool s_parked   = false;
 
+/* Set by display_show_wait() — a ONE-WAY park held until reboot or an
+ * explicit display_resume_after_wait(). While it's set, display_unpause()
+ * must not resume the task or clear s_park_req: the wait-screen owner still
+ * needs the display parked and is drawing wait.jpg from its own task. This
+ * exists because display_show_wait() bypasses the refcount below (it's not
+ * one of several equal peers — it outranks them), so without this flag a
+ * concurrent display_pause_for_spi()/display_unpause() pair (e.g. the
+ * /api/status FS-usage walk) that drops the refcount to zero would resume
+ * the display task mid wait-screen draw → both tasks on the SPI bus at once
+ * → "previous polling transaction not terminated", and the caller
+ * (webui_pull_task) could then wedge on the corrupted transaction. */
+static volatile bool s_wait_active = false;
+
 /* Reference-counted: multiple callers (an /api/status poll, a file upload,
  * the boot-time stock-files check, the VCOM/profile/invert appliers) can
  * overlap, and a plain boolean flag lets whichever finishes first resume
@@ -80,6 +93,16 @@ static portMUX_TYPE  s_pause_mux = portMUX_INITIALIZER_UNLOCKED;
 bool display_pause_for_spi(uint32_t timeout_ms)
 {
     if (!s_display_task_handle) return true;   /* boot: task not started yet */
+    /* display_show_wait() already owns the park (until reboot / an explicit
+     * resume) — the task is, or is about to be, suspended and we must not
+     * join the refcount or later resume it. Just confirm it's actually
+     * suspended, then proceed. */
+    if (s_wait_active) {
+        for (uint32_t i = 0; i < timeout_ms / 10 &&
+             eTaskGetState(s_display_task_handle) != eSuspended; i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+        return eTaskGetState(s_display_task_handle) == eSuspended;
+    }
 
     taskENTER_CRITICAL(&s_pause_mux);
     bool are_first = (++s_pause_refcount == 1);
@@ -110,14 +133,19 @@ bool display_pause_for_spi(uint32_t timeout_ms)
 void display_unpause(void)
 {
     if (!s_display_task_handle) return;
+    bool resume = false;
     taskENTER_CRITICAL(&s_pause_mux);
     if (s_pause_refcount > 0) s_pause_refcount--;
-    bool are_last = (s_pause_refcount == 0);
+    /* Resume only when the LAST refcount holder releases AND the wait-screen
+     * owner isn't holding its own one-way park. Both checks under the mux so
+     * they can't race a concurrent display_resume_after_wait(). */
+    if (s_pause_refcount == 0 && !s_wait_active) {
+        s_park_req = false;
+        s_parked   = false;
+        resume = true;
+    }
     taskEXIT_CRITICAL(&s_pause_mux);
-    if (!are_last) return;   /* another concurrent caller still holds the pause */
-    s_park_req = false;
-    s_parked   = false;
-    vTaskResume(s_display_task_handle);
+    if (resume) vTaskResume(s_display_task_handle);   /* not ISR/critical-section safe */
 }
 
 /* Short-lived "busy" backoff (display_busy_hint): a wall-clock deadline, in
@@ -10490,6 +10518,7 @@ void display_show_wait(void)
      * task suspend ITSELF at its loop boundary, where no SPI transaction can
      * be open. Flash operations always end in esp_restart(), so it never
      * resumes. */
+    s_wait_active = true;   /* outranks display_pause_for_spi()'s refcount park */
     if (s_display_task_handle) {
         s_park_req = true;
         /* Worst case: a full cold-cache clock render (6 JPEG decodes) is in
@@ -10539,6 +10568,20 @@ void display_show_wait(void)
  * harmless since the task re-checks them fresh on its next loop iteration). */
 void display_resume_after_wait(void)
 {
-    display_unpause();
+    bool resume = false;
+    taskENTER_CRITICAL(&s_pause_mux);
+    s_wait_active = false;   /* release the one-way park */
+    /* display_show_wait() bypassed the refcount, so a plain display_unpause()
+     * wouldn't resume (its guarded decrement no-ops from 0). Resume here iff
+     * no display_pause_for_spi() caller still holds the refcount park; if one
+     * does, its own display_unpause() does the resume now s_wait_active is
+     * clear. Mutually exclusive with display_unpause() via the mux. */
+    if (s_pause_refcount == 0) {
+        s_park_req = false;
+        s_parked   = false;
+        resume = true;
+    }
+    taskEXIT_CRITICAL(&s_pause_mux);
+    if (resume && s_display_task_handle) vTaskResume(s_display_task_handle);
     display_invalidate();
 }
