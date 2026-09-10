@@ -157,6 +157,24 @@ void display_set_debug_wl_fps(int fps);
  *  Thread-safe: safe to call from any task. */
 void display_set_update_indicator(bool active);
 
+/* ── Mode-rotation pause ───────────────────────────────────────────── */
+/** Pause or resume the automatic mode-rotation timer without touching
+ *  config_mgr's persisted rotation_enabled/interval/weights settings.
+ *  paused == false                 -> resume immediately
+ *  paused == true, duration_s == 0 -> pause indefinitely, until resumed
+ *  paused == true, duration_s  > 0 -> pause for this many seconds, then
+ *                                     auto-resume on its own
+ *  Runtime-only: always clears on reboot. Manual mode switches (touch
+ *  buttons, web UI) are unaffected either way.
+ *  Thread-safe: safe to call from any task. */
+void display_set_rotation_paused(bool paused, uint32_t duration_s);
+/** Current pause state — surfaced in /api/status so the web UI reflects it
+ *  even if changed from another open tab, or reset by a reboot. */
+bool display_rotation_is_paused(void);
+/** Seconds remaining until an active timed pause auto-resumes, -1 if
+ *  paused indefinitely, or 0 if not paused. For status reporting. */
+int32_t display_rotation_pause_remaining_s(void);
+
 /* ── Anti burn-in ──────────────────────────────────────────────────── */
 /** Start or stop per-tube burn-in color-cycle mode.
  *  mask:       bitmask, bit N = tube N.  0x3F = all six.  0x00 = restore all.

@@ -20,4 +20,5 @@ idf_component_register(
         app_update
         ha_mqtt
         wled_sync
+        json
 )

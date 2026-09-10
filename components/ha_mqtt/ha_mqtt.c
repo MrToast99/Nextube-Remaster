@@ -1421,13 +1421,90 @@ void ha_mqtt_start(void)
  * flash-write window just because the WiFi side thinks it's clear. */
 static volatile int s_pause_refcount = 0;
 
+/* esp_mqtt_client_stop() blocks until the client's internal task exits —
+ * normally instant, but if that task is wedged in a blocking connect()
+ * (e.g. broker hostname not resolving mid-reconnect-storm), it can hang
+ * indefinitely. ha_mqtt_pause() runs inside several web_server.c HTTP
+ * handlers (OTA, hotpatch, stock repair, factory reset) via
+ * ota_suspend_tasks() — an unbounded hang there pins one of
+ * WEB_SERVER_MAX_SOCKETS sockets forever (observed in the field as httpd
+ * socket count climbing and never recovering during a stuck reconnect).
+ *
+ * Bound it: run stop() on a helper task, give up after
+ * MQTT_STOP_TIMEOUT_MS. s_connected/s_pause_refcount are already updated
+ * by the caller, so the rest of the firmware treats MQTT as paused either
+ * way. Worst case on timeout: the helper task/semaphore are abandoned
+ * instead of the socket.
+ *
+ * The helper task must NEVER fall back to a direct in-line
+ * esp_mqtt_client_stop() — that is the exact unbounded call this wrapper
+ * exists to keep off the calling (httpd) thread. It matters most right
+ * after boot, when internal RAM is at its most fragmented (WiFi/mDNS/TLS
+ * churn) so xTaskCreate here is most likely to fail, AND the MQTT client
+ * is most likely wedged in a first-connect to a broker that hasn't
+ * resolved yet — precisely when an in-line stop() hangs. If the helper
+ * can't be created, we skip the stop: esp-mqtt's own client task keeps
+ * running through the flash window (extra TCP + heap traffic, not ideal),
+ * which is a far better failure mode than hanging an OTA/hotpatch forever
+ * and pinning an httpd socket. */
+#define MQTT_STOP_TIMEOUT_MS 1500
+
+/* Set while a background mqtt_stop_task is running esp_mqtt_client_stop().
+ * ha_mqtt_resume() waits for this to clear before esp_mqtt_client_start() —
+ * starting the client while a stop is still in flight corrupts esp-mqtt's
+ * internal state. Cleared by the helper task itself when stop() returns. */
+static volatile bool s_mqtt_stop_inflight = false;
+
+static void mqtt_stop_task(void *arg)
+{
+    (void)arg;
+    esp_mqtt_client_stop(s_client);
+    s_mqtt_stop_inflight = false;
+    ESP_LOGI(TAG, "esp_mqtt_client_stop() returned");
+    vTaskDelete(NULL);
+}
+
+/* Runs esp_mqtt_client_stop() on a throwaway task and waits at most
+ * MQTT_STOP_TIMEOUT_MS for it. Never calls esp_mqtt_client_stop() directly
+ * on the caller's (httpd) thread — that unbounded call is the exact hang
+ * this wrapper exists to avoid: a wedged first-connect (broker not yet
+ * resolvable right after boot) blocks it indefinitely, pinning an httpd
+ * socket and freezing an OTA / hotpatch. On any failure path we leave
+ * esp-mqtt's client running through the flash window (extra TCP + heap
+ * traffic, not ideal) rather than block. */
+static void ha_mqtt_stop_bounded(void)
+{
+    if (s_mqtt_stop_inflight) return;   /* a previous stop is still finishing */
+
+    ESP_LOGI(TAG, "stopping esp-mqtt client (bounded, %dms)", MQTT_STOP_TIMEOUT_MS);
+    s_mqtt_stop_inflight = true;
+    BaseType_t created = pdFAIL;
+    for (int attempt = 0; attempt < 3 && created != pdPASS; attempt++) {
+        if (attempt) vTaskDelay(pdMS_TO_TICKS(100));
+        created = xTaskCreatePinnedToCore(mqtt_stop_task, "mqtt_stop", 3072, NULL, 3, NULL, 0);
+    }
+    if (created != pdPASS) {
+        s_mqtt_stop_inflight = false;
+        ESP_LOGW(TAG, "mqtt_stop_task creation failed (3x) — leaving esp-mqtt "
+                      "client running rather than risk a blocking in-line stop()");
+        return;
+    }
+    /* Poll the flag rather than a semaphore so the helper task can outlive
+     * this function without a dangling handle if it overruns the timeout. */
+    for (int i = 0; i < MQTT_STOP_TIMEOUT_MS / 50 && s_mqtt_stop_inflight; i++)
+        vTaskDelay(pdMS_TO_TICKS(50));
+    if (s_mqtt_stop_inflight)
+        ESP_LOGW(TAG, "esp_mqtt_client_stop() still running after %dms — "
+                      "continuing; ha_mqtt_resume() will wait for it", MQTT_STOP_TIMEOUT_MS);
+}
+
 void ha_mqtt_pause(void)
 {
     if (!s_client) return;   /* never started, or esp_mqtt_client_init() failed */
     if (s_pause_refcount++ > 0) return;   /* another reason already has it paused */
     s_connected = false;
     ESP_LOGI(TAG, "MQTT paused");
-    esp_mqtt_client_stop(s_client);   /* blocks until the client's own task has stopped */
+    ha_mqtt_stop_bounded();
 }
 
 /* Resume a client previously paused with ha_mqtt_pause().  s_connected
@@ -1441,6 +1518,13 @@ void ha_mqtt_resume(void)
     if (!s_client) return;
     if (s_pause_refcount == 0) return;          /* not paused, or already balanced */
     if (--s_pause_refcount > 0) return;         /* still paused by another reason */
+    /* A background stop from ha_mqtt_stop_bounded() may still be running
+     * (it overran its short bound). Starting now would race it inside
+     * esp-mqtt and corrupt the client — wait it out (up to ~10s). */
+    for (int i = 0; i < 200 && s_mqtt_stop_inflight; i++)
+        vTaskDelay(pdMS_TO_TICKS(50));
+    if (s_mqtt_stop_inflight)
+        ESP_LOGW(TAG, "MQTT resume: prior stop still running after 10s — starting anyway");
     esp_err_t e = esp_mqtt_client_start(s_client);
     if (e != ESP_OK)
         ESP_LOGW(TAG, "MQTT resume: esp_mqtt_client_start failed (%s)", esp_err_to_name(e));

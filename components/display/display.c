@@ -363,6 +363,32 @@ static volatile bool s_full_repaint_request = false;
  * one tick even if change-detection tracking is momentarily stale. */
 static volatile bool s_settings_saved = false;
 
+/* Mode-rotation pause deadline (POST /api/rotation_pause), in esp_timer
+ * microseconds — same shape as s_busy_until_us above, including the same
+ * torn-64-bit-read/write concern across cores (httpd task writes, display
+ * task reads every tick), hence the same spinlock-guarded accessor pair.
+ * Runtime only — never written to config_mgr/flash, so any pause (timed or
+ * indefinite) always clears on reboot; every other persisted rotation
+ * setting (rotation_enabled, interval, weights) is untouched.
+ *   0          -> not paused
+ *   INT64_MAX  -> paused indefinitely, until display_set_rotation_paused(false, 0)
+ *   otherwise  -> paused until this deadline, then auto-resumes on its own */
+static volatile int64_t s_rotation_pause_until_us = 0;
+static portMUX_TYPE s_rotation_pause_mux = portMUX_INITIALIZER_UNLOCKED;
+static inline int64_t rotation_pause_until_us(void)
+{
+    taskENTER_CRITICAL(&s_rotation_pause_mux);
+    int64_t v = s_rotation_pause_until_us;
+    taskEXIT_CRITICAL(&s_rotation_pause_mux);
+    return v;
+}
+static inline void rotation_pause_set_until_us(int64_t v)
+{
+    taskENTER_CRITICAL(&s_rotation_pause_mux);
+    s_rotation_pause_until_us = v;
+    taskEXIT_CRITICAL(&s_rotation_pause_mux);
+}
+
 /* Per-tube software brightness scale (0-100).  Must be initialised to 100 in
  * display_init() because the linker zero-initialises static arrays, which would
  * render every pixel black.  Updated by display_apply_tube_brightness(). */
@@ -1079,6 +1105,49 @@ void display_set_update_indicator(bool active)
     s_update_indicator = active;
 }
 
+/* ── Mode-rotation pause API ───────────────────────────────────────────
+ * Called by the web-server task via POST /api/rotation_pause. Runtime-only
+ * (see s_rotation_pause_until_us above) — pausing/resuming here never
+ * touches config_mgr or flash.
+ *   paused == false            -> resume immediately (clears any pause)
+ *   paused == true, duration_s == 0  -> pause indefinitely, until resumed
+ *   paused == true, duration_s  > 0  -> pause for this many seconds, then
+ *                                       auto-resume on its own */
+void display_set_rotation_paused(bool paused, uint32_t duration_s)
+{
+    if (!paused)
+        rotation_pause_set_until_us(0);
+    else if (duration_s == 0)
+        rotation_pause_set_until_us(INT64_MAX);
+    else
+        rotation_pause_set_until_us(esp_timer_get_time() + (int64_t)duration_s * 1000000LL);
+}
+
+/* Auto-clears an expired timed pause the moment it's checked — the display
+ * task calls this every tick, so an expired pause is cleared (and rotation
+ * resumes) within one tick of its deadline without any separate timer. */
+bool display_rotation_is_paused(void)
+{
+    int64_t until = rotation_pause_until_us();
+    if (until == 0) return false;
+    if (until != INT64_MAX && esp_timer_get_time() >= until) {
+        rotation_pause_set_until_us(0);
+        return false;
+    }
+    return true;
+}
+
+/* For status reporting (POST /api/status): 0 = not paused, -1 = paused
+ * indefinitely, N = seconds remaining until auto-resume. */
+int32_t display_rotation_pause_remaining_s(void)
+{
+    int64_t until = rotation_pause_until_us();
+    if (until == 0) return 0;
+    if (until == INT64_MAX) return -1;
+    int64_t rem_us = until - esp_timer_get_time();
+    return rem_us > 0 ? (int32_t)(rem_us / 1000000) : 0;
+}
+
 /* ── Anti burn-in API ────────────────────────────────────────────────
  * display_set_burnin_mask() — select which tubes enter color-cycle mode.
  * mask bit N = tube N.  0x3F = all six tubes.  0x00 = restore all.
@@ -1182,6 +1251,8 @@ void display_set_debug_wl_fps(int fps)
 #define WEATHER_PANEL_SUN   2   /* sunrise + sunset times */
 #define WEATHER_PANEL_WIND  3   /* wind speed — procedural glyph + digits + unit */
 #define WEATHER_PANEL_HILO  4   /* daily Hi / Lo — internal HI→LO sub-rotation */
+#define WEATHER_PANEL_INTMP 5   /* indoor temperature (SHT30) — mirrors TEMP */
+#define WEATHER_PANEL_INHUM 6   /* indoor humidity (SHT30) — mirrors HUM */
 /* Stack: config snapshot (~1900 B, moved to static cfg_snap in display_task
  * so it's off the stack) + JPEG decode call chain. 8 KB was too tight — the
  * panic handler couldn't print a backtrace. Measured peak across
@@ -8454,34 +8525,392 @@ static void render_weather_hilo(const nextube_config_t *cfg, bool show_hi)
     else display_show_ampm(5, "blank", th);
 }
 
+/* ── Shared weather-panel tube renderers ─────────────────────────────────
+ * Tubes 0-4 of a temperature/humidity panel look identical whether the
+ * value came from outdoor weather_get() or the indoor SHT30 — only the
+ * number differs. Factored out of render_weather() so the Indoor
+ * Temperature/Humidity panels (5/6) below reuse the exact same digit/glyph
+ * code as their outdoor counterparts instead of duplicating ~150 lines of
+ * per-pixel droplet/digit compositing. */
+
+/* Draws an "In"/"Out" label in the upper zone of `tube`, so the two are
+ * never mistaken for each other at a glance — shared with whatever `tube`
+ * would otherwise show alone in the lower zone: a minus sign (temperature
+ * panels, tube 1, only for a 2-digit negative value) or nothing (humidity
+ * panels, tube 1, which has no minus-sign concept — center_glyph is always
+ * NULL there).
+ *
+ * This used to live on tube 5, replacing (Indoor) or overlaying (Outdoor)
+ * the weather-condition icon there — reported to visibly conflict with the
+ * real icon on asset/DotMatrix themes for the Outdoor panels. Tube 1 is
+ * free on every theme (it's blank except for that one 2-digit-negative
+ * case, which is exactly the thing being shared here, not a separate asset
+ * to protect), so this sidesteps that entirely and also makes Indoor/
+ * Outdoor consistent — both always show their label in the same spot
+ * instead of only one of them needing special handling.
+ *
+ * Combining two elements on one tube means stepping away from the theme's
+ * own full-tube minus/digit JPEG assets for center_glyph — same reason the
+ * existing classic-theme Indoor H/T panel (render_cx_panel() kind==2)
+ * renders its own temp/humidity as generic text instead of the theme's
+ * number JPEGs, once more than one thing has to share the tube.
+ *
+ * center_glyph: "-" (temperature, 2-digit negative) or NULL (every other
+ * case — humidity never passes anything here). Called by
+ * wx_draw_temp_digits()/wx_draw_humidity_digits() below, defined first
+ * since C requires it declared before those use it. */
+static void wx_draw_label_tube_shared(const nextube_config_t *cfg, const char *th,
+                                  bool wl_sky, int tube, const char *label,
+                                  const char *center_glyph)
+{
+    (void)th;
+    if (s_wl_dm_active) {
+        /* Same shared-cell convention as the existing DotMatrix Indoor H/T
+         * panel (render_cx_panel() kind==2): one cell size fits every
+         * string shown together on the tube, not each string picking its
+         * own — otherwise the label and the glyph below it would be drawn
+         * at two different, visually inconsistent dot pitches. */
+        uint8_t *fb = wl_fb();
+        if (!fb) return;
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        int cell = dm_fit_cell(label);
+        if (center_glyph) {
+            int c2 = dm_fit_cell(center_glyph);
+            if (c2 < cell) cell = c2;
+        }
+        dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        dm_draw_text_p_on(fb, 40, 40, label, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        if (center_glyph)
+            dm_draw_text_p_on(fb, 40, 116, center_glyph, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+        return;
+    }
+
+    if (wl_sky) {
+        uint8_t *fb = wl_fb();
+        if (!fb) { wl_tube_sky(tube); return; }
+        wl_paint_background(fb, tube, &s_wl_last_scene);
+
+        /* Label — upper zone. Smaller than a full-tube label since it now
+         * shares the tube. Fit against "Out" (the wider of the two words)
+         * regardless of which one is actually being drawn here, same
+         * reasoning as before this moved off tube 5: fr_draw_text()'s
+         * per-string auto-fit would otherwise size "In" and "Out"
+         * differently just because one has a letter less. */
+        const int REQ_PX = 20;
+        int label_by = (s_ft_face_id >= 0) ? 54 : 47;
+        if (s_ft_face_id >= 0) {
+            uint16_t fit_px = fr_fit_px_size(LCD_WIDTH, (uint8_t)s_ft_face_id,
+                                              REQ_PX, inout_label(cfg->language, false));
+            int ttf_by = label_by - (int)(fit_px / 5);   /* same nudge wl_text() applies */
+            fr_draw_text_exact(fb, LCD_WIDTH, LCD_HEIGHT, 40, ttf_by,
+                               (uint8_t)s_ft_face_id, fit_px, label,
+                               (uint8_t)s_wl_font_r, (uint8_t)s_wl_font_g, (uint8_t)s_wl_font_b,
+                               s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b,
+                               s_wl_shadow_size);
+        } else {
+            wl_text(fb, 40, label_by, u8g2_font_logisoso20_tf, label,
+                    s_wl_font_r, s_wl_font_g, s_wl_font_b, REQ_PX);
+        }
+
+        /* center_glyph — lower zone. */
+        if (center_glyph)
+            wl_text(fb, 40, 134, u8g2_font_logisoso42_tf, center_glyph,
+                    s_wl_font_r, s_wl_font_g, s_wl_font_b, 40);
+
+        display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+        return;
+    }
+
+    /* Classic asset themes. */
+    const uint8_t *bg = cx_load_text_bg(tube, cfg);
+    if (!bg) display_fill(tube, 0x0000);
+    uint16_t fg = ht_sample_theme_color(cfg->theme);
+    ht_draw_label(tube, label, 12, fg, bg);
+    if (center_glyph)
+        ht_draw_str_at(tube, center_glyph, HT_LABEL_H + 12, 90, u8g2_font_logisoso42_tf, fg, bg);
+}
+
+/* Tubes 0-4 of a temperature panel (outdoor Temp, or Indoor Temperature). */
+static void wx_draw_temp_digits(int temp, bool negative, bool fahrenheit,
+                                 const char *th, bool wl_sky,
+                                 const nextube_config_t *cfg, const char *label)
+{
+    char path[128];
+    char ds[16];
+
+    if (!wl_sky) flip_prime_blank(4, th);
+
+    bool single_digit = (temp < 10);
+
+    /* Tube 0: always blank */
+    if (wl_sky) wl_tube_sky(0);
+    else display_show_ampm(0, "blank", th);
+
+    /* Tube 1: "In"/"Out" label, shared with a minus sign when the 2-digit-
+     * negative case puts one here — otherwise just the label alone. See
+     * wx_draw_label_tube_shared(). */
+    const char *center = (negative && !single_digit) ? "-" : NULL;
+    wx_draw_label_tube_shared(cfg, th, wl_sky, 1, label, center);
+
+    /* Tube 2: minus (1-digit negative), tens digit (2-digit), or blank —
+     * unrelated to the label, which lives on tube 1 above. */
+    if (negative && single_digit) {
+        if (wl_sky) wl_tube_str(2, u8g2_font_logisoso46_tf, "-", 100);
+        else { display_path_temperature(path, sizeof(path), th, "minus"); display_show_image(2, path); }
+    } else if (!single_digit) {
+        if (wl_sky) { snprintf(ds, sizeof(ds), "%d", temp / 10); wl_tube_str(2, u8g2_font_logisoso46_tf, ds, 100); }
+        else { display_path_number(path, sizeof(path), th, temp / 10); display_show_image(2, path); }
+    } else {
+        if (wl_sky) wl_tube_sky(2);
+        else display_show_ampm(2, "blank", th);
+    }
+
+    /* Tube 3: units digit */
+    if (wl_sky) { snprintf(ds, sizeof(ds), "%d", temp % 10); wl_tube_str(3, u8g2_font_logisoso46_tf, ds, 100); }
+    else { display_path_number(path, sizeof(path), th, temp % 10); display_show_image(3, path); }
+
+    /* Tube 4: °C / °F symbol */
+    if (wl_sky) wl_tube_str(4, u8g2_font_logisoso28_tf, fahrenheit ? "\xc2\xb0""F" : "\xc2\xb0""C", 91);
+    else { display_path_temperature(path, sizeof(path), th, fahrenheit ? "degreef" : "degreec"); display_show_image(4, path); }
+}
+
+/* Tube 0 of a humidity panel — the procedural water-droplet glyph, drawn
+ * into the shared framebuffer over the theme's blank tile (or the
+ * WeatherLive sky) and pushed once.  Same for indoor and outdoor. */
+static void wx_draw_humidity_droplet(const char *th, bool wl_sky)
+{
+    char path[128];
+    uint8_t *fb = wl_fb();
+    if (fb) {
+        if (wl_sky) {
+            wl_paint_background(fb, 0, &s_wl_last_scene);
+        } else {
+            display_path_ampm(path, sizeof(path), th, "blank");
+            seed_fb_blank(fb, path);
+        }
+
+        const int tip = 36;
+        const int cx  = 40;
+        const int bcy = 100;
+        const int rad = 22;
+
+        if (s_wl_dm_active) {
+            /* This icon has a whole tube to itself (value/% live on
+             * tubes 2-4) — the 7x14 glyph grid always maps to a full
+             * tube, at the same cell=9/gap=2 pitch every other
+             * full-tube glyph in this theme uses (digits, AM/PM,
+             * sunrise/sunset, arrows); don't scale it down to chase
+             * the non-DM procedural droplet's particular geometry.
+             * Centred on the tube itself (80), not tip/bcy/rad —
+             * those describe the smooth droplet shape this glyph
+             * replaces, not this glyph's own placement. */
+            dm_draw_glyph(fb, cx, 80, DM_CP_ICON_HUMIDITY, 9, 2, true,
+                          s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        } else {
+        /* Shadow pass: same droplet shape expanded 2 px all round. */
+        if (wl_shadow_on()) {
+            const int SH = 2;
+            for (int sy = tip - SH; sy <= bcy + rad + SH; sy++) {
+                if (sy < 0 || sy >= LCD_HEIGHT) continue;
+                float w;
+                if (sy < tip) {
+                    float dist = (float)(tip - sy);
+                    w = (dist <= (float)SH) ? ((float)SH - dist) : 0.0f;
+                } else if (sy <= bcy) {
+                    float t = (float)(sy - tip) / (float)(bcy - tip);
+                    w = (float)rad * t * (2.0f - t) + (float)SH;
+                } else {
+                    float dsy = (float)(sy - bcy);
+                    float v   = (float)(rad * rad) - dsy * dsy;
+                    w = (v > 0.0f) ? sqrtf(v) + (float)SH : 0.0f;
+                }
+                int iw = (int)(w + 0.5f);
+                for (int sx = cx - iw; sx <= cx + iw; sx++) {
+                    if (sx < 0 || sx >= LCD_WIDTH) continue;
+                    wl_blend_px(fb + (sy * LCD_WIDTH + sx) * 2,
+                                s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, 160);
+                }
+            }
+        }
+        for (int y = tip; y <= bcy + rad; y++) {
+            if (y < 0 || y >= LCD_HEIGHT) continue;
+            int cone_hw = 0;
+            if (y <= bcy) {
+                float t = (float)(y - tip) / (float)(bcy - tip);
+                cone_hw = (int)((float)rad * t * (2.0f - t) + 0.5f);
+            }
+            for (int x = cx - rad; x <= cx + rad; x++) {
+                if (x < 0 || x >= LCD_WIDTH) continue;
+                int dx = x - cx, dy = y - bcy;
+                bool in_circle = (dx * dx + dy * dy <= rad * rad);
+                bool in_cone   = (y <= bcy && (dx < 0 ? -dx : dx) <= cone_hw);
+                if (in_circle || in_cone)
+                    wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, 80, 160, 255, 255);
+            }
+        }
+        for (int y = bcy - rad + 4; y <= bcy - rad + 12; y++) {
+            if (y < 0 || y >= LCD_HEIGHT) continue;
+            for (int x = cx - 12; x <= cx - 2; x++) {
+                if (x < 0 || x >= LCD_WIDTH) continue;
+                int dx = x - (cx - 7), dy = y - (bcy - rad + 8);
+                if (dx * dx + dy * dy <= 16)
+                    wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, 220, 240, 255, 180);
+            }
+        }
+        }
+        display_show_digit(0, fb, LCD_WIDTH, LCD_HEIGHT);
+    } else {
+        if (wl_sky) wl_tube_sky(0);
+        else display_show_ampm(0, "blank", th);
+    }
+}
+
+/* Tubes 1-4 of a humidity panel: "In"/"Out" label, tens digit, units digit,
+ * % symbol. */
+static void wx_draw_humidity_digits(int hum, const char *th, bool wl_sky,
+                                     const nextube_config_t *cfg, const char *label)
+{
+    char path[128];
+    char ds[16];
+
+    /* Tube 1: "In"/"Out" label — humidity has no minus sign, so this tube
+     * never has anything else to share with. See wx_draw_label_tube_shared(). */
+    wx_draw_label_tube_shared(cfg, th, wl_sky, 1, label, NULL);
+
+    /* Tube 2: tens digit of humidity (blank if < 10) */
+    if (wl_sky) {
+        if (hum / 10 == 0) wl_tube_sky(2);
+        else { snprintf(ds, sizeof(ds), "%d", hum / 10); wl_tube_str(2, u8g2_font_logisoso46_tf, ds, 100); }
+    } else {
+        if (hum / 10 == 0) display_show_ampm(2, "blank", th);
+        else { display_path_number(path, sizeof(path), th, hum / 10); display_show_image(2, path); }
+    }
+
+    /* Tube 3: units digit of humidity */
+    if (wl_sky) { snprintf(ds, sizeof(ds), "%d", hum % 10); wl_tube_str(3, u8g2_font_logisoso46_tf, ds, 100); }
+    else { display_path_number(path, sizeof(path), th, hum % 10); display_show_image(3, path); }
+
+    /* Tube 4: humidity % symbol.
+     * Single char → wl_tube_str would route through wl_glyph (2× full-tube
+     * scale, logisoso42 hardcoded), making % fill the tube like a digit.
+     * Use wl_text directly for the correct 1× accent-sized rendering.       */
+    if (wl_sky) {
+        uint8_t *pfb = wl_fb();
+        if (pfb) {
+            wl_paint_background(pfb, 4, &s_wl_last_scene);
+            wl_text(pfb, 40, 91, u8g2_font_logisoso28_tf, "%",
+                    s_wl_font_r, s_wl_font_g, s_wl_font_b, 0);
+            display_show_digit(4, pfb, LCD_WIDTH, LCD_HEIGHT);
+        } else {
+            wl_tube_sky(4);
+        }
+    } else { display_path_humidity(path, sizeof(path), th, "humidity"); display_show_image(4, path); }
+}
+
+/* Panel 5 — Indoor Temperature (SHT30). Same tube layout as the outdoor
+ * Temperature panel (wx_draw_temp_digits, including the "In" label shared
+ * on tube 1 — see wx_draw_label_tube_shared()); tube 5 is plain blank, since
+ * Indoor has no weather icon to show there either way. Independent of
+ * weather_get()'s outdoor data, so it still renders correctly even if the
+ * outdoor fetch has never succeeded. */
+static void render_weather_indoor_temp(const nextube_config_t *cfg)
+{
+    if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);
+    const char *th = effective_bg_theme(cfg);
+    s_wl_dm_active = !strcmp(th, "DotMatrix");
+    bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
+
+    sht30_reading_t s;
+    if (!sht30_get(&s)) {
+        /* Sensor absent or not yet valid — same "no data" dot pattern
+         * render_weather() shows before the first outdoor fetch succeeds. */
+        for (int i = 0; i < LCD_COUNT; i++) {
+            if (wl_sky) wl_tube_str(i, u8g2_font_logisoso46_tf, ".", 100);
+            else display_show_ampm(i, "dot", th);
+        }
+        return;
+    }
+
+    bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
+    temp_val_t tv = temp_sign_magnitude(s.temp_c, fahrenheit);
+    wx_draw_temp_digits(tv.value, tv.negative, fahrenheit, th, wl_sky, cfg,
+                        inout_label(cfg->language, true));
+    if (wl_sky) wl_tube_sky(5);
+    else display_show_ampm(5, "blank", th);
+}
+
+/* Panel 6 — Indoor Humidity (SHT30). Same tube layout as the outdoor
+ * Humidity panel (droplet on tube 0, unchanged, "In" label on tube 1 — see
+ * wx_draw_label_tube_shared()); tube 5 is plain blank. */
+static void render_weather_indoor_hum(const nextube_config_t *cfg)
+{
+    if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);
+    const char *th = effective_bg_theme(cfg);
+    s_wl_dm_active = !strcmp(th, "DotMatrix");
+    bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
+
+    sht30_reading_t s;
+    if (!sht30_get(&s)) {
+        for (int i = 0; i < LCD_COUNT; i++) {
+            if (wl_sky) wl_tube_str(i, u8g2_font_logisoso46_tf, ".", 100);
+            else display_show_ampm(i, "dot", th);
+        }
+        return;
+    }
+
+    int hum = (int)(s.humidity + 0.5f);
+    if (hum < 0)  hum = 0;
+    if (hum > 99) hum = 99;
+
+    wx_draw_humidity_droplet(th, wl_sky);
+    wx_draw_humidity_digits(hum, th, wl_sky, cfg, inout_label(cfg->language, true));
+    if (wl_sky) wl_tube_sky(5);
+    else display_show_ampm(5, "blank", th);
+}
+
 /* render_weather – panel 0 = temperature + icon, panel 1 = humidity + icon,
- *                  panel 2 = sunrise + sunset times.
+ *                  panel 2 = sunrise + sunset times, panels 5/6 = indoor
+ *                  temperature/humidity (SHT30, dedicated renderers above).
  *
- * Three-panel layout (auto-cycles in the display task):
+ * Panel layout (auto-cycles in the display task):
  *
- *  Panel 0 — temperature (tubes 0-indexed):
- *    positive 1-digit:  0=blank  1=blank  2=blank  3=units  4=°C/°F
- *    positive 2-digit:  0=blank  1=blank  2=tens   3=units  4=°C/°F
- *    negative 1-digit:  0=blank  1=blank  2=minus  3=units  4=°C/°F
- *    negative 2-digit:  0=blank  1=minus  2=tens   3=units  4=°C/°F
- *                     tube 5 = weather icon
+ *  Panel 0 — temperature (tubes 0-indexed). Tube 1 always carries the
+ *  "Out" label; it's otherwise blank except for a 2-digit-negative minus
+ *  sign, which shares the tube with it (see wx_draw_label_tube_shared()).
+ *  Tube 2 is unaffected by the label — same minus/tens/blank content:
+ *    positive 1-digit:  0=blank  1=Out       2=blank  3=units  4=°C/°F
+ *    positive 2-digit:  0=blank  1=Out       2=tens   3=units  4=°C/°F
+ *    negative 1-digit:  0=blank  1=Out       2=minus  3=units  4=°C/°F
+ *    negative 2-digit:  0=blank  1=Out+minus 2=tens   3=units  4=°C/°F
+ *                     tube 5 = weather icon (untouched by the label)
  *
- *  Panel 1 — humidity:
- *    [droplet glyph] [blank] [hum_tens/blank] [hum_units] [%] [icon]
+ *  Panel 1 — humidity (tube 1 = "Out" always; humidity has no minus sign):
+ *    [droplet glyph] [Out] [hum_tens/blank] [hum_units] [%] [icon]
  *
  *  Panel 2 — sunrise + sunset:
  *    [rise_icon] [rise_time] [blank] [blank] [set_icon] [set_time]
+ *
+ *  Panels 5/6 — indoor temp/humidity: identical layout to 0/1 but with "In"
+ *    on tube 1 and tube 5 plain blank (render_weather_indoor_*() above,
+ *    dispatched before this function's outdoor-weather validity check).
  */
 static void render_weather(const nextube_config_t *cfg, int panel, bool anim_only,
                            int hilo_phase)
 {
+    /* Panels 5/6 — indoor temperature/humidity (SHT30) — dispatch first,
+     * before the outdoor weather_get() validity check below: indoor
+     * readings are independent of the outdoor fetch, so an outdoor-fetch
+     * failure shouldn't blank an otherwise-valid indoor panel. */
+    if (panel == WEATHER_PANEL_INTMP) { render_weather_indoor_temp(cfg); return; }
+    if (panel == WEATHER_PANEL_INHUM) { render_weather_indoor_hum(cfg);  return; }
+
     if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);   /* keep anim_t current */
     const char *th = effective_bg_theme(cfg);
     s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
     const weather_data_t *w = weather_get();
     bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
     char path[128];
-    char ds[16];
 
     if (!w || !w->valid) {
         for (int i = 0; i < LCD_COUNT; i++) {
@@ -8522,10 +8951,11 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
     if (hum < 0)  hum = 0;
     if (hum > 99) hum = 99;
 
-    const char *unit = fahrenheit ? "degreef" : "degreec";
     const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
 
-    /* Tube 5 (weather icon) — sky fill for WeatherLive (no icon assets) */
+    /* Tube 5 (weather icon) — sky fill for WeatherLive (no icon assets).
+     * Untouched by the "Out" label, which lives on tube 1 now (see
+     * wx_draw_label_tube_shared()). */
     if (wl_sky) {
         wl_tube_sky(5);
     } else {
@@ -8534,167 +8964,16 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
     }
 
     /* ── Panel 1: humidity ─────────────────────────────────────────── */
-    /* Layout: 0=droplet glyph  1=blank  2=tens/blank  3=units  4=%  5=icon */
+    /* Layout: 0=droplet glyph  1=label  2=tens/blank  3=units  4=%  5=icon */
     if (panel == 1) {
-        /* Tube 0: procedural water-droplet glyph */
-        {
-            uint8_t *fb = wl_fb();
-            if (fb) {
-                if (wl_sky) {
-                    wl_paint_background(fb, 0, &s_wl_last_scene);
-                } else {
-                    display_path_ampm(path, sizeof(path), th, "blank");
-                    seed_fb_blank(fb, path);
-                }
-
-                const int tip = 36;
-                const int cx  = 40;
-                const int bcy = 100;
-                const int rad = 22;
-
-                if (s_wl_dm_active) {
-                    /* This icon has a whole tube to itself (value/% live on
-                     * tubes 2-4) — the 7x14 glyph grid always maps to a full
-                     * tube, at the same cell=9/gap=2 pitch every other
-                     * full-tube glyph in this theme uses (digits, AM/PM,
-                     * sunrise/sunset, arrows); don't scale it down to chase
-                     * the non-DM procedural droplet's particular geometry.
-                     * Centred on the tube itself (80), not tip/bcy/rad —
-                     * those describe the smooth droplet shape this glyph
-                     * replaces, not this glyph's own placement. */
-                    dm_draw_glyph(fb, cx, 80, DM_CP_ICON_HUMIDITY, 9, 2, true,
-                                  s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
-                } else {
-                /* Shadow pass: same droplet shape expanded 2 px all round. */
-                if (wl_shadow_on()) {
-                    const int SH = 2;
-                    for (int sy = tip - SH; sy <= bcy + rad + SH; sy++) {
-                        if (sy < 0 || sy >= LCD_HEIGHT) continue;
-                        float w;
-                        if (sy < tip) {
-                            float dist = (float)(tip - sy);
-                            w = (dist <= (float)SH) ? ((float)SH - dist) : 0.0f;
-                        } else if (sy <= bcy) {
-                            float t = (float)(sy - tip) / (float)(bcy - tip);
-                            w = (float)rad * t * (2.0f - t) + (float)SH;
-                        } else {
-                            float dsy = (float)(sy - bcy);
-                            float v   = (float)(rad * rad) - dsy * dsy;
-                            w = (v > 0.0f) ? sqrtf(v) + (float)SH : 0.0f;
-                        }
-                        int iw = (int)(w + 0.5f);
-                        for (int sx = cx - iw; sx <= cx + iw; sx++) {
-                            if (sx < 0 || sx >= LCD_WIDTH) continue;
-                            wl_blend_px(fb + (sy * LCD_WIDTH + sx) * 2,
-                                        s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, 160);
-                        }
-                    }
-                }
-                for (int y = tip; y <= bcy + rad; y++) {
-                    if (y < 0 || y >= LCD_HEIGHT) continue;
-                    int cone_hw = 0;
-                    if (y <= bcy) {
-                        float t = (float)(y - tip) / (float)(bcy - tip);
-                        cone_hw = (int)((float)rad * t * (2.0f - t) + 0.5f);
-                    }
-                    for (int x = cx - rad; x <= cx + rad; x++) {
-                        if (x < 0 || x >= LCD_WIDTH) continue;
-                        int dx = x - cx, dy = y - bcy;
-                        bool in_circle = (dx * dx + dy * dy <= rad * rad);
-                        bool in_cone   = (y <= bcy && (dx < 0 ? -dx : dx) <= cone_hw);
-                        if (in_circle || in_cone)
-                            wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, 80, 160, 255, 255);
-                    }
-                }
-                for (int y = bcy - rad + 4; y <= bcy - rad + 12; y++) {
-                    if (y < 0 || y >= LCD_HEIGHT) continue;
-                    for (int x = cx - 12; x <= cx - 2; x++) {
-                        if (x < 0 || x >= LCD_WIDTH) continue;
-                        int dx = x - (cx - 7), dy = y - (bcy - rad + 8);
-                        if (dx * dx + dy * dy <= 16)
-                            wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, 220, 240, 255, 180);
-                    }
-                }
-                }
-                display_show_digit(0, fb, LCD_WIDTH, LCD_HEIGHT);
-            } else {
-                if (wl_sky) wl_tube_sky(0);
-                else display_show_ampm(0, "blank", th);
-            }
-        }
-
-        if (wl_sky) wl_tube_sky(1);
-        else display_show_ampm(1, "blank", th);
-
-        /* Tube 2: tens digit of humidity (blank if < 10) */
-        if (wl_sky) {
-            if (hum / 10 == 0) wl_tube_sky(2);
-            else { snprintf(ds, sizeof(ds), "%d", hum / 10); wl_tube_str(2, u8g2_font_logisoso46_tf, ds, 100); }
-        } else {
-            if (hum / 10 == 0) display_show_ampm(2, "blank", th);
-            else { display_path_number(path, sizeof(path), th, hum / 10); display_show_image(2, path); }
-        }
-
-        /* Tube 3: units digit of humidity */
-        if (wl_sky) { snprintf(ds, sizeof(ds), "%d", hum % 10); wl_tube_str(3, u8g2_font_logisoso46_tf, ds, 100); }
-        else { display_path_number(path, sizeof(path), th, hum % 10); display_show_image(3, path); }
-
-        /* Tube 4: humidity % symbol.
-         * Single char → wl_tube_str would route through wl_glyph (2× full-tube
-         * scale, logisoso42 hardcoded), making % fill the tube like a digit.
-         * Use wl_text directly for the correct 1× accent-sized rendering.       */
-        if (wl_sky) {
-            uint8_t *pfb = wl_fb();
-            if (pfb) {
-                wl_paint_background(pfb, 4, &s_wl_last_scene);
-                wl_text(pfb, 40, 91, u8g2_font_logisoso28_tf, "%",
-                        s_wl_font_r, s_wl_font_g, s_wl_font_b, 0);
-                display_show_digit(4, pfb, LCD_WIDTH, LCD_HEIGHT);
-            } else {
-                wl_tube_sky(4);
-            }
-        } else { display_path_humidity(path, sizeof(path), th, "humidity"); display_show_image(4, path); }
-
+        wx_draw_humidity_droplet(th, wl_sky);
+        wx_draw_humidity_digits(hum, th, wl_sky, cfg, inout_label(cfg->language, false));
         return;
     }
 
     /* ── Panel 0: temperature ──────────────────────────────────────── */
-    if (!wl_sky) flip_prime_blank(4, th);
-
-    bool single_digit = (temp < 10);
-
-    /* Tube 0: always blank */
-    if (wl_sky) wl_tube_sky(0);
-    else display_show_ampm(0, "blank", th);
-
-    /* Tube 1: minus (2-digit negative) or blank */
-    if (negative && !single_digit) {
-        if (wl_sky) wl_tube_str(1, u8g2_font_logisoso46_tf, "-", 100);
-        else { display_path_temperature(path, sizeof(path), th, "minus"); display_show_image(1, path); }
-    } else {
-        if (wl_sky) wl_tube_sky(1);
-        else display_show_ampm(1, "blank", th);
-    }
-
-    /* Tube 2: minus (1-digit negative), tens digit (2-digit), or blank */
-    if (negative && single_digit) {
-        if (wl_sky) wl_tube_str(2, u8g2_font_logisoso46_tf, "-", 100);
-        else { display_path_temperature(path, sizeof(path), th, "minus"); display_show_image(2, path); }
-    } else if (!single_digit) {
-        if (wl_sky) { snprintf(ds, sizeof(ds), "%d", temp / 10); wl_tube_str(2, u8g2_font_logisoso46_tf, ds, 100); }
-        else { display_path_number(path, sizeof(path), th, temp / 10); display_show_image(2, path); }
-    } else {
-        if (wl_sky) wl_tube_sky(2);
-        else display_show_ampm(2, "blank", th);
-    }
-
-    /* Tube 3: units digit */
-    if (wl_sky) { snprintf(ds, sizeof(ds), "%d", temp % 10); wl_tube_str(3, u8g2_font_logisoso46_tf, ds, 100); }
-    else { display_path_number(path, sizeof(path), th, temp % 10); display_show_image(3, path); }
-
-    /* Tube 4: °C / °F symbol */
-    if (wl_sky) wl_tube_str(4, u8g2_font_logisoso28_tf, fahrenheit ? "\xc2\xb0""F" : "\xc2\xb0""C", 91);
-    else { display_path_temperature(path, sizeof(path), th, unit); display_show_image(4, path); }
+    wx_draw_temp_digits(temp, negative, fahrenheit, th, wl_sky, cfg,
+                        inout_label(cfg->language, false));
 }
 
 
@@ -8876,6 +9155,10 @@ static void display_task(void *arg)
     float         last_hum      = -1.0f;
     bool          last_wx_valid = false;       /* detect when data first arrives */
     int           last_wx_min   = -1;          /* solar time change detection (minute) */
+    float         last_indoor_temp_c = -9999.0f;   /* indoor (SHT30) change detection —
+                                                      * Weather Mode panels 5/6 */
+    float         last_indoor_hum    = -1.0f;
+    bool          last_indoor_valid  = false;
     bool          last_leading_zero = false;    /* leading-zero change detection */
     bool          last_cx_dual  = false;       /* 24H_CX dual-panel toggle change detection */
     bool          last_bl_on    = true;        /* backlight on/off tracking */
@@ -8892,6 +9175,7 @@ static void display_task(void *arg)
     TickType_t    theme_rotation_tick = 0;     /* tick when current theme started */
     bool          last_mode_rot_en    = false; /* mode-rotation enable edge tracker  */
     bool          last_theme_rot_en   = false; /* theme-rotation enable edge tracker */
+    bool          last_rotation_paused = false; /* rotation-pause edge tracker (see s_rotation_paused) */
     int           weather_panel      = WEATHER_PANEL_TEMP;
     TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
     int           hilo_phase        = 0;       /* 0 = show HI, 1 = show LO (panel 4 only) */
@@ -8990,6 +9274,9 @@ static void display_task(void *arg)
             last_hum      = -1.0f;
             last_wx_valid = false;
             last_wx_min   = -1;
+            last_indoor_temp_c = -9999.0f;
+            last_indoor_hum    = -1.0f;
+            last_indoor_valid  = false;
         }
         /* Config saved via WebUI: force mode_changed so every render path
          * (including WeatherLive / Custom face) picks up new custom_* values
@@ -9002,9 +9289,10 @@ static void display_task(void *arg)
         }
 
         /* ── Mode rotation ───────────────────────────────────────────
-         * Only fires when rotation_enabled is true.  Any mode change
-         * (UI, button, or previous rotation step) resets the timer so
-         * the new mode gets its full weighted dwell before advancing.
+         * Only fires when rotation_enabled is true and not paused (see
+         * s_rotation_paused / display_set_rotation_paused()).  Any mode
+         * change (UI, button, or previous rotation step) resets the timer
+         * so the new mode gets its full weighted dwell before advancing.
          *
          * Effective dwell = rotation_interval_s × rotation_weights[mode].
          * A weight of 1 (default) gives the base interval; a weight of 10
@@ -9016,9 +9304,17 @@ static void display_task(void *arg)
             rotation_tick = xTaskGetTickCount();
         last_mode_rot_en = cfg->rotation_enabled;
 
+        /* Reset the baseline on resume (paused → not-paused) too, so the
+         * current mode always gets a fresh full dwell instead of possibly
+         * advancing immediately off elapsed time that accrued while paused. */
+        bool rotation_paused = display_rotation_is_paused();
+        if (!rotation_paused && last_rotation_paused)
+            rotation_tick = xTaskGetTickCount();
+        last_rotation_paused = rotation_paused;
+
         if (mode_changed) {
             rotation_tick = xTaskGetTickCount();
-        } else if (cfg->rotation_enabled && !first) {
+        } else if (cfg->rotation_enabled && !rotation_paused && !first) {
             uint16_t interval = cfg->rotation_interval_s ? cfg->rotation_interval_s : 60;
             uint8_t  weight   = cfg->rotation_weights[cfg->current_mode];
             if (weight < 1) weight = 1;
@@ -9242,6 +9538,9 @@ static void display_task(void *arg)
             last_hum      = -1.0f;
             last_wx_valid = false;
             last_wx_min   = -1;
+            last_indoor_temp_c = -9999.0f;
+            last_indoor_hum    = -1.0f;
+            last_indoor_valid  = false;
             first         = true;
             ap_pin_transition = true;   /* arm the exit guard for the next tick */
             vTaskDelayUntil(&wake, pdMS_TO_TICKS(200));
@@ -9870,6 +10169,10 @@ static void display_task(void *arg)
 
             /* Panel auto-switch: cycle enabled panels on a timer.
              * Respects weather_panel0/1/2/3/4_en — panels not enabled are skipped.
+             * Panels 5/6 (indoor temp/humidity, SHT30) are additionally gated on
+             * sht30_is_present() — a device without the sensor never rotates into
+             * a dash-only panel even if the toggle happens to be on (e.g. a
+             * synced config from a unit that does have one).
              * Panel 4 (HILO) has an internal HI→LO sub-rotation: the first timer
              * fire flips hilo_phase 0→1; the second fire advances to the next panel.
              * If the currently active panel has been disabled, jumps to the next
@@ -9880,16 +10183,21 @@ static void display_task(void *arg)
                  * just when now_valid, so a disabled panel is corrected before
                  * the first weather fetch completes (fixes panel 0 showing
                  * persistently when only another panel is enabled). */
-                bool pen[5] = { cfg->weather_panel0_en,
+                bool sht_present = sht30_is_present();
+                bool pen[7] = { cfg->weather_panel0_en,
                                 cfg->weather_panel1_en,
                                 cfg->weather_panel2_en,
                                 cfg->weather_panel3_en,
-                                cfg->weather_panel4_en };
-                int elist[5]; int ecnt = 0;
-                for (int _i = 0; _i < 5; _i++)
+                                cfg->weather_panel4_en,
+                                cfg->weather_panel5_en && sht_present,
+                                cfg->weather_panel6_en && sht_present };
+                int elist[7]; int ecnt = 0;
+                for (int _i = 0; _i < 7; _i++)
                     if (pen[_i]) elist[ecnt++] = _i;
                 if (ecnt == 0) {
-                    /* Stale/corrupt config — enable all panels as fallback */
+                    /* Stale/corrupt config — enable the original 5 outdoor
+                     * panels as fallback (never the indoor ones, since those
+                     * need explicit opt-in and working hardware). */
                     for (int _i = 0; _i < 5; _i++) elist[ecnt++] = _i;
                 }
 
@@ -9900,8 +10208,12 @@ static void display_task(void *arg)
                 if (!cur_ok) {
                     weather_panel = elist[0]; weather_panel_tick = 0;
                     hilo_phase = 0; panel_flipped = true;
-                } else if (now_valid && (ecnt > 1 || weather_panel == WEATHER_PANEL_HILO)) {
-                    /* Timer-based rotation — only when data is valid */
+                } else if ((now_valid || pen[5] || pen[6]) &&
+                           (ecnt > 1 || weather_panel == WEATHER_PANEL_HILO)) {
+                    /* Timer-based rotation — needs valid outdoor data, or at
+                     * least one indoor panel enabled (SHT30 present), so an
+                     * indoor-only setup still cycles even if the outdoor
+                     * fetch has never succeeded. */
                     TickType_t now_t = xTaskGetTickCount();
                     if (weather_panel_tick == 0) {
                         weather_panel_tick = now_t;
@@ -9946,8 +10258,28 @@ static void display_task(void *arg)
                     wx_changed = (wx_tm.tm_min != last_wx_min);
             }
             bool valid_changed = (now_valid != last_wx_valid);
+
+            /* Indoor (SHT30) change detection — independent of the outdoor
+             * weather_get() validity above, so panels 5/6 keep redrawing on
+             * new indoor readings even when the outdoor fetch never
+             * succeeds (a cheap mutex copy-out, not an I2C transaction —
+             * fine to call every tick regardless of which panel is active,
+             * same as the sensor's other periodic-poll consumers). */
+            sht30_reading_t sht_now;
+            bool indoor_now_valid = sht30_get(&sht_now);
+            bool indoor_changed = false;
+            if (indoor_now_valid && last_indoor_valid) {
+                bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
+                temp_val_t cur_i  = temp_sign_magnitude(sht_now.temp_c,     fahrenheit);
+                temp_val_t last_i = temp_sign_magnitude(last_indoor_temp_c, fahrenheit);
+                indoor_changed = (cur_i.value != last_i.value || cur_i.negative != last_i.negative ||
+                                   (int)(sht_now.humidity + 0.5f) != (int)(last_indoor_hum + 0.5f));
+            }
+            bool indoor_valid_changed = (indoor_now_valid != last_indoor_valid);
+
             bool full_redraw   = (first || mode_changed || theme_changed || wx_changed ||
-                                  valid_changed || panel_flipped || burnin_force_render);
+                                  valid_changed || indoor_changed || indoor_valid_changed ||
+                                  panel_flipped || burnin_force_render);
             if (full_redraw || (sun_anim && !wl_anim_tick)) {
                 /* wx_sun_anim_frame advances a static position counter exactly
                  * once per rendered frame (on the rising=true tube-0 call).
@@ -9966,6 +10298,11 @@ static void display_task(void *arg)
                         last_wx_min = wx_tm.tm_min;
                     }
                     last_wx_valid = now_valid;
+                    if (indoor_now_valid) {
+                        last_indoor_temp_c = sht_now.temp_c;
+                        last_indoor_hum    = sht_now.humidity;
+                    }
+                    last_indoor_valid = indoor_now_valid;
                 }
             }
             break;

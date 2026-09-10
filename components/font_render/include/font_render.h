@@ -82,3 +82,21 @@ void  fr_draw_text(uint8_t *fb, int fb_w, int fb_h,
  * Pass the framebuffer width as fb_w (used for the width-fit cap).
  * Returns 0 on error.  Does not render anything. */
 int   fr_measure_text(int fb_w, uint8_t face_id, uint16_t px_size, const char *utf8_str);
+
+/* Return the px_size fr_draw_text() would actually render utf8_str at (after
+ * norm_ratio/width-fit/height-fit) — for fitting several short strings that
+ * share one spot to a common size: fit against the widest one with this,
+ * then draw all of them at that exact size via fr_draw_text_exact() instead
+ * of fr_draw_text(), so a narrower string doesn't end up larger just
+ * because it didn't need its own independent shrink-to-fit.
+ * Returns px_size unchanged on error. Does not render anything. */
+uint16_t fr_fit_px_size(int fb_w, uint8_t face_id, uint16_t px_size, const char *utf8_str);
+
+/* Render utf8_str at EXACTLY px_size — no width/height auto-fit, unlike
+ * fr_draw_text(). Pair with fr_fit_px_size() (see above). */
+void  fr_draw_text_exact(uint8_t *fb, int fb_w, int fb_h,
+                         int cx, int baseline_y,
+                         uint8_t face_id, uint16_t px_size,
+                         const char *utf8_str,
+                         uint8_t cr, uint8_t cg, uint8_t cb,
+                         bool shadow, uint8_t sr, uint8_t sg, uint8_t sb, uint8_t shadow_size);

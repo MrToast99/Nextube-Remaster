@@ -66,7 +66,22 @@ static bool s_server_restart_pending = false;   /* set when a WiFi reconnect sto
 static bool    s_fs_cache_valid   = false;
 static size_t  s_fs_total_cached  = 0;
 static size_t  s_fs_used_cached   = 0;
+/* /spiffs/web/version.txt content, cached alongside the usage figures — it
+ * only changes on a hotpatch / webui-pull / FS-OTA, all of which call
+ * fs_usage_invalidate(). Avoids a blocking fopen() on every 5s /api/status
+ * poll, which during a hotpatch's ~minute-long LittleFS write window would
+ * stall behind the extraction long enough for the browser's poll to abort. */
+static char    s_fs_ver_cached[32] = "unknown";
 static void fs_usage_invalidate(void) { s_fs_cache_valid = false; }
+
+/* True while a firmware/filesystem OTA or Web UI hotpatch is running. Declared
+ * here (not with its doc comment further down) so api_status() can check it:
+ * while an update holds the display parked via display_show_wait(),
+ * api_status() must NOT run its own display_pause_for_spi()/display_unpause()
+ * FS-usage walk — display_unpause() would drop the refcount to zero and
+ * resume the display task mid-flash, the exact race display_show_wait()
+ * exists to prevent. */
+static volatile bool s_ota_active = false;
 
 /* ── Stock-file integrity check ────────────────────────────────────────
  * STOCK_FILES (generated, see stock_files.h) is every file shipped in data/
@@ -246,6 +261,7 @@ static esp_err_t api_audio_play(httpd_req_t *r)
     cJSON_Delete(root);
     return send_json(r, "{\"status\":\"ok\"}");
 }
+
 
 /* POST /api/weather  — inject externally-sourced weather data.
  * Lets a home-automation system push its own (e.g. multi-provider averaged)
@@ -434,6 +450,8 @@ static esp_err_t api_post_settings(httpd_req_t *r)
      *      mic_enabled / audio_enabled to take effect. */
     char old_ssid[64], old_pass[64], old_hostname[32];
     bool old_weather_en, old_youtube_en, old_mdns_en, old_mic_en, old_audio_en;
+    char old_timezone[64];
+    char old_ntp_servers[4][64];
     uint8_t old_invert_mask;
     uint8_t old_init_profile[6];
     uint8_t old_vcom[6];
@@ -450,6 +468,8 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     old_mdns_en      = old_cfg->mdns_enabled;
     old_mic_en       = old_cfg->mic_enabled;
     old_audio_en     = old_cfg->audio_enabled;
+    strlcpy(old_timezone, old_cfg->timezone, sizeof(old_timezone));
+    memcpy(old_ntp_servers, old_cfg->ntp_servers, sizeof(old_ntp_servers));
     old_invert_mask  = old_cfg->lcd_invert_mask;
     memcpy(old_init_profile,    old_cfg->lcd_init_profile,    sizeof(old_init_profile));
     memcpy(old_vcom,            old_cfg->lcd_vcom,            sizeof(old_vcom));
@@ -469,6 +489,8 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     char    new_ssid[64], new_pass[64], new_hostname[32];
     bool    new_weather_en, new_youtube_en, new_mdns_en, new_mic_en;
     float   new_sht30_offset;
+    char    new_timezone[64];
+    char    new_ntp_servers[4][64];
     uint8_t new_invert_mask;
     uint8_t new_init_profile[6];
     uint8_t new_vcom[6];
@@ -488,6 +510,8 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     new_mdns_en       = new_cfg->mdns_enabled;
     new_mic_en        = new_cfg->mic_enabled;
     new_sht30_offset  = new_cfg->sht30_temp_offset;
+    strlcpy(new_timezone, new_cfg->timezone, sizeof(new_timezone));
+    memcpy(new_ntp_servers, new_cfg->ntp_servers, sizeof(new_ntp_servers));
     new_invert_mask   = new_cfg->lcd_invert_mask;
     memcpy(new_init_profile,    new_cfg->lcd_init_profile,    sizeof(new_init_profile));
     memcpy(new_vcom,            new_cfg->lcd_vcom,            sizeof(new_vcom));
@@ -498,9 +522,17 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     config_unlock();
 
     leds_set_brightness(new_brightness);
-    ntp_apply_timezone();
-    ntp_apply_servers();
-    audio_set_enabled(new_audio_enabled);
+    /* Apply the NTP settings only when they actually changed — ntp_apply_servers()
+     * stops and re-inits the SNTP engine (and both it and ntp_apply_timezone()
+     * log a line), which is needless churn on every save of an unrelated field. */
+    if (strcmp(new_timezone, old_timezone) != 0)
+        ntp_apply_timezone();
+    if (memcmp(new_ntp_servers, old_ntp_servers, sizeof(new_ntp_servers)) != 0)
+        ntp_apply_servers();
+    /* audio_set_enabled() only logs "takes effect after reboot" — skip it (and
+     * the log line) when the flag is unchanged. */
+    if (new_audio_enabled != old_audio_en)
+        audio_set_enabled(new_audio_enabled);
     /* Volume applies live — unlike audio_enabled, which needs a reboot. Without
      * this the slider only wrote config.json and the new level was not picked
      * up until audio_deferred_start() re-read it on the next boot. */
@@ -946,6 +978,12 @@ static esp_err_t api_status(httpd_req_t *r)
     cJSON_AddBoolToObject(root, "rtc_battery_ok",  ntp_rtc_battery_ok());
     cJSON_AddBoolToObject(root, "wifi_connected", wifi_manager_is_connected());
     cJSON_AddStringToObject(root, "ip", wifi_manager_get_ip());
+    /* Runtime-only pause state (see display_set_rotation_paused) — not part
+     * of the persisted config, so the web UI needs it here to reflect a
+     * pause set from another open tab, a timed pause auto-resuming, or a
+     * reset back to 0 on reboot. 0 = not paused, -1 = paused indefinitely,
+     * N = seconds remaining until auto-resume. */
+    cJSON_AddNumberToObject(root, "rotation_pause_remaining_s", display_rotation_pause_remaining_s());
     int64_t t_wifi = esp_timer_get_time();
     const weather_data_t *w = weather_get();
     if (w && w->valid) {
@@ -994,7 +1032,13 @@ static esp_err_t api_status(httpd_req_t *r)
                             (double)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     int64_t t_heap = esp_timer_get_time();
     {
-        if (!s_fs_cache_valid) {
+        /* Skip the FS-usage walk entirely while an OTA / hotpatch is running:
+         * it holds the display parked via display_show_wait(), and the
+         * display_pause_for_spi()/display_unpause() pair below would drop the
+         * park refcount to zero and resume the display task mid-flash. Serve
+         * whatever's cached (possibly stale/zero); the poll after the update
+         * finishes refreshes it. */
+        if (!s_fs_cache_valid && !s_ota_active) {
             /* This lazy first call fires on the first /api/status poll
              * after boot, right as display_task is doing its own SPI/LEDC
              * work — the block-walk's raw flash reads force ESP32's
@@ -1005,6 +1049,16 @@ static esp_err_t api_status(httpd_req_t *r)
              * and let the next poll retry. */
             if (display_pause_for_spi(5000)) {
                 esp_littlefs_info("littlefs", &s_fs_total_cached, &s_fs_used_cached);
+                /* Re-read the FS version string in the same guarded window,
+                 * so the /api/status hot path below never does its own
+                 * blocking fopen(). */
+                strcpy(s_fs_ver_cached, "unknown");
+                FILE *vcf = fopen("/spiffs/web/version.txt", "r");
+                if (vcf) {
+                    if (fgets(s_fs_ver_cached, sizeof(s_fs_ver_cached), vcf))
+                        s_fs_ver_cached[strcspn(s_fs_ver_cached, "\r\n")] = '\0';
+                    fclose(vcf);
+                }
                 s_fs_cache_valid = true;
                 display_unpause();
             } else {
@@ -1018,8 +1072,9 @@ static esp_err_t api_status(httpd_req_t *r)
     cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
     /* expected_fs: the LittleFS version this firmware binary was built against.
      * Baked in at compile time from version.json → fs_version.
-     * fs_version: the version actually present on the device, read at
-     * runtime from /spiffs/web/version.txt (written when littlefs.bin was flashed).
+     * fs_version: the version actually present on the device, from
+     * /spiffs/web/version.txt (written when littlefs.bin was flashed);
+     * cached in s_fs_ver_cached, re-read only on fs_usage_invalidate().
      * The UI shows a mismatch banner when these two differ — i.e. the LittleFS
      * image on the device is not the one this firmware expects. */
     cJSON_AddStringToObject(root, "expected_fs", FS_VERSION_STR);
@@ -1029,14 +1084,7 @@ static esp_err_t api_status(httpd_req_t *r)
     const char *te = display_get_theme_error();
     if (te) cJSON_AddStringToObject(root, "theme_error", te);
     else    cJSON_AddNullToObject  (root, "theme_error");
-    char fs_ver[32] = "unknown";
-    FILE *vf = fopen("/spiffs/web/version.txt", "r");
-    if (vf) {
-        if (fgets(fs_ver, sizeof(fs_ver), vf))
-            fs_ver[strcspn(fs_ver, "\r\n")] = '\0';
-        fclose(vf);
-    }
-    cJSON_AddStringToObject(root, "fs_version", fs_ver);
+    cJSON_AddStringToObject(root, "fs_version", s_fs_ver_cached);
     /* stock_missing: count from the last stock_files_check() run (boot, or
      * most recent hotpatch/webui-pull completion) — cheap read of an
      * already-computed value, never recomputed here. See that function's
@@ -1244,8 +1292,9 @@ static void webui_resume_tasks(void)
  *     to retry the POST. Instead: send the response with "Connection:
  *     close", return so httpd closes the socket cleanly, then fire
  *     esp_restart() from a one-shot timer ~1.5s later (the esp_timer task
- *     isn't suspended by ota_suspend_tasks(), so this still runs). */
-static volatile bool s_ota_active    = false;
+ *     isn't suspended by ota_suspend_tasks(), so this still runs).
+ * s_ota_active itself is declared near the top of this file (api_status()
+ * needs to read it). */
 /* Hidden debug panel's "Per-task stack log" toggle — see api_debug_stacklog()
  * and web_server_debug_stacklog_enabled() below. Runtime only, off by default;
  * resets on reboot like every other debug-panel control. */
@@ -4157,6 +4206,33 @@ static esp_err_t api_update_notify(httpd_req_t *r)
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
+/* POST /api/rotation_pause
+ * Body: {"paused": false}                     -> resume immediately
+ *       {"paused": true}                      -> pause indefinitely, until resumed
+ *       {"paused": true, "duration_s": 3600}   -> pause for N seconds, then
+ *                                                 auto-resume on its own
+ * Pauses/resumes automatic mode rotation without touching config_mgr or
+ * flash — see display_set_rotation_paused(). Runtime only: any pause
+ * (timed or indefinite) always clears on reboot; the persisted Mode
+ * Rotation setting itself (enabled/interval/weights) is untouched. */
+static esp_err_t api_rotation_pause(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char body[64];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
+    cJSON *jp = cJSON_GetObjectItem(root, "paused");
+    cJSON *jd = cJSON_GetObjectItem(root, "duration_s");
+    bool     paused     = cJSON_IsTrue(jp);
+    uint32_t duration_s = cJSON_IsNumber(jd) ? (uint32_t)jd->valueint : 0;
+    cJSON_Delete(root);
+    display_set_rotation_paused(paused, duration_s);
+    ESP_LOGI(TAG, "rotation_pause: %s", paused
+             ? (duration_s ? "paused (timed)" : "paused (indefinite)")
+             : "resumed");
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
 /* POST /api/cx_image?tube=5|6  — body = a JPG, exactly 80×160 px.
  * Pushes the image to the 24H_CX tube-5/6 "Pushed image" info panel so an
  * external script can drive that tube (asset/base themes only — WeatherLive
@@ -4943,6 +5019,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/reset",           api_reset),
     R(HTTP_POST, "/api/reboot",          api_reboot),
     R(HTTP_POST, "/api/audio/play",      api_audio_play),
+    R(HTTP_POST, "/api/rotation_pause",  api_rotation_pause),
     R(HTTP_POST, "/api/weather",         api_post_weather),
     R(HTTP_POST, "/api/cx_image",        api_cx_image),
     R(HTTP_GET,  "/api/status",          api_status),

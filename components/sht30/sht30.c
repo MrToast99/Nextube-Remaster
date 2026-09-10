@@ -131,9 +131,7 @@ static void sht30_task(void *arg)
             xSemaphoreTake(s_mutex, portMAX_DELAY);
             s_last = reading;
             xSemaphoreGive(s_mutex);
-            ESP_LOGI(TAG, "%.1f °C  %.1f %%RH  (stack hwm: %u)",
-                     reading.temp_c, reading.humidity,
-                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            ESP_LOGI(TAG, "%.1f °C  %.1f %%RH", reading.temp_c, reading.humidity);
         }
         vTaskDelay(pdMS_TO_TICKS(30 * 1000));
     }
@@ -144,6 +142,10 @@ void sht30_set_offset(float offset_c)
     /* Clamp to ±20 °C to catch obvious misconfiguration */
     if (offset_c >  20.0f) offset_c =  20.0f;
     if (offset_c < -20.0f) offset_c = -20.0f;
+    /* Called on every settings save regardless of which field changed —
+     * no-op (and no log) when the offset is unchanged. */
+    float delta = offset_c - s_offset_c;
+    if (delta < 0.05f && delta > -0.05f) return;
     /* s_offset_c is a single float — atomic on Xtensa; no mutex needed */
     s_offset_c = offset_c;
     ESP_LOGI(TAG, "Temperature offset set to %+.1f °C", (double)offset_c);
@@ -151,13 +153,11 @@ void sht30_set_offset(float offset_c)
 
 void sht30_task_start(void)
 {
-    /* 3072, down from 4096: sht30_task logs its own stack high-water-mark on
-     * every 30s sample, giving continuous real usage data rather than a
-     * one-off measurement. Peak usage sits in a 2064-2260 B band —
+    /* 3072, down from 4096: measured peak usage sits in a 2064-2260 B band —
      * sht30_read()'s error/CRC branches are all shorter than the success
-     * path already being measured, so no deeper branch is hiding unmeasured.
-     * 3072 leaves ~36% margin over the worst reading seen, and the ongoing
-     * per-sample log means any future regression stays visible. */
+     * path that was measured, so no deeper branch is hiding unmeasured.
+     * 3072 leaves ~36% margin over the worst reading seen; re-check via
+     * /api/debug/tasks if sht30_read() ever grows. */
     if (xTaskCreate(sht30_task, "sht30", 3072, NULL, 4, NULL) != pdPASS)
         ESP_LOGE(TAG, "sht30_task creation failed");
 }

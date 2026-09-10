@@ -220,6 +220,8 @@ static void set_defaults(void)
     s_cfg.weather_panel2_en = false;  /* sunrise/sunset panel off by default */
     s_cfg.weather_panel3_en = false;  /* wind speed panel off by default */
     s_cfg.weather_panel4_en = false;  /* Hi/Lo panel off by default */
+    s_cfg.weather_panel5_en = false;  /* indoor temperature panel off by default — not every unit has SHT30 */
+    s_cfg.weather_panel6_en = false;  /* indoor humidity panel off by default */
 
     /* 24H Custom — tube 6 panel rotation */
     s_cfg.tube6_panel_weather  = false;
@@ -252,6 +254,8 @@ static void set_defaults(void)
     s_cfg.rotation_interval_s = 60;
     s_cfg.rotation_modes      = 0;    /* 0 = cycle all enabled modes */
     for (int i = 0; i < APP_MODE_MAX; i++) s_cfg.rotation_weights[i] = 1;
+    s_cfg.rotation_pause_offer_indefinite = true;
+    strncpy(s_cfg.rotation_pause_hours, "1,2", sizeof(s_cfg.rotation_pause_hours) - 1);
 
     /* Theme rotation off by default; 0 count = all installed themes */
     s_cfg.theme_rotation_enabled    = false;
@@ -644,10 +648,13 @@ static void parse_json(const char *json, size_t len)
         json_read_bool(root, "weather_panel2_en", &s_cfg.weather_panel2_en);
         json_read_bool(root, "weather_panel3_en", &s_cfg.weather_panel3_en);
         json_read_bool(root, "weather_panel4_en", &s_cfg.weather_panel4_en);
+        json_read_bool(root, "weather_panel5_en", &s_cfg.weather_panel5_en);
+        json_read_bool(root, "weather_panel6_en", &s_cfg.weather_panel6_en);
     }
     if (!s_cfg.weather_panel0_en && !s_cfg.weather_panel1_en &&
         !s_cfg.weather_panel2_en && !s_cfg.weather_panel3_en &&
-        !s_cfg.weather_panel4_en)
+        !s_cfg.weather_panel4_en && !s_cfg.weather_panel5_en &&
+        !s_cfg.weather_panel6_en)
         s_cfg.weather_panel0_en = true;
 
     /* 24H Custom — tube 6 panel rotation */
@@ -775,6 +782,8 @@ static void parse_json(const char *json, size_t len)
             }
         }
     }
+    json_read_bool(root, "rotation_pause_offer_indefinite", &s_cfg.rotation_pause_offer_indefinite);
+    json_read_str(root, "rotation_pause_hours", s_cfg.rotation_pause_hours, sizeof(s_cfg.rotation_pause_hours));
 
     /* Theme rotation */
     json_read_bool(root, "theme_rotation_enabled", &s_cfg.theme_rotation_enabled);
@@ -1327,6 +1336,8 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "weather_panel2_en",      s_cfg.weather_panel2_en);
     cJSON_AddBoolToObject  (root, "weather_panel3_en",      s_cfg.weather_panel3_en);
     cJSON_AddBoolToObject  (root, "weather_panel4_en",      s_cfg.weather_panel4_en);
+    cJSON_AddBoolToObject  (root, "weather_panel5_en",      s_cfg.weather_panel5_en);
+    cJSON_AddBoolToObject  (root, "weather_panel6_en",      s_cfg.weather_panel6_en);
     cJSON_AddBoolToObject  (root, "tube6_panel_weather",    s_cfg.tube6_panel_weather);
     cJSON_AddBoolToObject  (root, "tube6_panel_weekdate",   s_cfg.tube6_panel_weekdate);
     cJSON_AddBoolToObject  (root, "tube6_panel_ht",         s_cfg.tube6_panel_ht);
@@ -1367,6 +1378,8 @@ char *config_to_json(bool include_password)
         for (int i = 0; i < APP_MODE_MAX; i++)
             cJSON_AddItemToArray(wa, cJSON_CreateNumber(s_cfg.rotation_weights[i]));
     }
+    cJSON_AddBoolToObject  (root, "rotation_pause_offer_indefinite", s_cfg.rotation_pause_offer_indefinite);
+    cJSON_AddStringToObject(root, "rotation_pause_hours",            s_cfg.rotation_pause_hours);
     cJSON_AddBoolToObject  (root, "theme_rotation_enabled",    s_cfg.theme_rotation_enabled);
     cJSON_AddNumberToObject(root, "theme_rotation_interval_s", s_cfg.theme_rotation_interval_s);
     {

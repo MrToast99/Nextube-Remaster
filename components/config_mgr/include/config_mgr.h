@@ -282,6 +282,8 @@ typedef struct {
     bool             weather_panel2_en;  /* true = show sunrise/sunset panel */
     bool             weather_panel3_en;  /* true = show wind speed panel     */
     bool             weather_panel4_en;  /* true = show daily Hi/Lo panel    */
+    bool             weather_panel5_en;  /* true = show indoor temperature panel (SHT30) */
+    bool             weather_panel6_en;  /* true = show indoor humidity panel (SHT30)    */
 
     /* Mode Rotation – auto-cycle through enabled modes on a timer.
      * When rotation_enabled is false the mode never changes automatically;
@@ -296,6 +298,14 @@ typedef struct {
     uint8_t          rotation_weights[12]; /* per-mode dwell multiplier (1–99, default 1).
                                             * effective dwell = rotation_interval_s × weight.
                                             * index == app_mode_t value.  0 treated as 1. */
+
+    /* Quick Actions "Pause Rotation" button — which durations its menu offers.
+     * UI-only: the device accepts any duration via POST /api/rotation_pause;
+     * these just drive the web UI's menu. When only "until turned back on" is
+     * offered, the button is a plain pause/resume toggle with no menu. */
+    bool             rotation_pause_offer_indefinite;  /* offer "until turned back on" */
+    char             rotation_pause_hours[32];         /* comma-separated hours, e.g. "1,2,8";
+                                                        * empty = no timed pause options */
 
     /* Theme Rotation – auto-cycle through themes on a timer.
      * theme_rotation_count == 0 → rotate all installed themes.

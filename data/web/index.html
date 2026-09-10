@@ -31,7 +31,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 ::-webkit-scrollbar-thumb:hover{background-color:rgba(255,255,255,.22)}
 ::selection{background:rgba(var(--hi-rgb),.35);color:#fff}
 :focus-visible{outline:2px solid var(--hi);outline-offset:2px;border-radius:2px}
-input[type=checkbox]{accent-color:var(--hi)}
+/* Explicit width/height/margin: iOS Safari's native checkbox can render
+ * noticeably larger than other browsers' (with accent-color set), which
+ * reads as an oversized gap before the label even with a small flex gap.
+ * !important beats .field input,.field select{width:100%} below (same
+ * specificity, later in source) — a checkbox inside a .field would
+ * otherwise stretch to 100% width, the same symptom this rule prevents. */
+input[type=checkbox]{accent-color:var(--hi);width:18px!important;height:18px!important;margin:0!important;flex-shrink:0}
 header{background:var(--card);border-bottom:1px solid var(--border);padding:1.1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}
 #sticky-shell{position:sticky;top:0;z-index:100;background:var(--bg);box-shadow:var(--shadow)}
 header h1{font-size:1.15rem;font-weight:700;letter-spacing:.2px}
@@ -96,6 +102,12 @@ main{padding:0 1rem 2rem}
 #debug-hero-h2{justify-content:center;border-bottom:none;padding-bottom:0}
 #debug-hero-h2::before{display:none}
 .field{margin-bottom:.8rem}
+/* Indent for the per-tube control blocks (gamma/profile/invert/offset/
+ * brightness) — was a hand-repeated inline style on all 5; pulled into a
+ * class so the mobile media query below can shrink it (2.5rem/side eats
+ * 80px of a 393px phone's width, which pushed the Panel Profile/Window
+ * Offset tables' last column off-screen — issue #88). */
+.tube-ctl-indent{padding:0 2.5rem}
 .field label{display:block;font-size:.8rem;font-weight:500;color:var(--dim);margin-bottom:5px}
 .field input[type=checkbox]+label{display:inline;color:var(--text);font-weight:400;margin-bottom:0}
 .field input,.field select{width:100%;padding:.6rem .7rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--accent);color:var(--text);font-size:.9rem;box-shadow:inset 0 1px 3px rgba(0,0,0,.25);transition:border-color .15s var(--ease),box-shadow .15s var(--ease)}
@@ -275,12 +287,22 @@ details>summary::before{content:"▶";display:inline-block;font-size:.85rem;colo
 details[open]>summary::before{transform:rotate(90deg)}
 details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
 
-/* ── Responsive ── narrow phones: stack the 2-column .row grid, and let
+/* ── Responsive ── narrow phones: stack the 2-column .row grid, let
  * wide data tables (debug/task-stats) scroll horizontally instead of
- * squeezing their columns unreadably thin. */
+ * squeezing their columns unreadably thin, and shrink the per-tube
+ * control indent (see .tube-ctl-indent above, issue #88). */
 @media (max-width:600px){
   .row{grid-template-columns:1fr}
   table{display:block;overflow-x:auto;white-space:nowrap}
+  .tube-ctl-indent{padding:0 .6rem}
+  /* Color Inversion's 6 "Tube N" checkboxes fit 3 per row in desktop
+   * testing but still overlapped on a real iPhone (issue #88 follow-up) —
+   * flex-wrap doesn't protect against per-item width rendering differently
+   * across browsers. A 2-column grid sidesteps that: each column is a
+   * fixed 50%, so nothing can overflow into the other.
+   * !important beats the element's inline display:flex/gap/flex-wrap
+   * (inline always wins over an external rule otherwise). */
+  #tube-invert-list{display:grid!important;grid-template-columns:1fr 1fr!important;gap:.5rem!important}
 }
 </style>
 </head>
@@ -392,6 +414,17 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <button class="btn btn-outline" data-mode-bit="9"  data-mode-name="Instagram" onclick="setMode('Instagram')">Instagram</button>
       <button class="btn btn-outline" data-mode-bit="10" data-mode-name="TikTok"    onclick="setMode('TikTok')">TikTok</button>
       <button class="btn btn-outline" data-mode-bit="11" data-mode-name="Mastodon"  onclick="setMode('Mastodon')">Mastodon</button>
+    </div>
+    <!-- Only shown while Mode Rotation (Display tab) is enabled — see
+         onRotationToggle(). Looks like any other Quick Actions button.
+         While running: opens a duration menu (built from the Pause Rotation
+         timers config), or pauses directly when only one option is
+         configured. While paused: label reads "Resume Rotation", click
+         resumes. See onRotationPauseButtonClick(). -->
+    <div class="btn-group" id="rotation-pause-wrap" style="margin-top:.6rem;display:none;position:relative">
+      <button class="btn btn-outline" id="btn-rotation-pause" onclick="onRotationPauseButtonClick()" data-i18n="js.rotation_pause_btn">⏸ Pause Rotation</button>
+      <div id="rotation-pause-menu" class="search-results" role="menu" style="right:auto;width:max-content;min-width:9rem;max-width:min(18rem,80vw)" hidden></div>
+      <span class="lbl" id="rotation-pause-status"></span>
     </div>
   </div>
 
@@ -737,7 +770,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div class="field" style="padding-bottom:.2rem">
           <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.gamma">Gamma Correction</div>
           <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem" data-i18n-html="adv.gamma_desc">Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and color depth on panels with a flat native response. Try <b>1.8–2.2</b> for washed replacement panels. Takes effect after Save.</div>
-          <div style="padding:0 2.5rem">
+          <div class="tube-ctl-indent">
             <div style="display:flex;flex-direction:column;gap:.3rem" id="tube-gamma-list"></div>
           </div>
         </div>
@@ -746,7 +779,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div class="field" style="padding-bottom:.2rem">
           <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.profile">Panel Profile</div>
           <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem" data-i18n-html="adv.profile_desc"><b>Profile</b> selects the hardware gamma curve. <b>VCOM</b> (0–63) sets the AC driving voltage — higher values increase contrast and color depth. For ST7735S replacement panels (e.g. LH096NT-IF09W) start with Profile <b>Vivid</b> + VCOM <b>40</b>, then tune: raise toward 60 if still washed, lower toward 25 if over-saturated. Changes take effect after Save.</div>
-          <div style="padding:0 2.5rem">
+          <div class="tube-ctl-indent">
             <table style="border-collapse:collapse;font-size:.82rem;width:100%">
               <thead><tr style="color:var(--dim)">
                 <th style="text-align:left;padding:2px 6px;font-weight:500" data-i18n="adv.tube">Tube</th>
@@ -762,7 +795,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div class="field" style="padding-bottom:.2rem;margin-top:.9rem">
           <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.inversion">Color Inversion</div>
           <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.inversion_desc">Enable for any tube whose replacement screen shows a photo-negative image. Sends INVON immediately — no reboot needed.</div>
-          <div style="padding:0 2.5rem">
+          <div class="tube-ctl-indent">
             <div style="display:flex;gap:1.2rem;flex-wrap:wrap" id="tube-invert-list"></div>
           </div>
         </div>
@@ -771,7 +804,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div class="field" style="padding-bottom:.2rem;margin-top:.9rem">
           <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.offset">Window Offset</div>
           <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem" data-i18n="adv.offset_desc">Shift the pixel window to fix 1 px static at the right/bottom edge of replacement panels. ST7735S variants (e.g. LH096NT-IF09W) typically need Col +2 / Row +1.</div>
-          <div style="padding:0 2.5rem">
+          <div class="tube-ctl-indent">
             <table style="border-collapse:collapse;font-size:.82rem;width:100%">
               <thead><tr style="color:var(--dim)">
                 <th style="text-align:left;padding:2px 6px;font-weight:500" data-i18n="adv.tube">Tube</th>
@@ -787,7 +820,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div class="field" style="padding-bottom:0;margin-top:.9rem">
           <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.brightness_trim">Individual Brightness Trim</div>
           <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.brightness_trim_desc">Scale each tube's pixels relative to the group LCD Brightness above. Use when one replacement panel is noticeably brighter or dimmer than the others (100 = no change).</div>
-          <div style="padding:0 2.5rem">
+          <div class="tube-ctl-indent">
             <div style="display:flex;flex-direction:column;gap:.3rem" id="tube-brightness-list"></div>
           </div>
         </div>
@@ -1002,6 +1035,21 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         Example: Clock&nbsp;×20, others&nbsp;×1 with a 1&nbsp;min interval → Clock shows for 20&nbsp;min between each 1&nbsp;min peek at other modes.
       </p>
     </div>
+    <!-- Pause Rotation timers — configures the durations the Dashboard's
+         "Pause Rotation" Quick Actions button offers in its menu. -->
+    <div id="rot-pause-cfg-wrap" style="border-top:1px solid rgba(255,255,255,.08);margin-top:.9rem;padding-top:.8rem">
+      <div style="font-size:.85rem;font-weight:600;margin-bottom:.5rem" data-i18n="disp.pause_menu">Pause Rotation Timers</div>
+      <div class="toggle-row" style="margin-bottom:.45rem">
+        <label class="toggle"><input type="checkbox" id="rot-pause-indef" onchange="onRotPauseCfgChange('rot-pause-indef')"><span class="track"><span class="thumb"></span></span></label>
+        <label for="rot-pause-indef" style="font-size:.85rem;cursor:pointer"><span data-i18n="disp.pause_indef">Until turned back on</span></label>
+      </div>
+      <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
+        <label class="toggle"><input type="checkbox" id="rot-pause-timed-en" onchange="onRotPauseCfgChange('rot-pause-timed-en')"><span class="track"><span class="thumb"></span></span></label>
+        <label for="rot-pause-timed-en" style="font-size:.85rem;cursor:pointer;white-space:nowrap"><span data-i18n="disp.pause_timed">Timed pauses (hours):</span></label>
+        <input type="text" id="rot-pause-hours" placeholder="1,2,8" inputmode="numeric" oninput="markDirty()" style="width:120px;padding:.25rem .45rem;font-size:.85rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)">
+      </div>
+      <p style="color:var(--dim);font-size:.76rem;margin-top:.45rem" data-i18n="disp.pause_menu_help">Comma-separated whole hours, 1–24. When only “until turned back on” is offered, the Quick Actions button is a plain pause/resume toggle with no menu.</p>
+    </div>
   </div>
   <!-- Scheduled Anti Burn-in / LCD Refresh -->
   <div class="card">
@@ -1208,11 +1256,11 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <div style="display:flex;flex-direction:column;gap:.35rem;margin-top:.35rem">
         <div class="toggle-row">
           <label class="toggle"><input type="checkbox" id="f-wx-p0" onchange="onWxPanelToggle('f-wx-p0')" checked><span class="track"><span class="thumb"></span></span></label>
-          <label for="f-wx-p0" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_temperature">Temperature</span> <span class="hint">(panel 0)</span></label>
+          <label for="f-wx-p0" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_temperature">Outdoor Temperature</span> <span class="hint">(panel 0)</span></label>
         </div>
         <div class="toggle-row">
           <label class="toggle"><input type="checkbox" id="f-wx-p1" onchange="onWxPanelToggle('f-wx-p1')" checked><span class="track"><span class="thumb"></span></span></label>
-          <label for="f-wx-p1" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_humidity">Humidity</span> <span class="hint">(panel 1)</span></label>
+          <label for="f-wx-p1" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_humidity">Outdoor Humidity</span> <span class="hint">(panel 1)</span></label>
         </div>
         <div class="toggle-row">
           <label class="toggle"><input type="checkbox" id="f-wx-p2" onchange="onWxPanelToggle('f-wx-p2')"><span class="track"><span class="thumb"></span></span></label>
@@ -1225,6 +1273,14 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div class="toggle-row">
           <label class="toggle"><input type="checkbox" id="f-wx-p4" onchange="onWxPanelToggle('f-wx-p4')"><span class="track"><span class="thumb"></span></span></label>
           <label for="f-wx-p4" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_hilo">Daily Hi / Lo</span> <span class="hint">(panel 4 — red ↑ Hi then blue ↓ Lo)</span></label>
+        </div>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-wx-p5" onchange="onWxPanelToggle('f-wx-p5')"><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-wx-p5" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_indoor_temp">Indoor Temperature</span> <span class="hint">(panel 5 — SHT30 sensor)</span></label>
+        </div>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-wx-p6" onchange="onWxPanelToggle('f-wx-p6')"><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-wx-p6" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_indoor_hum">Indoor Humidity</span> <span class="hint">(panel 6 — SHT30 sensor)</span></label>
         </div>
       </div>
       <small style="color:var(--dim);margin-top:.3rem;display:block" data-i18n="svc.wx_one_panel">At least one panel must remain enabled.</small>
@@ -2038,6 +2094,8 @@ Object.assign(I18N.en, {
   "disp.mode_rotation":"Mode Rotation",
   "disp.mode_rotation_desc":"When enabled, the device automatically cycles through modes on a timer. Choose which modes to include, or leave all checked to rotate every enabled mode. When disabled, the mode only changes via the Quick Actions buttons or the physical touch buttons.",
   "disp.enable_auto_rotation":"Enable Auto Rotation","disp.interval_per_mode":"Interval per mode:","disp.modes_to_include":"Modes to include & weight:",
+  "disp.pause_menu":"Pause Rotation Timers","disp.pause_indef":"Until turned back on","disp.pause_timed":"Timed pauses (hours):",
+  "disp.pause_menu_help":"Comma-separated whole hours, 1–24. When only “until turned back on” is offered, the Quick Actions button is a plain pause/resume toggle with no menu.",
   "disp.burnin":"Scheduled Anti Burn-in / LCD Refresh",
   "disp.burnin_desc":"Automatically runs a burn-in recovery session at the configured schedule, then returns to normal display. No user action is required — the device fires autonomously while powered on.",
   "disp.save":"Save Display Settings"
@@ -2076,7 +2134,8 @@ Object.assign(I18N.en, {
   "svc.wlive_anim":"WeatherLive scene","svc.wlive_realtime":"Realtime (animated)","svc.wlive_static":"Static (updates ~10 min)",
   "opt.celsius":"Celsius","opt.fahrenheit":"Fahrenheit",
   "svc.panel_rotation":"Panel Rotation (seconds)","svc.display_panels":"Display Panels",
-  "svc.wx_temperature":"Temperature","svc.wx_humidity":"Humidity","svc.wx_sunrise":"Sunrise & Sunset","svc.wx_wind":"Wind Speed","svc.wx_hilo":"Daily Hi / Lo",
+  "svc.wx_temperature":"Outdoor Temperature","svc.wx_humidity":"Outdoor Humidity","svc.wx_sunrise":"Sunrise & Sunset","svc.wx_wind":"Wind Speed","svc.wx_hilo":"Daily Hi / Lo",
+  "svc.wx_indoor_temp":"Indoor Temperature","svc.wx_indoor_hum":"Indoor Humidity",
   "svc.wx_one_panel":"At least one panel must remain enabled.",
   "svc.mqtt":"Home Assistant MQTT","svc.enable":"Enable","svc.restart_required":"(restart required)",
   "svc.broker":"Broker","svc.broker_ph":"192.168.1.x or hostname","svc.port":"Port",
@@ -2246,6 +2305,11 @@ Object.assign(I18N.en, {
   "js.relay_host_required":"Set a relay host before saving — see the warning in Social Media Counters.",
   "js.settings_saved_rebooting":"Settings saved — rebooting…","js.settings_saved":"Settings saved!","js.save_failed":"Save failed",
   "js.mode_prefix":"Mode: ","js.failed":"Failed",
+  "js.rotation_pause_btn":"⏸ Pause Rotation","js.rotation_resume_btn":"▶ Resume Rotation",
+  "js.rotation_pause_indefinite":"Until turned back on","js.rotation_pause_h_one":"1 hour","js.rotation_pause_h_many":"{0} hours",
+  "js.rotation_paused":"Rotation paused","js.rotation_resumed":"Rotation resumed",
+  "js.rotation_status_indefinite":"Paused — resumes when turned back on",
+  "js.rotation_status_hm":"Paused — resumes in {0}h {1}m","js.rotation_status_m":"Paused — resumes in {0}m",
   "js.refreshing_counters":"Refreshing counters… check back in a few seconds","js.refresh_failed":"Refresh request failed",
   "js.scanning":"Scanning…","js.no_file_path":"No file path set",
   "js.playing":"▶ Playing…","js.playback_failed":"Playback failed",
@@ -2376,7 +2440,7 @@ async function saveAndReboot() {
 
 /* ── Weather panel enable guard (at least one must remain on) ── */
 function onWxPanelToggle(changedId) {
-  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked && !$('f-wx-p2').checked && !$('f-wx-p3').checked && !$('f-wx-p4').checked) {
+  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked && !$('f-wx-p2').checked && !$('f-wx-p3').checked && !$('f-wx-p4').checked && !$('f-wx-p5').checked && !$('f-wx-p6').checked) {
     /* Prevent all being unchecked — restore the one that was just changed */
     $(changedId).checked = true;
   }
@@ -2776,6 +2840,20 @@ async function loadNetworkInfo() {
  * the session.  All API calls go through secureFetch() which auto-adds
  * the Authorization header and routes 401 responses to the login modal. */
 let authToken = localStorage.getItem('nextube_token') || '';
+
+/* AbortSignal.timeout() isn't supported before Safari 16. It throws a
+ * TypeError immediately rather than rejecting, so wrapping the fetch
+ * itself in try/catch doesn't help. Used in place of AbortSignal.timeout(ms)
+ * everywhere in this file, including refreshStatus()'s boot-critical call
+ * — an uncaught throw there silently aborts the whole first connect (page
+ * loads, never gets past "Connecting…"). */
+function abortTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+    return AbortSignal.timeout(ms);
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
 
 async function secureFetch(url, opts) {
   opts = opts || {};
@@ -3505,6 +3583,8 @@ const SETTINGS_SCHEMA = [
   { key:'weather_panel2_en', id:'f-wx-p2', type:'bool', def:false },
   { key:'weather_panel3_en', id:'f-wx-p3', type:'bool', def:false },
   { key:'weather_panel4_en', id:'f-wx-p4', type:'bool', def:false },
+  { key:'weather_panel5_en', id:'f-wx-p5', type:'bool', def:false },
+  { key:'weather_panel6_en', id:'f-wx-p6', type:'bool', def:false },
 
   // ── Social counters ──
   { key:'sub_poll_interval_min', load(cfg) { $('f-sub-interval').value = cfg.sub_poll_interval_min || 30; },
@@ -3664,12 +3744,24 @@ const SETTINGS_SCHEMA = [
       });
       updateRotWeightStates();
       onRotationToggle('rot-enabled','rot-interval-wrap','rot-modes-wrap');
+      /* Pause Rotation timer menu */
+      $('rot-pause-indef').checked = cfg.rotation_pause_offer_indefinite !== false;
+      const pHrs = (cfg.rotation_pause_hours || '').trim();
+      $('rot-pause-timed-en').checked = pHrs.length > 0;
+      $('rot-pause-hours').value = pHrs;
+      onRotPauseCfgChange('rot-pause-indef');
     },
     save(body) {
       body.rotation_enabled = $('rot-enabled').checked;
       body.rotation_interval_s = +$('rot-interval').value;
       body.rotation_modes = rotModeMask();
       body.rotation_weights = rotWeightsArray();
+      body.rotation_pause_offer_indefinite = $('rot-pause-indef').checked;
+      body.rotation_pause_hours = $('rot-pause-timed-en').checked ? normalizePauseHours($('rot-pause-hours').value) : '';
+      /* Keep the in-memory cfg in sync so the Dashboard's Pause Rotation menu
+       * reflects the new config immediately, without a page reload. */
+      cfg.rotation_pause_offer_indefinite = body.rotation_pause_offer_indefinite;
+      cfg.rotation_pause_hours = body.rotation_pause_hours;
     }
   },
 
@@ -4045,7 +4137,40 @@ function onRotationToggle(checkboxId, wrap1Id, wrap2Id) {
     $(id).style.opacity = on ? '1' : '0.4';
     $(id).style.pointerEvents = on ? '' : 'none';
   });
+  if (checkboxId === 'rot-enabled') {
+    /* The Quick Actions Pause Rotation button only makes sense while Mode
+     * Rotation is enabled — hide it entirely (not just dim it). */
+    const wrap = $('rotation-pause-wrap');
+    if (wrap) wrap.style.display = on ? '' : 'none';
+    /* The Pause Rotation timers config fades with the rest of the card,
+     * same as "Modes to include". */
+    const pcfg = $('rot-pause-cfg-wrap');
+    if (pcfg) {
+      pcfg.style.opacity = on ? '1' : '0.4';
+      pcfg.style.pointerEvents = on ? '' : 'none';
+    }
+  }
   markDirty();
+}
+
+/* Pause Rotation timer-menu config (Display → Mode Rotation). Keeps at least
+ * one option available (indefinite or timed) and greys the hours input to
+ * match its checkbox. */
+function onRotPauseCfgChange(changedId) {
+  const indef = $('rot-pause-indef'), timed = $('rot-pause-timed-en'), hrs = $('rot-pause-hours');
+  if (!indef.checked && !timed.checked) $(changedId).checked = true;
+  hrs.disabled = !timed.checked;
+  hrs.style.opacity = timed.checked ? '1' : '0.4';
+  markDirty();
+}
+/* "8, 1,2, 2, 99, x" → "1,2,8" — whole hours 1-24, deduped, sorted. */
+function normalizePauseHours(str) {
+  const set = new Set();
+  (str || '').split(',').forEach(t => {
+    const n = parseInt(t.trim(), 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 24) set.add(n);
+  });
+  return [...set].sort((a, b) => a - b).join(',');
 }
 function rotModeSelectAll(checked) {
   document.querySelectorAll('.rot-mode-cb').forEach(cb => cb.checked = checked);
@@ -4254,6 +4379,77 @@ async function setMode(mode) {
   refreshStatus();
 }
 
+/* ── Pause/resume mode rotation ───────────────────────
+ * Runtime-only on the device (display_set_rotation_paused) — does not touch
+ * the persisted Mode Rotation setting, and any pause (indefinite or timed)
+ * always clears itself on reboot. refreshStatus() keeps the UI in sync in
+ * case it's paused/resumed from another open tab, a timed pause expires on
+ * its own, or a reboot clears it.
+ *
+ * The button itself always looks like any other Quick Actions button. While
+ * running: opens a duration menu (styled like the settings-search results
+ * dropdown) when more than one option is configured, or pauses directly
+ * when there's only one; while paused, clicking it resumes directly — see
+ * the "paused" dataset flag applyRotationPauseUI() sets.
+ *
+ * The menu options come from the Pause Rotation timers config (Display →
+ * Mode Rotation): an "until turned back on" entry (duration_s 0, which the
+ * device treats as indefinite) plus one entry per configured hour value. */
+function rotationPauseOptions() {
+  const opts = [];
+  if (cfg.rotation_pause_offer_indefinite !== false)
+    opts.push({ s: 0, label: tr('js.rotation_pause_indefinite') });
+  (cfg.rotation_pause_hours || '').split(',').forEach(t => {
+    const h = parseInt(t.trim(), 10);
+    if (Number.isFinite(h) && h >= 1 && h <= 24)
+      opts.push({ s: h * 3600, label: h === 1 ? tr('js.rotation_pause_h_one') : tr('js.rotation_pause_h_many', h) });
+  });
+  return opts;
+}
+function onRotationPauseButtonClick() {
+  if ($('btn-rotation-pause').dataset.paused === '1') { resumeRotation(); return; }
+  const opts = rotationPauseOptions();
+  if (opts.length <= 1) { pauseRotationFor(opts.length ? opts[0].s : 0); return; }
+  const menu = $('rotation-pause-menu');
+  menu.innerHTML = opts.map(o => `<button type="button" role="menuitem" data-s="${o.s}">${esc(o.label)}</button>`).join('');
+  menu.hidden = !menu.hidden;
+}
+document.getElementById('rotation-pause-menu')?.addEventListener('click', e => {
+  const b = e.target.closest('button[data-s]');
+  if (b) pauseRotationFor(+b.dataset.s);
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('#rotation-pause-wrap')) { const m = $('rotation-pause-menu'); if (m) m.hidden = true; }
+});
+async function pauseRotationFor(duration_s) {
+  $('rotation-pause-menu').hidden = true;
+  const res = await api('rotation_pause', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ paused: true, duration_s }) });
+  toast(res?.status === 'ok' ? tr('js.rotation_paused') : tr('js.failed'), res?.status !== 'ok');
+  refreshStatus();
+}
+async function resumeRotation() {
+  const res = await api('rotation_pause', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ paused: false }) });
+  toast(res?.status === 'ok' ? tr('js.rotation_resumed') : tr('js.failed'), res?.status !== 'ok');
+  refreshStatus();
+}
+/* remainingS: 0 = not paused, -1 = paused indefinitely, N = seconds left. */
+function fmtRotationRemaining(remainingS) {
+  if (remainingS < 0) return tr('js.rotation_status_indefinite');
+  const h = Math.floor(remainingS / 3600), m = Math.max(1, Math.round((remainingS % 3600) / 60));
+  return h > 0 ? tr('js.rotation_status_hm', h, m) : tr('js.rotation_status_m', m);
+}
+function applyRotationPauseUI(remainingS) {
+  const btn = $('btn-rotation-pause'), status = $('rotation-pause-status');
+  if (!btn || !status) return;
+  const paused = remainingS !== 0;
+  btn.dataset.paused = paused ? '1' : '0';
+  btn.textContent = tr(paused ? 'js.rotation_resume_btn' : 'js.rotation_pause_btn');
+  btn.classList.toggle('btn-primary', paused);
+  btn.classList.toggle('btn-outline', !paused);
+  status.textContent = paused ? fmtRotationRemaining(remainingS) : '';
+  if (!paused) $('rotation-pause-menu').hidden = true;
+}
+
 /* ── Social counter force-refresh ─────────────────── */
 async function socialRefreshNow() {
   const res = await api('social/refresh', { method: 'POST' });
@@ -4375,7 +4571,7 @@ async function waitForDeviceThenReload(statusEl) {
   await new Promise(res => setTimeout(res, 2000));
   for (;;) {
     try {
-      const r = await fetch('/api/status', { signal: AbortSignal.timeout(3000) });
+      const r = await fetch('/api/status', { signal: abortTimeoutSignal(3000) });
       if (r.ok) { location.reload(); return; }
     } catch (e) { /* expected while the device is down/rebooting — keep polling */ }
     if (Date.now() - start > giveUpMs) {
@@ -4563,6 +4759,7 @@ function applyHotpatchFile(file, ui) {
     stat.textContent = 'Upload complete — writing files to the device… this can take up to a minute, please don\'t close this page.';
   };
   xhr.onload = () => {
+    _otaInProgress = false;
     bar.classList.remove('pulsing');
     bar.style.width = '100%';
     if (_xhrHandle401(xhr)) { bar.style.background = 'var(--hi)'; stat.style.color = 'var(--dim)'; stat.textContent = 'Sign in required'; return; }
@@ -4591,6 +4788,7 @@ function applyHotpatchFile(file, ui) {
     }
   };
   xhr.onerror = () => {
+    _otaInProgress = false;
     bar.classList.remove('pulsing');
     bar.style.background = 'var(--hi)';
     stat.style.color = 'var(--hi)';
@@ -4600,6 +4798,12 @@ function applyHotpatchFile(file, ui) {
   xhr.open('POST', '/api/update_fs_hotpatch');
   xhr.setRequestHeader('Content-Type', 'application/zip');
   _xhrAuthHeader(xhr);
+  /* Pause refreshStatus() polling for the whole upload + LittleFS-write window
+   * — the same thing the firmware / FS-OTA flows do via _otaSetBusy(). The
+   * device holds the filesystem busy for 30-60 s writing files, and a
+   * /api/status poll that stalls behind that would 8 s-abort and surface a
+   * spurious "API error" toast. Cleared in every xhr terminal handler above. */
+  _otaInProgress = true;
   xhr.send(file);
 }
 
@@ -5238,11 +5442,19 @@ function animateStatValue(id, target, suffix) {
 }
 
 /* ── Status polling ────────────────────────────────── */
+/* Guards against overlapping polls: setInterval(refreshStatus, 5000) fires
+ * regardless of whether the previous call has returned, so a slow or
+ * stuck device would otherwise pile up one more connection every 5s,
+ * racing through WEB_SERVER_MAX_SOCKETS with no bound at all. */
+let _statusPollInFlight = false;
 async function refreshStatus() {
   /* Suppress status polls during OTA — reduces competing TCP connections to
    * the device while the httpd task is busy streaming the firmware binary. */
   if (_otaInProgress) return;
-  const s = await api('status');
+  if (_statusPollInFlight) return;   /* previous poll hasn't returned yet — skip this tick */
+  _statusPollInFlight = true;
+  try {
+  const s = await api('status', {signal: abortTimeoutSignal(8000)});
   if (!s) {
     $('conn-status').innerHTML = '<span class="status-dot err"></span>' + esc(tr('conn.offline'));
     return;
@@ -5260,6 +5472,7 @@ async function refreshStatus() {
   { const mk = 'mode.' + (s.mode || '').toLowerCase();
     $('s-mode').textContent = s.mode ? (I18N.en[mk] ? tr(mk) : s.mode) : '--'; }
   if (s.mode) updateQuickActionActive(s.mode);
+  if (typeof s.rotation_pause_remaining_s === 'number') applyRotationPauseUI(s.rotation_pause_remaining_s);
   const _useFahrenheit = (cfg.temperature_format || 'Celsius') === 'Fahrenheit';
   if (s.weather) {
     const _wt = _useFahrenheit ? (s.weather.temp_c * 9 / 5 + 32) : s.weather.temp_c;
@@ -5371,6 +5584,9 @@ async function refreshStatus() {
      * any stale dismiss flag so it shows again if the battery fails later. */
     $('rtc-toast').style.display = 'none';
     sessionStorage.removeItem('rtc_bat_dismissed');
+  }
+  } finally {
+    _statusPollInFlight = false;
   }
 }
 
@@ -5523,7 +5739,7 @@ async function pollWebuiPullDone(status, giveUpMs) {
     await new Promise(res => setTimeout(res, 700));
     let ws = null;
     try {
-      const rs = await secureFetch('/api/webui_pull_status', {signal: AbortSignal.timeout(5000)});
+      const rs = await secureFetch('/api/webui_pull_status', {signal: abortTimeoutSignal(5000)});
       if (rs && rs.ok) ws = await rs.json();
     } catch(e) { if (e?.message === 'unauthorized') throw e; }
     if (ws) {
@@ -5545,7 +5761,7 @@ async function pollStockRepairDone(statusEl, giveUpMs) {
     await new Promise(res => setTimeout(res, 700));
     let s = null;
     try {
-      const rs = await secureFetch('/api/stock_repair_status', {signal: AbortSignal.timeout(5000)});
+      const rs = await secureFetch('/api/stock_repair_status', {signal: abortTimeoutSignal(5000)});
       if (rs && rs.ok) s = await rs.json();
     } catch(e) { if (e?.message === 'unauthorized') throw e; }
     if (s) {
@@ -5572,7 +5788,7 @@ async function stockRepair(btnId = 'stock-repair-btn', statusId = 'stock-repair-
   status.textContent = 'Starting…';
 
   try {
-    const rp = await secureFetch('/api/stock_repair', { method: 'POST', signal: AbortSignal.timeout(12000) });
+    const rp = await secureFetch('/api/stock_repair', { method: 'POST', signal: abortTimeoutSignal(12000) });
     if (rp?.status === 409) throw new Error('An update is already in progress — wait for it to finish.');
     if (!rp?.ok) throw new Error('failed to start');
 
@@ -5634,7 +5850,7 @@ async function fixWebuiMismatch() {
     try {
       const rp = await secureFetch('/api/webui_pull', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body,
-        signal: AbortSignal.timeout(12000)
+        signal: abortTimeoutSignal(12000)
       });
       if (rp?.status === 409) throw new Error('An update is already in progress — wait for it to finish.');
       liveStarted = !!rp?.ok;
@@ -5658,7 +5874,7 @@ async function fixWebuiMismatch() {
     status.textContent = 'Live update unavailable right now — rebooting to apply instead…';
     const rp2 = await secureFetch('/api/webui_pull_reboot', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body,
-      signal: AbortSignal.timeout(12000)
+      signal: abortTimeoutSignal(12000)
     });
     if (rp2?.status === 409) throw new Error('An update is already in progress — wait for it to finish.');
     if (!rp2?.ok) throw new Error('failed to stage (HTTP ' + (rp2 ? rp2.status : '?') + ')');
@@ -5671,7 +5887,7 @@ async function fixWebuiMismatch() {
     for (let tries = 0; tries < 25; tries++) {
       await new Promise(res => setTimeout(res, 2000));
       try {
-        const rp3 = await fetch('/api/ping', {signal: AbortSignal.timeout(1500)});
+        const rp3 = await fetch('/api/ping', {signal: abortTimeoutSignal(1500)});
         if (!rp3.ok) break;
       } catch { break; }
     }
@@ -5680,7 +5896,7 @@ async function fixWebuiMismatch() {
     for (let tries = 0; tries < 30; tries++) {
       await new Promise(res => setTimeout(res, 2000));
       try {
-        const rp3 = await fetch('/api/ping', {signal: AbortSignal.timeout(2000)});
+        const rp3 = await fetch('/api/ping', {signal: abortTimeoutSignal(2000)});
         if (rp3.ok) { backOnline = true; break; }
       } catch { /* expected while rebooting */ }
     }
@@ -6020,7 +6236,7 @@ async function startAutoUpdate() {
       await new Promise(res => setTimeout(res, POLL_GAP_MS));
       let st = null;
       try {
-        const rs = await secureFetch('/api/ota_pull_status', {signal: AbortSignal.timeout(POLL_TIMEOUT_MS)});
+        const rs = await secureFetch('/api/ota_pull_status', {signal: abortTimeoutSignal(POLL_TIMEOUT_MS)});
         if (rs && rs.ok) st = await rs.json();
       } catch { /* timeout / network — handled below */ }
 
@@ -6130,7 +6346,7 @@ async function startAutoUpdate() {
       for (let tries = 0; tries < 25; tries++) {
         await new Promise(res => setTimeout(res, 2000));
         try {
-          const rp = await fetch('/api/ping', {signal: AbortSignal.timeout(1500)});
+          const rp = await fetch('/api/ping', {signal: abortTimeoutSignal(1500)});
           if (!rp.ok) break;   /* non-ok = going down */
         } catch { break; }     /* exception = device offline */
       }
@@ -6138,7 +6354,7 @@ async function startAutoUpdate() {
       for (let tries = 0; tries < 30; tries++) {
         await new Promise(res => setTimeout(res, 2000));
         try {
-          const rp = await fetch('/api/ping', {signal: AbortSignal.timeout(2000)});
+          const rp = await fetch('/api/ping', {signal: abortTimeoutSignal(2000)});
           if (rp.ok) break;
         } catch { /* expected while rebooting */ }
       }
@@ -6160,7 +6376,7 @@ async function startAutoUpdate() {
       const triggerWebuiPull = async () => {
         try {
           const ra = await secureFetch('/api/webui_pull_auto',
-                                       {signal: AbortSignal.timeout(6000)});
+                                       {signal: abortTimeoutSignal(6000)});
           if (ra && (ra.ok || ra.status === 409)) return;   /* started or already running */
         } catch(e) { if (e?.message === 'unauthorized') throw e; }
         try {
@@ -6168,7 +6384,7 @@ async function startAutoUpdate() {
             method:  'POST',
             headers: {'Content-Type': 'application/json'},
             body:    JSON.stringify({url: uiAsset.browser_download_url, sha256: uiSha256_ || ''}),
-            signal:  AbortSignal.timeout(12000)
+            signal:  abortTimeoutSignal(12000)
           });
         } catch(e) { if (e?.message === 'unauthorized') throw e; }
       };
@@ -6209,7 +6425,7 @@ async function startAutoUpdate() {
 
         let ws = null;
         try {
-          const rs = await secureFetch('/api/webui_pull_status', {signal: AbortSignal.timeout(5000)});
+          const rs = await secureFetch('/api/webui_pull_status', {signal: abortTimeoutSignal(5000)});
           if (rs && rs.ok) { lastOk = Date.now(); ws = await rs.json(); }
         } catch(e) {
           if (e?.message === 'unauthorized') throw e;
@@ -6555,7 +6771,7 @@ async function onboardAwaitMigration(ip) {
       // Bounded so a hung connection attempt (e.g. mid-network-switch) can't
       // eat the whole poll budget in one or two tries — without this, a
       // slow OS-level TCP timeout could easily run past the 2.5s cadence.
-      await fetch('http://' + ip + '/', { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(4000) });
+      await fetch('http://' + ip + '/', { mode: 'no-cors', cache: 'no-store', signal: abortTimeoutSignal(4000) });
       window.location.href = 'http://' + ip + '/';
       return;
     } catch (_) { /* no route yet — expected until this device also switches networks */ }

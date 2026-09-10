@@ -698,3 +698,60 @@ int fr_measure_text(int fb_w, uint8_t face_id, uint16_t px_size, const char *utf
     uint16_t adj_px;
     return fr_compute_fit_size(fb_w, face_id, px_size, utf8_str, &adj_px);
 }
+
+/* Return the actual px_size fr_draw_text(fb_w, face_id, px_size, utf8_str)
+ * would render utf8_str at, after norm_ratio/width-fit/height-fit — i.e.
+ * fr_compute_fit_size()'s *out_adj_px, without rendering or measuring
+ * advance. For a caller drawing several short strings that share one tube
+ * (e.g. a fixed "In"/"Out" label pair): fr_draw_text() fits each string
+ * independently, so a wide one gets shrunk to fit while a narrower one
+ * doesn't — same requested_px, visibly different rendered sizes. Fit
+ * against the widest string once with this, then draw all of them at that
+ * exact size via fr_draw_text_exact() instead of fr_draw_text(), so they
+ * match. Returns requested_px unchanged on error (unloaded face, empty
+ * string). */
+uint16_t fr_fit_px_size(int fb_w, uint8_t face_id, uint16_t px_size, const char *utf8_str)
+{
+    if (!utf8_str || !utf8_str[0] || !fr_face_valid(face_id)) return px_size;
+
+    uint16_t adj_px;
+    fr_compute_fit_size(fb_w, face_id, px_size, utf8_str, &adj_px);
+    return adj_px;
+}
+
+/* Render utf8_str at EXACTLY px_size — no width/height auto-fit, unlike
+ * fr_draw_text(). For a caller that already resolved the size elsewhere
+ * (typically via fr_fit_px_size() against a different, wider reference
+ * string) and needs every string drawn at that literal size to look
+ * consistent, rather than each one re-fitting itself independently.
+ * Mirrors fr_draw_text()'s own two-pass measure-then-blit body exactly,
+ * just without the fr_compute_fit_size() call in between. */
+void fr_draw_text_exact(uint8_t *fb, int fb_w, int fb_h,
+                        int cx, int baseline_y,
+                        uint8_t face_id, uint16_t px_size,
+                        const char *utf8_str,
+                        uint8_t cr, uint8_t cg, uint8_t cb,
+                        bool shadow, uint8_t sr, uint8_t sg, uint8_t sb, uint8_t shadow_size)
+{
+    if (!utf8_str || !utf8_str[0] || !fr_face_valid(face_id)) return;
+
+    int total_adv = 0;
+    const char *p = utf8_str;
+    uint32_t cp;
+    while ((cp = fr_utf8_next(&p)) != 0) {
+        const fr_glyph_t *g = fr_get_glyph(face_id, cp, px_size);
+        if (g) total_adv += g->advance;
+    }
+
+    int pen_x = cx - total_adv / 2;
+    p = utf8_str;
+    while ((cp = fr_utf8_next(&p)) != 0) {
+        const fr_glyph_t *g = fr_get_glyph(face_id, cp, px_size);
+        if (!g) continue;
+        int x0 = pen_x + g->bearing_x;
+        int y0 = baseline_y - g->bearing_y;
+        if (cp == ':') y0 -= (px_size / 8);   /* same colon nudge as fr_draw_text() */
+        fr_blit(fb, fb_w, fb_h, g, x0, y0, cr, cg, cb, shadow, sr, sg, sb, shadow_size);
+        pen_x += g->advance;
+    }
+}

@@ -40,6 +40,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"   /* esp_timer_get_time — uptime in heap telemetry */
+#include "cJSON.h"       /* cJSON_InitHooks — see install_cjson_psram_hooks() */
 
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"   /* rtc_gpio_isolate — GPIO25 idle state */
@@ -333,9 +334,47 @@ static void audio_defer_timer_cb(void *arg)
         ESP_LOGE(TAG, "audio_defer task creation failed — audio will not start");
 }
 
+/* ── cJSON → PSRAM ────────────────────────────────────────────────────
+ * cJSON's default allocator is plain malloc()/free(), which — like every
+ * other unmarked allocation in this firmware — is subject to
+ * SPIRAM_MALLOC_ALWAYSINTERNAL=255 (see sdkconfig.defaults): each tree
+ * node and duplicated string value is well under 255 B, so by default
+ * every one of them lands in internal SRAM. That threshold exists for
+ * DMA-sensitive buffers (WPA2 supplicant, etc.) — cJSON nodes are never
+ * touched by DMA or an ISR, so there's no reason for them to compete for
+ * that same limited, fragmentation-prone region. api_status() alone
+ * rebuilds and tears down a ~20-30-node tree every 5 s for as long as a
+ * browser tab is open on the dashboard; weather.c parses/frees a much
+ * larger one every 10 min. Routing cJSON's own allocations to PSRAM
+ * instead removes that churn from internal SRAM entirely, at the cost of
+ * PSRAM's slightly higher access latency — irrelevant here, nothing
+ * touching these buffers is timing-critical. Falls back to internal RAM
+ * if PSRAM is ever exhausted, rather than failing the allocation outright.
+ * Installed as the first thing in app_main(), before any subsystem that
+ * might touch cJSON (config_mgr's config.json load included). */
+static void *cjson_psram_malloc(size_t sz)
+{
+    void *p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p ? p : malloc(sz);
+}
+
+static void cjson_psram_free(void *ptr)
+{
+    free(ptr);   /* heap_caps_malloc() and malloc() share one heap registry —
+                   * free() correctly routes to whichever region ptr is in. */
+}
+
+static void install_cjson_psram_hooks(void)
+{
+    cJSON_Hooks hooks = { .malloc_fn = cjson_psram_malloc, .free_fn = cjson_psram_free };
+    cJSON_InitHooks(&hooks);
+}
+
 /* ── Application entry ─────────────────────────────────────────────── */
 void app_main(void)
 {
+    install_cjson_psram_hooks();
+
     /* Restart once after any hard reset so WiFi PHY initialises cleanly.
      * (See s_warm_boot comment above.) */
     if (esp_reset_reason() == ESP_RST_EXT && s_warm_boot != WARM_BOOT_MAGIC) {
