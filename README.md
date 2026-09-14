@@ -259,29 +259,29 @@ When the update check finds a newer GitHub release (see [Automatic Update Checks
 
 #### Manual Updating
 
-The web UI provides three separate update paths under the **System** tab (use these for sideloading a build, or when the device can't reach GitHub):
+The web UI groups three update paths into one **Firmware & Filesystem Update** card under the **System** tab, each its own expandable section in the order you'd normally reach for them (use these for sideloading a build, or when the device can't reach GitHub):
 
-| System card | File | When to use |
+| Section | File | When to use |
 |---|---|---|
 | **Firmware Update (OTA)** | `nextube-fw-v{ver}-ota.bin` | New firmware, bug fixes |
 | **Web UI Update** | `nextube-WebUI-v{ver}.zip` | New web interface — config-safe delta patch, no reboot |
-| **LittleFS Recovery** | `nextube-littlefs-v{ver}.bin` | Full filesystem reflash — only when release notes require it, or to recover a corrupted filesystem |
+| **LittleFS Recovery** | `nextube-littlefs-v{ver}.bin` | Reflash of just the on-device asset partition — only when release notes require it, or to recover a corrupted filesystem |
 
 **Step by step — updating firmware:**
 
 1. Download `nextube-fw-v{ver}-ota.bin` from the [GitHub release](https://github.com/MrToast99/Nextube-Remaster/releases) assets.
-2. Open **System → Firmware Update (OTA)**, choose the file, and click **Upload & Flash**.
+2. Open **System → Firmware & Filesystem Update**, expand **Firmware Update (OTA)**, choose the file, and click **Upload & Flash**.
 3. A progress bar tracks the upload and flash; the tubes show a wait screen. When flashing completes the device **reboots itself** into the new firmware and the page reconnects automatically.
 
 **Step by step — updating the web UI:**
 
 1. Download `nextube-WebUI-v{ver}.zip` from the same release.
-2. Open **System → Web UI Update**, choose the ZIP, and click **Upload & Apply**.
+2. Open **System → Firmware & Filesystem Update**, expand **Web UI Update**, choose the ZIP, and click **Upload & Apply**.
 3. Changed files are written in place. Your config, custom themes, album images, and audio clips are **never touched**, and **no reboot is needed** — reload the browser page and the new UI is live. A file that's already byte-identical on the device (same content, same checksum) is skipped rather than rewritten, so re-applying a patch — or one that ships mostly-unchanged assets like fonts or icons — doesn't cost a flash write for content that hasn't actually changed.
 
 **Updating both (a normal release):** flash the firmware first, let the device reboot, then apply the Web UI ZIP. If you do firmware only, the version-mismatch banner (below) will remind you the web UI is stale.
 
-**LittleFS Recovery** (`nextube-littlefs-v{ver}.bin` via **System → LittleFS Recovery**) is the heavyweight alternative to the ZIP: it erases and rewrites the **entire** filesystem partition. Your settings survive automatically (saved to NVS before the erase, restored on next boot), but custom themes, album images, and audio files are wiped — back those up first via **System → LittleFS Files**. Use it only when the release notes explicitly call for a full LittleFS reflash.
+**LittleFS Recovery** (`nextube-littlefs-v{ver}.bin` via **System → Firmware & Filesystem Update → LittleFS Recovery**) is the heavyweight alternative to the ZIP: it erases and rewrites the **entire** LittleFS asset partition (firmware is untouched). Your settings survive automatically (saved to NVS before the erase, restored on next boot), but custom themes, album images, and audio files are wiped — back those up first via **System → LittleFS Files**. Use it only when the release notes explicitly call for a full LittleFS reflash.
 
 > **Do not** upload `nextube-fw-full.bin` via OTA — it is the merged USB-flash image, not a valid OTA app image.
 
@@ -291,7 +291,7 @@ The web UI provides three separate update paths under the **System** tab (use th
 
 #### Version mismatch detection
 
-After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web UI version doesn't match the new firmware's expected version. Follow the prompt to apply the matching web UI — the `nextube-WebUI-v{ver}.zip` via **System → Web UI Update** (recommended), or the full `nextube-littlefs-v{ver}.bin` via **System → LittleFS Recovery**.
+After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web UI version doesn't match the new firmware's expected version. Follow the prompt to apply the matching web UI — the `nextube-WebUI-v{ver}.zip` via **System → Firmware & Filesystem Update → Web UI Update** (recommended), or the full `nextube-littlefs-v{ver}.bin` via **System → Firmware & Filesystem Update → LittleFS Recovery**.
 
 **Settings are preserved automatically (both paths):** the Web UI ZIP never touches `config.json` at all, and a full LittleFS Recovery flash saves your `config.json` to NVS (a separate flash partition that is never erased by a LittleFS update) before wiping the partition, then restores it on the next boot. Either way you do not need to re-enter your Wi-Fi credentials, theme, brightness, or any other settings.
 
@@ -1734,7 +1734,7 @@ The LED ring behaviour in Spectrum mode is independently configurable under **Di
 | **Custom glow color** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. The color is set by the **LED Glow Color** picker and is the same for all LEDs. |
 | **Follow accent mode** | The LEDs animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colors from the LED settings, ignoring the audio by default. The LCD bars still respond to the microphone normally. |
 
-The **LCD Bar Color** picker is separate from the LED source and always applies — it controls the color of the frequency bars drawn on the LCDs regardless of which LED source is selected.
+The **LCD Bar Color** picker is separate from the LED source and always applies — it controls the color of the frequency bars drawn on the LCDs regardless of which LED source is selected. The **Peak Dot Color** picker controls the peak-hold dot that tops each bar (see "Display dynamics" above) independently of the bar color itself; defaults to white.
 
 **Beat-reactive nudge (optional):** with **Follow accent mode** selected, an additional **Beat-reactive nudge for Breath / Rainbow** checkbox appears. When enabled, those two accent modes get an extra push (brightness surge for Breath, an extra hue jump for Rainbow) each time the microphone detects a percussive hit, on top of their normal animation. This is a lightweight broadband-transient detector, not true beats-per-minute tracking — the spectrum analyser's bands start at 280 Hz, so it reacts to snare/hihat/kick harmonics rather than a resolved sub-bass kick drum, and it won't lock to tempo the way a dedicated beat-detection algorithm would. Off by default; only has any effect for Breath and Rainbow specifically.
 

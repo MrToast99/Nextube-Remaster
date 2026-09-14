@@ -218,6 +218,8 @@
   "hw.test": "Testaa",
   "hw.enable_click": "Ota napsautusääni käyttöön painikkeen painalluksella",
   "hw.save": "Tallenna laitteisto",
+  "sys.update_methods": "Laiteohjelmiston ja tiedostojärjestelmän päivitys",
+  "sys.update_methods_help": "Kolme tapaa päivittää tämä laite, joita käytetään yleensä tässä järjestyksessä:<br><strong>1. Laiteohjelmistopäivitys</strong> — uutta laiteohjelmistoversiota varten (yleisin tapaus).<br><strong>2. Web-käyttöliittymän päivitys</strong> — päivittää vain verkkokäyttöliittymän,<br><strong>3. LittleFS-palautus</strong> — vilkuttaa valinnaisesti kokonaan vain data-osion (kuvat, äänet, web-käyttöliittymä jne.).",
   "sys.ota": "Laiteohjelmistopäivitys (OTA)",
   "sys.ota_help": "Lataa <strong>nextube-fw-ota.bin</strong> langattomia päivityksiä varten. <strong>Älä</strong> lataa <code>nextube-fw-full.bin</code> — se on täysi flash-vedos vain USB-flashaukseen.",
   "sys.upload_flash": "Lataa ja flashaa",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Amplitudimoduloitu LED-rengasväri Spektrumtilassa",
   "spec.lcd_color_label": "LCD Palkkiväri",
   "spec.lcd_color_hint": "Palkkiväri LCD-spektrinesityksessä",
+  "spec.peak_color_label": "Huippupisteen väri",
+  "spec.peak_color_hint": "Väri pisteelle, joka merkitsee kunkin palkin huipun",
   "spec.capture_baseline_btn": "📸 Tallenna pohjaviiva",
   "spec.reset_auto_btn": "↺ Palauta automaattiseksi",
   "spec.capture_help": "Kun huone on hiljainen, napsauta <strong>Tallenna pohjaviiva</strong> ottaaksesi laitteiston kohinatason näytteeksi.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Kuinka usein tilan, näytön, kirkkauden, teeman ja kierron muutokset tarkistetaan ja julkaistaan Home Assistantille. Anturilukemat sekä tila-/NTP-telemetria julkaistaan aina omalla ~60 sekunnin syklillään tästä asetuksesta riippumatta.",
   "sys.debug_logging": "Virheenjäljityksen lokitus (yksityiskohtainen)",
   "sys.debug_logging_hint": "Näyttää alla osajärjestelmäkohtaiset yksityiskohtaisuuden hallinnat. Ei tallenneta — palautuu uudelleenkäynnistyksessä.",
-  "sys.logging_subsystems_hint": "Valitse osajärjestelmä nostaaksesi sen DEBUG-tasolle (yksityiskohtainen, esim. pyyntöjen ajoitus); poista valinta palauttaaksesi normaalin INFO-lokituksen. <strong>Nämä tulevat voimaan välittömästi — tallennusta ei tarvita.</strong>"
+  "sys.logging_subsystems_hint": "Valitse osajärjestelmä nostaaksesi sen DEBUG-tasolle (yksityiskohtainen, esim. pyyntöjen ajoitus); poista valinta palauttaaksesi normaalin INFO-lokituksen. <strong>Nämä tulevat voimaan välittömästi — tallennusta ei tarvita.</strong>",
+  "sys.debug_logging_persist": "Säilytä uudelleenkäynnistyksen yli",
+  "sys.debug_logging_persist_hint": "Ottaa yllä valitut osajärjestelmät uudelleen käyttöön jokaisella käynnistyskerralla, ennen kuin mikään muu käynnistyy — muuten yllä olevat valinnat nollautuvat uudelleenkäynnistyksessä eivätkä havaitse varhaisia käynnistysongelmia. Jätä pois päältä, ellet aktiivisesti selvitä käynnistysongelmaa."
 }

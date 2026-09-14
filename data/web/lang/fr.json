@@ -218,6 +218,8 @@
   "hw.test": "Tester",
   "hw.enable_click": "Activer le son de clic à l'appui des boutons",
   "hw.save": "Enregistrer le matériel",
+  "sys.update_methods": "Mise à jour du micrologiciel et du système de fichiers",
+  "sys.update_methods_help": "Trois façons de mettre à jour cet appareil, généralement utilisées dans cet ordre :<br><strong>1. Mise à jour du micrologiciel</strong> — pour une nouvelle version du micrologiciel (le cas courant).<br><strong>2. Mise à jour de l'interface Web</strong> — corrige uniquement l'interface Web,<br><strong>3. Récupération LittleFS</strong> — reflashe éventuellement entièrement la partition de données (images, sons, interface Web, etc.).",
   "sys.ota": "Mise à jour du firmware (OTA)",
   "sys.ota_help": "Téléversez <strong>nextube-fw-ota.bin</strong> pour les mises à jour à distance. Ne téléversez <strong>pas</strong> <code>nextube-fw-full.bin</code> — c'est l'image flash complète, réservée au flashage USB.",
   "sys.upload_flash": "Téléverser et flasher",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Couleur anneau LED modulée en mode Spectre",
   "spec.lcd_color_label": "Couleur des Barres LCD",
   "spec.lcd_color_hint": "Couleur barres pour l'affichage spectral LCD",
+  "spec.peak_color_label": "Couleur du Point de Crête",
+  "spec.peak_color_hint": "Couleur du point marquant le pic de chaque barre",
   "spec.capture_baseline_btn": "📸 Capturer la Ligne de Base",
   "spec.reset_auto_btn": "↺ Réinitialiser en Auto",
   "spec.capture_help": "Quand la pièce est silencieuse, cliquez sur <strong>Capturer la Ligne de Base</strong> pour photographier le plancher de bruit matériel.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Fréquence à laquelle les changements de mode, d'affichage, de luminosité, de thème et de rotation sont vérifiés et publiés sur Home Assistant. Les relevés des capteurs et la télémétrie d'état/NTP sont toujours publiés selon leur propre cadence d'environ 60 s, indépendamment de ce paramètre.",
   "sys.debug_logging": "Journalisation de débogage (détaillée)",
   "sys.debug_logging_hint": "Affiche ci-dessous les réglages de verbosité par sous-système. Non enregistré — réinitialisé au redémarrage.",
-  "sys.logging_subsystems_hint": "Cochez un sous-système pour l'élever au niveau DEBUG (détaillé, ex. chronométrage des requêtes) ; décochez pour revenir à la journalisation INFO normale. <strong>Ces changements prennent effet immédiatement — aucun enregistrement requis.</strong>"
+  "sys.logging_subsystems_hint": "Cochez un sous-système pour l'élever au niveau DEBUG (détaillé, ex. chronométrage des requêtes) ; décochez pour revenir à la journalisation INFO normale. <strong>Ces changements prennent effet immédiatement — aucun enregistrement requis.</strong>",
+  "sys.debug_logging_persist": "Conserver après redémarrage",
+  "sys.debug_logging_persist_hint": "Réapplique les sous-systèmes cochés ci-dessus à chaque démarrage, avant que quoi que ce soit d'autre ne démarre — sinon les cases cochées ci-dessus sont réinitialisées au redémarrage et ne peuvent pas détecter les problèmes de démarrage précoces. Laissez désactivé sauf en cas de dépannage actif d'un problème de démarrage."
 }

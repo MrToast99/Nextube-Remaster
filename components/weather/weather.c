@@ -15,7 +15,9 @@
 #include <math.h>
 
 static const char *TAG = "weather";
-static weather_data_t s_weather = {0};
+/* cloud_cover_pct/precip_mm start at -1 ("not fetched yet") — see their
+ * weather.h field comments for why that differs from wind_kph's 0 default. */
+static weather_data_t s_weather = { .cloud_cover_pct = -1.0f, .precip_mm = -1.0f };
 static SemaphoreHandle_t s_wx_mutex = NULL;
 
 /* Location coordinates from the last successful weather fetch.
@@ -901,18 +903,25 @@ static bool weather_source_is_external(void)
  * using the location the active provider just geocoded (weather_get_location).
  * Provider-agnostic, so the WeatherLive tube-6 panel gets a real daily range no
  * matter which current-conditions source is selected.  No-op until a location
- * is known. */
+ * is known.
+ *
+ * Also pulls current wind speed, cloud cover %, and precipitation rate from
+ * the same request's `current` block (added alongside the legacy
+ * `current_weather=true` object, which only exposes temperature/windspeed) —
+ * these feed WeatherLive's continuous cloud-density/rain-intensity rendering
+ * regardless of which provider supplies the primary icon/condition text. */
 static void fetch_daily_range(void)
 {
     float lat, lon;
     if (!weather_get_location(&lat, &lon)) return;
 
-    char url[256];
+    char url[320];
     snprintf(url, sizeof(url),
              "https://api.open-meteo.com/v1/forecast"
              "?latitude=%.4f&longitude=%.4f"
              "&daily=temperature_2m_max,temperature_2m_min"
              "&current_weather=true"
+             "&current=cloud_cover,precipitation"
              "&forecast_days=1&timezone=auto",
              (double)lat, (double)lon);
 
@@ -945,6 +954,21 @@ static void fetch_daily_range(void)
         s_weather.wind_kph = (float)ws->valuedouble;
         xSemaphoreGive(s_wx_mutex);
         ESP_LOGI(TAG, "wind: %.0f km/h", (double)ws->valuedouble);
+    }
+
+    /* Cloud cover % and current precipitation rate (mm) for WeatherLive's
+     * continuous sky-density rendering — see weather.h's field comments. */
+    cJSON *cur   = cJSON_GetObjectItem(root, "current");
+    cJSON *cc    = cur ? cJSON_GetObjectItem(cur, "cloud_cover")   : NULL;
+    cJSON *precp = cur ? cJSON_GetObjectItem(cur, "precipitation") : NULL;
+    if (cJSON_IsNumber(cc) || cJSON_IsNumber(precp)) {
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        if (cJSON_IsNumber(cc))    s_weather.cloud_cover_pct = (float)cc->valuedouble;
+        if (cJSON_IsNumber(precp)) s_weather.precip_mm       = (float)precp->valuedouble;
+        xSemaphoreGive(s_wx_mutex);
+        ESP_LOGI(TAG, "cloud cover: %.0f%%  precip: %.1f mm",
+                 cJSON_IsNumber(cc)    ? cc->valuedouble    : -1.0,
+                 cJSON_IsNumber(precp) ? precp->valuedouble : -1.0);
     }
     cJSON_Delete(root);
 }

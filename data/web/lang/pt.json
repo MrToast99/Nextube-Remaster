@@ -218,6 +218,8 @@
   "hw.test": "Testar",
   "hw.enable_click": "Ativar som de clique ao premir botões",
   "hw.save": "Guardar hardware",
+  "sys.update_methods": "Atualização de firmware e sistema de arquivos",
+  "sys.update_methods_help": "Três formas de atualizar este dispositivo, normalmente usadas nesta ordem:<br><strong>1. Atualização de firmware</strong> — para uma nova versão do firmware (o caso comum).<br><strong>2. Atualização da interface web</strong> — corrige apenas a interface web,<br><strong>3. Recuperação LittleFS</strong> — regrava opcionalmente por completo apenas a partição de dados (imagens, sons, interface web, etc.).",
   "sys.ota": "Atualização de firmware (OTA)",
   "sys.ota_help": "Carregue <strong>nextube-fw-ota.bin</strong> para atualizações over-the-air. <strong>Não</strong> carregue <code>nextube-fw-full.bin</code> — essa é a imagem flash completa apenas para flash via USB.",
   "sys.upload_flash": "Carregar e gravar",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Cor anel LED modulada em modo Espectro",
   "spec.lcd_color_label": "Cor das Barras LCD",
   "spec.lcd_color_hint": "Cor barras para visualização espectral LCD",
+  "spec.peak_color_label": "Cor do Ponto de Pico",
+  "spec.peak_color_hint": "Cor do ponto que marca o pico de cada barra",
   "spec.capture_baseline_btn": "📸 Capturar Linha de Base",
   "spec.reset_auto_btn": "↺ Redefinir Auto",
   "spec.capture_help": "Quando a sala estiver silenciosa, clique em <strong>Capturar Linha de Base</strong> para capturar o ruído de fundo do hardware.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Com que frequência as alterações de modo, ecrã, brilho, tema e rotação são verificadas e publicadas no Home Assistant. As leituras dos sensores e a telemetria de estado/NTP são sempre publicadas no seu próprio ciclo de ~60 s, independentemente desta definição.",
   "sys.debug_logging": "Registo de depuração (detalhado)",
   "sys.debug_logging_hint": "Mostra abaixo os controlos de detalhe por subsistema. Não é guardado — repõe-se ao reiniciar.",
-  "sys.logging_subsystems_hint": "Assinale um subsistema para o elevar a DEBUG (detalhado, por exemplo, tempos de pedido); desmarque para voltar ao registo INFO normal. <strong>Estas alterações têm efeito imediato — não é necessário guardar.</strong>"
+  "sys.logging_subsystems_hint": "Assinale um subsistema para o elevar a DEBUG (detalhado, por exemplo, tempos de pedido); desmarque para voltar ao registo INFO normal. <strong>Estas alterações têm efeito imediato — não é necessário guardar.</strong>",
+  "sys.debug_logging_persist": "Manter após reiniciar",
+  "sys.debug_logging_persist_hint": "Reaplica os subsistemas assinalados acima em cada arranque, antes de qualquer outra coisa iniciar — caso contrário, as marcações acima são repostas ao reiniciar e não conseguem detetar problemas de arranque precoces. Deixe desativado a menos que esteja a resolver ativamente um problema de arranque."
 }

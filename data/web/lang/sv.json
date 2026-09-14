@@ -218,6 +218,8 @@
   "hw.test": "Testa",
   "hw.enable_click": "Aktivera klickljud vid knapptryckning",
   "hw.save": "Spara hårdvara",
+  "sys.update_methods": "Firmware- och filsystemuppdatering",
+  "sys.update_methods_help": "Tre sätt att uppdatera den här enheten, vanligtvis använda i den här ordningen:<br><strong>1. Firmwareuppdatering</strong> — för en ny firmwareversion (det vanliga fallet).<br><strong>2. Webbgränssnittsuppdatering</strong> — patchar bara webbgränssnittet,<br><strong>3. LittleFS-återställning</strong> — ominstallerar valfritt hela datapartitionen (bilder, ljud, webbgränssnitt, osv.).",
   "sys.ota": "Firmware-uppdatering (OTA)",
   "sys.ota_help": "Ladda upp <strong>nextube-fw-ota.bin</strong> för trådlösa uppdateringar. Ladda <strong>inte</strong> upp <code>nextube-fw-full.bin</code> — det är den fullständiga flash-avbilden, endast för USB-flashning.",
   "sys.upload_flash": "Ladda upp och flasha",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Amplitudmodulerad LED-ringfärg i Spektrumläge",
   "spec.lcd_color_label": "LCD-stapelfärg",
   "spec.lcd_color_hint": "Stapelfärg för LCD-spektrumvisning",
+  "spec.peak_color_label": "Toppunktsfärg",
+  "spec.peak_color_hint": "Färg på punkten som markerar toppen av varje stapel",
   "spec.capture_baseline_btn": "📸 Fånga baslinje",
   "spec.reset_auto_btn": "↺ Återställ till Auto",
   "spec.capture_help": "När rummet är tyst, klicka på <strong>Fånga baslinje</strong> för att fånga hårdvarubrusplanet.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Hur ofta ändringar i läge, skärm, ljusstyrka, tema och rotation kontrolleras och publiceras till Home Assistant. Sensoravläsningar och hälso-/NTP-telemetri publiceras alltid med sin egen ~60 sekunders takt oavsett denna inställning.",
   "sys.debug_logging": "Felsökningsloggning (utförlig)",
   "sys.debug_logging_hint": "Visar detaljnivåkontroller per delsystem nedan. Sparas inte — återställs vid omstart.",
-  "sys.logging_subsystems_hint": "Kryssa i ett delsystem för att höja det till DEBUG (utförligt, t.ex. förfrågningstiming); avmarkera för att återgå till normal INFO-loggning. <strong>Dessa träder i kraft omedelbart — inget Spara behövs.</strong>"
+  "sys.logging_subsystems_hint": "Kryssa i ett delsystem för att höja det till DEBUG (utförligt, t.ex. förfrågningstiming); avmarkera för att återgå till normal INFO-loggning. <strong>Dessa träder i kraft omedelbart — inget Spara behövs.</strong>",
+  "sys.debug_logging_persist": "Behåll efter omstart",
+  "sys.debug_logging_persist_hint": "Återapplicerar de markerade delsystemen ovan vid varje start, innan något annat startar — annars återställs markeringarna ovan vid omstart och kan inte fånga tidiga startproblem. Lämna avstängd om du inte aktivt felsöker ett startproblem."
 }

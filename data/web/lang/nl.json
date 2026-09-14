@@ -218,6 +218,8 @@
   "hw.test": "Testen",
   "hw.enable_click": "Klikgeluid bij knopdruk inschakelen",
   "hw.save": "Hardware opslaan",
+  "sys.update_methods": "Firmware- en bestandssysteemupdate",
+  "sys.update_methods_help": "Drie manieren om dit apparaat bij te werken, meestal in deze volgorde gebruikt:<br><strong>1. Firmware-update</strong> — voor een nieuwe firmwarerelease (het gebruikelijke geval).<br><strong>2. Web-UI-update</strong> — patcht alleen de webinterface,<br><strong>3. LittleFS-herstel</strong> — herflasht optioneel volledig alleen de datapartitie (afbeeldingen, geluiden, web-UI, enz.).",
   "sys.ota": "Firmware-update (OTA)",
   "sys.ota_help": "Upload <strong>nextube-fw-ota.bin</strong> voor over-the-air-updates. Upload <strong>niet</strong> <code>nextube-fw-full.bin</code> — dat is de volledige flash-image, alleen voor USB-flashen.",
   "sys.upload_flash": "Uploaden en flashen",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Amplitudegemoduleerde LED-ringkleur in Spectrummodus",
   "spec.lcd_color_label": "LCD Balkkleur",
   "spec.lcd_color_hint": "Balkkleur voor LCD-spectrumweergave",
+  "spec.peak_color_label": "Piekpunt Kleur",
+  "spec.peak_color_hint": "Kleur van het punt dat de piek van elke balk markeert",
   "spec.capture_baseline_btn": "📸 Basisniveau vastleggen",
   "spec.reset_auto_btn": "↺ Terug naar Auto",
   "spec.capture_help": "Wanneer de kamer stil is, klik op <strong>Basisniveau vastleggen</strong> om het hardware-ruisniveau vast te leggen.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Hoe vaak wijzigingen in modus, weergave, helderheid, thema en rotatie worden gecontroleerd en gepubliceerd naar Home Assistant. Sensormetingen en status-/NTP-telemetrie worden altijd met hun eigen cyclus van ~60 s gepubliceerd, ongeacht deze instelling.",
   "sys.debug_logging": "Debug-logging (uitgebreid)",
   "sys.debug_logging_hint": "Toont hieronder de detailinstellingen per subsysteem. Wordt niet opgeslagen — wordt gereset bij herstart.",
-  "sys.logging_subsystems_hint": "Vink een subsysteem aan om het naar DEBUG te verhogen (uitgebreid, bijv. verzoektiming); vink uit om terug te keren naar normale INFO-logging. <strong>Deze worden onmiddellijk van kracht — opslaan is niet nodig.</strong>"
+  "sys.logging_subsystems_hint": "Vink een subsysteem aan om het naar DEBUG te verhogen (uitgebreid, bijv. verzoektiming); vink uit om terug te keren naar normale INFO-logging. <strong>Deze worden onmiddellijk van kracht — opslaan is niet nodig.</strong>",
+  "sys.debug_logging_persist": "Behouden na herstart",
+  "sys.debug_logging_persist_hint": "Past de hierboven aangevinkte subsystemen opnieuw toe bij elke opstart, voordat er iets anders start — anders worden de vinkjes hierboven bij een herstart gereset en kunnen ze vroege opstartproblemen niet opvangen. Laat uit tenzij je actief een opstartprobleem aan het oplossen bent."
 }

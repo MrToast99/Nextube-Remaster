@@ -1,6 +1,22 @@
 # Changelog
 
 
+## [1.18.4] - 2026-09-13
+
+### Added
+- **Controlled boot** — the tubes now show a small animated shape (pulsing, rotating, cycling color/shape) instead of placeholder/dashes content until NTP time, weather, or a configured social platform's data is actually ready, then cut straight to a complete frame. Clock/Date/Album/Spectrum resolve almost instantly; Weather mode, a WeatherLive/Custom-face sky, or a configured social mode wait longer, capped at 30 s so a device that can't currently reach its configured WiFi doesn't animate forever. A never-configured device still gets AP-PIN setup immediately regardless.
+- WeatherLive's sky now scales cloud density/opacity and rain/snow intensity continuously from the actual cloud-cover % and precipitation rate instead of a fixed value per condition icon — a light drizzle now reads visibly sparser than a downpour.
+- Diagnostic: every HTTP-triggered reboot path now logs the requesting client's IP address just before restarting, to help trace the source of an otherwise-unexplained reboot.
+- Settings → System → Debug logging now has a **Persist across reboot** option, so a chosen subsystem's verbose logging survives a restart instead of resetting to normal — useful for catching boot-time issues that happen before you can react.
+- Spectrum mode's LCD peak-hold dot was hardcoded white — it's now a configurable color (Display → Spectrum Mode → Peak Dot Color), independent of the bar color. Defaults to white.
+
+### Fixed
+- The shared backlight came up to ~50% brightness immediately at init, before any tube panel had actually been reset — so it was lit while tubes still showed reset garbage, then flashed per-tube as they finished initializing. It now starts fully off and only ramps up once real content (or the boot splash) is ready.
+- Web UI: saving *any* setting could silently revert the device to whatever mode was active when the settings page first loaded, if the mode changed afterward (Dashboard buttons, touch panel, Home Assistant, WLED rotation) without a page reload. The dashboard's status poll now keeps that cached mode in sync.
+
+### Changed
+- Web UI: System → Firmware Update (OTA), Web UI Update, and LittleFS Recovery — previously three separate cards scattered across the System tab — are now one **Firmware & Filesystem Update** card, each in its own expandable section, with a brief note on what each is for and the order you'd normally reach for them (firmware, then Web UI, with LittleFS Recovery as the optional full data-partition reflash). No change to what any of the three actions themselves do.
+
 ## [1.18.3] - 2026-09-10
 
 ### Added

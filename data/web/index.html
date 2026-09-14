@@ -352,8 +352,8 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
   </div>
   <div id="vm-fix-status" style="display:none;margin-top:.5rem;font-size:.8rem;opacity:.9"></div>
   <div style="margin-top:.4rem">
-  Or upload <code>nextube-WebUI-v*.zip</code> via <strong>System → Web UI Update</strong>,
-  or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → LittleFS Recovery</strong> (⚠️ erases filesystem — your config is backed up and restored automatically, but as a precaution you can still export it yourself first via <strong>System → Backup &amp; Restore</strong>; custom themes and album photos aren't covered and will be lost unless backed up separately).
+  Or upload <code>nextube-WebUI-v*.zip</code> via <strong>System → Firmware &amp; Filesystem Update → Web UI Update</strong>,
+  or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → Firmware &amp; Filesystem Update → LittleFS Recovery</strong> (⚠️ erases filesystem — your config is backed up and restored automatically, but as a precaution you can still export it yourself first via <strong>System → Backup &amp; Restore</strong>; custom themes and album photos aren't covered and will be lost unless backed up separately).
   </div>
 </div>
 <div id="stock-missing-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6">
@@ -363,7 +363,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
   </div>
   <div id="sm-repair-status" style="display:none;margin-top:.5rem;font-size:.8rem;opacity:.9"></div>
   <div style="margin-top:.4rem">
-  Or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → LittleFS Recovery</strong> to restore a complete, known-good set regardless of how much is missing. Your config (WiFi, settings) is backed up and restored automatically, but as a precaution you can still export it yourself first via <strong>System → Backup &amp; Restore</strong>. Custom themes or album photos you've uploaded aren't covered by the automatic backup and will be lost unless you back those up separately.
+  Or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → Firmware &amp; Filesystem Update → LittleFS Recovery</strong> to restore a complete, known-good set regardless of how much is missing. Your config (WiFi, settings) is backed up and restored automatically, but as a precaution you can still export it yourself first via <strong>System → Backup &amp; Restore</strong>. Custom themes or album photos you've uploaded aren't covered by the automatic backup and will be lost unless you back those up separately.
   </div>
 </div>
 <div id="theme-error-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
@@ -928,6 +928,9 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <label data-i18n="spec.lcd_color_label" for="f-spec-lcd-color">LCD Bar Color</label>
       <input type="color" id="f-spec-lcd-color" class="color-swatch">
       <span style="color:var(--dim);font-size:.82rem" data-i18n="spec.lcd_color_hint">Bar color for the LCD spectrum display</span>
+      <label data-i18n="spec.peak_color_label" for="f-spec-peak-color">Peak Dot Color</label>
+      <input type="color" id="f-spec-peak-color" class="color-swatch">
+      <span style="color:var(--dim);font-size:.82rem" data-i18n="spec.peak_color_hint">Color of the peak-hold dot that tops each bar</span>
     </div>
     <div class="field" style="display:flex;align-items:center;gap:8px;margin-top:.4rem">
       <label class="toggle"><input type="checkbox" id="f-spec-lcd-wled"><span class="track"><span class="thumb"></span></span></label>
@@ -1595,20 +1598,50 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
 <!-- ─── System ─────────────────────────────────────────────────── -->
 <div class="tab-content" id="tab-system" role="tabpanel" aria-labelledby="tabbtn-system">
   <div class="card">
-    <h2 data-i18n="sys.ota">Firmware Update (OTA)</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem" data-i18n-html="sys.ota_help">Upload <strong>nextube-fw-ota.bin</strong> for over-the-air updates. Do <strong>not</strong> upload <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.</p>
-    <input type="file" id="ota-file" accept=".bin" style="margin-bottom:.5rem">
-    <div class="progress ota" id="ota-progress" style="display:none"><div class="progress-bar" id="ota-bar"></div></div>
-    <p id="ota-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button id="ota-btn" class="btn btn-primary" onclick="doOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
-  </div>
-  <div class="card">
-    <h2 data-i18n="sys.webui_update">Web UI Update</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.webui_help">Upload <strong>nextube-WebUI-v*.zip</strong> to apply only the changed web UI files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
-    <input type="file" id="hotpatch-file" accept=".zip" style="margin-bottom:.5rem">
-    <div class="progress ota" id="hotpatch-progress" style="display:none"><div class="progress-bar" id="hotpatch-bar"></div></div>
-    <p id="hotpatch-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button class="btn btn-primary" onclick="doHotPatch()" data-i18n="sys.upload_apply">Upload & Apply</button></div>
+    <h2 data-i18n="sys.update_methods">Firmware &amp; Filesystem Update</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem" data-i18n-html="sys.update_methods_help">Three ways to update this device, normally used in this order: <strong>1. Firmware Update</strong> for a new firmware release (the common case), <strong>2. Web UI Update</strong> to patch just the web interface without touching firmware, and <strong>3. LittleFS Recovery</strong> as a last resort — a full filesystem reflash that erases everything and rebuilds from scratch.</p>
+
+    <details style="border:1px solid var(--accent);border-radius:8px;margin-bottom:1rem">
+      <summary style="padding:.75rem 1rem">
+        <span style="font-size:.95rem;font-weight:600;letter-spacing:.02em;color:var(--hi)" data-i18n="sys.ota">Firmware Update (OTA)</span>
+      </summary>
+      <div style="padding:.75rem 1rem;border-top:1px solid var(--accent)">
+        <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem" data-i18n-html="sys.ota_help">Upload <strong>nextube-fw-ota.bin</strong> for over-the-air updates. Do <strong>not</strong> upload <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.</p>
+        <input type="file" id="ota-file" accept=".bin" style="margin-bottom:.5rem">
+        <div class="progress ota" id="ota-progress" style="display:none"><div class="progress-bar" id="ota-bar"></div></div>
+        <p id="ota-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
+        <div class="btn-group"><button id="ota-btn" class="btn btn-primary" onclick="doOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
+      </div>
+    </details>
+
+    <details style="border:1px solid var(--accent);border-radius:8px;margin-bottom:1rem">
+      <summary style="padding:.75rem 1rem">
+        <span style="font-size:.95rem;font-weight:600;letter-spacing:.02em;color:var(--hi)" data-i18n="sys.webui_update">Web UI Update</span>
+      </summary>
+      <div style="padding:.75rem 1rem;border-top:1px solid var(--accent)">
+        <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.webui_help">Upload <strong>nextube-WebUI-v*.zip</strong> to apply only the changed web UI files. Your config, album images, and audio clips are <strong>never touched</strong>. No reboot required — changes are live instantly.</p>
+        <input type="file" id="hotpatch-file" accept=".zip" style="margin-bottom:.5rem">
+        <div class="progress ota" id="hotpatch-progress" style="display:none"><div class="progress-bar" id="hotpatch-bar"></div></div>
+        <p id="hotpatch-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
+        <div class="btn-group"><button class="btn btn-primary" onclick="doHotPatch()" data-i18n="sys.upload_apply">Upload & Apply</button></div>
+      </div>
+    </details>
+
+    <details style="border:1px solid var(--accent);border-radius:8px">
+      <summary style="padding:.75rem 1rem">
+        <span style="font-size:.95rem;font-weight:600;letter-spacing:.02em;color:var(--hi)" data-i18n="sys.fs_recovery">LittleFS Recovery</span>
+      </summary>
+      <div style="padding:.75rem 1rem;border-top:1px solid var(--accent)">
+        <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.fs_recovery_help">Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.</p>
+        <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5" data-i18n-html="sys.fs_recovery_warn">
+          ⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above.<br>Your settings (Wi-Fi, theme, brightness, etc.) are backed up to NVS automatically before the erase and restored on the next boot — no manual config backup needed for this step.
+        </div>
+        <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
+        <div class="progress ota" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
+        <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
+        <div class="btn-group"><button id="fsota-btn" class="btn btn-primary" onclick="doFSOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
+      </div>
+    </details>
   </div>
   <div class="card">
     <h2 data-i18n="sys.backup">Backup &amp; Restore</h2>
@@ -1656,17 +1689,6 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
     <p id="stock-repair-status" style="font-size:.82rem;color:var(--dim);margin-top:.6rem;display:none"></p>
   </div>
   <div class="card">
-    <h2 data-i18n="sys.fs_recovery">LittleFS Recovery</h2>
-    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="sys.fs_recovery_help">Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.</p>
-    <div style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);border-radius:6px;padding:.7rem .9rem;margin-bottom:.8rem;font-size:.82rem;line-height:1.5" data-i18n-html="sys.fs_recovery_warn">
-      ⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above.<br>Your settings (Wi-Fi, theme, brightness, etc.) are backed up to NVS automatically before the erase and restored on the next boot — no manual config backup needed for this step.
-    </div>
-    <input type="file" id="spiffs-file" accept=".bin" style="margin-bottom:.5rem">
-    <div class="progress ota" id="spiffs-progress" style="display:none"><div class="progress-bar" id="spiffs-bar"></div></div>
-    <p id="spiffs-status" style="font-size:.8rem;color:var(--dim);margin-top:.4rem;display:none"></p>
-    <div class="btn-group"><button id="fsota-btn" class="btn btn-primary" onclick="doFSOTA()" data-i18n="sys.upload_flash">Upload & Flash</button></div>
-  </div>
-  <div class="card">
     <h2 data-i18n="sys.logs">Device Logs</h2>
     <p style="color:var(--dim);font-size:.82rem;margin-bottom:.8rem" data-i18n="sys.logs_help">Live device log output — buffered in RAM from boot, not written to flash. Last 200 lines. Use auto-refresh to watch in real time.</p>
     <pre id="log-output" style="background:#0d0d0d;color:#bbb;font-family:'Courier New',Courier,monospace;font-size:.73rem;line-height:1.45;padding:.8rem;border-radius:6px;height:300px;overflow-y:auto;margin:0 0 .8rem;white-space:pre-wrap;word-break:break-all;border:1px solid #222"></pre>
@@ -1688,6 +1710,11 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
           <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="logAllOn()">All on</button>
           <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="logAllOff()">All off</button>
         </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:.7rem;padding-top:.6rem;border-top:1px solid var(--accent)">
+          <label class="toggle"><input type="checkbox" id="log-persist-boot" onchange="logPersistChange()"><span class="track"><span class="thumb"></span></span></label>
+          <label for="log-persist-boot" style="margin:0;cursor:pointer;font-weight:normal" data-i18n="sys.debug_logging_persist">Persist across reboot</label>
+        </div>
+        <p style="font-size:.78rem;color:var(--dim);margin:.3rem 0 0" data-i18n="sys.debug_logging_persist_hint">Re-applies whichever subsystems are checked above at every boot, before anything else starts — otherwise the checks above reset on reboot and can't catch early-boot issues. Leave off unless actively troubleshooting a boot-time problem.</p>
       </div>
     </details>
   </div>
@@ -2197,6 +2224,8 @@ Object.assign(I18N.en, {
 });
 /* ── Translation batch: System tab (main cards; hidden debug panel left EN) ── */
 Object.assign(I18N.en, {
+  "sys.update_methods":"Firmware & Filesystem Update",
+  "sys.update_methods_help":"Three ways to update this device, normally used in this order:<br><strong>1. Firmware Update</strong> — for a new firmware release (the common case).<br><strong>2. Web UI Update</strong> — to patch just the web interface,<br><strong>3. LittleFS Recovery</strong> — optionally full reflash just the data partition (images, sounds, web UI, etc.).",
   "sys.ota":"Firmware Update (OTA)",
   "sys.ota_help":"Upload <strong>nextube-fw-ota.bin</strong> for over-the-air updates. Do <strong>not</strong> upload <code>nextube-fw-full.bin</code> — that is the full flash image for USB flashing only.",
   "sys.upload_flash":"Upload & Flash",
@@ -2217,6 +2246,8 @@ Object.assign(I18N.en, {
   "sys.debug_logging":"Debug logging (verbose)",
   "sys.debug_logging_hint":"Shows per-subsystem verbosity controls below. Not saved — resets on reboot.",
   "sys.logging_subsystems_hint":"Check a subsystem to raise it to DEBUG (verbose, e.g. request timing); uncheck to return it to normal INFO logging. <strong>These take effect immediately — no Save needed.</strong>",
+  "sys.debug_logging_persist":"Persist across reboot",
+  "sys.debug_logging_persist_hint":"Re-applies whichever subsystems are checked above at every boot, before anything else starts — otherwise the checks above reset on reboot and can't catch early-boot issues. Leave off unless actively troubleshooting a boot-time problem.",
   "sys.setup_ap":"Setup AP",
   "sys.setup_ap_help":"8-digit PIN for the <strong>Nextube-Setup</strong> WiFi network. Visible on the LCD tubes whenever the AP is broadcasting.",
   "sys.show":"Show","sys.regenerate":"Regenerate",
@@ -2250,6 +2281,7 @@ Object.assign(I18N.en, {
   "spec.led_src_follow":"Follow accent mode (Static / Breath / Rainbow / Off / WLED)",
   "spec.led_color_label":"LED Glow Color","spec.led_color_hint":"Amplitude-modulated LED ring color in Spectrum mode",
   "spec.lcd_color_label":"LCD Bar Color","spec.lcd_color_hint":"Bar color for the LCD spectrum display",
+  "spec.peak_color_label":"Peak Dot Color","spec.peak_color_hint":"Color of the peak-hold dot that tops each bar",
   "spec.lcd_wled":"Follow WLED primary color (requires WLED Sync service; falls back to the color above when no WLED data)",
   "spec.beat_react":"Beat-reactive nudge for Breath / Rainbow",
   "spec.beat_react_hint":"Only affects Breath and Rainbow accent modes. Reacts to detected percussive hits (snare/hihat/kick) — not true beats-per-minute tracking, since the analyser doesn't resolve sub-bass frequencies.",
@@ -3709,6 +3741,7 @@ const SETTINGS_SCHEMA = [
       $('f-spec-color').value = hexFromRgb(cfg.spectrum_RGB, [50,80,100]);
       $('f-spec-lcd-color').value = hexFromRgb(cfg.spectrum_lcd_RGB, [30,220,30]);
       $('f-spec-lcd-wled').checked = cfg.spectrum_lcd_wled === true;
+      $('f-spec-peak-color').value = hexFromRgb(cfg.spectrum_peak_RGB, [255,255,255]);
       $('f-spec-led-src').value = String(cfg.spectrum_led_source || 0);
       $('f-spec-beat-react').checked = cfg.spectrum_led_beat_react === true;
       specLedSrcChange();
@@ -3717,6 +3750,7 @@ const SETTINGS_SCHEMA = [
       body.spectrum_RGB = rgbFromHex(hexVal('f-spec-color', '#326450'));
       body.spectrum_lcd_RGB = rgbFromHex(hexVal('f-spec-lcd-color', '#1edc1e'));
       body.spectrum_lcd_wled = $('f-spec-lcd-wled').checked;
+      body.spectrum_peak_RGB = rgbFromHex(hexVal('f-spec-peak-color', '#ffffff'));
       body.spectrum_led_source = +$('f-spec-led-src').value;
       body.spectrum_led_beat_react = $('f-spec-beat-react').checked;
     }
@@ -4996,7 +5030,10 @@ async function dbgClearUpdateRepo() {
 
 /* ── Runtime per-subsystem logging (debug panel) ───────────────────────────
  * Toggles call esp_log_level_set() on the device via /api/debug/loglevel.
- * Runtime only — not persisted; resets on reboot. */
+ * Runtime only — not persisted; resets on reboot, UNLESS "Persist across
+ * reboot" is also checked, which saves the current tag selection into
+ * debug_log_persist_mask (config_mgr) so main.c re-applies it at next boot,
+ * before display_task or networking starts. */
 const LOG_TAGS = ['ntp','weather','sht30','subscribers','mic','leds','display',
                   'audio','ha_mqtt','wled_sync','wifi_mgr','rtc','config','touch','web_srv'];
 /* Per-subsystem checkboxes are a direct DEBUG/INFO switch — checked = level
@@ -5007,18 +5044,46 @@ function buildLogToggles() {
   const box = $('log-toggles');
   if (!box || box.dataset.built) return;
   box.dataset.built = '1';
-  LOG_TAGS.forEach(tag => {
+  const persistMask = cfg.debug_log_persist_mask || 0;
+  LOG_TAGS.forEach((tag, i) => {
     const lbl = document.createElement('label');
     lbl.style.cssText = 'display:flex;align-items:center;gap:.4rem;font-size:.8rem;cursor:pointer';
     const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.checked = false; cb.id = 'log-' + tag;
+    /* A set bit means main.c already applied DEBUG for this tag at boot —
+     * reflect that here without re-POSTing (the device is already there). */
+    cb.type = 'checkbox'; cb.checked = (persistMask & (1 << i)) !== 0; cb.id = 'log-' + tag;
     cb.dataset.noDirty = '1';
     cb.style.cssText = 'width:14px;height:14px';
-    cb.onchange = () => setLogLevelRaw(tag, cb.checked ? 4 : 3);
+    cb.onchange = () => { setLogLevelRaw(tag, cb.checked ? 4 : 3); logPersistSync(); };
     lbl.appendChild(cb);
     lbl.appendChild(document.createTextNode(tag));
     box.appendChild(lbl);
   });
+  $('log-persist-boot').checked = persistMask !== 0;
+}
+function logPersistMask() {
+  let mask = 0;
+  LOG_TAGS.forEach((tag, i) => { if ($('log-' + tag)?.checked) mask |= (1 << i); });
+  return mask;
+}
+/* Keeps a saved mask in sync with the checkboxes above whenever persistence
+ * is already on — a no-op otherwise, so plain runtime toggling (persist
+ * off) never touches flash. */
+function logPersistSync() {
+  if ($('log-persist-boot').checked) saveDebugLogPersistMask(logPersistMask());
+}
+function logPersistChange() {
+  const on = $('log-persist-boot').checked;
+  saveDebugLogPersistMask(on ? logPersistMask() : 0);
+  toast(on ? 'Debug logging will persist across reboot' : 'Debug logging no longer persists across reboot');
+}
+async function saveDebugLogPersistMask(mask) {
+  cfg.debug_log_persist_mask = mask;
+  await secureFetch('/api/settings', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ debug_log_persist_mask: mask })
+  }).catch(() => toast('Failed to save persisted debug log setting', true));
 }
 function setLogLevelRaw(tag, level) {
   return secureFetch('/api/debug/loglevel', {
@@ -5139,6 +5204,7 @@ async function logAllOn() {
     const cb = $('log-' + tag); if (cb) cb.checked = true;
     await setLogLevelRaw(tag, 4);
   }
+  logPersistSync();
   toast('Logging: all on (debug)');
 }
 async function logAllOff() {
@@ -5146,6 +5212,7 @@ async function logAllOff() {
     const cb = $('log-' + tag); if (cb) cb.checked = false;
     await setLogLevelRaw(tag, 3);
   }
+  logPersistSync();
   toast('Logging: all off (info)');
 }
 /* "Debug logging" is a native <details>/<summary> now — see the shared
@@ -5472,6 +5539,12 @@ async function refreshStatus() {
   { const mk = 'mode.' + (s.mode || '').toLowerCase();
     $('s-mode').textContent = s.mode ? (I18N.en[mk] ? tr(mk) : s.mode) : '--'; }
   if (s.mode) updateQuickActionActive(s.mode);
+  /* Keep window._settingsApp0 (the cached mode the "Clock face" schema
+   * entry's save() resends) in sync with the device's actual mode — it's
+   * otherwise set once at page load and goes stale after any later mode
+   * change (Dashboard buttons, touch panel, HA, WLED), silently reverting
+   * the device on the next unrelated settings save. */
+  if (s.mode && window._settingsApp0) window._settingsApp0.app = s.mode;
   if (typeof s.rotation_pause_remaining_s === 'number') applyRotationPauseUI(s.rotation_pause_remaining_s);
   const _useFahrenheit = (cfg.temperature_format || 'Celsius') === 'Fahrenheit';
   if (s.weather) {

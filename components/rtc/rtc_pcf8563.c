@@ -136,9 +136,11 @@ bool rtc_get_time(struct tm *t)
     t->tm_year = year + 100;               /* PCF8563 year 0-99 → 2000-2099 */
     t->tm_isdst = -1;                      /* let mktime determine DST */
 
-    ESP_LOGD(TAG, "RTC read: %04d-%02d-%02d %02d:%02d:%02d",
-             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-             t->tm_hour, t->tm_min, t->tm_sec);
+    /* No per-read log here on purpose: ntp_time.c's PCF8563 edge-sync loop
+     * calls this every ~2 ms for up to 1.1 s once a minute (see its own
+     * comment), so a log here would spam ~550 lines per sync at DEBUG level.
+     * Both real single-shot callers already print their own more-informative
+     * "RTC read OK: ... -> epoch ..." line right after. */
     return true;
 }
 

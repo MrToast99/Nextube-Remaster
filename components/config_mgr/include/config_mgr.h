@@ -130,6 +130,8 @@ typedef struct {
     bool             spectrum_lcd_wled;     /* true = LCD bars follow the WLED primary color
                                                (live, when WLED Sync is receiving packets);
                                                falls back to spectrum_lcd_rgb otherwise */
+    uint8_t          spectrum_peak_rgb[3];  /* LCD bar peak-hold dot color [R, G, B];
+                                               default white matches the old hardcoded dot */
     uint8_t          spectrum_led_source;   /* 0 = custom glow color (amplitude-modulated),
                                                1 = follow configured accent mode (Static/Breath/Rainbow/Off) */
     bool             spectrum_led_beat_react; /* Breath/Rainbow only, and only while
@@ -139,6 +141,12 @@ typedef struct {
     bool             notify_update_on_display; /* true = draw red indicator on tube 6 when a
                                                   firmware update is available.  Driven by the
                                                   web UI via POST /api/update_notify. */
+    uint16_t         debug_log_persist_mask; /* bitmask: bit N = LOG_TAGS[N] (web UI's Debug
+                                                 logging panel, same order) gets ESP_LOG_DEBUG
+                                                 re-applied at boot, before display_task starts.
+                                                 0 = no persisted tags (the panel's per-tag
+                                                 toggles are otherwise runtime-only, reset every
+                                                 reboot). See main.c's apply_persisted_debug_log_levels(). */
     uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0xFFF (all 12) */
     uint8_t          lcd_invert_mask;    /* bitmask: bit N = tube N needs INVON (color-inverted replacement panel) */
     uint8_t          lcd_init_profile[6];    /* per-tube panel profile: 0=Standard, 1=Vivid (gamma curve selector) */

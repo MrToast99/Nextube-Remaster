@@ -92,6 +92,11 @@ static void set_defaults(void)
     s_cfg.spectrum_lcd_rgb[2] = 30;
     s_cfg.spectrum_lcd_wled   = false;  /* opt-in: bars follow WLED primary color */
 
+    /* Peak-hold dot color — white matches the old hardcoded dot */
+    s_cfg.spectrum_peak_rgb[0] = 255;
+    s_cfg.spectrum_peak_rgb[1] = 255;
+    s_cfg.spectrum_peak_rgb[2] = 255;
+
     /* Follow Sun/Moon LED mode defaults. */
     s_cfg.sunmoon_sun_rgb[0] = 255; s_cfg.sunmoon_sun_rgb[1] = 213; s_cfg.sunmoon_sun_rgb[2] = 46;
     s_cfg.sunmoon_moon_rgb[0] = 230; s_cfg.sunmoon_moon_rgb[1] = 234; s_cfg.sunmoon_moon_rgb[2] = 248;
@@ -103,6 +108,9 @@ static void set_defaults(void)
 
     /* Clock-face update indicator — opt-in (off by default) */
     s_cfg.notify_update_on_display = false;
+
+    /* No debug-log tags persisted across reboot by default — see config_mgr.h */
+    s_cfg.debug_log_persist_mask = 0;
 
     /* Per-tube color-inversion mask (0 = all normal; set bit N for replacement
      * panels that default to INVON, e.g. LH096NT-IF09W variants) */
@@ -883,6 +891,18 @@ static void parse_json(const char *json, size_t len)
         }
     }
 
+    /* spectrum_peak_RGB — LCD bar peak-hold dot color */
+    {
+        cJSON *sp = cJSON_GetObjectItem(root, "spectrum_peak_RGB");
+        if (cJSON_IsArray(sp) && cJSON_GetArraySize(sp) >= 3) {
+            for (int i = 0; i < 3; i++) {
+                cJSON *v = cJSON_GetArrayItem(sp, i);
+                if (cJSON_IsNumber(v) && v->valueint >= 0 && v->valueint <= 255)
+                    s_cfg.spectrum_peak_rgb[i] = (uint8_t)v->valueint;
+            }
+        }
+    }
+
     /* spectrum_led_source — 0 = custom glow, 1 = follow accent mode */
     json_read_u8(root, "spectrum_led_source", &s_cfg.spectrum_led_source);
     if (s_cfg.spectrum_led_source > 1) s_cfg.spectrum_led_source = 0;
@@ -893,6 +913,9 @@ static void parse_json(const char *json, size_t len)
 
     /* notify_update_on_display — opt-in clock-face update indicator */
     json_read_bool(root, "notify_update_on_display", &s_cfg.notify_update_on_display);
+
+    /* debug_log_persist_mask — see config_mgr.h */
+    json_read_u16(root, "debug_log_persist_mask", &s_cfg.debug_log_persist_mask);
 
     /* lcd_invert_mask — per-tube INVON flag for color-inverted replacement panels */
     json_read_u8(root, "lcd_invert_mask", &s_cfg.lcd_invert_mask);
@@ -1424,11 +1447,18 @@ char *config_to_json(bool include_password)
             cJSON_AddItemToArray(sp, cJSON_CreateNumber(s_cfg.spectrum_lcd_rgb[i]));
     }
 
+    {
+        cJSON *sp = cJSON_AddArrayToObject(root, "spectrum_peak_RGB");
+        for (int i = 0; i < 3; i++)
+            cJSON_AddItemToArray(sp, cJSON_CreateNumber(s_cfg.spectrum_peak_rgb[i]));
+    }
+
     cJSON_AddNumberToObject(root, "spectrum_led_source", s_cfg.spectrum_led_source);
     cJSON_AddBoolToObject(root, "spectrum_led_beat_react", s_cfg.spectrum_led_beat_react);
     cJSON_AddBoolToObject(root, "spectrum_lcd_wled",   s_cfg.spectrum_lcd_wled);
 
     cJSON_AddBoolToObject(root, "notify_update_on_display", s_cfg.notify_update_on_display);
+    cJSON_AddNumberToObject(root, "debug_log_persist_mask", s_cfg.debug_log_persist_mask);
     cJSON_AddNumberToObject(root, "lcd_invert_mask", s_cfg.lcd_invert_mask);
     json_add_tube_u8(root, "lcd_init_profile",   s_cfg.lcd_init_profile);
     json_add_tube_u8(root, "lcd_vcom",            s_cfg.lcd_vcom);

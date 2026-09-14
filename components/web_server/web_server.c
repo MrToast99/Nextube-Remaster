@@ -104,7 +104,20 @@ static volatile bool s_ota_active = false;
  * — ~380 stat() calls is cheaper than esp_littlefs_info()'s full walk, but
  * still risks becoming the same kind of blocking cost inside a request
  * handler. Not re-run after a plain file upload/delete — a stale reading
- * until next reboot is an acceptable trade there. */
+ * until next reboot is an acceptable trade there.
+ *
+ * Paused in small batches (STOCK_CHECK_BATCH files at a time), not one
+ * pause for the whole scan — under concurrent WiFi/MQTT/flash traffic each
+ * stat() can cost tens of ms (measured 13-15s total for 384 files on a
+ * busy boot), and holding display_task parked for the whole scan froze the
+ * boot splash or WeatherLive animation solid.
+ *
+ * BATCH=32/60ms (an earlier attempt) still read as a freeze: ~35ms/file
+ * means ~1.1s paused per batch against only 60ms resumed — not long enough
+ * to render a visibly different frame before the next pause. This smaller
+ * batch + a gap close to one full render tick trades a longer total scan
+ * for many brief, visible-motion pauses instead of one long freeze. */
+#define STOCK_CHECK_BATCH 6
 static int  s_stock_missing_count       = 0;
 static char s_stock_missing_example[128] = "";
 
@@ -114,30 +127,44 @@ static void stock_files_check(void)
     char example[128] = "";
     struct stat st;
 
-    for (size_t i = 0; i < STOCK_FILES_COUNT; i++) {
-        char vpath[320];
-        snprintf(vpath, sizeof(vpath), "/spiffs/%s", STOCK_FILES[i]);
-        if (stat(vpath, &st) != 0) {
-            missing++;
-            if (example[0] == '\0') snprintf(example, sizeof(example), "%s", STOCK_FILES[i]);
+    for (size_t i = 0; i < STOCK_FILES_COUNT; i += STOCK_CHECK_BATCH) {
+        size_t end = i + STOCK_CHECK_BATCH;
+        if (end > STOCK_FILES_COUNT) end = STOCK_FILES_COUNT;
+
+        if (!display_pause_for_spi(5000)) {
+            ESP_LOGW(TAG, "stock_files_check: display task did not pause at file %u/%u — "
+                          "stopping early this boot", (unsigned)i, (unsigned)STOCK_FILES_COUNT);
+            return;   /* leave s_stock_missing_count untouched — same "skip this
+                       * boot's check" behavior the old single-pause version had */
         }
-        /* stat() is far cheaper than stock_repair_task()'s fopen+fread+SHA-256
-         * pass over the same file list (that loop measured ~37s on real
-         * hardware with no yield at all and tripped the task watchdog — see
-         * its own comment), so a yield every iteration here would be
-         * needless overhead on what's meant to be a cheap, boot-safe check.
-         * Every 32 is defensive headroom in case this filesystem's stat()
-         * ever turns out costlier than expected, without meaningfully
-         * slowing down the common case. */
-        if ((i & 31) == 31) vTaskDelay(1);
+        for (size_t j = i; j < end; j++) {
+            char vpath[320];
+            snprintf(vpath, sizeof(vpath), "/spiffs/%s", STOCK_FILES[j]);
+            if (stat(vpath, &st) != 0) {
+                missing++;
+                if (example[0] == '\0') snprintf(example, sizeof(example), "%s", STOCK_FILES[j]);
+            }
+        }
+        display_unpause();
+        vTaskDelay(pdMS_TO_TICKS(150));   /* ~one full display-task render tick —
+                                            * long enough for a visibly different
+                                            * frame to actually land, not just a
+                                            * yield the scheduler immediately
+                                            * hands back */
     }
 
     /* web/index.html special case — see the generation comment in the root
-     * CMakeLists.txt for why this pair isn't a plain manifest entry. */
-    if (stat("/spiffs/web/index.html", &st) != 0 &&
-        stat("/spiffs/web/index.html.gz", &st) != 0) {
-        missing++;
-        if (example[0] == '\0') snprintf(example, sizeof(example), "web/index.html(.gz)");
+     * CMakeLists.txt for why this pair isn't a plain manifest entry. Small
+     * enough to get its own quick pause rather than folding into the loop
+     * above. */
+    if (display_pause_for_spi(5000)) {
+        bool idx_missing = stat("/spiffs/web/index.html", &st) != 0 &&
+                            stat("/spiffs/web/index.html.gz", &st) != 0;
+        display_unpause();
+        if (idx_missing) {
+            missing++;
+            if (example[0] == '\0') snprintf(example, sizeof(example), "web/index.html(.gz)");
+        }
     }
 
     s_stock_missing_count = missing;
@@ -213,6 +240,46 @@ static esp_err_t send_json(httpd_req_t *req, const char *json)
      * leakage even on auth-open routes like /api/status. */
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, json);
+}
+
+/* Logs the requesting client's IP address alongside `reason`, for the
+ * reboot-triggering handlers below. These all end in esp_restart(), and a
+ * user-observed reboot with no crash/panic and no config wipe can only be
+ * one of a small set of authenticated HTTP calls — this makes the next
+ * occurrence traceable to a specific device on the LAN instead of a guess. */
+static void log_restart_request(httpd_req_t *req, const char *reason)
+{
+    int sock = httpd_req_to_sockfd(req);
+    /* Raw buffer, not a typed struct -- big enough for either a
+     * sockaddr_in or a sockaddr_in6 peer address, regardless of whether
+     * this build's lwip has IPv6 compiled in. */
+    char sa_buf[28] = { 0 };
+    socklen_t len = sizeof(sa_buf);
+    char ip[48] = "unknown";
+    if (sock >= 0 && getpeername(sock, (struct sockaddr *)sa_buf, &len) == 0) {
+        struct sockaddr *sa = (struct sockaddr *)sa_buf;
+        const uint8_t *b = NULL;   /* 4 bytes for a plain IPv4 peer, or the
+                                     * last 4 of an IPv4-mapped IPv6 peer
+                                     * (::ffff:a.b.c.d) -- httpd's listen
+                                     * socket is IPv6 dual-stack when
+                                     * available, so LAN clients often show
+                                     * up mapped. */
+        if (sa->sa_family == AF_INET) {
+            b = (const uint8_t *)&((struct sockaddr_in *)sa_buf)->sin_addr;
+        }
+#ifdef AF_INET6
+        else if (sa->sa_family == AF_INET6) {
+            const uint8_t *b16 = (const uint8_t *)&((struct sockaddr_in6 *)sa_buf)->sin6_addr;
+            bool v4_mapped = b16[10] == 0xff && b16[11] == 0xff;
+            for (int i = 0; v4_mapped && i < 10; i++) v4_mapped = (b16[i] == 0);
+            if (v4_mapped) b = &b16[12];
+        }
+#endif
+        if (b) {
+            snprintf(ip, sizeof(ip), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+        }
+    }
+    ESP_LOGW(TAG, "[restart] %s requested by client %s", reason, ip);
 }
 
 /* ── Auth ———──────────────────────────────────────────────────────────
@@ -594,6 +661,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
             return ESP_OK;
         }
         /* No SSID change involved — no WiFi risk, reboot immediately as before. */
+        log_restart_request(r, "settings change");
         send_json(r, ok ? "{\"status\":\"ok\",\"reboot\":true}"
                         : "{\"status\":\"error\",\"reboot\":false}");
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -832,6 +900,7 @@ static esp_err_t api_factory_reset_full(httpd_req_t *r)
      *   3. Reboot.
      * If we wipe before responding, the network may still drop the
      * response if the WiFi reset path interrupts TCP. */
+    log_restart_request(r, "factory reset (full)");
     send_json(r, "{\"status\":\"ok\",\"message\":\"Resetting and rebooting...\"}");
     vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -927,6 +996,7 @@ static esp_err_t api_auth_disable(httpd_req_t *r)
 static esp_err_t api_reset(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
+    log_restart_request(r, "reset (config+wifi)");
     send_json(r, "{\"status\":\"ok\"}");
     vTaskDelay(pdMS_TO_TICKS(500));
     /* Same esp_wifi_restore()-vs-ha_mqtt race as api_factory_reset_full()
@@ -947,6 +1017,7 @@ static esp_err_t api_reset(httpd_req_t *r)
 static esp_err_t api_reboot(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
+    log_restart_request(r, "plain reboot");
     send_json(r, "{\"status\":\"ok\",\"message\":\"Rebooting...\"}");
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
@@ -1037,8 +1108,17 @@ static esp_err_t api_status(httpd_req_t *r)
          * display_pause_for_spi()/display_unpause() pair below would drop the
          * park refcount to zero and resume the display task mid-flash. Serve
          * whatever's cached (possibly stale/zero); the poll after the update
-         * finishes refreshes it. */
-        if (!s_fs_cache_valid && !s_ota_active) {
+         * finishes refreshes it.
+         *
+         * Also skip while the boot splash is active: this cache is
+         * invalidated every boot (so status always reflects reality), so
+         * the FIRST /api/status poll after boot always pays this walk's
+         * full cost — on real hardware, ~1.8s, entirely spent with the
+         * display paused. Landing during the boot-wait window reads as the
+         * splash freezing solid. Same defer-and-retry-later reasoning as
+         * stock_files_check_timer_cb(); the next poll after boot-wait ends
+         * (dashboard already polls every 5s) picks it up normally. */
+        if (!s_fs_cache_valid && !s_ota_active && !display_boot_wait_active()) {
             /* This lazy first call fires on the first /api/status poll
              * after boot, right as display_task is doing its own SPI/LEDC
              * work — the block-walk's raw flash reads force ESP32's
@@ -5173,28 +5253,17 @@ static void post_ota_autostart_timer_cb(void *arg)
 
 /* Task wrapper for the deferred stock_files_check() call — see
  * stock_files_check_timer_cb() below for why this runs as its own task
- * instead of straight from the timer callback. */
+ * instead of straight from the timer callback. stock_files_check() now
+ * handles its own pausing internally, in batches (see its doc comment) —
+ * each stat() is a directory-block read through the same raw
+ * esp_flash_read() path esp_littlefs_info() uses (see api_status()'s
+ * comment / the boot-crash memory note), which forces ESP32's
+ * flash-cache-disable mechanism to park the OTHER core with its interrupts
+ * masked for each read's duration; pausing display_task is what keeps that
+ * from landing mid an SPI/LEDC critical section there. */
 static void stock_files_check_task(void *arg)
 {
-    /* stock_files_check()'s stat() loop is 384 individual LittleFS lookups —
-     * each one a directory-block read through the same raw esp_flash_read()
-     * path esp_littlefs_info() uses (see api_status()'s comment / the
-     * boot-crash memory note), which forces ESP32's flash-cache-disable
-     * mechanism to park the OTHER core with its interrupts masked for each
-     * read's duration. This task's own per-32-files vTaskDelay(1) only
-     * prevents ITS task from starving the watchdog — it does nothing about
-     * that cross-core parking hitting display_task mid an SPI/LEDC critical
-     * section, which is the actual interrupt-watchdog risk. Same pause for
-     * the same reason, for the whole call rather than per-read: cheaper
-     * than pausing/resuming 384 times, and this task already isn't
-     * SPI/LCD-sensitive itself, so parking display_task around the whole
-     * thing costs nothing extra. */
-    if (display_pause_for_spi(5000)) {
-        stock_files_check();
-        display_unpause();
-    } else {
-        ESP_LOGW(TAG, "stock_files_check: display task did not pause — skipping this boot's check");
-    }
+    stock_files_check();
     ESP_LOGI(TAG, "stock_files_check_task stack high-water mark: %u B unused (of %u allocated)",
              (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)STOCK_CHECK_STACK_SIZE);
     vTaskDelete(NULL);
@@ -5228,6 +5297,16 @@ static void stock_files_check_timer_cb(void *arg)
      * Same defer-and-retry pattern as the s_ota_active guard above. */
     if (wifi_manager_ap_pin_visible()) {
         ESP_LOGI(TAG, "stock-file check: AP PIN visible — deferring 5 s to avoid stalling its redraw");
+        if (s_stock_check_timer)
+            esp_timer_start_once(s_stock_check_timer, 5000 * 1000ULL);  /* 5 s in µs */
+        return;
+    }
+    /* Same reasoning as the AP-PIN guard above, for the boot splash:
+     * pausing the whole display for this scan reads as the splash hanging,
+     * not a brief hitch — and under flash contention (busy WiFi/MQTT/NVS)
+     * that hang can run into the tens of seconds. */
+    if (display_boot_wait_active()) {
+        ESP_LOGI(TAG, "stock-file check: boot splash active — deferring 5 s to avoid pausing it");
         if (s_stock_check_timer)
             esp_timer_start_once(s_stock_check_timer, 5000 * 1000ULL);  /* 5 s in µs */
         return;

@@ -218,6 +218,8 @@
   "hw.test": "Test",
   "hw.enable_click": "Aktivér kliklyd ved knaptryk",
   "hw.save": "Gem hardware",
+  "sys.update_methods": "Firmware- og filsystemopdatering",
+  "sys.update_methods_help": "Tre måder at opdatere enheden på, normalt brugt i denne rækkefølge:<br><strong>1. Firmwareopdatering</strong> — til en ny firmwareudgivelse (det almindelige tilfælde).<br><strong>2. Web UI-opdatering</strong> — retter kun webgrænsefladen,<br><strong>3. LittleFS-gendannelse</strong> — kan eventuelt fuldt genflashe kun data-partitionen (billeder, lyde, web-UI, osv.).",
   "sys.ota": "Firmwareopdatering (OTA)",
   "sys.ota_help": "Upload <strong>nextube-fw-ota.bin</strong> til trådløse opdateringer. Upload <strong>ikke</strong> <code>nextube-fw-full.bin</code> — det er det fulde flash-image, kun til USB-flashning.",
   "sys.upload_flash": "Upload og flash",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Amplitudemoduleret LED-ringfarve i Spektrumtilstand",
   "spec.lcd_color_label": "LCD Søjlefarve",
   "spec.lcd_color_hint": "Søjlefarve til LCD-spektrumvisning",
+  "spec.peak_color_label": "Peak-punktfarve",
+  "spec.peak_color_hint": "Farve på prikken der markerer toppunktet for hver søjle",
   "spec.capture_baseline_btn": "📸 Optag grundlinje",
   "spec.reset_auto_btn": "↺ Nulstil til Auto",
   "spec.capture_help": "Når rummet er stille, klik på <strong>Optag grundlinje</strong> for at optage hardwarestøjniveauet.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Hvor ofte ændringer i tilstand, skærm, lysstyrke, tema og rotation kontrolleres og udgives til Home Assistant. Sensoraflæsninger og sundheds-/NTP-telemetri udgives altid med deres egen ~60 sekunders takt uanset denne indstilling.",
   "sys.debug_logging": "Fejlfindingslog (uddybende)",
   "sys.debug_logging_hint": "Viser detaljeringskontroller pr. undersystem nedenfor. Gemmes ikke — nulstilles ved genstart.",
-  "sys.logging_subsystems_hint": "Markér et undersystem for at hæve det til DEBUG (uddybende, f.eks. anmodningstiming); fjern markeringen for at vende tilbage til normal INFO-logning. <strong>Disse træder i kraft med det samme — ingen Gem nødvendig.</strong>"
+  "sys.logging_subsystems_hint": "Markér et undersystem for at hæve det til DEBUG (uddybende, f.eks. anmodningstiming); fjern markeringen for at vende tilbage til normal INFO-logning. <strong>Disse træder i kraft med det samme — ingen Gem nødvendig.</strong>",
+  "sys.debug_logging_persist": "Bevar efter genstart",
+  "sys.debug_logging_persist_hint": "Genanvender de markerede undersystemer ovenfor ved hver opstart, før noget andet starter — ellers nulstilles markeringerne ovenfor ved genstart og kan ikke fange tidlige opstartsproblemer. Lad være slået fra, medmindre du aktivt fejlfinder et opstartsproblem."
 }

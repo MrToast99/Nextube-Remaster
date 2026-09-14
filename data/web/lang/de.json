@@ -218,6 +218,8 @@
   "hw.test": "Test",
   "hw.enable_click": "Klickton bei Tastendruck aktivieren",
   "hw.save": "Hardware speichern",
+  "sys.update_methods": "Firmware- & Dateisystem-Update",
+  "sys.update_methods_help": "Drei Wege, dieses Gerät zu aktualisieren, normalerweise in dieser Reihenfolge verwendet:<br><strong>1. Firmware-Update</strong> — für eine neue Firmware-Version (der übliche Fall).<br><strong>2. Web-UI-Update</strong> — patcht nur die Weboberfläche,<br><strong>3. LittleFS-Wiederherstellung</strong> — flasht optional die Datenpartition komplett neu (Bilder, Sounds, Web-UI usw.).",
   "sys.ota": "Firmware-Update (OTA)",
   "sys.ota_help": "Laden Sie <strong>nextube-fw-ota.bin</strong> für Over-the-Air-Updates hoch. Laden Sie <strong>nicht</strong> <code>nextube-fw-full.bin</code> hoch — das ist das vollständige Flash-Image nur für USB-Flashen.",
   "sys.upload_flash": "Hochladen & Flashen",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Amplitudenmodulierte LED-Ringfarbe im Spektrum-Modus",
   "spec.lcd_color_label": "LCD-Balkenfarbe",
   "spec.lcd_color_hint": "Balkenfarbe für die LCD-Spektrumanzeige",
+  "spec.peak_color_label": "Spitzenpunkt-Farbe",
+  "spec.peak_color_hint": "Farbe des Punkts, der die Spitze jedes Balkens markiert",
   "spec.capture_baseline_btn": "📸 Grundrauschen aufnehmen",
   "spec.reset_auto_btn": "↺ Zurück auf Auto",
   "spec.capture_help": "Während der Raum ruhig ist, klicken Sie auf <strong>Grundrauschen aufnehmen</strong>, um den Hardware-Rauschboden zu erfassen. Der Basiswert wird im Flash gespeichert.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Wie oft Änderungen an Modus, Anzeige, Helligkeit, Design und Rotation geprüft und an Home Assistant veröffentlicht werden. Sensormesswerte und Zustands-/NTP-Telemetrie werden unabhängig von dieser Einstellung immer in ihrem eigenen ~60-Sekunden-Takt veröffentlicht.",
   "sys.debug_logging": "Debug-Protokollierung (ausführlich)",
   "sys.debug_logging_hint": "Zeigt unten Detailgrad-Steuerungen pro Subsystem. Wird nicht gespeichert — wird bei einem Neustart zurückgesetzt.",
-  "sys.logging_subsystems_hint": "Aktivieren Sie ein Subsystem, um es auf DEBUG anzuheben (ausführlich, z. B. Anfrage-Timing); deaktivieren Sie es, um zur normalen INFO-Protokollierung zurückzukehren. <strong>Diese wirken sofort — kein Speichern erforderlich.</strong>"
+  "sys.logging_subsystems_hint": "Aktivieren Sie ein Subsystem, um es auf DEBUG anzuheben (ausführlich, z. B. Anfrage-Timing); deaktivieren Sie es, um zur normalen INFO-Protokollierung zurückzukehren. <strong>Diese wirken sofort — kein Speichern erforderlich.</strong>",
+  "sys.debug_logging_persist": "Über Neustart hinweg beibehalten",
+  "sys.debug_logging_persist_hint": "Wendet die oben markierten Subsysteme bei jedem Start erneut an, bevor irgendetwas anderes startet — andernfalls werden die Markierungen oben bei einem Neustart zurückgesetzt und können frühe Startprobleme nicht erfassen. Lassen Sie dies deaktiviert, außer Sie beheben aktiv ein Startzeitproblem."
 }

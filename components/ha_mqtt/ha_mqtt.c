@@ -218,7 +218,17 @@ static void build_theme_options_json(char *out, size_t out_sz)
  * the outdoor AQI sensor.  Callers pass false when the SHT30 is not present
  * so HA doesn't get discovery configs for entities that will never publish
  * a state.  Every other entity (mode/display/brightness/theme/rotation/
- * firmware/update) is unconditional — those don't depend on SHT30 presence. */
+ * firmware/update) is unconditional — those don't depend on SHT30 presence.
+ *
+ * A vTaskDelay(1) follows every publish() call here and in
+ * publish_ticker_discovery() below — the only place in this subsystem
+ * where a dozen-plus publishes fire back-to-back, unlike every other call
+ * site's single, isolated publish. On real hardware this burst measured
+ * ~2s uninterrupted (each QoS-1 publish waits on the broker's PUBACK),
+ * long enough to visibly stall anything else needing scheduling then (e.g.
+ * the display task's boot-wait animation). The 1-tick delays are cheap
+ * next to that, in exchange for giving other tasks real gaps to run — same
+ * trade as stock_files_check()'s scan loop. */
 static void publish_discovery(bool include_sensors)
 {
     char topic[TOPIC_MAXLEN];
@@ -258,6 +268,7 @@ static void publish_discovery(bool include_sensors)
                  "}",
                  s_hostname, state_t, dev);
         publish(topic, payload, 1);
+        vTaskDelay(pdMS_TO_TICKS(1));
 
         /* ── Humidity sensor ── */
         make_topic(state_t, sizeof(state_t), "sensor/humidity/state");
@@ -275,6 +286,7 @@ static void publish_discovery(bool include_sensors)
                  "}",
                  s_hostname, state_t, dev);
         publish(topic, payload, 1);
+        vTaskDelay(pdMS_TO_TICKS(1));
 
         /* ── Air-quality sensor (outdoor AQI from Open-Meteo) ── */
         make_topic(state_t, sizeof(state_t), "sensor/aqi/state");
@@ -292,6 +304,7 @@ static void publish_discovery(bool include_sensors)
                  "}",
                  s_hostname, state_t, dev);
         publish(topic, payload, 1);
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     /* ── Mode select ── */
@@ -315,6 +328,7 @@ static void publish_discovery(bool include_sensors)
              "}",
              s_hostname, mode_state, mode_cmd, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Display switch (backlight on/off) ── */
     char disp_state[TOPIC_MAXLEN], disp_cmd[TOPIC_MAXLEN];
@@ -334,6 +348,7 @@ static void publish_discovery(bool include_sensors)
              "}",
              s_hostname, disp_state, disp_cmd, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Brightness number ── */
     char br_state[TOPIC_MAXLEN], br_cmd[TOPIC_MAXLEN];
@@ -353,6 +368,7 @@ static void publish_discovery(bool include_sensors)
              "}",
              s_hostname, br_state, br_cmd, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Theme select ── */
     char theme_state[TOPIC_MAXLEN], theme_cmd[TOPIC_MAXLEN];
@@ -381,6 +397,7 @@ static void publish_discovery(bool include_sensors)
              "}",
              s_hostname, theme_state, theme_cmd, theme_opts, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Mode rotation switch ── */
     char rot_state[TOPIC_MAXLEN], rot_cmd[TOPIC_MAXLEN];
@@ -401,6 +418,7 @@ static void publish_discovery(bool include_sensors)
              "}",
              s_hostname, rot_state, rot_cmd, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Firmware version sensor (diagnostic) ── */
     char fw_state[TOPIC_MAXLEN];
@@ -418,6 +436,7 @@ static void publish_discovery(bool include_sensors)
              "}",
              s_hostname, fw_state, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Update available binary sensor ── */
     char upd_state[TOPIC_MAXLEN];
@@ -437,6 +456,7 @@ static void publish_discovery(bool include_sensors)
              "}",
              s_hostname, upd_state, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Latest available version sensor (diagnostic) ── */
     char upd_ver_state[TOPIC_MAXLEN];
@@ -454,6 +474,7 @@ static void publish_discovery(bool include_sensors)
              "}",
              s_hostname, upd_ver_state, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     ESP_LOGI(TAG, "HA auto-discovery payloads published");
 }
@@ -668,6 +689,9 @@ static void publish_sensors(void)
 }
 
 /* ── Ticker discovery ─────────────────────────────────────────────── */
+/* Same reasoning as publish_discovery() above for the vTaskDelay(1) after
+ * every publish() call here — this is the same discovery burst, just
+ * split into its own function; see that doc comment. */
 static void publish_ticker_discovery(void)
 {
     char topic[TOPIC_MAXLEN];
@@ -694,6 +718,7 @@ static void publish_ticker_discovery(void)
              "}",
              s_hostname, s_topic_ticker_state, s_topic_ticker_set, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Ticker speed number (px per 200 ms tick; higher = faster) ── */
     char ts_state[TOPIC_MAXLEN], ts_cmd[TOPIC_MAXLEN];
@@ -714,6 +739,7 @@ static void publish_ticker_discovery(void)
              "}",
              s_hostname, ts_state, ts_cmd, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Ticker sound switch (chime when ticker text arrives) ──
      * Plays cfg->ticker_file through the speaker on every non-empty
@@ -735,6 +761,7 @@ static void publish_ticker_discovery(void)
              "}",
              s_hostname, sn_state, sn_cmd, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── NTP timekeeping sensors (clock-discipline telemetry) ──
      * Published after every steady-state NTP sync (see on_ntp_sync_stats).
@@ -758,6 +785,7 @@ static void publish_ticker_discovery(void)
              "}",
              s_hostname, nx_state, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     snprintf(topic, sizeof(topic),
              "homeassistant/sensor/%s_rtc_err/config", s_hostname);
@@ -773,6 +801,7 @@ static void publish_ticker_discovery(void)
              "}",
              s_hostname, nr_state, dev);
     publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Optional groups (web-UI checkboxes) ──
      * Discovery for these is published only when their group is enabled at
@@ -812,6 +841,7 @@ static void publish_ticker_discovery(void)
                      k_h[i].name, s_hostname, k_h[i].id, h_state, k_h[i].tmpl,
                      k_h[i].unit, k_h[i].icon, k_h[i].devclass, dev);
             publish(topic, payload, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 
@@ -834,6 +864,7 @@ static void publish_ticker_discovery(void)
                      "}",
                      k_btns[i], b_state, k_btns[i], dev);
             publish(topic, payload, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 }
@@ -881,32 +912,50 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             publish_discovery(sht30_is_present());
         }
 
-        /* Subscribe to command topics */
+        /* Subscribe to command topics — same connect-time-burst reasoning
+         * as publish_discovery()'s doc comment. This block sat right after
+         * it, completely unyielded, and turned out to be the real cost once
+         * that first fix was measured on hardware. */
         {
             char topic[TOPIC_MAXLEN];
             make_topic(topic, sizeof(topic), "mode/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             make_topic(topic, sizeof(topic), "display/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             make_topic(topic, sizeof(topic), "brightness/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             make_topic(topic, sizeof(topic), "theme/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             make_topic(topic, sizeof(topic), "rotation/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             make_topic(topic, sizeof(topic), "ticker_speed/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             make_topic(topic, sizeof(topic), "ticker_sound/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             esp_mqtt_client_subscribe(s_client, s_topic_ticker_set, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
+        /* Diagnostic, kept for future boot logs — confirmed this block and
+         * the current-state-publish block below (~24ms and ~68ms) are fast;
+         * the earlier connect-burst fix only ever timed
+         * Connected-to-discovery-published, not these two. See CHANGELOG. */
+        ESP_LOGI(TAG, "subscribed to 8 command topics");
 
         /* HA auto-discovery: ticker entity — added after both SHT30 branches */
         if (s_discovery) {
             publish_ticker_discovery();
         }
 
-        /* Publish current state immediately after (re-)connect */
+        /* Publish current state immediately after (re-)connect. Same
+         * connect-time-burst reasoning as the discovery/subscribe blocks
+         * above — a vTaskDelay(1) follows each publish here too. */
         {
             config_lock();
             const nextube_config_t *cfg = config_get();
@@ -921,14 +970,25 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             config_unlock();
 
             publish_mode(cur_mode);
+            vTaskDelay(pdMS_TO_TICKS(1));
             publish_display(cur_on);
+            vTaskDelay(pdMS_TO_TICKS(1));
             publish_brightness(cur_br);
+            vTaskDelay(pdMS_TO_TICKS(1));
             publish_theme(cur_theme);
+            vTaskDelay(pdMS_TO_TICKS(1));
             publish_rotation(cur_rot);
+            vTaskDelay(pdMS_TO_TICKS(1));
             publish_ticker_speed(display_get_ticker_speed());
+            vTaskDelay(pdMS_TO_TICKS(1));
             publish_ticker_sound(cur_tsnd);
+            vTaskDelay(pdMS_TO_TICKS(1));
             publish_ticker_state();   /* current text (or empty) — see its doc comment */
-            if (sht30_is_present()) publish_sensors();
+            vTaskDelay(pdMS_TO_TICKS(1));
+            if (sht30_is_present()) {
+                publish_sensors();
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
 
             /* Firmware version — retained so HA has it after broker restart */
             {
@@ -937,6 +997,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 publish(fw_topic, FW_VERSION_STR, /*retain=*/1);
             }
         }
+        /* Diagnostic only — see the comment above the subscribe block's own
+         * marker log. */
+        ESP_LOGI(TAG, "current state published");
         break;
 
     case MQTT_EVENT_DISCONNECTED:

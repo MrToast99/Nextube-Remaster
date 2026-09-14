@@ -55,6 +55,24 @@ static TaskHandle_t s_display_task_handle = NULL;
 static volatile bool s_park_req = false;
 static volatile bool s_parked   = false;
 
+/* True from boot until the controlled-boot gate lets real content render,
+ * plus BOOT_SETTLE_MS after — i.e. while the boot splash is on the tubes,
+ * plus a grace window for real content to finish drawing. Exported so
+ * stock_files_check_timer_cb() (web_server.c) can defer its scan here the
+ * same way it already defers for wifi_manager_ap_pin_visible() — that scan
+ * pauses the whole display for its full duration, which would otherwise
+ * read as the splash hanging. The settle window covers the gate's own
+ * retry landing mid-render right as boot_ready flips (e.g. a WeatherLive
+ * sky painted but the clock digits not yet drawn on top of it). */
+static volatile bool    s_boot_wait_active     = true;
+static volatile int64_t s_boot_settle_until_us = 0;   /* 0 until boot_ready resolves */
+#define BOOT_SETTLE_MS 8000
+
+/* Ceiling on how long the boot splash waits for weather/social data (NOT
+ * for NTP time, which resolves near-instantly from the RTC seed) before
+ * giving up and rendering anyway — see the gate itself, below, for why. */
+#define BOOT_DATA_TIMEOUT_MS 30000
+
 /* Set by display_show_wait() — a ONE-WAY park held until reboot or an
  * explicit display_resume_after_wait(). While it's set, display_unpause()
  * must not resume the task or clear s_park_req: the wait-screen owner still
@@ -146,6 +164,12 @@ void display_unpause(void)
     }
     taskEXIT_CRITICAL(&s_pause_mux);
     if (resume) vTaskResume(s_display_task_handle);   /* not ISR/critical-section safe */
+}
+
+bool display_boot_wait_active(void)
+{
+    if (s_boot_wait_active) return true;
+    return s_boot_settle_until_us != 0 && esp_timer_get_time() < s_boot_settle_until_us;
 }
 
 /* Short-lived "busy" backoff (display_busy_hint): a wall-clock deadline, in
@@ -585,9 +609,19 @@ void display_init(void)
         .timer_num = LEDC_TIMER_0, .freq_hz = 50000, .clk_cfg = LEDC_AUTO_CLK,
     };
     ledc_timer_config(&tmr);
+    /* duty=255 (active-low — see display_set_brightness()'s own comment —
+     * so this is fully OFF, not half-bright) keeps the shared backlight
+     * line dark through the per-tube reset+init loop just below. Used to
+     * start at 128 (~50% bright) immediately here, before any panel was
+     * reset/initialised — so it was already lit while each tube's GRAM
+     * still held reset garbage, reading as the backlight flashing per tube
+     * as they popped to black one at a time. The display task's power-on
+     * glow (display_set_brightness(), gated by boot_glow_done) is what's
+     * meant to bring it up uniformly once real content is ready, so it
+     * must start genuinely off here. */
     ledc_channel_config_t ch = {
         .gpio_num = PIN_LCD_BACKLIGHT, .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = LEDC_CHANNEL_0, .timer_sel = LEDC_TIMER_0, .duty = 128,
+        .channel = LEDC_CHANNEL_0, .timer_sel = LEDC_TIMER_0, .duty = 255,
     };
     ledc_channel_config(&ch);
 
@@ -3607,6 +3641,9 @@ typedef struct wl_scene_s {
     int   cr, cg, cb;   /* cloud color                                        */
     int   ca;           /* cloud peak opacity (0..255)                         */
     int   precip;       /* 0 none · 1 rain · 2 snow                            */
+    float precip_intensity; /* 0..1 — fraction of the shared particle pool
+                              * actively drawn each frame (see weather_data_t's
+                              * precip_mm comment)                            */
     float wind;         /* normalised wind 0..1 (drives drift + rain slant)    */
     float flash;        /* lightning flash intensity this frame 0..1           */
     int   night;        /* night-sky darkness 0..255 (drives star visibility)  */
@@ -3815,6 +3852,35 @@ static void wl_scene_clouds_from_icon(const char *ic, wl_scene_t *out)
     else if (!strcmp(ic, "snow"))           { out->ncloud = 5; out->ca = 190; out->cr = 210; out->cg = 215; out->cb = 225; out->precip = 2; }
 }
 
+/* Layers live wind speed, cloud cover %, and precipitation rate onto a
+ * scene already populated by wl_scene_clouds_from_icon() — separate since
+ * only the animated clock face adds lightning flashes on top; every call
+ * site here uses real wind/cloud/precip either way.
+ *
+ * cloud_cover_pct/precip_mm default to -1, not 0 like wind_kph (see
+ * weather_data_t's field comments) — this only refines the icon's ncloud/ca
+ * when real data is available, falling back to a mid-range guess for
+ * precip_intensity so a known-rainy icon doesn't render an empty particle
+ * field for the first ~10 minutes after boot. */
+static void wl_apply_live_weather(wl_scene_t *out, const weather_data_t *w)
+{
+    out->wind = (w && w->valid) ? w->wind_kph / 50.0f : 0.0f;
+    if      (out->wind < 0.0f) out->wind = 0.0f;
+    else if (out->wind > 1.0f) out->wind = 1.0f;
+
+    if (w && w->cloud_cover_pct >= 0.0f) {
+        float cc = w->cloud_cover_pct;
+        if (cc > 100.0f) cc = 100.0f;
+        out->ncloud = 1 + (int)(cc / 100.0f * 5.0f + 0.5f);    /* 1..6   */
+        out->ca     = 90 + (int)(cc / 100.0f * 130.0f + 0.5f); /* 90..220 */
+    }
+
+    out->precip_intensity = (w && w->precip_mm >= 0.0f)
+        ? 0.4f + (w->precip_mm / 2.5f) * 0.6f
+        : 0.6f;
+    if (out->precip_intensity > 1.0f) out->precip_intensity = 1.0f;
+}
+
 /* Precipitation particle field, in gap-aware panorama coords (every particle is
  * spawned on a panel, never in a gap).  Updated once per frame in
  * render_weatherlive(); drawn per-tube in wl_draw_tube(). */
@@ -3829,6 +3895,99 @@ static uint8_t *wl_fb(void)
 {
     if (!s_wl_fb) s_wl_fb = PSRAM_MALLOC(LCD_WIDTH * LCD_HEIGHT * 2);
     return s_wl_fb;
+}
+
+/* Controlled-boot splash, painted identically on every tube while the
+ * display task's boot-readiness gate waits for the active mode's data
+ * (NTP/weather/social — see the gate further down). A shape pulses
+ * large-to-dot-to-large while rotating continuously, cycling shape
+ * (circle/square/triangle) and color only at the dot, never mid-morph.
+ * Reuses wl_fb()'s shared scratch buffer — safe since this only runs
+ * before any per-mode rendering (WeatherLive included) begins for this
+ * boot. */
+static void draw_boot_splash(void)
+{
+    uint8_t *fb = wl_fb();
+    if (!fb) return;
+
+    memset(fb, 0x00, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);   /* solid black backdrop */
+
+    float t = (float)esp_timer_get_time() / 1000000.0f;
+
+    /* One pulse (large -> dot -> large) every ARC_S seconds: fabsf() turns a
+     * plain sine into a repeating 0..1..0 bounce with no negative half, so
+     * consecutive arcs are identical instead of alternating up/down. */
+    const float ARC_S = 1.2f;
+    float scale = fabsf(sinf((float)M_PI * t / ARC_S));
+    const int R_MAX = 20, R_MIN = 2, R_AA = 2;
+    int R = R_MIN + (int)((float)(R_MAX - R_MIN) * scale + 0.5f);
+    if (R < R_AA + 1) R = R_AA + 1;   /* keep the AA band inside the shape */
+
+    /* Cycles a whole arc at a time (never interpolated) so the switch lands
+     * while the shape is smallest. Square/triangle are true sharp-cornered
+     * polygons (half-plane-distance tests), not a rounded superellipse
+     * approximation. Shape (period 3) and color (period 5) are coprime, so
+     * the full pairing takes 15 arcs (18 s) to repeat instead of an
+     * obviously short loop. */
+    long arc_index  = (long)(t / ARC_S);
+    int  shape_kind = (int)(arc_index % 3);   /* 0=circle 1=square 2=triangle */
+
+    /* Color steps white -> red -> green -> blue -> yellow -> white..., one
+     * step every arc. */
+    static const uint8_t COLORS[5][3] = {
+        { 255, 255, 255 },   /* white  */
+        { 255,  80,  80 },   /* red    */
+        {  80, 255, 120 },   /* green  */
+        { 100, 140, 255 },   /* blue   */
+        { 255, 220,  60 },   /* yellow */
+    };
+    const uint8_t *col = COLORS[arc_index % 5];
+
+    /* Continuous rotation, one full turn every ROT_S seconds — sampling the
+     * pixel grid rotated by -theta equals rotating the shape by +theta, with
+     * no per-shape state needed. Invisible on the (rotationally symmetric)
+     * circle; only square/triangle arcs visibly spin. */
+    const float ROT_S = 3.0f;
+    float theta = t * (2.0f * (float)M_PI / ROT_S);
+    float cs = cosf(-theta), sn = sinf(-theta);
+
+    /* Triangle uses 3 half-plane tests (normals 120° apart, not +/- pairs
+     * like the square's, so no fabsf() folding). TRI_SCALE corrects its
+     * vertex reach from 2x inradius (visibly bigger than circle/square at
+     * the same R) down to ~1.25R, close to the square's ~1.41R diagonal. */
+    const float TRI_SCALE = 1.6f;
+    const float TRI_NX[3] = { 0.0f, -0.8660254f,  0.8660254f };
+    const float TRI_NY[3] = { 1.0f, -0.5f,       -0.5f       };
+
+    const int cx = LCD_WIDTH / 2, cy = LCD_HEIGHT / 2;
+
+    for (int y = cy - R - R_AA; y <= cy + R + R_AA; y++) {
+        if (y < 0 || y >= LCD_HEIGHT) continue;
+        for (int x = cx - R - R_AA; x <= cx + R + R_AA; x++) {
+            if (x < 0 || x >= LCD_WIDTH) continue;
+            float ox = (float)(x - cx), oy = (float)(y - cy);
+            float rx = ox * cs - oy * sn;
+            float ry = ox * sn + oy * cs;
+            float px = rx / (float)R, py = ry / (float)R;
+            float d;
+            if (shape_kind == 0) {
+                d = px * px + py * py;                          /* circle */
+            } else if (shape_kind == 1) {
+                d = fmaxf(fabsf(px), fabsf(py));                /* square */
+            } else {
+                float d0 = TRI_NX[0] * px + TRI_NY[0] * py;
+                float d1 = TRI_NX[1] * px + TRI_NY[1] * py;
+                float d2 = TRI_NX[2] * px + TRI_NY[2] * py;
+                d = TRI_SCALE * fmaxf(d0, fmaxf(d1, d2));       /* triangle */
+            }
+            if (d > 1.15f) continue;               /* outside the shape + AA band */
+            int a = (d <= 1.0f) ? 255 : (int)(255.0f * (1.15f - d) / 0.15f);
+            wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, col[0], col[1], col[2], a);
+        }
+    }
+
+    for (int i = 0; i < LCD_COUNT; i++)
+        display_show_digit(i, fb, LCD_WIDTH, LCD_HEIGHT);
 }
 
 /* Dirty-row SPI optimisation: per-tube previous-frame buffers (PSRAM).
@@ -4170,9 +4329,14 @@ static void wl_paint_background(uint8_t *fb, int tube, const wl_scene_t *sc)
     }
 
     /* 2c. Precipitation — rain streaks or snow dots from the shared particle
-     *     field; each particle belongs to exactly one tube's glass. */
+     *     field; each belongs to exactly one tube's glass. precip_intensity
+     *     (wl_apply_live_weather) gates how many of WL_NPART actively draw,
+     *     so a light drizzle reads sparser than a downpour instead of one
+     *     fixed density for every precip icon. */
     if (sc->precip) {
-        for (int i = 0; i < WL_NPART; i++) {
+        int n_active = (int)(sc->precip_intensity * (float)WL_NPART);
+        if (n_active > WL_NPART) n_active = WL_NPART;
+        for (int i = 0; i < n_active; i++) {
             int cxl = (int)s_wl_part[i].x - tube * WL_TUBE_STRIDE;
             if (cxl < 0 || cxl >= LCD_WIDTH) continue;
             int py = (int)s_wl_part[i].y;
@@ -6554,10 +6718,9 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     const char *ic = demo_ic ? demo_ic : ((w && w->valid) ? w->icon : "");
     wl_scene_clouds_from_icon(ic, &sc);
 
-    /* ── Wind (≈50 km/h saturates) drives cloud drift, gusts and rain slant ── */
-    sc.wind = w->wind_kph / 50.0f;
-    if (sc.wind < 0.0f)      sc.wind = 0.0f;
-    else if (sc.wind > 1.0f) sc.wind = 1.0f;
+    /* ── Wind (≈50 km/h saturates) drives cloud drift/gusts/rain slant; cloud
+     * cover % and precipitation rate refine density/intensity continuously ── */
+    wl_apply_live_weather(&sc, w);
 
     /* ── Lightning: random flashes during thunderstorms ──────────────────── */
     sc.flash = 0.0f;
@@ -6860,9 +7023,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
             const char *ic = (wdat && wdat->valid) ? wdat->icon : "";
             wl_scene_clouds_from_icon(ic, &s_wl_last_scene);
             s_wl_last_scene.flash = 0.0f;
-            s_wl_last_scene.wind = (wdat && wdat->valid) ? wdat->wind_kph / 50.0f : 0.0f;
-            if (s_wl_last_scene.wind < 0.0f) s_wl_last_scene.wind = 0.0f;
-            else if (s_wl_last_scene.wind > 1.0f) s_wl_last_scene.wind = 1.0f;
+            wl_apply_live_weather(&s_wl_last_scene, wdat);
         }
         return;
     }
@@ -6881,8 +7042,7 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
     const char *ic = (wdat && wdat->valid) ? wdat->icon : "";
     wl_scene_clouds_from_icon(ic, &sc);
     sc.flash = 0.0f;
-    sc.wind = (wdat && wdat->valid) ? wdat->wind_kph / 50.0f : 0.0f;
-    if (sc.wind < 0.0f) sc.wind = 0.0f; else if (sc.wind > 1.0f) sc.wind = 1.0f;
+    wl_apply_live_weather(&sc, wdat);
 
     s_wl_font_r = 255; s_wl_font_g = 255; s_wl_font_b = 255;
     s_wl_shadow = true;
@@ -7155,7 +7315,8 @@ static void render_followers(const nextube_config_t *cfg,
  *                                                                         *
  * Color: user-configurable single base color (spectrum_lcd_RGB config). *
  * Brightness ramp 0.75→1.00 bottom-to-top for visual depth.              *
- * Peak dot: bright-white segment that holds then decays (~1 s at 20 Hz). *
+ * Peak dot: user-configurable color (spectrum_peak_RGB, default white)   *
+ * segment that holds then decays (~1 s at 20 Hz).                        *
  * Unlit segments: ~6% ghost so the full bar outline is always visible.    */
 #define SPEC_SEGS           13   /* segments per bar                              */
 #define SPEC_SEG_H          10   /* segment height (px)                           */
@@ -7202,6 +7363,9 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
     uint8_t br = cfg->spectrum_lcd_rgb[0];
     uint8_t bg = cfg->spectrum_lcd_rgb[1];
     uint8_t bb = cfg->spectrum_lcd_rgb[2];
+    uint8_t pr = cfg->spectrum_peak_rgb[0];
+    uint8_t pg = cfg->spectrum_peak_rgb[1];
+    uint8_t pb = cfg->spectrum_peak_rgb[2];
 
     /* Optional: follow the WLED primary color (live).  Falls back to the
      * configured color when WLED Sync isn't running / hasn't received a
@@ -7290,7 +7454,7 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
             for (int s = 0; s < SPEC_SEGS; s++) {
                 uint8_t r, g, b;
                 if (peak_vis[bidx] && s == peak_dot[bidx]) {
-                    r = g = b = 255;
+                    r = pr; g = pg; b = pb;
                 } else {
                     spec_seg_color(s, s < lit_count[bidx], br, bg, bb, &r, &g, &b);
                 }
@@ -9221,9 +9385,27 @@ static void display_task(void *arg)
     bool          last_ntp_synced       = false; /* detect boot-NTP sync transition; reset clamp */
     bool          last_time_valid       = false; /* detect invalid→valid time transition (RTC or NTP) */
 
+    /* Controlled-boot gate state — see the gate itself, below, for the full
+     * explanation. boot_glow_done tracks whether the power-on glow has
+     * fired yet, separately from `first`: it must fire once for whichever
+     * comes first (boot splash, or real content on modes that never wait)
+     * and never twice — see the backlight-ramp block. */
+    bool          boot_ready           = false;
+    bool          boot_glow_done       = false;
+    bool          boot_data_timeout_logged = false;   /* one-shot guard for the warning below */
+    /* Diagnostic only, debug-level — see the heartbeat log in the wait
+     * branch below. */
+    int64_t       boot_heartbeat_us    = 0;
+    /* Diagnostic only, debug-level — stall detector: logs the gap between
+     * consecutive wait-loop iterations when wider than expected, for
+     * correlating against other tasks' own boot log timestamps. Unthrottled
+     * (unlike the heartbeat above) since stalls are rare one-off events. */
+    int64_t       boot_last_iter_us    = 0;
+
     TickType_t wake = xTaskGetTickCount();
     rotation_tick       = wake;
     theme_rotation_tick = wake;
+    const int64_t boot_wait_start_us = esp_timer_get_time();   /* for BOOT_DATA_TIMEOUT_MS below */
 
     /* Config snapshot — static so it lives in BSS rather than on the task
      * stack.  nextube_config_t is ~1900 bytes; keeping it on the stack
@@ -9252,6 +9434,117 @@ static void display_task(void *arg)
         s_dm_on_r  = cfg->dm_on_color[0];  s_dm_on_g  = cfg->dm_on_color[1];  s_dm_on_b  = cfg->dm_on_color[2];
         s_dm_off_r = cfg->dm_off_color[0]; s_dm_off_g = cfg->dm_off_color[1]; s_dm_off_b = cfg->dm_off_color[2];
         app_mode_t mode = cfg->current_mode;
+
+        /* ── Controlled-boot gate ─────────────────────────────────────────
+         * Holds off the first real content render until the active mode's
+         * data is actually available, showing draw_boot_splash() meanwhile
+         * instead of dashes/wrong placeholder content. ntp_has_valid_time()
+         * is satisfied by the RTC seed alone, so Clock/Date/Album/Spectrum
+         * resolve near-instantly; only Weather mode, a WeatherLive/
+         * Custom-face sky, or a configured social mode with data still in
+         * flight actually wait.
+         *
+         * That wait is capped at BOOT_DATA_TIMEOUT_MS (below) rather than
+         * open-ended: a device with valid-but-currently-unreachable WiFi
+         * credentials (router down, wrong password, out of range) never
+         * triggers the AP-PIN bail-out below, since that only fires for a
+         * device with no credentials at all — without this timeout, such a
+         * device would animate the splash forever with no way to tell it
+         * isn't stuck. NTP time itself has no timeout — a real RTC/NTP
+         * failure is rarer and out of scope here.
+         *
+         * One mandatory bail-out: AP-PIN setup (wifi_manager_ap_pin_visible(),
+         * rendered further down this loop). A freshly-reset device can't get
+         * WiFi without that screen, so this gate must never block it.
+         *
+         * Runs once per boot: `continue` re-enters the loop above the OTA
+         * park check, so parking for a flash write still works during the
+         * wait. */
+        if (!boot_ready) {
+            bool needs_weather = (mode == APP_MODE_WEATHER) || cx_is_wl_sky(cfg);
+            bool weather_ok    = !needs_weather || weather_get()->valid;
+
+            bool social_ok = true;
+            switch (mode) {
+                case APP_MODE_YOUTUBE:
+                    social_ok = (cfg->youtube_id[0] == '\0') || subscribers_get()->valid;
+                    break;
+                case APP_MODE_INSTAGRAM:
+                    social_ok = (cfg->instagram_user[0] == '\0') || instagram_get()->valid;
+                    break;
+                case APP_MODE_TIKTOK:
+                    social_ok = (cfg->tiktok_user[0] == '\0') || tiktok_get()->valid;
+                    break;
+                case APP_MODE_MASTODON:
+                    social_ok = (cfg->mastodon_user[0] == '\0' ||
+                                 cfg->mastodon_instance[0] == '\0') || mastodon_get()->valid;
+                    break;
+                default: break;
+            }
+
+            if ((!weather_ok || !social_ok) &&
+                esp_timer_get_time() - boot_wait_start_us >= (int64_t)BOOT_DATA_TIMEOUT_MS * 1000) {
+                if (!boot_data_timeout_logged) {
+                    boot_data_timeout_logged = true;
+                    ESP_LOGW(TAG, "boot-wait: %d s elapsed with weather_ok=%d social_ok=%d — "
+                                  "giving up and rendering with whatever data is available",
+                             BOOT_DATA_TIMEOUT_MS / 1000, (int)weather_ok, (int)social_ok);
+                }
+                weather_ok = true;
+                social_ok  = true;
+            }
+
+            bool time_ok      = ntp_has_valid_time();
+            bool setup_active = wifi_manager_ap_pin_visible();
+
+            if (setup_active || (time_ok && weather_ok && social_ok)) {
+                boot_ready             = true;   /* fall through — this tick renders real content */
+                s_boot_wait_active     = false;
+                s_boot_settle_until_us = esp_timer_get_time() + (int64_t)BOOT_SETTLE_MS * 1000;
+            } else {
+                /* Diagnostic only, debug-level — confirms this loop is still
+                 * iterating when a boot-wait runs long; at most once a
+                 * second. Kept at debug rather than removed since the
+                 * MQTT-discovery stall it was added to chase (see CHANGELOG)
+                 * is understood but not eliminated. */
+                int64_t hb_now_us = esp_timer_get_time();
+                if (hb_now_us - boot_heartbeat_us >= 1000000) {
+                    boot_heartbeat_us = hb_now_us;
+                    ESP_LOGD(TAG, "boot-wait heartbeat: mode=%d time_ok=%d weather_ok=%d social_ok=%d",
+                             (int)mode, (int)time_ok, (int)weather_ok, (int)social_ok);
+                }
+                /* Diagnostic only, debug-level — stall detector, see its
+                 * declaration comment up top. Unthrottled: fires immediately
+                 * any time this loop takes noticeably longer than its own
+                 * ~66 ms vTaskDelay to come back around. */
+                if (boot_last_iter_us != 0) {
+                    int64_t gap_ms = (hb_now_us - boot_last_iter_us) / 1000;
+                    if (gap_ms > 150)
+                        ESP_LOGD(TAG, "boot-wait stall: %lld ms since previous iteration (expected ~66 ms)",
+                                 (long long)gap_ms);
+                }
+                boot_last_iter_us = hb_now_us;
+                if (cfg->backlight_on && !boot_glow_done) {
+                    /* Mirrors the target-brightness logic in the ramp block
+                     * further down (night-mode override) — duplicated
+                     * rather than restructured, since the boot splash needs
+                     * a brightness before that block runs. */
+                    uint8_t splash_brt = cfg->lcd_brightness;
+                    if (cfg->auto_brightness &&
+                        ntp_is_night_window(cfg->night_start_hour, cfg->night_end_hour))
+                        splash_brt = cfg->night_brightness;
+                    display_set_brightness(splash_brt);
+                    boot_glow_done = true;
+                }
+                draw_boot_splash();
+                vTaskDelay(pdMS_TO_TICKS(66));   /* ~15 fps — smoother than the
+                                                   * main loop's normal 5 Hz;
+                                                   * nothing else needs the SPI
+                                                   * bus during this window */
+                continue;
+            }
+        }
+
         bool mode_changed  = (mode != last_mode);
         bool theme_changed = (strcmp(cfg->theme,      last_theme)      != 0) ||
                              (strcmp(cfg->clock_face, last_clock_face) != 0);
@@ -9413,6 +9706,10 @@ static void display_task(void *arg)
          *     rendered underneath by this point (nothing else about this
          *     tick is skipped), so this reads as the panel physically
          *     waking up rather than snapping straight to full brightness.
+         *     Skipped if the boot splash already turned the backlight on
+         *     (boot_glow_done) — ramping a second time right as real content
+         *     replaces it would reintroduce the exact glitch this mechanism
+         *     exists to remove.
          *   - Night Mode boundary: night_start_hour/night_end_hour used to
          *     snap the PWM duty instantly — a visible jolt right next to
          *     the (separate) WeatherLive color crossfade, which already
@@ -9420,13 +9717,19 @@ static void display_task(void *arg)
          * The user's own on/off toggle stays instant either way — there's
          * no "duration" to glide over for an explicit action. */
         if (first) {
-            brt_ramp_from         = 0;
-            brt_ramp_start_us     = esp_timer_get_time();
-            brt_ramp_duration_ms  = BOOT_BRT_RAMP_MS;
-            brt_ramp_active       = cfg->backlight_on;
+            if (!boot_glow_done) {
+                brt_ramp_from         = 0;
+                brt_ramp_start_us     = esp_timer_get_time();
+                brt_ramp_duration_ms  = BOOT_BRT_RAMP_MS;
+                brt_ramp_active       = cfg->backlight_on;
+                display_set_brightness(0);
+                boot_glow_done        = true;
+            } else {
+                brt_ramp_cur    = target_brt;
+                brt_ramp_active = false;
+            }
             last_bl_on            = cfg->backlight_on;
             last_bl_brt           = target_brt;
-            display_set_brightness(0);
         } else if (cfg->backlight_on != last_bl_on) {
             display_set_brightness(cfg->backlight_on ? target_brt : 0);
             last_bl_on      = cfg->backlight_on;

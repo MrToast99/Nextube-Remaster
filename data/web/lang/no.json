@@ -218,6 +218,8 @@
   "hw.test": "Test",
   "hw.enable_click": "Aktiver klikklyd ved knappetrykk",
   "hw.save": "Lagre maskinvare",
+  "sys.update_methods": "Fastvare- og filsystemoppdatering",
+  "sys.update_methods_help": "Tre måter å oppdatere denne enheten på, vanligvis brukt i denne rekkefølgen:<br><strong>1. Fastvareoppdatering</strong> — for en ny fastvareversjon (det vanlige tilfellet).<br><strong>2. Web-UI-oppdatering</strong> — oppdaterer bare webgrensesnittet,<br><strong>3. LittleFS-gjenoppretting</strong> — omflasher valgfritt datapartisjonen fullstendig (bilder, lyder, web-UI, osv.).",
   "sys.ota": "Fastvareoppdatering (OTA)",
   "sys.ota_help": "Last opp <strong>nextube-fw-ota.bin</strong> for trådløse oppdateringer. Last <strong>ikke</strong> opp <code>nextube-fw-full.bin</code> — det er det fullstendige flash-bildet, kun for USB-flashing.",
   "sys.upload_flash": "Last opp og flash",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Amplitudemodulert LED-ringfarge i Spektrummodus",
   "spec.lcd_color_label": "LCD Strekfarge",
   "spec.lcd_color_hint": "Strekfarge for LCD-spektrumvisning",
+  "spec.peak_color_label": "Toppunktfarge",
+  "spec.peak_color_hint": "Farge på punktet som markerer toppen av hver stolpe",
   "spec.capture_baseline_btn": "📸 Fang grunnlinje",
   "spec.reset_auto_btn": "↺ Tilbakestill til Auto",
   "spec.capture_help": "Når rommet er stille, klikk på <strong>Fang grunnlinje</strong> for å ta opp støyplanet.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Hvor ofte endringer i modus, skjerm, lysstyrke, tema og rotasjon sjekkes og publiseres til Home Assistant. Sensoravlesninger og helse-/NTP-telemetri publiseres alltid med sin egen ~60 sekunders takt uavhengig av denne innstillingen.",
   "sys.debug_logging": "Feilsøkingslogg (utfyllende)",
   "sys.debug_logging_hint": "Viser detaljeringskontroller per delsystem nedenfor. Lagres ikke — tilbakestilles ved omstart.",
-  "sys.logging_subsystems_hint": "Kryss av et delsystem for å heve det til DEBUG (utfyllende, f.eks. forespørselstiming); fjern avkrysning for å gå tilbake til normal INFO-logging. <strong>Disse trer i kraft umiddelbart — ingen lagring nødvendig.</strong>"
+  "sys.logging_subsystems_hint": "Kryss av et delsystem for å heve det til DEBUG (utfyllende, f.eks. forespørselstiming); fjern avkrysning for å gå tilbake til normal INFO-logging. <strong>Disse trer i kraft umiddelbart — ingen lagring nødvendig.</strong>",
+  "sys.debug_logging_persist": "Behold etter omstart",
+  "sys.debug_logging_persist_hint": "Bruker de avkryssede delsystemene ovenfor på nytt ved hver oppstart, før noe annet starter — ellers nullstilles avkrysningene ovenfor ved omstart og kan ikke fange tidlige oppstartsproblemer. La stå av med mindre du aktivt feilsøker et oppstartsproblem."
 }

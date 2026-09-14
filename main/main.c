@@ -370,6 +370,33 @@ static void install_cjson_psram_hooks(void)
     cJSON_InitHooks(&hooks);
 }
 
+/* Mirrors the web UI's LOG_TAGS array (data/web/index.html) — same order,
+ * since debug_log_persist_mask's bits are indexed against this list. Keep
+ * both in sync if either changes. */
+static const char *DEBUG_LOG_TAGS[] = {
+    "ntp", "weather", "sht30", "subscribers", "mic", "leds", "display",
+    "audio", "ha_mqtt", "wled_sync", "wifi_mgr", "rtc", "config", "touch", "web_srv",
+};
+#define DEBUG_LOG_TAG_COUNT (sizeof(DEBUG_LOG_TAGS) / sizeof(DEBUG_LOG_TAGS[0]))
+
+/* Re-applies whichever subsystems' DEBUG level the web UI's "Persist across
+ * reboot" checkbox saved (Settings → System → Debug logging) — plain
+ * esp_log_level_set() is runtime-only and forgets on every reboot, so this
+ * is what makes a persisted tag survive one. Called right after config
+ * loads, well before display_task or any networking starts, so a persisted
+ * "display" tag (or any other) is already active for the very first
+ * controlled-boot-gate iteration — the whole point being to catch
+ * early-boot stalls that a runtime-only toggle can't reach in time. */
+static void apply_persisted_debug_log_levels(uint16_t mask)
+{
+    for (size_t i = 0; i < DEBUG_LOG_TAG_COUNT; i++) {
+        if (mask & (1u << i)) {
+            esp_log_level_set(DEBUG_LOG_TAGS[i], ESP_LOG_DEBUG);
+            ESP_LOGW(TAG, "debug logging persisted from last boot: %s", DEBUG_LOG_TAGS[i]);
+        }
+    }
+}
+
 /* ── Application entry ─────────────────────────────────────────────── */
 void app_main(void)
 {
@@ -422,17 +449,18 @@ void app_main(void)
      * reads them fresh from config at start time (see audio_deferred_start).
      * mic_* fields are read a little further down, by mic_hw_init()/
      * mic_init() themselves (each takes the lock internally). */
-    bool    boot_update_check_enabled;
-    bool    boot_mqtt_enabled;
-    bool    boot_wled_sync_enabled;
-    float   boot_sht30_temp_offset;
-    uint8_t boot_invert_mask;
-    uint8_t boot_init_profile[6];
-    uint8_t boot_vcom[6];
-    float   boot_gamma[6];
-    int8_t  boot_col_offset[6];
-    int8_t  boot_row_offset[6];
-    uint8_t boot_tube_brightness[6];
+    bool     boot_update_check_enabled;
+    bool     boot_mqtt_enabled;
+    bool     boot_wled_sync_enabled;
+    float    boot_sht30_temp_offset;
+    uint8_t  boot_invert_mask;
+    uint8_t  boot_init_profile[6];
+    uint8_t  boot_vcom[6];
+    float    boot_gamma[6];
+    int8_t   boot_col_offset[6];
+    int8_t   boot_row_offset[6];
+    uint8_t  boot_tube_brightness[6];
+    uint16_t boot_debug_log_persist_mask;
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
     boot_update_check_enabled = cfg_boot->update_check_enabled;
@@ -446,7 +474,12 @@ void app_main(void)
     memcpy(boot_col_offset,      cfg_boot->lcd_col_offset,      sizeof(boot_col_offset));
     memcpy(boot_row_offset,      cfg_boot->lcd_row_offset,      sizeof(boot_row_offset));
     memcpy(boot_tube_brightness, cfg_boot->lcd_tube_brightness, sizeof(boot_tube_brightness));
+    boot_debug_log_persist_mask = cfg_boot->debug_log_persist_mask;
     config_unlock();
+
+    /* Applied immediately after config loads — see the function's own
+     * comment for why this needs to run this early. */
+    apply_persisted_debug_log_levels(boot_debug_log_persist_mask);
 
     /* Hardware drivers */
     display_init();

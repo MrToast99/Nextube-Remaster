@@ -50,6 +50,15 @@ bool display_pause_for_spi(uint32_t timeout_ms);
 /** Undo display_pause_for_spi() — resumes the display task from exactly
  *  where it parked. No-op if the display task isn't running (pre-boot). */
 void display_unpause(void);
+
+/** True from boot until the controlled-boot gate lets real content render,
+ *  plus a brief settle window after — i.e. while the boot splash is on the
+ *  tubes, and for a few seconds after real content starts so it can finish
+ *  drawing before anything else pauses the display. Callers that pause the
+ *  display for an extended scan (stock_files_check, etc.) should defer
+ *  through this window, the same way they already defer around
+ *  wifi_manager_ap_pin_visible(). */
+bool display_boot_wait_active(void);
 void display_fill(int tube, uint16_t color);
 void display_show_digit(int tube, const uint8_t *rgb565_data, int w, int h);
 

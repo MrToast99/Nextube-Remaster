@@ -218,6 +218,8 @@
   "hw.test": "Prova",
   "hw.enable_click": "Abilita suono clic alla pressione dei pulsanti",
   "hw.save": "Salva hardware",
+  "sys.update_methods": "Aggiornamento firmware e file system",
+  "sys.update_methods_help": "Tre modi per aggiornare questo dispositivo, normalmente usati in questo ordine:<br><strong>1. Aggiornamento firmware</strong> — per una nuova versione del firmware (il caso comune).<br><strong>2. Aggiornamento Web UI</strong> — applica una patch solo all'interfaccia web,<br><strong>3. Ripristino LittleFS</strong> — esegue facoltativamente il reflash completo della sola partizione dati (immagini, suoni, interfaccia web, ecc.).",
   "sys.ota": "Aggiornamento firmware (OTA)",
   "sys.ota_help": "Carica <strong>nextube-fw-ota.bin</strong> per gli aggiornamenti over-the-air. <strong>Non</strong> caricare <code>nextube-fw-full.bin</code> — è l'immagine flash completa solo per il flashing via USB.",
   "sys.upload_flash": "Carica e flasha",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Colore anello LED modulato in modalità Spettro",
   "spec.lcd_color_label": "Colore Barre LCD",
   "spec.lcd_color_hint": "Colore barre per visualizzazione spettrale LCD",
+  "spec.peak_color_label": "Colore Punto di Picco",
+  "spec.peak_color_hint": "Colore del punto che segna il picco di ogni barra",
   "spec.capture_baseline_btn": "📸 Cattura Baseline",
   "spec.reset_auto_btn": "↺ Ripristina Auto",
   "spec.capture_help": "Quando la stanza è silenziosa, clicca su <strong>Cattura Baseline</strong> per acquisire il rumore hardware.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Con quale frequenza le modifiche a modalità, display, luminosità, tema e rotazione vengono controllate e pubblicate su Home Assistant. Le letture dei sensori e la telemetria di stato/NTP vengono sempre pubblicate con il proprio ciclo di ~60 s, indipendentemente da questa impostazione.",
   "sys.debug_logging": "Log di debug (dettagliato)",
   "sys.debug_logging_hint": "Mostra di seguito i controlli di dettaglio per ogni sottosistema. Non viene salvato — si reimposta al riavvio.",
-  "sys.logging_subsystems_hint": "Seleziona un sottosistema per elevarlo a DEBUG (dettagliato, ad es. tempi di richiesta); deselezionalo per tornare al normale log INFO. <strong>Questi hanno effetto immediato — non serve salvare.</strong>"
+  "sys.logging_subsystems_hint": "Seleziona un sottosistema per elevarlo a DEBUG (dettagliato, ad es. tempi di richiesta); deselezionalo per tornare al normale log INFO. <strong>Questi hanno effetto immediato — non serve salvare.</strong>",
+  "sys.debug_logging_persist": "Mantieni dopo il riavvio",
+  "sys.debug_logging_persist_hint": "Riapplica i sottosistemi selezionati sopra a ogni avvio, prima che qualsiasi altra cosa parta — altrimenti le selezioni sopra si azzerano al riavvio e non possono rilevare problemi di avvio precoce. Lascialo disattivato a meno che tu non stia risolvendo attivamente un problema di avvio."
 }

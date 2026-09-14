@@ -18,6 +18,15 @@ typedef struct {
     /* Current wind speed (km/h) from the Open-Meteo current_weather block,
      * fetched alongside the daily range.  0 until first fetch / when calm. */
     float wind_kph;
+    /* Cloud cover (%) and precipitation rate (mm) from the same Open-Meteo
+     * block as wind_kph — used by WeatherLive's sky to scale cloud
+     * density/opacity and rain/snow particle count continuously instead of
+     * fixed per-icon values. Defaults to -1, not 0 like wind_kph: 0 would
+     * render a clear sky for the first ~10 minutes even when the icon
+     * already reports overcast/rain — worse than a few minutes of "no
+     * wind". */
+    float cloud_cover_pct;
+    float precip_mm;
     /* US EPA Air Quality Index (0-500) + PM2.5 (µg/m³) from the keyless
      * Open-Meteo air-quality endpoint, fetched alongside the daily range using
      * the same geocoded location.  aqi_valid stays false until the first

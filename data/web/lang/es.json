@@ -218,6 +218,8 @@
   "hw.test": "Probar",
   "hw.enable_click": "Activar sonido de clic al pulsar botones",
   "hw.save": "Guardar hardware",
+  "sys.update_methods": "Actualización de firmware y sistema de archivos",
+  "sys.update_methods_help": "Tres formas de actualizar este dispositivo, normalmente usadas en este orden:<br><strong>1. Actualización de firmware</strong> — para una nueva versión de firmware (el caso más común).<br><strong>2. Actualización de la interfaz web</strong> — parchea solo la interfaz web,<br><strong>3. Recuperación de LittleFS</strong> — reflashea opcionalmente por completo solo la partición de datos (imágenes, sonidos, interfaz web, etc.).",
   "sys.ota": "Actualización de firmware (OTA)",
   "sys.ota_help": "Sube <strong>nextube-fw-ota.bin</strong> para actualizaciones por aire. <strong>No</strong> subas <code>nextube-fw-full.bin</code> — esa es la imagen flash completa solo para flasheo por USB.",
   "sys.upload_flash": "Subir y flashear",
@@ -281,6 +283,8 @@
   "spec.led_color_hint": "Color anillo LED modulado en modo Espectro",
   "spec.lcd_color_label": "Color de Barras LCD",
   "spec.lcd_color_hint": "Color barras para visualización espectral LCD",
+  "spec.peak_color_label": "Color del Punto de Pico",
+  "spec.peak_color_hint": "Color del punto que marca el pico de cada barra",
   "spec.capture_baseline_btn": "📸 Capturar Línea Base",
   "spec.reset_auto_btn": "↺ Restablecer Auto",
   "spec.capture_help": "Cuando la habitación esté en silencio, haga clic en <strong>Capturar Línea Base</strong> para capturar el ruido de fondo del hardware.",
@@ -431,5 +435,7 @@
   "svc.mqtt_interval_help": "Con qué frecuencia se comprueban y publican en Home Assistant los cambios de modo, pantalla, brillo, tema y rotación. Las lecturas de sensores y la telemetría de estado/NTP siempre se publican con su propio ciclo de ~60 s, independientemente de este ajuste.",
   "sys.debug_logging": "Registro de depuración (detallado)",
   "sys.debug_logging_hint": "Muestra a continuación los controles de detalle por subsistema. No se guarda — se restablece al reiniciar.",
-  "sys.logging_subsystems_hint": "Marca un subsistema para elevarlo a DEBUG (detallado, p. ej. tiempos de solicitud); desmárcalo para volver al registro INFO normal. <strong>Estos cambios se aplican de inmediato — no es necesario guardar.</strong>"
+  "sys.logging_subsystems_hint": "Marca un subsistema para elevarlo a DEBUG (detallado, p. ej. tiempos de solicitud); desmárcalo para volver al registro INFO normal. <strong>Estos cambios se aplican de inmediato — no es necesario guardar.</strong>",
+  "sys.debug_logging_persist": "Mantener tras reiniciar",
+  "sys.debug_logging_persist_hint": "Vuelve a aplicar los subsistemas marcados arriba en cada arranque, antes de que arranque cualquier otra cosa — de lo contrario, las marcas anteriores se restablecen al reiniciar y no pueden detectar problemas de arranque tempranos. Déjalo desactivado a menos que estés solucionando activamente un problema de arranque."
 }
