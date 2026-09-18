@@ -1,6 +1,20 @@
 # Changelog
 
 
+## [1.18.5] - 2026-09-18
+
+### Added
+- The "Missing built-in files" banner has a new **Manage exceptions** option, for anyone who's deliberately removed stock themes to save space. It lists exactly what's missing — grouped by folder, so removing a whole theme is one click — and whatever you uncheck is remembered and never flagged as missing again, while anything genuinely new going missing later still shows up normally. The saved list is also viewable anytime via a new **Manage exceptions** button under System → Verify & Repair Stock Files, with a Remove option per entry. Fully translated into all 10 supported languages.
+- Verify & Repair Stock Files has a new **Enable auto boot-up check** toggle (on by default) — turning it off skips the automatic scan a few seconds after every boot, while Check & Repair and the exception picker both keep working on demand.
+- System → LittleFS Files uploads (single files or a whole folder) now show a live progress bar and status line ("Uploading (3/12) filename.jpg… 45%") instead of a single "Uploading…" toast with no feedback until it finishes or fails.
+- The time zone list (Network → Time Zone) is refreshed from the current IANA time zone database — includes recent real-world changes such as Alberta/BC/NWT (Canada) and Morocco dropping seasonal time changes, and Moldova's DST transition time shifting slightly. If your saved time zone's rule changed, or if it was removed, a banner now explains what happened as soon as the page loads — regardless of which tab you're on. Where a one-click fix is available, clicking it jumps straight to the Time Zone field and briefly highlights it so you can see the corrected value before saving.
+
+### Fixed
+- Uploading a folder full of files was much slower than it needed to be — the device re-checked free space from scratch before every single file (a scan that takes a couple of seconds on its own), so a folder of even a few dozen small files spent most of its time checking space rather than transferring it. It now trusts its last check as long as there's comfortable headroom, and only re-scans for real when getting close to the limit.
+- Applying a Web UI update (or LittleFS hotpatch, or running Check & Repair) took far longer than the "extraction took N ms" it reported — after copying the new files, the device also ran its full missing-file scan before letting anything resume, adding 10-15+ seconds that never showed up in that number. One real device measured a ~34s stall for a ~2.6s update. That scan now runs in the background afterward instead, so the update finishes and the device comes back immediately; the missing-files banner just catches up a moment later.
+- Instagram's **Internal** fetch method (Services → Instagram) rejects most direct requests from the device outright regardless of the exact request sent, so **Relay** (via `social_relay.py`) is now the default and recommended method, with a clear note next to Internal that it's likely to fail. 
+- Updating the time zone list or a translation file (`zones.json`, `lang/*.json`) could leave every already-open browser tab showing the old content for up to an hour after the new file landed on the device, with no way to tell — the browser was trusting its own cached copy instead of asking again. Those two file types are now always re-checked with the device on load.
+
 ## [1.18.4] - 2026-09-13
 
 ### Added

@@ -55,14 +55,18 @@ static bool s_server_restart_pending = false;   /* set when a WiFi reconnect sto
 /* LittleFS usage stats (fs_total/fs_used in /api/status) — cached until
  * explicitly invalidated. esp_littlefs_info() walks every block to compute
  * used space (no cheap counter API exists), ~2.7s on this device's file
- * count — too slow to recompute on every 5s dashboard poll.
+ * count — too slow to recompute on every 5s dashboard poll, or on every
+ * file of a folder upload (see api_file_upload()'s space check).
  *
- * Computed lazily on the first /api/status call and only recomputed when
- * fs_usage_invalidate() is called after upload/delete/hotpatch. A full
- * LittleFS OTA always ends in esp_restart(), resetting this cache for
- * free. mkdir/rename don't meaningfully change used bytes, so they're not
- * invalidation points. Only touched from the httpd task, so no lock
- * needed. */
+ * Computed lazily on first use and recomputed when fs_usage_invalidate()
+ * is called after delete/hotpatch. A full LittleFS OTA always ends in
+ * esp_restart(), resetting this cache for free. mkdir/rename don't
+ * meaningfully change used bytes, so they're not invalidation points.
+ * api_file_upload() deliberately does NOT invalidate on a successful
+ * upload — it nudges s_fs_used_cached up by the bytes written instead, so
+ * a many-file folder upload doesn't pay this walk once per file; see that
+ * function's own comment for the resulting drift and how it's bounded.
+ * Only touched from the httpd task, so no lock needed. */
 static bool    s_fs_cache_valid   = false;
 static size_t  s_fs_total_cached  = 0;
 static size_t  s_fs_used_cached   = 0;
@@ -121,11 +125,93 @@ static volatile bool s_ota_active = false;
 static int  s_stock_missing_count       = 0;
 static char s_stock_missing_example[128] = "";
 
+/* Full list backing the missing-files exception picker (GET
+ * /api/stock_missing_list) — s_stock_missing_count above is the true total;
+ * this is capped separately since the picker only needs enough entries to
+ * build its checkbox tree, not an unbounded dump. 128 is generous headroom
+ * over any real STOCK_FILES_COUNT-sized miss.
+ *
+ * Lazily-allocated PSRAM buffer, NOT a static internal-RAM array: this
+ * table (128*96 = 12288 B) plus the two exception-snapshot copies below
+ * shipped for one release as `static` internal-DRAM arrays and shrank the
+ * device's permanent internal heap by ~24 KB — confirmed by comparing a
+ * `heap_init` DRAM region's address/size across boot logs from before and
+ * after that change (address shifted +24592 B, length shrank 24576 B —
+ * matching to within alignment rounding). On this device's already-scarce
+ * internal-RAM budget that was enough to cause task-creation failures and
+ * lwip out-of-memory errors within 15 s of boot, eventually crashing.
+ * PSRAM is plentiful and this data has no DMA need, so it belongs there —
+ * same pattern as display.c's wl_fb(). */
+#define STOCK_MISSING_LIST_MAX 128
+static char (*s_stock_missing_paths)[96] = NULL;
+static int  s_stock_missing_list_count = 0;   /* entries actually stored, <= STOCK_MISSING_LIST_MAX */
+
+/* Returns the lazily-allocated PSRAM backing store for s_stock_missing_paths,
+ * allocating it on first use and keeping it forever after (same lifetime as
+ * a static array, just not carved out of internal DRAM at link time).
+ * Returns NULL if PSRAM is exhausted; callers must treat that as "can't
+ * record this entry" rather than dereference it. */
+static char (*stock_missing_paths_buf(void))[96]
+{
+    if (!s_stock_missing_paths)
+        s_stock_missing_paths = heap_caps_malloc(STOCK_MISSING_LIST_MAX * sizeof(*s_stock_missing_paths),
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return s_stock_missing_paths;
+}
+
+/* True if `relpath` (a STOCK_FILES entry, no leading "/spiffs/") is covered
+ * by one of the snapshotted exception entries — an exact match, or a
+ * directory-prefix match when the entry ends in '/'. Shared by
+ * stock_files_check() and stock_repair_task()'s verify pass so an excepted
+ * file is never counted as missing AND never offered for repair. */
+static bool stock_path_excepted(const char exc[][STOCK_EXCEPTION_PATH_LEN], uint8_t exc_count,
+                                 const char *relpath)
+{
+    for (uint8_t i = 0; i < exc_count; i++) {
+        size_t elen = strlen(exc[i]);
+        if (elen == 0) continue;
+        if (exc[i][elen - 1] == '/') {
+            if (strncmp(relpath, exc[i], elen) == 0) return true;
+        } else if (strcmp(relpath, exc[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void stock_files_check(void)
 {
     int  missing = 0;
     char example[128] = "";
     struct stat st;
+
+    /* Snapshot once, not per-file — hundreds of config_lock() calls across
+     * this batched scan would be needless churn against a list that can't
+     * change mid-scan (the web UI only saves exceptions between scans).
+     *
+     * PSRAM, NOT a stack local and NOT a static internal-RAM array: a plain
+     * stack-local here once overflowed this task's entire 3072 B stack on
+     * its own (32*96 = 3072 B, before any of this function's other locals
+     * or call frames). The follow-up fix made it `static` instead, which
+     * avoided the overflow but permanently carved 3072 B out of internal
+     * DRAM at link time — see stock_missing_paths_buf() above for the full
+     * heap_init evidence that this class of fix was itself a regression.
+     * Lazily allocating from PSRAM avoids both problems. */
+    static char (*exc_buf)[STOCK_EXCEPTION_PATH_LEN] = NULL;
+    if (!exc_buf)
+        exc_buf = heap_caps_malloc(STOCK_EXCEPTION_MAX * sizeof(*exc_buf),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t exc_count = 0;
+    if (exc_buf) {
+        config_lock();
+        const nextube_config_t *scan_cfg = config_get();
+        exc_count = scan_cfg->stock_exception_count;
+        memcpy(exc_buf, scan_cfg->stock_exception_paths, STOCK_EXCEPTION_MAX * sizeof(*exc_buf));
+        config_unlock();
+    }
+
+    char (*missing_buf)[96] = stock_missing_paths_buf();
+    s_stock_missing_list_count = 0;
 
     for (size_t i = 0; i < STOCK_FILES_COUNT; i += STOCK_CHECK_BATCH) {
         size_t end = i + STOCK_CHECK_BATCH;
@@ -138,11 +224,15 @@ static void stock_files_check(void)
                        * boot's check" behavior the old single-pause version had */
         }
         for (size_t j = i; j < end; j++) {
+            if (stock_path_excepted(exc_buf, exc_count, STOCK_FILES[j])) continue;
             char vpath[320];
             snprintf(vpath, sizeof(vpath), "/spiffs/%s", STOCK_FILES[j]);
             if (stat(vpath, &st) != 0) {
                 missing++;
                 if (example[0] == '\0') snprintf(example, sizeof(example), "%s", STOCK_FILES[j]);
+                if (missing_buf && s_stock_missing_list_count < STOCK_MISSING_LIST_MAX)
+                    snprintf(missing_buf[s_stock_missing_list_count++],
+                             sizeof(missing_buf[0]), "%s", STOCK_FILES[j]);
             }
         }
         display_unpause();
@@ -156,7 +246,8 @@ static void stock_files_check(void)
     /* web/index.html special case — see the generation comment in the root
      * CMakeLists.txt for why this pair isn't a plain manifest entry. Small
      * enough to get its own quick pause rather than folding into the loop
-     * above. */
+     * above. Not exception-eligible — it's the web UI itself, never a
+     * deliberately-removed theme. */
     if (display_pause_for_spi(5000)) {
         bool idx_missing = stat("/spiffs/web/index.html", &st) != 0 &&
                             stat("/spiffs/web/index.html.gz", &st) != 0;
@@ -164,6 +255,9 @@ static void stock_files_check(void)
         if (idx_missing) {
             missing++;
             if (example[0] == '\0') snprintf(example, sizeof(example), "web/index.html(.gz)");
+            if (missing_buf && s_stock_missing_list_count < STOCK_MISSING_LIST_MAX)
+                snprintf(missing_buf[s_stock_missing_list_count++],
+                         sizeof(missing_buf[0]), "web/index.html(.gz)");
         }
     }
 
@@ -175,6 +269,140 @@ static void stock_files_check(void)
                  missing, example);
     else
         ESP_LOGI(TAG, "stock-file check: all %u present", (unsigned)(STOCK_FILES_COUNT + 1));
+}
+
+/* Task-creation params for the deferred stock_files_check() call, shared by
+ * every spawn site below (defined up here, ahead of stock_files_check_task()
+ * itself further down, so all of them can use it as one source of truth). */
+#define STOCK_CHECK_STACK_SIZE 3072
+static void stock_files_check_task(void *arg);
+
+/* True while a stock_files_check_task is running. stock_files_check() reads
+ * and writes several shared statics (s_stock_missing_paths/count/list_count,
+ * the lazily-allocated exception-snapshot buffer) on the explicit assumption
+ * that it's never reentered concurrently with itself — see its own doc
+ * comment. That held for free as long as every caller ran it synchronously
+ * while holding tls_sem (hotpatch/webui-pull/stock_repair all serialize on
+ * that semaphore) — but those call sites now spawn it asynchronously
+ * instead (see their own comments for why: a direct call blocked their
+ * task-resume/display-resume for the whole ~13-15s+ scan), and a spawned
+ * task keeps running after its caller releases tls_sem. Without this flag,
+ * a second hotpatch/webui-pull/stock_repair/manual-check starting while the
+ * first's scan is still finishing would spawn a second, genuinely
+ * concurrent instance. */
+static bool s_stock_check_task_running = false;
+
+/* Spawns stock_files_check_task unless one is already running, in which
+ * case this is a no-op — not a failure, since that scan's result will be
+ * fresh again shortly regardless and a second instance would corrupt the
+ * shared state above. Returns true if a task is now running (just spawned,
+ * or already was); false only on a genuine xTaskCreate failure, which
+ * callers may still want to retry/log. Every stock_files_check_task spawn
+ * in this file should go through this, not a raw xTaskCreate(). */
+static bool stock_files_check_spawn(void)
+{
+    if (s_stock_check_task_running) return true;
+    if (xTaskCreate(stock_files_check_task, "stock_chk", STOCK_CHECK_STACK_SIZE, NULL, 2, NULL) != pdPASS)
+        return false;
+    s_stock_check_task_running = true;
+    return true;
+}
+
+/* Called after every /api/settings save, given the exception count from
+ * BEFORE this save was applied (the caller reads that one field under
+ * config_lock() itself — cheap, unlike snapshotting the whole 3072 B
+ * exception array onto the httpd worker's stack just to diff it, which is
+ * exactly the kind of stack cost this file just got bitten by elsewhere).
+ *
+ * The exception picker's whole point is instant feedback ("I just
+ * excepted this file, the banner should clear now") — waiting for the
+ * next full stock_files_check() (next boot, or a manual Check & Repair
+ * click, which itself takes 13-15s scanning hundreds of files) would make
+ * the picker feel broken, and the fix wouldn't visibly do anything: the
+ * count/example shown by /api/status come from
+ * s_stock_missing_count/s_stock_missing_example, which a settings save
+ * alone never touches.
+ *
+ * Cheap in the common case (count unchanged: bail immediately) and in the
+ * "exceptions only grew" case, by re-filtering the already-cached missing
+ * list from the last real scan instead of touching the filesystem again —
+ * exact, since anything already in that cache and now excepted can only
+ * need to disappear, never reappear. A *shrink* (an exception removed) is
+ * different: a file dropped from the cache when it was first excepted
+ * needs a real stat() to know whether it's still actually missing before
+ * it can be reported again, which the cache alone can't answer. Same
+ * problem if the cache was truncated (more than STOCK_MISSING_LIST_MAX
+ * missing) — it doesn't hold every missing file to filter in the first
+ * place. Both of those fall back to a real background rescan (the same
+ * task the boot-time auto-check uses); the banner catches up once it
+ * finishes. */
+static void stock_missing_recompute_after_exception_change(uint8_t old_exc_count)
+{
+    config_lock();
+    uint8_t new_exc_count = config_get()->stock_exception_count;
+    config_unlock();
+
+    if (new_exc_count == old_exc_count) return;   /* this save didn't touch exceptions */
+
+    bool shrank          = new_exc_count < old_exc_count;
+    bool cache_truncated = s_stock_missing_count > s_stock_missing_list_count;
+    if (shrank || cache_truncated) {
+        stock_files_check_spawn();
+        return;
+    }
+    if (s_stock_missing_list_count == 0) return;
+
+    char (*exc_buf)[STOCK_EXCEPTION_PATH_LEN] =
+        heap_caps_malloc(STOCK_EXCEPTION_MAX * sizeof(*exc_buf), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!exc_buf) return;   /* stale count stands until the next real scan */
+
+    uint8_t exc_count;
+    config_lock();
+    const nextube_config_t *cfg = config_get();
+    exc_count = cfg->stock_exception_count;
+    memcpy(exc_buf, cfg->stock_exception_paths, STOCK_EXCEPTION_MAX * sizeof(*exc_buf));
+    config_unlock();
+
+    char (*missing_buf)[96] = stock_missing_paths_buf();
+    if (missing_buf) {
+        int kept = 0;
+        for (int i = 0; i < s_stock_missing_list_count; i++) {
+            if (!stock_path_excepted(exc_buf, exc_count, missing_buf[i])) {
+                if (kept != i) memcpy(missing_buf[kept], missing_buf[i], sizeof(missing_buf[0]));
+                kept++;
+            }
+        }
+        s_stock_missing_list_count = kept;
+        s_stock_missing_count = kept;
+        snprintf(s_stock_missing_example, sizeof(s_stock_missing_example), "%s", kept > 0 ? missing_buf[0] : "");
+    }
+    free(exc_buf);
+}
+
+/* Called after every successful /api/file/upload with the uploaded path
+ * relative to /spiffs (no leading slash, matching STOCK_FILES[]/the cached
+ * missing-list entries). If it exactly matches one of the currently-cached
+ * missing files — e.g. the user just re-uploaded a deliberately-deleted
+ * theme folder through the LittleFS Files browser — this removes it from
+ * the cache and decrements the count immediately, the same "instant
+ * feedback without a full rescan" reasoning as
+ * stock_missing_recompute_after_exception_change() above, just triggered
+ * by an upload finishing instead of a settings save. A path not found in
+ * the cache (never was missing, or the cache was truncated past it) is
+ * left untouched; the next real scan (boot, or a manual Check & Repair)
+ * still catches up eventually. */
+static void stock_missing_mark_present(const char *relpath)
+{
+    for (int i = 0; i < s_stock_missing_list_count; i++) {
+        if (strcmp(s_stock_missing_paths[i], relpath) != 0) continue;
+        for (int j = i; j < s_stock_missing_list_count - 1; j++)
+            memcpy(s_stock_missing_paths[j], s_stock_missing_paths[j + 1], sizeof(s_stock_missing_paths[0]));
+        s_stock_missing_list_count--;
+        if (s_stock_missing_count > 0) s_stock_missing_count--;
+        snprintf(s_stock_missing_example, sizeof(s_stock_missing_example), "%s",
+                 s_stock_missing_list_count > 0 ? s_stock_missing_paths[0] : "");
+        return;
+    }
 }
 
 /* Forward declaration — defined in the static-file section below */
@@ -525,8 +753,10 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     float   old_gamma[6];
     int8_t  old_col_offset[6], old_row_offset[6];
     uint8_t old_tube_brightness[6];
+    uint8_t old_stock_exc_count;
     config_lock();
     const nextube_config_t *old_cfg = config_get();
+    old_stock_exc_count = old_cfg->stock_exception_count;
     strlcpy(old_ssid,     old_cfg->ssid,      sizeof(old_ssid));
     strlcpy(old_pass,     old_cfg->password,  sizeof(old_pass));
     strlcpy(old_hostname, old_cfg->hostname,  sizeof(old_hostname));
@@ -549,6 +779,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     bool ok = config_set_json(buf, len);
     free(buf);
     display_config_changed();  /* NVS write done — lift busy backoff + force re-render of live config changes */
+    stock_missing_recompute_after_exception_change(old_stock_exc_count);
 
     uint8_t new_brightness;
     bool    new_audio_enabled;
@@ -2153,7 +2384,27 @@ static esp_err_t api_fs_hotpatch_impl(httpd_req_t *r)
     hp_drop_stale_index();
     display_theme_cache_flush();   /* re-probe PNG format on next render */
     fs_usage_invalidate();
-    stock_files_check();   /* a hotpatch is precisely the moment most likely to have just fixed a gap */
+    /* Async, not a direct call: stock_files_check() paces itself in batches
+     * (see its own doc comment) specifically so a 384-file scan doesn't
+     * block the display for the ~13-15s+ it takes — but called
+     * synchronously here it blocked THIS function's own completion for
+     * that same stretch, holding every suspended background task
+     * (net_poll/ntp/sht30/leds/mic/ha_mqtt) suspended and the tubes stuck
+     * on the wait screen the whole time, well past the extraction time this
+     * log line's own timing (extraction_ms) already accounts for — a real
+     * boot log showed ~34s between suspend and resume for a ~2.6s
+     * extraction, almost all of it this scan. Spawning it lets the
+     * response, task-resume, and display-resume below happen immediately;
+     * the missing-files banner just catches up a little later, same as it
+     * already tolerates elsewhere (exception saves, uploads). Safe right
+     * after extraction: nothing is still writing to the flash bus at this
+     * point. Goes through stock_files_check_spawn(), not a raw xTaskCreate:
+     * this now runs before tls_sem_give() below releases the lock that used
+     * to keep this scan single-instance for free — see that function's own
+     * comment. A creation failure here just means the banner doesn't
+     * refresh this cycle — no retry; the next boot or manual Check & Repair
+     * still catches it. */
+    stock_files_check_spawn();
     ESP_LOGI(TAG, "hotpatch complete: %d written, %d skipped, %d failed, %d unchanged, extraction took %lld ms",
              ok, skipped, failed, unchanged, (long long)extraction_ms);
 
@@ -3098,7 +3349,13 @@ static void webui_pull_task(void *arg)
         free(zip);
         hp_drop_stale_index();
         display_theme_cache_flush();   /* re-probe PNG format on next render */
-        stock_files_check();   /* a webui pull is precisely the moment most likely to have just fixed a gap */
+        /* Async, via stock_files_check_spawn() — see the hotpatch handler's
+         * identical call for why a direct call here would block this task's
+         * own task-resume/display-resume below for the whole ~13-15s+ scan
+         * instead of just the extraction time this log line reports, and
+         * why the spawn helper (not a raw xTaskCreate) matters now that
+         * this runs before tls_sem_give() releases the lock. */
+        stock_files_check_spawn();
         ESP_LOGI(TAG, "[webui] extraction done: %d written, %d skipped, %d failed, %d unchanged, extraction took %lld ms",
                  ok, skipped, failed, unchanged, (long long)extraction_ms);
         if (failed > 0)
@@ -3521,21 +3778,50 @@ static void stock_repair_task(void *arg)
         int work_n = 0;
         bool too_many = false;
 
+        /* Same exception snapshot as stock_files_check() — a file the user
+         * deliberately removed (and excepted via the missing-files picker)
+         * should never be flagged as needing repair, and must not eat into
+         * STOCK_REPAIR_MAX_FILES on a device with many such files.
+         *
+         * PSRAM, NOT a stack local and NOT a static internal-RAM array —
+         * same reasoning as stock_files_check()'s copy: a stack local here
+         * would have overflowed this function's own measured ~4544 B peak
+         * on a 6144 B stack by ~1.5 KB, but making it `static` instead only
+         * traded that for a permanent internal-DRAM cost. See
+         * stock_missing_paths_buf() above for the heap_init evidence that
+         * cost was real and severe on this device's memory budget. */
+        static char (*exc_buf)[STOCK_EXCEPTION_PATH_LEN] = NULL;
+        if (!exc_buf)
+            exc_buf = heap_caps_malloc(STOCK_EXCEPTION_MAX * sizeof(*exc_buf),
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        uint8_t exc_count = 0;
+        if (exc_buf) {
+            config_lock();
+            const nextube_config_t *repair_cfg = config_get();
+            exc_count = repair_cfg->stock_exception_count;
+            memcpy(exc_buf, repair_cfg->stock_exception_paths, STOCK_EXCEPTION_MAX * sizeof(*exc_buf));
+            config_unlock();
+        }
+
         for (size_t i = 0; i < STOCK_FILES_COUNT && !too_many; i++) {
-            char vpath[320];
-            snprintf(vpath, sizeof(vpath), "/spiffs/%s", STOCK_FILES[i]);
             s_stock_repair.checked = (int)i + 1;
-            if (!hp_file_sha256_matches(vpath, STOCK_SHA256[i])) {
-                if (work_n >= STOCK_REPAIR_MAX_FILES) { too_many = true; break; }
-                work[work_n++] = i;
-            }
             /* Real-hardware telemetry: 383 files took ~37s here (fopen +
              * fread + SHA-256 per file, no yield) and starved IDLE0 on this
              * task's own core long enough to trip the task watchdog ~30s in
              * — the exact failure mode extract_zip_to_littlefs's per-write
              * vTaskDelay(1) already guards against elsewhere in this file.
-             * This loop needed the same discipline and didn't have it. */
+             * This loop needed the same discipline and didn't have it. Must
+             * run before the exception `continue` below too, or a device
+             * with many excepted files re-creates the exact same starvation
+             * this was added to fix. */
             vTaskDelay(1);
+            if (stock_path_excepted(exc_buf, exc_count, STOCK_FILES[i])) continue;
+            char vpath[320];
+            snprintf(vpath, sizeof(vpath), "/spiffs/%s", STOCK_FILES[i]);
+            if (!hp_file_sha256_matches(vpath, STOCK_SHA256[i])) {
+                if (work_n >= STOCK_REPAIR_MAX_FILES) { too_many = true; break; }
+                work[work_n++] = i;
+            }
         }
         s_stock_repair.need_repair = too_many ? (work_n + 1) : work_n;   /* +1: at least one more than fit */
 
@@ -3597,7 +3883,11 @@ static void stock_repair_task(void *arg)
 stock_repair_resume:
     fs_usage_invalidate();
     display_theme_cache_flush();
-    stock_files_check();   /* refresh the passive missing-file banner's count too */
+    /* Async, via stock_files_check_spawn() — same reasoning as the
+     * hotpatch/webui-pull call sites: a direct call here would hold tasks
+     * suspended and the display parked for the whole ~13-15s+ scan on top
+     * of the repair work already done above. */
+    stock_files_check_spawn();
     ESP_LOGI(TAG, "[stock_repair] done: checked=%d need_repair=%d fetched=%d failed=%d",
              s_stock_repair.checked, s_stock_repair.need_repair,
              s_stock_repair.fetched, s_stock_repair.failed);
@@ -3660,6 +3950,31 @@ static esp_err_t api_stock_repair_status(httpd_req_t *r)
              s_stock_repair.need_repair, s_stock_repair.fetched, s_stock_repair.failed,
              STOCK_REPAIR_MAX_FILES, s_stock_repair.repaired_files);
     return send_json(r, buf);
+}
+
+/* GET /api/stock_missing_list — full list backing the missing-files
+ * exception picker (Settings → System → "Manage exceptions"). Distinct from
+ * stock_repair_status: that one verifies CONTENT (SHA-256, capped at
+ * STOCK_REPAIR_MAX_FILES so a slow per-file fetch loop stays bounded) — this
+ * just reports the last stock_files_check() presence scan's results
+ * (already computed, uncapped, existence-only), so a device with hundreds
+ * of deliberately-removed files can still list every one of them for the
+ * picker to build its checkbox tree from. */
+static esp_err_t api_stock_missing_list(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "total", s_stock_missing_count);
+    cJSON_AddBoolToObject(root, "truncated", s_stock_missing_count > s_stock_missing_list_count);
+    cJSON *arr = cJSON_AddArrayToObject(root, "paths");
+    for (int i = 0; i < s_stock_missing_list_count; i++)
+        cJSON_AddItemToArray(arr, cJSON_CreateString(s_stock_missing_paths[i]));
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!out) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    esp_err_t err = send_json(r, out);
+    free(out);
+    return err;
 }
 
 /* URL-decode a query-string parameter value in-place.
@@ -3916,6 +4231,12 @@ static esp_err_t api_file_download(httpd_req_t *r)
  * JPEGs; the WebUI patch route has its own dedicated limit. */
 #define MAX_UPLOAD_BYTES (2 * 1024 * 1024)
 
+/* Below this much estimated headroom, api_file_upload()'s space check
+ * forces a real esp_littlefs_info() rescan instead of trusting its cached
+ * running estimate — see that check's own comment for why the estimate
+ * exists and how it can drift. */
+#define FS_SPACE_CHECK_MARGIN (256 * 1024)
+
 /* fs_mkdir_parents – ensure every directory component of `file_path` exists,
  * creating any that don't (like `mkdir -p $(dirname file_path)`). Needed
  * because the web UI's "upload folder" control preserves each file's
@@ -3968,24 +4289,43 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
 
     /* Reject the upload if the declared size exceeds available free space.
-     * Same display_task pause as api_status()'s cached lookup above (see its
-     * comment) — this is the SAME raw esp_littlefs_info() block-walk, just
-     * on a rarer, user-initiated path rather than every boot; the
-     * interrupt-watchdog risk from racing display_task's SPI/LEDC critical
-     * sections is identical either way. On a pause timeout, skip the free-
-     * space check rather than risk it — fopen() below still catches an
-     * actually-full filesystem, just as a write failure instead of this
-     * friendlier pre-check. */
+     *
+     * Prefers the cached total/used figures (s_fs_cache_valid, shared with
+     * /api/status — see its doc comment) over a fresh esp_littlefs_info()
+     * block-walk: that walk measured ~2.7s on this device's file count, and
+     * a folder upload calls this handler once per file, so re-walking on
+     * every single one turned a many-file theme-folder upload into minutes
+     * of pure space-check overhead with no data actually moving. The cache
+     * is kept current without a full rescan by nudging `used` up by each
+     * upload's byte count below (see there) instead of invalidating it —
+     * invalidating here would force the very next file in the same folder
+     * upload to pay the same 2.7s walk again, defeating the point.
+     *
+     * That running estimate can under-count real usage (LittleFS rounds
+     * each file up to block-sized allocations, so many small files use
+     * more space than their raw byte sum suggests), so it's only trusted
+     * while there's comfortable headroom. Within FS_SPACE_CHECK_MARGIN of
+     * the requested size — or if nothing has ever been cached yet — this
+     * falls back to a real scan to confirm, same display_task-pause
+     * handling as before. A genuinely full filesystem is still caught by
+     * the fopen()/fwrite() failure path below regardless of how far the
+     * estimate has drifted; a pause timeout during the fallback scan skips
+     * the check the same way it always did. */
     {
-        size_t total = 0, used = 0;
-        if (display_pause_for_spi(5000)) {
-            esp_littlefs_info("littlefs", &total, &used);
-            display_unpause();
-            if ((size_t)r->content_len > (total - used))
-                return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Not enough space"), ESP_FAIL;
-        } else {
-            ESP_LOGW(TAG, "fs usage: display task did not pause — skipping pre-upload space check");
+        size_t total = s_fs_total_cached, used = s_fs_used_cached;
+        bool have_usage = s_fs_cache_valid;
+        if (!have_usage || (total - used) < (size_t)r->content_len + FS_SPACE_CHECK_MARGIN) {
+            if (display_pause_for_spi(5000)) {
+                esp_littlefs_info("littlefs", &s_fs_total_cached, &s_fs_used_cached);
+                display_unpause();
+                s_fs_cache_valid = true;
+                total = s_fs_total_cached; used = s_fs_used_cached; have_usage = true;
+            } else {
+                ESP_LOGW(TAG, "fs usage: display task did not pause — skipping pre-upload space check");
+            }
         }
+        if (have_usage && (size_t)r->content_len > (total - used))
+            return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Not enough space"), ESP_FAIL;
     }
 
     /* Try the plain open first — the destination directory already exists
@@ -4027,10 +4367,16 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     free(buf); fclose(f);
 
     if (n < 0) { remove(spiffs_path); return ESP_FAIL; }
-    fs_usage_invalidate();
+    /* Keep the fs-usage cache current without invalidating it — see the
+     * space-check comment above for why a full rescan on every file would
+     * undo the whole point of caching within one folder upload. Safe to
+     * skip when nothing's cached yet (have_usage was false above): there's
+     * nothing to keep in sync, and the next reader just populates it fresh. */
+    if (s_fs_cache_valid) s_fs_used_cached += (size_t)received;
     ESP_LOGI(TAG, "Uploaded: %s (%d bytes)", spiffs_path, received);
     if (strncmp(p, "/images/album/", 14) == 0)
         display_album_invalidate();
+    stock_missing_mark_present(p + 1);   /* p has a leading '/'; cached entries don't */
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
@@ -5015,6 +5361,23 @@ static esp_err_t serve_static(httpd_req_t *r)
     bool  gz = false;
     FILE *f  = NULL;
 
+    /* zones.json and lang/ *.json are the only static assets under data/web/
+     * that get hand-edited and pushed on their own (a translation fix, a
+     * tzdata refresh via tools/update_zones.py) rather than only changing
+     * as part of a whole new release — see that script and the "Missing
+     * built-in files" banner exceptions work for examples. The blanket
+     * max-age=3600 below is fine for everything else (images, JS, CSS,
+     * the app shell, which has its own separate PSRAM-cache invalidation
+     * via shell_cache_flush()), but it meant re-uploading just one of
+     * these two file types left every already-open browser tab showing
+     * stale content for up to an hour with no way to tell — confirmed on
+     * real hardware: a zones.json update landed on the device fine, GET
+     * confirmed it directly, and only a private/incognito window (no
+     * cache) showed the new content. */
+    size_t fp_len = strlen(fp);
+    bool no_cache = fp_len > 5 && strcmp(fp + fp_len - 5, ".json") == 0;
+    const char *cache_control = no_cache ? "no-cache" : "max-age=3600";
+
     if (!want_shell) {
         f = open_gz_or_plain(fp, &gz);
         if (!f) {
@@ -5065,7 +5428,50 @@ static esp_err_t serve_static(httpd_req_t *r)
 
     httpd_resp_set_type(r, ctype);
     if (gz) httpd_resp_set_hdr(r, "Content-Encoding", "gzip");
-    httpd_resp_set_hdr(r, "Cache-Control", "max-age=3600");
+    httpd_resp_set_hdr(r, "Cache-Control", cache_control);
+
+    /* ETag + conditional GET, for the same small hand-pushed JSON files
+     * no_cache covers above. "no-cache" alone still re-transfers the
+     * whole file on every single settings-page load even when nothing
+     * changed, because this server sends no validator for the browser to
+     * check against — it can only ever answer with a fresh 200. Reading
+     * the whole file once (a few KB) and hashing it is cheap enough to
+     * redo on every request for just these two file types; deliberately
+     * NOT extended to the generic streaming path below, where a file can
+     * be far larger (an uploaded album photo, up to MAX_UPLOAD_BYTES) and
+     * hashing on every GET would cost a real flash-read + CPU pass that
+     * those files' long max-age already exists to avoid. */
+    if (no_cache) {
+        fseek(f, 0, SEEK_END);
+        long fsize = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        uint8_t *buf = (fsize > 0 && fsize < 65536) ? malloc((size_t)fsize) : NULL;
+        if (buf && fread(buf, 1, (size_t)fsize, f) == (size_t)fsize) {
+            /* FNV-1a 32-bit — not a security hash, just a cheap fingerprint
+             * that changes whenever the content does; see the size cap
+             * above for why this is fine to run on every request here. */
+            uint32_t hash = 2166136261u;
+            for (long i = 0; i < fsize; i++) { hash ^= buf[i]; hash *= 16777619u; }
+            char etag[12];
+            snprintf(etag, sizeof(etag), "\"%08x\"", (unsigned)hash);
+            httpd_resp_set_hdr(r, "ETag", etag);
+
+            char inm[12] = {0};
+            esp_err_t ret;
+            if (httpd_req_get_hdr_value_str(r, "If-None-Match", inm, sizeof(inm)) == ESP_OK &&
+                strcmp(inm, etag) == 0) {
+                httpd_resp_set_status(r, "304 Not Modified");
+                ret = httpd_resp_send(r, NULL, 0);
+            } else {
+                ret = httpd_resp_send(r, (const char *)buf, fsize);
+            }
+            free(buf);
+            fclose(f);
+            return ret;
+        }
+        free(buf);              /* NULL-safe: too large for this path, or the read failed */
+        fseek(f, 0, SEEK_SET);  /* undo the ftell probe above before falling through */
+    }
 
     /* Stream non-shell files (and the rare cache-miss shell fallback) from flash.
      * fread() on LittleFS is a synchronous SPI op that never yields, so an 8 KB
@@ -5141,6 +5547,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/webui_pull_reboot",     api_webui_pull_reboot),
     R(HTTP_POST, "/api/stock_repair",          api_stock_repair),
     R(HTTP_GET,  "/api/stock_repair_status",   api_stock_repair_status),
+    R(HTTP_GET,  "/api/stock_missing_list",    api_stock_missing_list),
     R(HTTP_POST, "/api/social/refresh",         api_social_refresh),
     R(HTTP_POST, "/api/debug/burnin",           api_debug_burnin),
     R(HTTP_POST, "/api/debug/snow",             api_debug_snow),
@@ -5249,7 +5656,8 @@ static void post_ota_autostart_timer_cb(void *arg)
         ESP_LOGE(TAG, "[boot] post_ota_autostart_task creation failed");
 }
 
-#define STOCK_CHECK_STACK_SIZE 3072
+/* STOCK_CHECK_STACK_SIZE is defined earlier in this file, alongside
+ * stock_missing_recompute_after_exception_change(), which also needs it. */
 
 /* Task wrapper for the deferred stock_files_check() call — see
  * stock_files_check_timer_cb() below for why this runs as its own task
@@ -5266,6 +5674,7 @@ static void stock_files_check_task(void *arg)
     stock_files_check();
     ESP_LOGI(TAG, "stock_files_check_task stack high-water mark: %u B unused (of %u allocated)",
              (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)STOCK_CHECK_STACK_SIZE);
+    s_stock_check_task_running = false;   /* see stock_files_check_spawn() above */
     vTaskDelete(NULL);
 }
 
@@ -5273,6 +5682,11 @@ static void stock_files_check_task(void *arg)
  * this on the initial 6 s defer — reused here so an OTA-busy reschedule (see
  * stock_files_check_timer_cb()) doesn't need its own separate timer. */
 static esp_timer_handle_t s_stock_check_timer;
+
+/* Bounded retry count for stock_files_check_task's own creation — see the
+ * non-blocking retry logic at the bottom of stock_files_check_timer_cb(). */
+#define STOCK_CHECK_CREATE_MAX_ATTEMPTS 4
+static int s_stock_check_create_attempts = 0;
 
 /* Timer callback for the deferred stock_files_check(). Spawns a task rather
  * than calling it directly: this callback runs on the shared esp_timer
@@ -5285,6 +5699,18 @@ static esp_timer_handle_t s_stock_check_timer;
  * recovery banner still needs it to run once. */
 static void stock_files_check_timer_cb(void *arg)
 {
+    /* Auto-check opt-out (Settings → System → Verify & Repair Stock Files).
+     * Checked first, ahead of every defer guard below: if it's off there's
+     * nothing to defer or retry, just skip the automatic scan outright. The
+     * standalone "Check & Repair" button and the post-hotpatch/webui-pull
+     * refreshes call stock_files_check()/stock_repair_task() directly, not
+     * through this timer, so they're unaffected and the missing-files
+     * banner still updates correctly after either. */
+    config_lock();
+    bool auto_check_on = config_get()->stock_auto_check_enabled;
+    config_unlock();
+    if (!auto_check_on) return;
+
     if (s_ota_active) {
         ESP_LOGI(TAG, "stock-file check: OTA/webUI pull active — deferring 10 s");
         if (s_stock_check_timer)
@@ -5317,8 +5743,43 @@ static void stock_files_check_timer_cb(void *arg)
      * yields inside stock_files_check() itself are separate and still
      * needed: they stop this task starving the IDLE task (and its
      * watchdog) when nothing else is ready to run either. */
-    if (xTaskCreate(stock_files_check_task, "stock_chk", STOCK_CHECK_STACK_SIZE, NULL, 2, NULL) != pdPASS)
-        ESP_LOGE(TAG, "stock_files_check_task creation failed — recovery banner will not update");
+    if (!stock_files_check_spawn()) {
+        /* stock_files_check_spawn() returning false means an actual
+         * xTaskCreate failure, not "one's already running" (that's a
+         * silent success — see the helper's own comment). Retries like
+         * create_task_with_retry() (used by ota_pull/webui_pull/
+         * stock_repair), for the same genuinely-transient case: a concurrent
+         * TLS/mDNS burst briefly starving the largest contiguous internal-RAM
+         * block below this task's stack size. Can't reuse that helper
+         * directly: it retries via vTaskDelay(), and this function runs ON
+         * the shared esp_timer dispatch task — blocking here would stall
+         * every other pending timer behind it (the exact bug this file's
+         * other deferred timer callbacks were already fixed to avoid).
+         * Reschedule through the timer instead, same as the three guards
+         * above, bounded so a genuinely sustained exhaustion still gives up
+         * instead of retrying forever.
+         *
+         * This bound is what actually surfaces a NON-transient shortage
+         * rather than papering over it: a real device once failed all 4
+         * attempts identically, which is what led to finding (and fixing)
+         * the static-array internal-DRAM regression documented at
+         * stock_missing_paths_buf() above. Don't reinterpret 4/4 failures
+         * here as "just needs more retries" without checking that class of
+         * cause first. */
+        s_stock_check_create_attempts++;
+        if (s_stock_check_create_attempts < STOCK_CHECK_CREATE_MAX_ATTEMPTS) {
+            ESP_LOGW(TAG, "stock_files_check_task creation failed (attempt %d/%d, internal largest=%u B) — retrying in 300 ms",
+                     s_stock_check_create_attempts, STOCK_CHECK_CREATE_MAX_ATTEMPTS,
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            if (s_stock_check_timer)
+                esp_timer_start_once(s_stock_check_timer, 300 * 1000ULL);  /* 300 ms in µs */
+        } else {
+            ESP_LOGE(TAG, "stock_files_check_task creation failed after %d attempts — recovery banner will not update this boot",
+                     STOCK_CHECK_CREATE_MAX_ATTEMPTS);
+        }
+        return;
+    }
+    s_stock_check_create_attempts = 0;
 }
 
 /* Refresh the HTTP server when STA obtains a new IP after a credential change.

@@ -15,6 +15,14 @@
  *  A _Static_assert in main.c enforces that the two constants stay in sync. */
 #define CFG_MIC_BAND_COUNT  24
 
+/* Missing-stock-files exception list (see stock_exception_paths below) —
+ * 32 entries is generous headroom (most real usage is a handful of removed
+ * theme directories), and 96 chars comfortably fits any real STOCK_FILES
+ * relative path. Bounded so config.json can't grow unbounded even if
+ * someone excepts a large number of individual files one at a time. */
+#define STOCK_EXCEPTION_MAX       32
+#define STOCK_EXCEPTION_PATH_LEN  96
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -147,6 +155,31 @@ typedef struct {
                                                  0 = no persisted tags (the panel's per-tag
                                                  toggles are otherwise runtime-only, reset every
                                                  reboot). See main.c's apply_persisted_debug_log_levels(). */
+    /* Paths (or directory prefixes, ending in '/') the "Missing built-in
+     * files" check should treat as expected-absent rather than missing —
+     * set via that banner's exception picker (individual files, or a whole
+     * directory like a removed theme, unchecked in one go). Matched exactly
+     * or by prefix against STOCK_FILES entries in both stock_files_check()
+     * and stock_repair_task() (web_server.c), so an excepted file is never
+     * counted as missing, never offered for repair, and never eats into
+     * STOCK_REPAIR_MAX_FILES. Genuinely new missing files (not covered by
+     * any exception) still surface normally. */
+    uint8_t          stock_exception_count;
+    char             stock_exception_paths[STOCK_EXCEPTION_MAX][STOCK_EXCEPTION_PATH_LEN];
+    bool             stock_auto_check_enabled; /* true (default) = stock_files_check_timer_cb()
+                                                 runs automatically ~6s after boot (web_server.c).
+                                                 Off just skips that automatic trigger — the
+                                                 missing-files banner simply won't self-populate
+                                                 at boot. The standalone "Check & Repair" button
+                                                 (stock_repair_task) and the post-hotpatch/
+                                                 webui-pull refreshes still call
+                                                 stock_files_check() directly and keep working, so
+                                                 the banner still updates correctly after any of
+                                                 those — this only turns off the unattended
+                                                 boot-time scan itself. For someone who's
+                                                 deliberately stripped down their stock files and
+                                                 finds even the excepted, batched scan not worth
+                                                 running unattended every boot. */
     uint16_t         enabled_modes;      /* bitmask: bit N = APP_MODE_N is enabled; default 0xFFF (all 12) */
     uint8_t          lcd_invert_mask;    /* bitmask: bit N = tube N needs INVON (color-inverted replacement panel) */
     uint8_t          lcd_init_profile[6];    /* per-tube panel profile: 0=Standard, 1=Vivid (gamma curve selector) */
@@ -169,6 +202,20 @@ typedef struct {
 
     /* Time */
     char             timezone[64];       /* POSIX TZ string e.g. "EST5EDT,M3.2.0,M11.1.0" */
+    char             timezone_name[64];  /* IANA zone name the string above came from (e.g.
+                                           * "America/Edmonton") — saved purely so the web UI
+                                           * can detect a stale/renamed zone later: zones.json
+                                           * is periodically regenerated from current tzdata
+                                           * (tools/update_zones.py) and a zone's POSIX rule can
+                                           * change (a DST law change, etc.) without its name
+                                           * disappearing, which a plain "does my saved TZ string
+                                           * still appear in zones.json" check can miss — it might
+                                           * now just coincidentally match a DIFFERENT zone's
+                                           * string. Empty on configs saved before this field
+                                           * existed, or after a hand-typed custom TZ string —
+                                           * both fall back to a same-string best-effort check
+                                           * client-side. Defaults to "Etc/UTC", matching the
+                                           * "UTC0" default below. */
     char             ntp_servers[4][64]; /* NTP server hostnames; empty string = skip slot */
     uint8_t          time_discipline_mode; /* experimental between-sync clock keeping (debug):
                                             * 0=off (reactive NTP), 1=ESP frequency disciplining,

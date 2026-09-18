@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-social_relay.py — Local social-counter relay for Nextube.
+social_relay.py — Local social-counter relay for Nextube-Remaster.
 
 Version: 1.1
 
 Run this script on any PC that is on the same Wi-Fi network as your
-Nextube clock.  It fetches public profile pages with a real browser
+Nextube-Remaster clock.  It fetches public profile pages with a real browser
 (Playwright/Chromium when available, curl otherwise) and serves the
 counts as plain JSON so the ESP32 doesn't need API keys or deal with
 bot checks.
@@ -20,7 +20,7 @@ Requirements:
 Usage:
     python social_relay.py
 
-Then open the Nextube web UI, go to Settings → Social Media Counters,
+Then open the Nextube-Remaster web UI, go to Settings → Social Media Counters,
 and enter the IP address printed below as the "Relay host".
 
 Routes:
@@ -1151,10 +1151,10 @@ if __name__ == "__main__":
     ip = local_ip()
 
     print("=" * 60)
-    print(f"  Nextube social relay  v{__version__}  ->  http://{ip}:{PORT}")
+    print(f"  Nextube-Remaster social relay  v{__version__}  ->  http://{ip}:{PORT}")
     print("=" * 60)
     print(f'  Enter  "{ip}"  as the relay host')
-    print("  in the Nextube web UI (Settings → Social Media Counters).")
+    print("  in the Nextube-Remaster web UI (Settings → Social Media Counters).")
     print()
 
     # Fetch engine status

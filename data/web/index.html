@@ -358,12 +358,28 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
 </div>
 <div id="stock-missing-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap">
-    <span style="flex:1;min-width:200px">⚠️ <strong>Missing built-in files</strong> — <span id="sm-count"></span> file(s) that should ship with this firmware, e.g. <code id="sm-example"></code>, aren't on the device (a past update may have missed them, or one was deleted). A version match alone doesn't catch this.</span>
-    <button id="sm-repair-btn" onclick="stockRepair('sm-repair-btn','sm-repair-status')" style="background:rgba(233,69,96,.9);border:none;color:#fff;border-radius:6px;padding:.35rem .8rem;font-size:.8rem;cursor:pointer;white-space:nowrap">Repair now</button>
+    <span id="sm-main-text" style="flex:1;min-width:200px"></span>
+    <button id="sm-repair-btn" onclick="stockRepair('sm-repair-btn','sm-repair-status')" style="background:rgba(233,69,96,.9);border:none;color:#fff;border-radius:6px;padding:.35rem .8rem;font-size:.8rem;cursor:pointer;white-space:nowrap" data-i18n="stock.repair_now">Repair now</button>
   </div>
   <div id="sm-repair-status" style="display:none;margin-top:.5rem;font-size:.8rem;opacity:.9"></div>
-  <div style="margin-top:.4rem">
+  <div style="margin-top:.4rem" data-i18n-html="stock.littlefs_recovery_hint">
   Or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → Firmware &amp; Filesystem Update → LittleFS Recovery</strong> to restore a complete, known-good set regardless of how much is missing. Your config (WiFi, settings) is backed up and restored automatically, but as a precaution you can still export it yourself first via <strong>System → Backup &amp; Restore</strong>. Custom themes or album photos you've uploaded aren't covered by the automatic backup and will be lost unless you back those up separately.
+  </div>
+  <div style="margin-top:.6rem;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.22);border-radius:6px;padding:.55rem .75rem;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+  <span style="font-size:1.1rem;line-height:1">🗂️</span>
+  <span style="flex:1;min-width:200px"><span data-i18n="stock.exception_prompt">Removed some built-in files on purpose (e.g. deleted a stock theme you don't use)?</span> <a href="#" onclick="openStockExceptionModal();return false" style="display:inline-block;background:rgba(255,255,255,.16);border:1px solid currentColor;color:inherit;text-decoration:none;font-weight:600;border-radius:6px;padding:.2rem .6rem;margin:0 .15rem;white-space:nowrap" data-i18n="stock.manage_exceptions">Manage exceptions</a> <span data-i18n="stock.exception_suffix">— pick exactly which files or folders to stop flagging.</span></span>
+  </div>
+</div>
+<!-- Timezone rule-changed/removed warning — see checkTzStale() in the main
+     script. Was originally inline under Network → Time Zone, but a card
+     nobody's looking at is the wrong place for "your clock is quietly
+     running the wrong DST rule" — promoted to a top-of-page banner like
+     ver-mismatch/stock-missing-banner so it's seen regardless of which
+     tab is open when the page loads. -->
+<div id="tz-stale-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap">
+    <span id="tz-stale-text" style="flex:1;min-width:200px"></span>
+    <button id="tz-stale-fix" type="button" style="display:none;background:rgba(233,69,96,.9);border:none;color:#fff;border-radius:6px;padding:.35rem .8rem;font-size:.8rem;cursor:pointer;white-space:nowrap"></button>
   </div>
 </div>
 <div id="theme-error-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
@@ -1385,10 +1401,10 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <div class="field">
         <label data-i18n="svc.fetch_method" for="ig-method">Fetch method</label>
         <select id="ig-method" onchange="onFetchMethodChange('ig','internal-hint'); markDirty(); validateSubs()">
+          <option value="relay" data-i18n="svc.ig_method_relay">Relay — no API key needed (recommended)</option>
           <option value="internal" data-i18n="svc.ig_method_internal">Internal — direct Instagram API</option>
-          <option value="relay" data-i18n="svc.ig_method_relay">Relay — via social_relay.py</option>
         </select>
-        <p id="ig-method-internal-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0" data-i18n="svc.ig_internal_hint">Calls Instagram's internal API directly. No relay needed, but may return 401 if rate-limited.</p>
+        <p id="ig-method-internal-hint" style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0" data-i18n="svc.ig_internal_hint">Calls Instagram's internal API directly. Instagram increasingly blocks requests from a device like this one — expect frequent 401 errors regardless of settings. Relay is the reliable option.</p>
         <p id="ig-method-relay-hint"    style="color:var(--dim);font-size:.78rem;margin:.35rem 0 0;display:none" data-i18n-html="svc.relay_method_hint">Uses <code>social_relay.py</code> — set the relay host above.</p>
       </div>
       <p id="warn-insta" style="display:none;color:var(--hi);font-size:.8rem;margin:-.3rem 0 .2rem;padding-left:2px" data-i18n="svc.username_warn">⚠ Username is required for the follower counter to work.</p>
@@ -1676,16 +1692,28 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <button class="btn btn-outline" onclick="$('upload-input').click()">⬆ <span data-i18n="sys.upload_files">Upload File(s)</span></button>
       <button class="btn btn-outline" onclick="$('upload-dir-input').click()">📁 <span data-i18n="sys.upload_folder">Upload Folder</span></button>
     </div>
+    <div class="progress" id="fsup-progress" style="display:none"><div class="progress-bar" id="fsup-bar" style="width:0%"></div></div>
+    <p id="fsup-status" style="display:none;font-size:.78rem;color:var(--dim);margin-top:.35rem"></p>
   </div>
   <div class="card">
-    <!-- Not yet translated (data-i18n omitted deliberately) — same as the
-         hidden debug panel elsewhere in this file; can gain i18n keys later
-         without needing to hold up shipping the feature. -->
+    <!-- Card header/description/toggle/Check & Repair: not yet translated
+         (data-i18n omitted deliberately) — same as the hidden debug panel
+         elsewhere in this file; can gain i18n keys later without needing to
+         hold up shipping the feature. The "Manage exceptions" button IS
+         translated (shares stock.manage_exceptions with the banner's own
+         link — same feature, same label). -->
     <h2>Verify &amp; Repair Stock Files</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem">
       Checks every built-in file (sounds, fonts, icons, themes, web UI) against what this firmware's own build actually shipped — catches a <em>stale</em> file the "Missing built-in files" banner above can't (it only checks whether a file exists, not whether its content is current). Only files found missing or different get re-downloaded, directly from the public repo at this device's own installed version — nothing else is touched, and nothing is ever downloaded speculatively.
     </p>
-    <div class="btn-group"><button id="stock-repair-btn" class="btn btn-primary" onclick="stockRepair()">Check &amp; Repair</button></div>
+    <div class="field" style="display:flex;align-items:center;gap:8px;margin-bottom:.7rem">
+      <label class="toggle"><input type="checkbox" id="f-stock-auto-check"><span class="track"><span class="thumb"></span></span></label>
+      <label for="f-stock-auto-check" style="margin:0;cursor:pointer;font-weight:normal">Enable auto boot-up check — scans for missing files ~6s after every boot. Turning this off only stops that automatic scan; Check &amp; Repair below still works anytime.</label>
+    </div>
+    <div class="btn-group">
+      <button id="stock-repair-btn" class="btn btn-primary" onclick="stockRepair()">Check &amp; Repair</button>
+      <button class="btn btn-outline" onclick="openStockExceptionsListModal()" data-i18n="stock.manage_exceptions">Manage exceptions</button>
+    </div>
     <p id="stock-repair-status" style="font-size:.82rem;color:var(--dim);margin-top:.6rem;display:none"></p>
   </div>
   <div class="card">
@@ -2146,6 +2174,10 @@ Object.assign(I18N.en, {
   "net.timezone":"Time Zone","net.region":"Region","net.filter_tz":"Filter timezones…","net.tz_loading":"Loading timezone list…",
   "net.posix_tz":"POSIX TZ string","net.posix_tz_hint":"(auto-filled by region, or enter manually)",
   "net.posix_tz_format":"Format: STD offset [DST [offset],start[/time],end[/time]] — supports automatic DST transitions",
+  "net.tz_rule_changed":"Your time zone ({0}) was updated to a new rule since you last saved — its DST dates or offset changed upstream, and the device is still using the old one.",
+  "net.tz_fix_button":"Update time zone",
+  "net.tz_removed":"Your time zone ({0}) is no longer in the list above. Pick a replacement and save.",
+  "net.tz_unknown":"Your saved time zone setting doesn't match any zone in the current list. Pick your time zone above and save.",
   "net.ntp_servers":"NTP Servers","net.optional":"(optional)","net.leave_blank":"leave blank to skip","net.save":"Save"
 });
 /* ── Translation batch: Services tab (pass 1 — Weather/MQTT/WLED/Timer/Album) ── */
@@ -2202,8 +2234,8 @@ Object.assign(I18N.en, {
   "svc.ig_enable":"Enable Instagram follower counter",
   "svc.fetch_follower_hint":"Fetches public follower count. Takes effect on the next poll cycle — no restart needed.",
   "svc.no_at_prefix":"(no @ prefix)","svc.username_ph":"username",
-  "svc.ig_method_internal":"Internal — direct Instagram API","svc.ig_method_relay":"Relay — via social_relay.py",
-  "svc.ig_internal_hint":"Calls Instagram's internal API directly. No relay needed, but may return 401 if rate-limited.",
+  "svc.ig_method_internal":"Internal — direct Instagram API","svc.ig_method_relay":"Relay — no API key needed (recommended)",
+  "svc.ig_internal_hint":"Calls Instagram's internal API directly. Instagram increasingly blocks requests from a device like this one — expect frequent 401 errors regardless of settings. Relay is the reliable option.",
   "svc.username_warn":"⚠ Username is required for the follower counter to work.",
   "svc.tt_enable":"Enable TikTok follower counter",
   "svc.tt_method_relay":"Relay — no API key needed (recommended)","svc.tt_method_apikey":"TikTok Research API token",
@@ -2256,6 +2288,32 @@ Object.assign(I18N.en, {
   "sys.danger_help":"<strong>Partial Factory Reset</strong> clears your settings (WiFi credentials, theme, modes) but preserves the admin password and AP PIN.<br><strong>Full factory reset</strong> additionally clears the admin password and AP PIN — device returns to fresh-from-box state.",
   "sys.partial_reset":"Partial Factory Reset","sys.full_reset":"Full Factory Reset","sys.reboot":"Reboot Device",
   "sys.about":"About","sys.github":"GitHub Repository","sys.check_updates":"Check for Updates"
+});
+/* ── Translation batch: Missing built-in files banner & exceptions picker ──
+ * {0}/{1} placeholders in stock.missing_main are the live missing-file
+ * count and an example path, substituted by tr() — see refreshStatus(). */
+Object.assign(I18N.en, {
+  "stock.missing_main":"⚠️ <strong>Missing built-in files</strong> — {0} file(s) that should ship with this firmware, e.g. <code>{1}</code>, aren't on the device (a past update may have missed them, or one was deleted). A version match alone doesn't catch this.",
+  "stock.repair_now":"Repair now",
+  "stock.littlefs_recovery_hint":"Or flash <code>nextube-littlefs-v*.bin</code> via <strong>System → Firmware &amp; Filesystem Update → LittleFS Recovery</strong> to restore a complete, known-good set regardless of how much is missing. Your config (WiFi, settings) is backed up and restored automatically, but as a precaution you can still export it yourself first via <strong>System → Backup &amp; Restore</strong>. Custom themes or album photos you've uploaded aren't covered by the automatic backup and will be lost unless you back those up separately.",
+  "stock.exception_prompt":"Removed some built-in files on purpose (e.g. deleted a stock theme you don't use)?",
+  "stock.manage_exceptions":"Manage exceptions",
+  "stock.exception_suffix":"— pick exactly which files or folders to stop flagging.",
+  "stock.manage_title":"Manage missing files",
+  "stock.manage_desc":"Uncheck a file — or a whole folder, like a removed theme — to stop flagging it as missing. Leave checked to keep it flagged for repair.",
+  "stock.truncated_hint":"Showing the first files found — save and reopen this to see more after they're excepted.",
+  "stock.cancel":"Cancel",
+  "stock.save_exceptions":"Save exceptions",
+  "stock.nothing_missing":"Nothing currently missing.",
+  "stock.exceptions_title":"Missing-file exceptions",
+  "stock.exceptions_desc":"Files and folders no longer flagged as missing. Remove one to start tracking it again.",
+  "stock.close":"Close",
+  "stock.no_exceptions":"No exceptions saved.",
+  "stock.remove":"Remove",
+  "js.stock_exceptions_saved":"{0} exception(s) saved — device will stop flagging those as missing.",
+  "js.stock_exceptions_save_failed":"Failed to save exceptions: {0}",
+  "js.stock_exception_removed":"Exception removed — flagged as missing again if still absent.",
+  "js.stock_exception_remove_failed":"Failed to remove: {0}"
 });
 /* ── Translation batch: Advanced Display sub-panel ── */
 Object.assign(I18N.en, {
@@ -3575,8 +3633,20 @@ const SETTINGS_SCHEMA = [
       const tzStr = cfg.timezone || 'UTC0';
       $('f-tz').value = tzStr;
       $('f-tz-sel').value = tzStr;
+      checkTzStale(cfg.timezone_name || '', tzStr);
     },
-    save(body) { body.timezone = $('f-tz').value; }
+    /* timezone_name: only trusted when the free-text field still matches
+     * whatever's selected in the dropdown — if they've diverged, the user
+     * hand-edited the POSIX string directly, and the dropdown's selected
+     * option no longer describes what's actually being saved. Empty means
+     * "unknown/custom"; checkTzStale() next load falls back to a same-
+     * string check instead of naming a (wrong) zone. */
+    save(body) {
+      body.timezone = $('f-tz').value;
+      body.timezone_name = ($('f-tz-sel').value === $('f-tz').value)
+        ? ($('f-tz-sel').selectedOptions[0]?.text || '')
+        : '';
+    }
   },
   { load(cfg) {
       const ntpDef = ['0.pool.ntp.org','1.pool.ntp.org','2.pool.ntp.org','3.pool.ntp.org'];
@@ -3625,7 +3695,7 @@ const SETTINGS_SCHEMA = [
   { key:'instagram_enabled', id:'f-insta-en', type:'bool', def:false },
   { key:'tiktok_enabled', id:'f-tiktok-en', type:'bool', def:false },
   { key:'instagram_user', id:'f-insta-user', type:'strTrim', def:'' },
-  { load(cfg) { $('ig-method').value = (cfg.instagram_method === 'relay') ? 'relay' : 'internal'; onFetchMethodChange('ig','internal-hint'); },
+  { load(cfg) { $('ig-method').value = (cfg.instagram_method === 'internal') ? 'internal' : 'relay'; onFetchMethodChange('ig','internal-hint'); },
     save(body) { body.instagram_method = $('ig-method').value; } },
   { key:'tiktok_user', id:'f-tiktok-user', type:'strTrim', def:'' },
   { load(cfg) {
@@ -3859,6 +3929,11 @@ const SETTINGS_SCHEMA = [
     save(body) { body.notify_update_on_display = $('f-notify-update').checked; }
   },
 
+  // ── Stock-files auto boot-up check ──
+  { load(cfg) { $('f-stock-auto-check').checked = cfg.stock_auto_check_enabled !== false; },
+    save(body) { body.stock_auto_check_enabled = $('f-stock-auto-check').checked; }
+  },
+
   // ── Backlight color swatches (one per physical tube) ──
   { load(cfg) {
       const sw = $('color-swatches'); sw.innerHTML = '';
@@ -4060,6 +4135,68 @@ function validateSubs() {
 function onTzSelChange() {
   const v = $('f-tz-sel').value;
   if (v) $('f-tz').value = v;
+  $('tz-stale-banner').style.display = 'none';   /* picking a fresh zone always resolves any warning */
+}
+
+/* Called once after settings load with the PREVIOUSLY saved zone name/
+ * POSIX string (before this page's own load(cfg) touched the form), to
+ * catch two distinct problems zones.json's periodic regeneration
+ * (tools/update_zones.py) can create — see timezone_name's doc comment in
+ * config_mgr.h for why a name is tracked at all:
+ *
+ *   1. The zone's NAME still exists but its RULE changed underneath the
+ *      saved POSIX string (e.g. a DST law repeal) — the device is quietly
+ *      running a now-wrong rule. A same-string check alone can miss this:
+ *      the stale string might coincidentally still match some OTHER
+ *      zone's current rule, showing no problem at all.
+ *   2. The zone's NAME was removed from zones.json entirely.
+ *
+ * savedName empty means either a config saved before this field existed,
+ * or a hand-typed custom string (see the SETTINGS_SCHEMA save() above) —
+ * neither has a name to check, so this falls back to a same-string check
+ * across every current zone, unable to name what it used to be.
+ *
+ * Renders into the top-of-page tz-stale-banner, not the Network tab's Time
+ * Zone card — a card on a tab nobody's currently viewing is easy to never
+ * see at all for something this important (the clock silently keeping the
+ * wrong DST rule). The fix button still targets the Network tab's own
+ * #f-tz-sel/#f-tz fields (DOM writes work regardless of which tab is
+ * visually active) and switches to that tab afterward so the change is
+ * actually visible before Save. */
+function checkTzStale(savedName, savedTz) {
+  const db = s_tz_db || TZ_FALLBACK;
+  const banner = $('tz-stale-banner'), text = $('tz-stale-text'), fixBtn = $('tz-stale-fix');
+  fixBtn.style.display = 'none';
+  fixBtn.onclick = null;
+
+  if (savedName && db[savedName] !== undefined) {
+    if (db[savedName] === savedTz) { banner.style.display = 'none'; return; }
+    text.textContent = tr('net.tz_rule_changed', savedName);
+    fixBtn.textContent = tr('net.tz_fix_button');
+    fixBtn.style.display = '';
+    fixBtn.onclick = () => {
+      $('f-tz-sel').value = db[savedName];
+      $('f-tz').value = db[savedName];
+      markDirty();
+      banner.style.display = 'none';
+      /* Same jump-and-flash the settings search box uses (tab switch +
+       * scroll-into-view + a brief highlight animation) — reused here so
+       * clicking this from any tab both lands on the field AND visibly
+       * confirms what just changed, not just a silent value swap
+       * somewhere off-screen. */
+      _searchJumpTo($('f-tz'));
+    };
+    banner.style.display = '';
+    return;
+  }
+  if (savedName) {
+    text.textContent = tr('net.tz_removed', savedName);
+    banner.style.display = '';
+    return;
+  }
+  const stillValid = Object.values(db).includes(savedTz);
+  text.textContent = tr('net.tz_unknown');
+  banner.style.display = stillValid ? 'none' : '';
 }
 
 /* ── LED mode change – hide color pickers for Rainbow / Off ── */
@@ -5393,7 +5530,34 @@ async function deleteFolder(path) {
   } catch(e) { toast('Delete error: ' + e.message, true); }
 }
 
-/* ── Upload files / folder to current LittleFS directory  */
+/* ── Upload files / folder to current LittleFS directory ──
+ * uploadOneFile() is the per-file XHR (not fetch) worker — XHR specifically
+ * so xhr.upload.onprogress can drive a live progress bar, which fetch has
+ * no event for. Mirrors the auth handling doFlash() uses for the
+ * OTA/hotpatch/LittleFS-recovery uploaders (_xhrAuthHeader/_xhrHandle401),
+ * just without that helper's flash-and-reboot phases, which don't apply to
+ * a plain file write. uploadFiles() below calls it once per file. */
+function uploadOneFile(destPath, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) onProgress(e.loaded / e.total * 100);
+    };
+    xhr.onload = () => {
+      if (_xhrHandle401(xhr)) { reject(new Error('auth')); return; }
+      if (xhr.status !== 200) { reject(new Error(xhr.statusText || ('HTTP ' + xhr.status))); return; }
+      try {
+        const d = JSON.parse(xhr.responseText);
+        d.status === 'ok' ? resolve() : reject(new Error(d.error || 'failed'));
+      } catch(e) { reject(e); }
+    };
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.open('POST', '/api/file/upload?path=' + encodeURIComponent(destPath));
+    _xhrAuthHeader(xhr);
+    xhr.send(file);
+  });
+}
+
 async function uploadFiles(fileList, preservePath) {
   /* Normalise to a real array and drop any null/empty entries up front, so a
    * FileList edge case (e.g. an empty/placeholder entry) can never throw on
@@ -5402,26 +5566,42 @@ async function uploadFiles(fileList, preservePath) {
   if (!files.length) return;
   const total = files.length;
   let ok = 0, fail = 0;
-  const label = total === 1 ? files[0].name : total + ' files';
-  toast('Uploading ' + label + '…');
-  for (const file of files) {
+  const prog = $('fsup-progress'), bar = $('fsup-bar'), stat = $('fsup-status');
+  prog.style.display = 'block';
+  stat.style.display = 'block';
+  bar.style.background = '';   /* clear any left-over ok/fail tint from a previous run */
+  stat.style.color = 'var(--dim)';
+
+  for (let i = 0; i < total; i++) {
+    const file = files[i];
     /* preservePath=true  → keep webkitRelativePath so folder structure is retained
        preservePath=false → flat upload into the currently-browsed directory */
     const rel = preservePath && file.webkitRelativePath ? file.webkitRelativePath : file.name;
     const destPath = s_filePath.replace(/\/$/, '') + '/' + rel;
+    const label = total > 1 ? '(' + (i + 1) + '/' + total + ') ' + rel : rel;
+    bar.style.width = '0%';
     try {
-      const r = await secureFetch('/api/file/upload?path=' + encodeURIComponent(destPath), {
-        method: 'POST', body: file
+      await uploadOneFile(destPath, file, pct => {
+        bar.style.width = pct.toFixed(0) + '%';
+        stat.textContent = 'Uploading ' + label + '… ' + pct.toFixed(0) + '%';
       });
-      const d = await r.json();
-      if (d.status === 'ok') ok++; else fail++;
+      ok++;
     } catch(e) { fail++; }
   }
+
   $('upload-input').value = '';
   $('upload-dir-input').value = '';
-  if (fail === 0) toast('Uploaded ' + (ok === 1 ? files[0].name : ok + ' files'));
-  else toast(ok + ' uploaded, ' + fail + ' failed', true);
+  bar.style.width = '100%';
+  bar.style.background = fail === 0 ? 'var(--ok)' : 'var(--hi)';
+  stat.style.color = fail === 0 ? 'var(--ok)' : 'var(--hi)';
+  const doneMsg = fail === 0 ? 'Uploaded ' + (ok === 1 ? files[0].name : ok + ' files')
+                              : ok + ' uploaded, ' + fail + ' failed';
+  stat.textContent = doneMsg;
+  toast(doneMsg, fail !== 0);
+  setTimeout(() => { prog.style.display = 'none'; stat.style.display = 'none'; }, 3000);
   browseDir(s_filePath);
+  refreshStatus();   /* an uploaded file may clear the missing-files banner — don't
+                       * wait up to 5s for the ambient status poll to notice */
 }
 
 /* ── Device logs ───────────────────────────────────── */
@@ -5622,10 +5802,11 @@ async function refreshStatus() {
   /* Missing stock-file banner — distinct from the version-string mismatch
    * above: expected_fs/fs_version can match while an individual file is
    * still actually gone (skipped hotpatch, manual delete, corrupt write).
-   * See stock_files_check() in web_server.c. */
+   * See stock_files_check() in web_server.c. Files covered by a saved
+   * exception (config_mgr.h's stock_exception_paths) are already excluded
+   * from stock_missing itself — see the "Manage exceptions" picker. */
   if (s.stock_missing > 0) {
-    $('sm-count').textContent = s.stock_missing;
-    $('sm-example').textContent = s.stock_missing_example || '?';
+    $('sm-main-text').innerHTML = tr('stock.missing_main', s.stock_missing, esc(s.stock_missing_example || '?'));
     $('stock-missing-banner').style.display = 'block';
   } else {
     $('stock-missing-banner').style.display = 'none';
@@ -5868,6 +6049,9 @@ async function stockRepair(btnId = 'stock-repair-btn', statusId = 'stock-repair-
     const s = await pollStockRepairDone(status, 5 * 60 * 1000);
     if (s.state === 'too_many') {
       status.textContent = `Too many files need repair (over ${s.max_files}) — use LittleFS Recovery below instead for a complete reflash.`;
+      refreshStatus();   /* same as the 'done'/error branches below — this phase-1 verify
+                           * is a fresh authoritative scan too, so the missing-files banner
+                           * shouldn't sit on stale data until the next ambient 5s poll */
     } else if (s.state === 'done' && s.need_repair === 0) {
       status.textContent = 'All built-in files are present and current — nothing to repair.';
     } else if (s.state === 'done') {
@@ -5884,6 +6068,169 @@ async function stockRepair(btnId = 'stock-repair-btn', statusId = 'stock-repair-
     btn.disabled = false;
     btn.textContent = prevLabel;
   }
+}
+
+/* ── Missing-files exception picker ("Manage exceptions" on the banner) ──
+ * Fetches the FULL current missing list (GET /api/stock_missing_list —
+ * uncapped, unlike stock_repair's 25-file repair cap) and groups it into a
+ * checkbox tree: one group per theme folder (images/themes/<Name>/) or per
+ * immediate parent directory otherwise, each with a parent checkbox that
+ * toggles its children. Saving computes the minimal exception set — a
+ * single directory-prefix entry when a whole group is unchecked, individual
+ * file paths otherwise — and MERGES it into cfg.stock_exception_paths
+ * (already-excepted files never appear in this list at all, since the
+ * device stops counting them as missing, so there's nothing here to lose by
+ * merging rather than replacing). */
+function stockExceptionGroupKey(path) {
+  const parts = path.split('/');
+  if (parts[0] === 'images' && parts[1] === 'themes' && parts.length > 2)
+    return parts.slice(0, 3).join('/') + '/';
+  parts.pop();
+  return parts.length ? parts.join('/') + '/' : path;
+}
+
+async function openStockExceptionModal() {
+  const tree = $('stock-exc-tree');
+  tree.innerHTML = '<p style="color:var(--dim)">' + esc(tr('sys.loading')) + '</p>';
+  $('stock-exc-overlay').classList.add('show');
+  let data;
+  try {
+    const res = await secureFetch('/api/stock_missing_list', {signal: abortTimeoutSignal(8000)});
+    data = res?.ok ? await res.json() : null;
+  } catch(e) { data = null; }
+  if (!data || !data.paths || data.paths.length === 0) {
+    tree.innerHTML = '<p style="color:var(--dim)">' + esc(tr('stock.nothing_missing')) + '</p>';
+    $('stock-exc-truncated').style.display = 'none';
+    return;
+  }
+  $('stock-exc-truncated').style.display = data.truncated ? 'block' : 'none';
+
+  const groups = new Map();   /* key -> [paths] */
+  data.paths.forEach(p => {
+    const key = stockExceptionGroupKey(p);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  });
+
+  tree.innerHTML = '';
+  groups.forEach((paths, key) => {
+    const det = document.createElement('details');
+    det.open = paths.length <= 4;
+    const sum = document.createElement('summary');
+    sum.style.cssText = 'cursor:pointer;display:flex;align-items:center;gap:.4rem;padding:.3rem 0';
+    const groupCb = document.createElement('input');
+    groupCb.type = 'checkbox'; groupCb.checked = true;
+    groupCb.onclick = (e) => e.stopPropagation();   /* don't toggle <details> */
+    groupCb.onchange = () => { groupCb.indeterminate = false; fileCbs.forEach(cb => cb.checked = groupCb.checked); };
+    sum.appendChild(groupCb);
+    sum.appendChild(document.createTextNode(`${key} (${paths.length})`));
+    det.appendChild(sum);
+
+    const fileCbs = [];
+    const list = document.createElement('div');
+    list.style.cssText = 'padding:.2rem 0 .3rem 1.4rem';
+    paths.forEach(p => {
+      const lbl = document.createElement('label');
+      lbl.style.cssText = 'display:flex;align-items:center;gap:.4rem;padding:.15rem 0;word-break:break-all';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = true; cb.dataset.path = p;
+      cb.onchange = () => {
+        const allOn  = fileCbs.every(c => c.checked);
+        const allOff = fileCbs.every(c => !c.checked);
+        groupCb.checked       = allOn;
+        groupCb.indeterminate = !allOn && !allOff;
+      };
+      fileCbs.push(cb);
+      lbl.appendChild(cb);
+      lbl.appendChild(document.createTextNode(p.slice(key.length) || p));
+      list.appendChild(lbl);
+    });
+    det.appendChild(list);
+    tree._fileCbs = tree._fileCbs || [];
+    tree._fileCbs.push({ key, groupCb, fileCbs });
+    tree.appendChild(det);
+  });
+}
+
+function closeStockExceptionModal() {
+  $('stock-exc-overlay').classList.remove('show');
+}
+
+async function saveStockExceptions() {
+  const groups = $('stock-exc-tree')._fileCbs || [];
+  const additions = [];
+  groups.forEach(({ key, fileCbs }) => {
+    if (fileCbs.length > 0 && fileCbs.every(cb => !cb.checked)) {
+      additions.push(key);   /* whole group excepted — one directory-prefix entry */
+    } else {
+      fileCbs.forEach(cb => { if (!cb.checked) additions.push(cb.dataset.path); });
+    }
+  });
+  if (additions.length === 0) { closeStockExceptionModal(); return; }
+
+  const merged = [...new Set([...(cfg.stock_exception_paths || []), ...additions])];
+  try {
+    await secureFetch('/api/settings', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ stock_exception_paths: merged })
+    });
+    cfg.stock_exception_paths = merged;
+    closeStockExceptionModal();
+    refreshStatus();
+    toast(tr('js.stock_exceptions_saved', additions.length));
+  } catch(e) { toast(tr('js.stock_exceptions_save_failed', e.message), true); }
+}
+
+/* "Manage exceptions" under Verify & Repair Stock Files — shows what's
+ * currently saved in cfg.stock_exception_paths (populated the same way as
+ * every other config field, via the normal /api/settings load) with a
+ * Remove button per entry. Distinct from the missing-files banner's picker
+ * above: that one converts "currently missing" into an exception; this one
+ * just manages the saved list directly, so it's reachable even when nothing
+ * is missing right now (the banner wouldn't even be visible then). */
+function openStockExceptionsListModal() {
+  const list = $('stock-exc-list');
+  const exceptions = cfg.stock_exception_paths || [];
+  list.innerHTML = '';
+  if (exceptions.length === 0) {
+    list.innerHTML = '<p style="color:var(--dim)">' + esc(tr('stock.no_exceptions')) + '</p>';
+  } else {
+    exceptions.forEach((path, idx) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:.6rem;padding:.4rem 0;border-bottom:1px solid var(--border)';
+      const span = document.createElement('span');
+      span.style.wordBreak = 'break-all';
+      span.textContent = path;
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-outline';
+      btn.style.cssText = 'padding:.2rem .6rem;font-size:.78rem;white-space:nowrap';
+      btn.textContent = tr('stock.remove');
+      btn.onclick = () => removeStockException(idx);
+      row.appendChild(span); row.appendChild(btn);
+      list.appendChild(row);
+    });
+  }
+  $('stock-exc-list-overlay').classList.add('show');
+}
+
+function closeStockExceptionsListModal() {
+  $('stock-exc-list-overlay').classList.remove('show');
+}
+
+async function removeStockException(idx) {
+  const updated = (cfg.stock_exception_paths || []).filter((_, i) => i !== idx);
+  try {
+    await secureFetch('/api/settings', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ stock_exception_paths: updated })
+    });
+    cfg.stock_exception_paths = updated;
+    openStockExceptionsListModal();   /* re-render with the entry gone */
+    refreshStatus();
+    toast(tr('js.stock_exception_removed'));
+  } catch(e) { toast(tr('js.stock_exception_remove_failed', e.message), true); }
 }
 
 /* "Fix now" on the version-mismatch banner — repairs an update whose Web UI
@@ -6687,6 +7034,42 @@ async function startAutoUpdate() {
   </div>
 </div>
 
+<!-- ── Missing-files exception picker — off the "Missing built-in files"
+     banner's "Manage exceptions" link. Lists whatever stock_files_check()
+     currently finds missing (GET /api/stock_missing_list) as a checkbox
+     tree grouped by directory; unchecking a file or a whole group (e.g. one
+     theme folder) persists it to stock_exception_paths so the device stops
+     counting it as missing. See buildStockExceptionTree()/saveStockExceptions(). -->
+<div id="stock-exc-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Manage missing built-in files">
+  <div class="auth-card" style="max-width:520px;max-height:82vh;display:flex;flex-direction:column">
+    <h3 data-i18n="stock.manage_title">Manage missing files</h3>
+    <p data-i18n="stock.manage_desc">Uncheck a file — or a whole folder, like a removed theme — to stop flagging it as missing. Leave checked to keep it flagged for repair.</p>
+    <div id="stock-exc-tree" style="overflow-y:auto;flex:1;font-size:.85rem;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.5rem .7rem"></div>
+    <p id="stock-exc-truncated" style="display:none;color:var(--dim);font-size:.78rem;margin:.5rem 0 0" data-i18n="stock.truncated_hint">Showing the first files found — save and reopen this to see more after they're excepted.</p>
+    <div style="display:flex;gap:.5rem;margin-top:1rem">
+      <button class="btn btn-outline" onclick="closeStockExceptionModal()" data-i18n="stock.cancel">Cancel</button>
+      <button class="btn btn-primary" onclick="saveStockExceptions()" data-i18n="stock.save_exceptions">Save exceptions</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Saved missing-file exceptions — off the "Manage exceptions" button
+     under Verify & Repair Stock Files. Plain list (the entries themselves
+     are already the collapsed directory-prefix/file form, no grouping
+     needed) with a Remove action per entry; removing one means the device
+     resumes flagging it as missing if it's still actually absent. See
+     openStockExceptionsListModal()/removeStockException(). -->
+<div id="stock-exc-list-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Missing-file exceptions">
+  <div class="auth-card" style="max-width:480px;max-height:80vh;display:flex;flex-direction:column">
+    <h3 data-i18n="stock.exceptions_title">Missing-file exceptions</h3>
+    <p data-i18n="stock.exceptions_desc">Files and folders no longer flagged as missing. Remove one to start tracking it again.</p>
+    <div id="stock-exc-list" style="overflow-y:auto;flex:1;font-size:.85rem"></div>
+    <div style="display:flex;gap:.5rem;margin-top:1rem">
+      <button class="btn btn-outline" onclick="closeStockExceptionsListModal()" data-i18n="stock.close">Close</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* ────— Auth UI glue (declared at script bottom so secureFetch above
  *  can reference showLoginModal via hoisting; all functions are global). */
@@ -7152,10 +7535,16 @@ document.addEventListener('change', e => {
 </script>
 
 <script>
-/* ── IANA timezone database (nayarsystems/posix_tz_db zones.json) ───────
- * Loaded at init from /zones.json.  Falls back to TZ_FALLBACK if the fetch
- * fails (e.g. file absent after a partial flash).  Option value = POSIX TZ
- * string; display text = IANA name — matches what onTzSelChange() expects. */
+/* ── IANA timezone database ──────────────────────────────────────────────
+ * Loaded at init from /zones.json, regenerated from the `tzdata` PyPI
+ * package by tools/update_zones.py (see that script for how/why — briefly,
+ * its original source had gone a year without a commit). Falls back to
+ * TZ_FALLBACK if the fetch fails (e.g. file absent after a partial flash).
+ * Option value = POSIX TZ string; display text = IANA name — matches what
+ * onTzSelChange() expects. zones.json's first key, "//", is a JSON-comment-
+ * convention marker recording which IANA tzdata release it came from
+ * (plain JSON has no real comment syntax) — not a zone, skipped explicitly
+ * in buildTzSelect() below. */
 let s_tz_db = null;
 
 const TZ_FALLBACK = {
@@ -7177,6 +7566,7 @@ function buildTzSelect(filter) {
   const q  = (filter || '').toLowerCase();
   const groups = {};
   for (const [name, posix] of Object.entries(db)) {
+    if (name === '//') continue;   /* zones.json's tzdata-release marker (tools/update_zones.py), not a zone */
     if (q && !name.toLowerCase().includes(q) && !posix.toLowerCase().includes(q)) continue;
     const region = name.includes('/') ? name.split('/')[0] : 'UTC';
     if (!groups[region]) groups[region] = [];

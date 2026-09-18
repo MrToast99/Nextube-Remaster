@@ -123,7 +123,7 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Live weather city verification in web UI | ✅ Working |
 | YouTube subscriber counter (direct + relay) | ✅ Working |
 | Bilibili follower counter (direct) | ✅ Working |
-| Instagram follower counter (direct unofficial API) | ✅ Working |
+| Instagram follower counter (via local relay, recommended) | ✅ Working |
 | TikTok follower counter (via local relay) | ✅ Working |
 | Mastodon follower counter (direct API) | ✅ Working |
 | Local social counter relay (`social_relay.py`) | ✅ Working |
@@ -301,7 +301,13 @@ After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web
 
 The version-mismatch banner above only catches a *version number* disagreement — it can't tell you that one specific built-in file (a sound, a font, an icon) is actually missing from the device while everything else reports the correct version. That gap is real: a device that skipped over an update where a particular file changed, or had one removed by hand through the LittleFS file browser, can end up on a "matching" version with a genuine hole in it.
 
-The device checks every stock file it shipped with — once at boot, and again right after any Web UI Update or Online Updater pull completes — and shows a **"Missing built-in files"** banner if anything expected is actually gone, naming one example. That check only looks at whether each file exists (a cheap check, safe to run automatically); it can't tell a *stale* file (present, but wrong content — e.g. left over from a version that predates a later change) from a healthy one.
+The device checks every stock file it shipped with — once at boot (a few seconds in, and only while **Enable auto boot-up check** under **System → Verify & Repair Stock Files** is on, which it is by default), and again in the background right after any Web UI Update, Online Updater pull, or Check & Repair completes — and shows a **"Missing built-in files"** banner if anything expected is actually gone, naming one example and the total count. That check only looks at whether each file exists (a cheap check, safe to run automatically); it can't tell a *stale* file (present, but wrong content — e.g. left over from a version that predates a later change) from a healthy one. The scan itself is paced in small batches so it never freezes the display, and it always runs in the background — applying an update or running Check & Repair finishes immediately, without waiting for this scan to catch up first.
+
+Turning **Enable auto boot-up check** off only skips that automatic run at boot; the manual **Check & Repair** button and the exception picker below keep working anytime regardless.
+
+**Deliberately removed a stock theme or file to save space?** Click **Manage exceptions** on the missing-files banner to pick exactly which of the currently-missing files or folders to stop flagging — grouped by folder, so excluding an entire theme you don't use is one click. Excepted files are remembered across every future scan and never counted as missing again, while anything genuinely new going missing later still shows up normally. The full saved list is also viewable and editable anytime — even when nothing is currently missing — via the separate **Manage exceptions** button under **System → Verify & Repair Stock Files**, with a **Remove** option per entry. Saving or removing an exception updates the banner immediately rather than waiting for the next scan.
+
+**Manually restoring a missing file instead?** Uploading it back through **System → LittleFS Files** — a single file, or a whole folder at once (see [Adding a Custom Theme](#adding-a-custom-theme) for the folder-upload workflow) — checks it off the missing list the moment the upload finishes, no need to wait for the next scan or run Check & Repair afterward.
 
 **Repair without a full reflash — "Verify & Repair Stock Files"** (**System** tab, and a **Repair now** button on the missing-files banner itself): a heavier, explicitly user-triggered check that verifies every stock file's actual *content* against what this exact firmware build shipped, then re-downloads only the files found missing or stale — one at a time, directly from the public GitHub repo at the git tag matching the device's own installed version (never a newer tag than what's actually installed). Nothing is ever bundled ahead of time for this: the device's own firmware image already carries the expected checksum for every stock file, so the only network activity is fetching bytes for something already known, locally, to be wrong. The result tells you exactly which files were repaired, not just a count. If too many files need fixing at once (more efficient as one larger transfer than dozens of small ones), it says so and points at LittleFS Recovery instead, which remains the guaranteed-complete fallback for anything this can't handle — no internet reachable, a very old device whose version predates this mechanism, or a repair that partially fails.
 
@@ -506,7 +512,7 @@ Sessions are **RAM-only** and lost on reboot — you will be asked to log in onc
 | **Clock** | 12H or 24H digital clock. **24H Custom** shows rotating info panel(s) on the right-hand tube(s) (configurable under Display → 24H Custom). Available panels: Day+date, Indoor temp & humidity (SHT30), Outdoor temperature + today's Hi/Lo, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon, and **Pushed image** (an 80×160 JPG you POST from an external script — see [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)). **Single-panel (default):** `H H : M M` with one rotating panel on tube 6. **Dual-panel:** the colon is dropped (`H H  M M`) and tubes 5 **and** 6 each show an **independently-configured** rotating panel — each tube has its own enabled-panel set and cycles through it on the shared rotation interval. Selecting the **WeatherLive** theme replaces the clock with a fully procedural animated weather sky — see [WeatherLive theme](#weatherlive-theme). |
 | **Date** | Date display (DD/MM/YY). Can be enabled alongside Clock — both appear as separate stops in the touch cycle. |
 | **YouTube** | Live subscriber count. Direct fetch or via local relay (recommended — see [Social Media Counters](#social-media-counters)). |
-| **Instagram** | Live follower count. Fetched directly from Instagram's unofficial public API — no account or relay required. |
+| **Instagram** | Live follower count. **Relay** (via local relay, no API key needed) is the default and recommended fetch method — Instagram increasingly blocks direct requests from the device outright, regardless of headers sent. **Internal** (direct, no relay) remains available but is unreliable and likely to fail; only use it if relay isn't an option. |
 | **TikTok** | Live follower count. Requires the local relay (`social_relay.py`) — TikTok's bot detection blocks direct ESP32 fetches. |
 | **Mastodon** | Live follower count. Fetched directly from the configured Mastodon instance API — no relay required. |
 | **Weather** | Up to three panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon; **Panel 3** — animated sunrise/sunset (rising/setting sun + mountain silhouettes at 20 Hz, solar times in HH:MM). Any combination of panels can be enabled; at least one must remain on. Temperatures rounded to whole degrees; leading zeros suppressed; minus sign shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
@@ -799,7 +805,7 @@ Five platforms are supported. Tube 0 shows the platform icon; tubes 1–5 show t
 |---|---|---|
 | **YouTube** | Direct fetch **or** via local relay | Optional (relay strongly recommended — direct ESP32 fetches are often bot-blocked) |
 | **Bilibili** | Direct unofficial API | No |
-| **Instagram** | Direct unofficial public-profile API | No |
+| **Instagram** | Direct unofficial public-profile API **or** via local relay | **Recommended (default)** — Instagram increasingly blocks direct ESP32 fetches outright, regardless of the exact request sent |
 | **TikTok** | Via local relay | **Yes** — TikTok's JS fingerprinting blocks direct device fetches |
 | **Mastodon** | Direct Mastodon instance API | No |
 
@@ -826,10 +832,11 @@ Both keys are entirely optional. Leave the field blank to use the default keyles
 > **Do you need the relay?**
 > - **No interest in social counters** — skip this section entirely. The relay is not required for any other feature.
 > - **YouTube with an API key** — skip the relay. Enter your [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) key in the web UI and the device fetches counts directly.
-> - **YouTube without an API key, or TikTok** — the relay is required. TikTok's bot detection blocks direct ESP32 fetches; YouTube without a key is also often blocked. Run the relay on any PC on the same network.
-> - **Instagram / Mastodon / Bilibili** — no relay needed; these platforms are fetched directly from the device.
+> - **TikTok** — the relay is required. TikTok's bot detection blocks direct ESP32 fetches entirely.
+> - **YouTube without an API key, or Instagram** — the relay is strongly recommended. Instagram increasingly rejects direct device requests outright regardless of settings; YouTube without a key is also often blocked. Run the relay on any PC on the same network.
+> - **Mastodon / Bilibili** — no relay needed; these platforms are fetched directly from the device.
 
-`helpers/social_relay/social_relay.py` is a lightweight Python HTTP proxy that runs on any PC on the same network as the Nextube. It fetches YouTube and TikTok counts using a real Chromium browser (Playwright), bypassing bot-detection checks that block the ESP32's plain HTTP client, then serves the result as simple JSON at `http://<relay-host>:8888/`.
+`helpers/social_relay/social_relay.py` is a lightweight Python HTTP proxy that runs on any PC on the same network as the Nextube. It fetches YouTube, TikTok, and Instagram counts using a real Chromium browser (Playwright), bypassing bot-detection checks that block the ESP32's plain HTTP client, then serves the result as simple JSON at `http://<relay-host>:8888/`.
 
 #### Quick start
 
@@ -852,7 +859,7 @@ On subsequent runs the packages are already present and startup is instant.
 | Package | Purpose |
 |---|---|
 | `playwright>=1.40` | Chromium browser control |
-| `playwright-stealth>=1.0.6` | Patches ~12 browser signals (navigator.webdriver, WebGL vendor, plugin arrays, etc.) that TikTok and YouTube use to detect automation |
+| `playwright-stealth>=1.0.6` | Patches ~12 browser signals (navigator.webdriver, WebGL vendor, plugin arrays, etc.) that TikTok, Instagram, and YouTube use to detect automation |
 
 To install manually instead (e.g. in a virtual environment):
 
@@ -867,6 +874,7 @@ playwright install chromium
 |---|---|
 | `GET /youtube?channel=<id>` | `{"subscribers": 12345}` |
 | `GET /tiktok?user=<username>` | `{"followers": 12345}` |
+| `GET /instagram?user=<username>` | `{"followers": 12345}` |
 | `GET /health` | `OK` |
 
 #### YouTube channel identifier
@@ -883,10 +891,10 @@ Find a channel ID in the channel URL or via `youtube.com/@handle/about`.
 
 #### Fetch strategy
 
-Both platforms use the same layered fallback:
+All three platforms use the same layered fallback:
 
 1. **Playwright/Chromium** — real browser with stealth patches; passes TLS fingerprinting and JS bot-detection checks. Primary method.
-2. **curl** — correct OS TLS fingerprint; no JS execution. TikTok fallback.
+2. **curl** — correct OS TLS fingerprint; no JS execution. Fallback for TikTok and Instagram.
 3. **urllib** — pure Python; may be WAF-blocked. Last resort.
 
 Results are cached for 5 minutes. The ESP32 HTTP timeout for relay requests is 45 seconds, giving Playwright time to launch Chromium on cold start.

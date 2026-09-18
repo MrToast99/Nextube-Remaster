@@ -112,6 +112,12 @@ static void set_defaults(void)
     /* No debug-log tags persisted across reboot by default — see config_mgr.h */
     s_cfg.debug_log_persist_mask = 0;
 
+    /* No missing-stock-files exceptions by default — see config_mgr.h */
+    s_cfg.stock_exception_count = 0;
+
+    /* Automatic boot-time stock-files scan on by default — see config_mgr.h */
+    s_cfg.stock_auto_check_enabled = true;
+
     /* Per-tube color-inversion mask (0 = all normal; set bit N for replacement
      * panels that default to INVON, e.g. LH096NT-IF09W variants) */
     s_cfg.lcd_invert_mask = 0;
@@ -145,6 +151,7 @@ static void set_defaults(void)
     strncpy(s_cfg.hostname, "nextube-remaster", sizeof(s_cfg.hostname) - 1);
     s_cfg.static_ip_enabled = false;   /* DHCP by default */
     strncpy(s_cfg.timezone, "UTC0", sizeof(s_cfg.timezone) - 1);
+    strncpy(s_cfg.timezone_name, "Etc/UTC", sizeof(s_cfg.timezone_name) - 1);
     strncpy(s_cfg.ntp_servers[0], "0.pool.ntp.org", sizeof(s_cfg.ntp_servers[0]) - 1);
     strncpy(s_cfg.ntp_servers[1], "1.pool.ntp.org", sizeof(s_cfg.ntp_servers[1]) - 1);
     strncpy(s_cfg.ntp_servers[2], "2.pool.ntp.org", sizeof(s_cfg.ntp_servers[2]) - 1);
@@ -195,7 +202,13 @@ static void set_defaults(void)
     s_cfg.instagram_enabled        = false;
     s_cfg.tiktok_enabled    = false;
     s_cfg.instagram_user[0] = '\0';
-    strncpy(s_cfg.instagram_method, "internal", sizeof(s_cfg.instagram_method) - 1);
+    /* relay, not internal: Instagram's direct API increasingly rejects
+     * ESP32/mbedTLS requests outright (401, regardless of headers) —
+     * likely TLS-fingerprint-based bot detection, which no header/host
+     * combination from this device can reliably get past. relay (via
+     * social_relay.py, run on a real machine) is the one that's actually
+     * confirmed working. */
+    strncpy(s_cfg.instagram_method, "relay", sizeof(s_cfg.instagram_method) - 1);
     s_cfg.tiktok_user[0]          = '\0';
     s_cfg.tiktok_key[0]           = '\0';
     s_cfg.tiktok_relay_host[0]    = '\0';
@@ -449,7 +462,7 @@ static void parse_json(const char *json, size_t len)
         json_read_str(root, "instagram_user",   s_cfg.instagram_user,   sizeof(s_cfg.instagram_user));
         json_read_str(root, "instagram_method", s_cfg.instagram_method, sizeof(s_cfg.instagram_method));
         if (s_cfg.instagram_method[0] == '\0')
-            strncpy(s_cfg.instagram_method, "internal", sizeof(s_cfg.instagram_method) - 1);
+            strncpy(s_cfg.instagram_method, "relay", sizeof(s_cfg.instagram_method) - 1);   /* see set_defaults()'s comment */
         json_read_str(root, "tiktok_user",         s_cfg.tiktok_user,         sizeof(s_cfg.tiktok_user));
         json_read_str(root, "tiktok_key",          s_cfg.tiktok_key,          sizeof(s_cfg.tiktok_key));
         json_read_str(root, "tiktok_relay_host",   s_cfg.tiktok_relay_host,   sizeof(s_cfg.tiktok_relay_host));
@@ -545,6 +558,12 @@ static void parse_json(const char *json, size_t len)
             }
         }
     }
+    /* IANA name the timezone string above was picked from — see this
+     * field's doc comment in config_mgr.h. Present-key-only update, same
+     * as every other plain string field; absent on a legacy save (fine,
+     * the web UI falls back to a same-string check) or a hand-typed TZ
+     * string (also fine — nothing to name in that case anyway). */
+    json_read_str(root, "timezone_name", s_cfg.timezone_name, sizeof(s_cfg.timezone_name));
 
     json_read_u8(root, "volume",         &s_cfg.volume);
     if (s_cfg.volume > 100) s_cfg.volume = 100;
@@ -917,6 +936,28 @@ static void parse_json(const char *json, size_t len)
     /* debug_log_persist_mask — see config_mgr.h */
     json_read_u16(root, "debug_log_persist_mask", &s_cfg.debug_log_persist_mask);
 
+    /* stock_exception_paths — see config_mgr.h */
+    {
+        cJSON *arr = cJSON_GetObjectItem(root, "stock_exception_paths");
+        if (cJSON_IsArray(arr)) {
+            int cnt = cJSON_GetArraySize(arr);
+            if (cnt > STOCK_EXCEPTION_MAX) cnt = STOCK_EXCEPTION_MAX;
+            s_cfg.stock_exception_count = 0;
+            for (int i = 0; i < cnt; i++) {
+                cJSON *it = cJSON_GetArrayItem(arr, i);
+                if (cJSON_IsString(it) && it->valuestring && it->valuestring[0]) {
+                    strncpy(s_cfg.stock_exception_paths[s_cfg.stock_exception_count],
+                            it->valuestring, STOCK_EXCEPTION_PATH_LEN - 1);
+                    s_cfg.stock_exception_paths[s_cfg.stock_exception_count][STOCK_EXCEPTION_PATH_LEN - 1] = '\0';
+                    s_cfg.stock_exception_count++;
+                }
+            }
+        }
+    }
+
+    /* stock_auto_check_enabled — see config_mgr.h */
+    json_read_bool(root, "stock_auto_check_enabled", &s_cfg.stock_auto_check_enabled);
+
     /* lcd_invert_mask — per-tube INVON flag for color-inverted replacement panels */
     json_read_u8(root, "lcd_invert_mask", &s_cfg.lcd_invert_mask);
     s_cfg.lcd_invert_mask &= 0x3F;   /* only 6 tubes */
@@ -1260,6 +1301,7 @@ char *config_to_json(bool include_password)
     cJSON_AddStringToObject(root, "static_dns1",      s_cfg.static_dns1);
     cJSON_AddStringToObject(root, "static_dns2",      s_cfg.static_dns2);
     cJSON_AddStringToObject(root, "timezone",        s_cfg.timezone);
+    cJSON_AddStringToObject(root, "timezone_name",   s_cfg.timezone_name);
     {
         cJSON *ntp_arr = cJSON_AddArrayToObject(root, "ntp_servers");
         for (int i = 0; i < 4; i++)
@@ -1459,6 +1501,12 @@ char *config_to_json(bool include_password)
 
     cJSON_AddBoolToObject(root, "notify_update_on_display", s_cfg.notify_update_on_display);
     cJSON_AddNumberToObject(root, "debug_log_persist_mask", s_cfg.debug_log_persist_mask);
+    {
+        cJSON *arr = cJSON_AddArrayToObject(root, "stock_exception_paths");
+        for (int i = 0; i < s_cfg.stock_exception_count; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateString(s_cfg.stock_exception_paths[i]));
+    }
+    cJSON_AddBoolToObject(root, "stock_auto_check_enabled", s_cfg.stock_auto_check_enabled);
     cJSON_AddNumberToObject(root, "lcd_invert_mask", s_cfg.lcd_invert_mask);
     json_add_tube_u8(root, "lcd_init_profile",   s_cfg.lcd_init_profile);
     json_add_tube_u8(root, "lcd_vcom",            s_cfg.lcd_vcom);

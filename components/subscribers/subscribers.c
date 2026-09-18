@@ -288,8 +288,20 @@ static void fetch_bilibili(void)
  * Method is selected by instagram_method config field:
  *   "relay"    — GET http://<tiktok_relay_host>:8888/instagram?user=<u>
  *                Plain HTTP, no TLS, no bot-check. Requires social_relay.py.
- *   "internal" — GET https://i.instagram.com/api/v1/users/web_profile_info/
- *                Direct Instagram API; may require valid headers to avoid 401. */
+ *   "internal" — GET https://www.instagram.com/api/v1/users/web_profile_info/
+ *                The public web endpoint, no login required — NOT
+ *                i.instagram.com, which is the private mobile-app API and
+ *                expects a real signed-in app session; hitting it with a
+ *                plain x-ig-app-id header returns exactly the 401 "requires
+ *                authentication" this device was seeing. www.instagram.com's
+ *                copy of this endpoint accepts an ordinary browser User-Agent
+ *                paired with x-ig-app-id: 936619743392459 (Instagram's public
+ *                web-client ID, unrelated to any account and stable across
+ *                requests) with no login — confirmed against multiple
+ *                independent scraper writeups as of Sept 2026, though
+ *                Instagram's anti-bot behavior is known to shift over time;
+ *                the relay path above remains the reliable fallback if this
+ *                endpoint's requirements change again. */
 static void fetch_instagram(void)
 {
     char user[48], method[16], relay_host[64];
@@ -365,7 +377,7 @@ static void fetch_instagram(void)
         url_encode_query(user, enc_user, sizeof(enc_user));
         char url[320];
         snprintf(url, sizeof(url),
-            "https://i.instagram.com/api/v1/users/web_profile_info/?username=%s", enc_user);
+            "https://www.instagram.com/api/v1/users/web_profile_info/?username=%s", enc_user);
 
         esp_http_client_config_t http_cfg = {
             .url = url, .event_handler = http_event_heap, .user_data = &ctx,
@@ -374,9 +386,16 @@ static void fetch_instagram(void)
         tls_sem_take();
         esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
         if (client) {
+            /* Browser-shaped request, matching what www.instagram.com's copy
+             * of this endpoint actually expects — see this function's doc
+             * comment for why the previous Android-app User-Agent (correct
+             * for i.instagram.com's private API, wrong here) produced a 401. */
             esp_http_client_set_header(client, "x-ig-app-id", "936619743392459");
             esp_http_client_set_header(client, "User-Agent",
-                "Instagram 219.0.0.12.117 Android (28/9; 420dpi; 1080x2148; samsung; SM-G977B)");
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36");
+            esp_http_client_set_header(client, "Accept", "*/*");
+            esp_http_client_set_header(client, "Accept-Language", "en-US,en;q=0.9");
         }
         esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
         int status = client ? esp_http_client_get_status_code(client) : 0;
