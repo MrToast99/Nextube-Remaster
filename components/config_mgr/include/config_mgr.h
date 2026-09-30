@@ -54,6 +54,9 @@ typedef enum {
     BL_MODE_WLED = 4,  /* Follow WLED strips via UDP Notifier broadcast */
     BL_MODE_SUNMOON = 5,  /* Follow Sun/Moon — track the sun (day) / moon (night) across the 6 tubes */
 } backlight_mode_t;
+/* Highest backlight_mode_t value — loops over every mode (name lookups,
+ * MQTT options) iterate 0..BL_MODE_LAST. Update when adding a mode. */
+#define BL_MODE_LAST BL_MODE_SUNMOON
 
 /* ── Configuration structure ───────────────────────────────────────── */
 typedef struct {
@@ -63,6 +66,7 @@ typedef struct {
     char             time_type[8];       /* "12H", "24H", or "24H_NS" */
     char             clock_tube5[16];    /* tube-5 content in 24H-no-sec mode: "blank"|"weather" */
     bool             leading_zero;       /* true = show "09:30", false = show " 9:30" */
+    bool             web_live_preview;   /* web UI only: show the Display tab's live tube preview */
     uint8_t          led_brightness;     /* 0-100 */
     uint8_t          lcd_brightness;     /* primary brightness 0-100 */
     bool             auto_brightness;    /* enable night mode (shared window for LCD + LED) */
@@ -133,6 +137,12 @@ typedef struct {
      * always painted, on or off, so both colors are independently set. */
     uint8_t          dm_on_color[3];         /* lit-dot RGB */
     uint8_t          dm_off_color[3];        /* unlit-dot RGB */
+    /* "Segments" theme — procedural 16-segment display font (ships with no
+     * on-disk assets, like DotMatrix/WeatherLive). Every one of a glyph's 16
+     * segments is always painted, lit or unlit, so both colors are
+     * independently set — same on/off-everywhere convention as DotMatrix. */
+    uint8_t          seg_on_color[3];        /* lit-segment RGB */
+    uint8_t          seg_off_color[3];       /* unlit-segment RGB */
     uint8_t          spectrum_rgb[3];       /* LED ring color for Spectrum mode [R, G, B] */
     uint8_t          spectrum_lcd_rgb[3];   /* LCD bar color for Spectrum mode [R, G, B] */
     bool             spectrum_lcd_wled;     /* true = LCD bars follow the WLED primary color
@@ -161,16 +171,15 @@ typedef struct {
      * directory like a removed theme, unchecked in one go). Matched exactly
      * or by prefix against STOCK_FILES entries in both stock_files_check()
      * and stock_repair_task() (web_server.c), so an excepted file is never
-     * counted as missing, never offered for repair, and never eats into
-     * STOCK_REPAIR_MAX_FILES. Genuinely new missing files (not covered by
-     * any exception) still surface normally. */
+     * counted as missing or offered for repair. Genuinely new missing files
+     * (not covered by any exception) still surface normally. */
     uint8_t          stock_exception_count;
     char             stock_exception_paths[STOCK_EXCEPTION_MAX][STOCK_EXCEPTION_PATH_LEN];
     bool             stock_auto_check_enabled; /* true (default) = stock_files_check_timer_cb()
                                                  runs automatically ~6s after boot (web_server.c).
                                                  Off just skips that automatic trigger — the
                                                  missing-files banner simply won't self-populate
-                                                 at boot. The standalone "Check & Repair" button
+                                                 at boot. The standalone "Verify & Repair" button
                                                  (stock_repair_task) and the post-hotpatch/
                                                  webui-pull refreshes still call
                                                  stock_files_check() directly and keep working, so
@@ -371,13 +380,14 @@ typedef struct {
     char             theme_rotation_themes[16][32];  /* selected theme names */
 
     /* Scheduled Burn-in – automatic LCD color-cycle recovery.
-     * Fires at midnight on the configured interval (weekly = every Sunday,
-     * monthly = 1st of month).  Calls display_set_burnin_mask() autonomously
-     * from within the display task — no web UI interaction required. */
+     * Fires at midnight on the configured interval (daily = every day,
+     * weekly = every Sunday, monthly = 1st of month).  Calls
+     * display_set_burnin_mask() autonomously from within the display task —
+     * no web UI interaction required. */
     bool             burnin_auto_enabled;      /* false = disabled (default)         */
     uint8_t          burnin_auto_mask;         /* tube bitmask; 0x3F = all 6 tubes   */
     uint32_t         burnin_auto_duration_s;   /* session length, 1800–14400 s (default 3600 = 1 hr) */
-    char             burnin_auto_interval[8];  /* "weekly" (Sunday) or "monthly" (1st) */
+    char             burnin_auto_interval[8];  /* "daily", "weekly" (Sunday), or "monthly" (1st) */
     uint8_t          burnin_auto_hour;         /* hour of day to fire, 0-23 (default 0 = midnight) */
     char             burnin_auto_mode[16];     /* "color-cycle" (default) or "snow" */
 
@@ -491,6 +501,12 @@ void config_set_theme   (const char *theme); /* RAM-only – no flash write */
  *  Single authoritative definition – eliminates duplicate string tables in
  *  main.c, config_mgr.c, and web_server.c. */
 const char *app_mode_name(app_mode_t mode);
+
+/** Return the canonical string for a backlight_mode_t value ("Static",
+ *  "Breath", "Rainbow", "Off", "WLED", "SunMoon") — the same strings the
+ *  web UI's #f-blmode select and parse_json()'s "backlight_mode" key use.
+ *  Returns "Static" for any out-of-range value. */
+const char *backlight_mode_name(backlight_mode_t mode);
 
 #ifdef __cplusplus
 }

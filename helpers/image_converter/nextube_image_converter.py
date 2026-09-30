@@ -135,113 +135,143 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nextube Image Converter</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;500;700&display=swap');
-
+/* Design tokens mirror the clock's own web UI (data/web/index.html) — same
+ * navy background, the --hi pink-crimson brand accent, card treatment,
+ * radius/shadow scale and system font stack — so this tool reads as part of
+ * the same project instead of a standalone skin. --panel/--panel2 stand in
+ * for the clock's --card/--accent (its input-background token); --accent2
+ * takes the clock's --warn amber as the one deliberately-distinct "special
+ * action" color (zipper import), the same role --warn already plays there. */
 :root {
-  --bg:#0a0e14; --panel:#111820; --panel2:#0d1520;
-  --border:#1e3a4a; --border2:#2a4a5e;
-  --accent:#00d4ff; --accent2:#ff6b35;
-  --text:#c8d8e8; --dim:#4a6a7a;
-  --success:#00ff88; --warn:#ffcc00;
-  --mono:'Share Tech Mono',monospace;
-  --sans:'Exo 2',sans-serif;
+  --bg:#13152a; --panel:#1b1e36; --panel2:#262c4c;
+  --border:rgba(255,255,255,.08); --border2:rgba(255,255,255,.16);
+  --accent:#ef4565; --accent-dark:#a13350; --accent-rgb:239,69,101;
+  --accent2:#e8a23a; --accent2-dark:#b9791f;
+  --text:#eef0f6; --dim:#8d94ac;
+  --success:#4ecca3; --warn:#e8a23a; --danger:#e34b3c;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --radius-sm:6px; --radius:10px; --radius-lg:14px;
+  --shadow-sm:0 1px 3px rgba(0,0,0,.3); --shadow:0 6px 20px rgba(0,0,0,.32);
+  --ease:cubic-bezier(.4,0,.2,1);
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;overflow-x:hidden}
-body::before{content:'';position:fixed;inset:0;
-  background-image:linear-gradient(rgba(0,212,255,.03) 1px,transparent 1px),
-    linear-gradient(90deg,rgba(0,212,255,.03) 1px,transparent 1px);
-  background-size:40px 40px;pointer-events:none;z-index:0}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;
+  overflow-x:hidden;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
 .container{max-width:1300px;margin:0 auto;padding:1.5rem;position:relative;z-index:1}
 
 /* Header */
-header{display:flex;align-items:center;gap:1rem;margin-bottom:2rem;padding-bottom:1.25rem;border-bottom:1px solid var(--border)}
-.logo{width:40px;height:40px;background:var(--accent);clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);display:flex;align-items:center;justify-content:center;text-align:center;font-family:var(--mono);font-size:.6rem;color:#000;font-weight:bold;flex-shrink:0}
-h1{font-family:var(--mono);font-size:1.3rem;color:var(--accent);letter-spacing:2px;text-transform:uppercase}
-h1 span{color:var(--accent2)}
-.subtitle{font-size:.7rem;color:var(--dim);letter-spacing:1px;margin-top:.2rem}
+header{display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem;padding:1.1rem 1.5rem;
+  background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm)}
+.logo{width:40px;height:40px;border-radius:var(--radius);flex-shrink:0;
+  background:linear-gradient(135deg,var(--accent),var(--accent-dark));
+  display:flex;align-items:center;justify-content:center;font-size:1.3rem;
+  box-shadow:0 2px 5px rgba(var(--accent-rgb),.2)}
+h1{font-size:1.15rem;font-weight:700;color:var(--text)}
+h1 span{color:var(--accent)}
+.subtitle{font-size:.75rem;color:var(--dim);margin-top:.2rem}
 
 /* Layout */
 .layout{display:grid;grid-template-columns:280px 1fr;gap:1.25rem;align-items:start}
 .right-col{display:flex;flex-direction:column;gap:1.25rem}
 
-/* Panel */
-.panel{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:1.25rem;position:relative}
-.panel::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),transparent)}
-.panel-title{font-family:var(--mono);font-size:.68rem;color:var(--accent);letter-spacing:2px;text-transform:uppercase;margin-bottom:1rem;display:flex;align-items:center;gap:.4rem}
-.panel-title::before{content:'//';color:var(--accent2)}
+/* Panel — same diagonal-wash card treatment as the clock UI's .card */
+.panel{background:linear-gradient(150deg,var(--panel2),var(--panel) 65%);border:1px solid var(--border);
+  border-radius:var(--radius-lg);padding:1.3rem;position:relative;
+  box-shadow:var(--shadow-sm),0 14px 34px -10px rgba(var(--accent-rgb),.14);
+  transition:box-shadow .2s var(--ease),border-color .2s var(--ease)}
+.panel:hover{box-shadow:var(--shadow-sm),0 18px 38px -8px rgba(var(--accent-rgb),.2);border-color:rgba(var(--accent-rgb),.18)}
+.panel-title{font-size:.95rem;font-weight:600;color:var(--text);margin-bottom:1rem;padding-bottom:.7rem;
+  border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.55rem}
+.panel-title::before{content:'';width:3px;height:1rem;border-radius:2px;
+  background:linear-gradient(var(--accent),var(--accent-dark));flex:0 0 auto}
 
 /* Form elements */
-lbl{display:block;font-size:.65rem;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:.35rem;margin-top:.9rem}
+lbl{display:block;font-size:.8rem;font-weight:500;color:var(--dim);margin-bottom:.35rem;margin-top:.9rem}
 lbl:first-of-type{margin-top:0}
 .dim-row{display:grid;grid-template-columns:1fr auto 1fr;gap:.4rem;align-items:center}
-.dim-sep{font-family:var(--mono);color:var(--accent);text-align:center}
-input[type=number],input[type=text],select{width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:.45rem .65rem;font-family:var(--mono);font-size:.82rem;border-radius:3px;outline:none;transition:border-color .2s}
-input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--accent)}
+.dim-sep{color:var(--accent);text-align:center;font-weight:600}
+input[type=number],input[type=text],select{width:100%;background:var(--panel2);border:1px solid var(--border);
+  color:var(--text);padding:.55rem .7rem;font-family:var(--sans);font-size:.88rem;border-radius:var(--radius-sm);
+  outline:none;box-shadow:inset 0 1px 3px rgba(0,0,0,.25);transition:border-color .15s var(--ease),box-shadow .15s var(--ease)}
+input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--accent);
+  box-shadow:inset 0 1px 3px rgba(0,0,0,.25),0 0 0 3px rgba(var(--accent-rgb),.18)}
+select option{background:var(--panel2);color:var(--text)}
 .radio-group{display:flex;gap:.4rem;flex-wrap:wrap}
 .radio-btn{flex:1;min-width:60px}
 .radio-btn input{display:none}
-.radio-btn label{display:block;text-align:center;padding:.4rem .4rem;border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:.65rem;font-family:var(--mono);transition:all .15s;background:var(--panel2);line-height:1.4;margin:0}
-.radio-btn input:checked+label{border-color:var(--accent);color:var(--accent);background:rgba(0,212,255,.08)}
+.radio-btn label{display:block;text-align:center;padding:.45rem .4rem;border:1px solid var(--border);
+  border-radius:var(--radius-sm);cursor:pointer;font-size:.72rem;font-family:var(--sans);
+  transition:all .15s var(--ease);background:var(--panel2);line-height:1.4;margin:0;color:var(--dim)}
+.radio-btn input:checked+label{border-color:transparent;color:#fff;
+  background:linear-gradient(135deg,var(--accent),var(--accent-dark));
+  box-shadow:0 2px 5px rgba(var(--accent-rgb),.15)}
 
 /* Drop zone */
-#dropzone{border:2px dashed var(--border);border-radius:4px;padding:1.75rem 1rem;text-align:center;cursor:pointer;transition:all .2s;position:relative;background:var(--panel2);margin-top:.9rem}
-#dropzone.drag-over{border-color:var(--accent);background:rgba(0,212,255,.05)}
-#dropzone.zipper-drag{border-color:var(--accent2);background:rgba(255,107,53,.05)}
+#dropzone{border:2px dashed var(--border);border-radius:var(--radius);padding:1.75rem 1rem;text-align:center;
+  cursor:pointer;transition:all .2s var(--ease);position:relative;background:var(--panel2);margin-top:.9rem}
+#dropzone.drag-over{border-color:var(--accent);background:rgba(var(--accent-rgb),.06)}
+#dropzone.zipper-drag{border-color:var(--accent2);background:rgba(232,162,58,.08)}
 #dropzone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
 .drop-icon{font-size:2rem;margin-bottom:.5rem;display:block}
-.drop-text{font-family:var(--mono);font-size:.72rem;color:var(--dim);line-height:1.6}
+.drop-text{font-size:.78rem;color:var(--dim);line-height:1.6}
 .drop-text strong{color:var(--accent)}
-.drop-text .zipper-hint{color:var(--accent2);font-size:.6rem;display:block;margin-top:.3rem}
+.drop-text .zipper-hint{color:var(--accent2);font-size:.68rem;display:block;margin-top:.3rem}
 
 /* Buttons */
-.btn{display:inline-flex;align-items:center;gap:.4rem;padding:.5rem 1rem;border:none;border-radius:3px;font-family:var(--mono);font-size:.75rem;letter-spacing:1px;cursor:pointer;transition:all .15s;text-transform:uppercase}
-.btn-primary{background:var(--accent);color:#000;width:100%;justify-content:center;margin-top:1rem;font-weight:bold}
-.btn-primary:hover{background:#33ddff}
-.btn-primary:disabled{opacity:.4;cursor:not-allowed}
-.btn-sm{background:transparent;border:1px solid var(--accent2);color:var(--accent2);font-size:.65rem;padding:.3rem .6rem}
-.btn-sm:hover{background:rgba(255,107,53,.1)}
-.btn-zip{background:var(--accent2);color:#000;font-size:.72rem;padding:.45rem .9rem;font-weight:bold}
-.btn-zip:hover{background:#ff8555}
-.btn-zip:disabled{opacity:.4;cursor:not-allowed}
-.btn-reset{background:transparent;border:1px solid var(--dim);color:var(--dim);font-size:.65rem;padding:.3rem .6rem}
-.btn-reset:hover{border-color:var(--accent2);color:var(--accent2)}
-.btn-zipper-import{background:rgba(255,107,53,.12);border:1px solid var(--accent2);color:var(--accent2);width:100%;margin-top:.5rem;justify-content:center;font-size:.7rem}
-.btn-zipper-import:hover{background:rgba(255,107,53,.22)}
+.btn{display:inline-flex;align-items:center;gap:.4rem;padding:.6rem 1.1rem;border:none;border-radius:var(--radius-sm);
+  font-family:var(--sans);font-size:.82rem;font-weight:600;letter-spacing:.01em;cursor:pointer;
+  transition:filter .15s var(--ease),transform .15s var(--ease),box-shadow .2s var(--ease)}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent-dark));color:#fff;width:100%;
+  justify-content:center;margin-top:1rem;box-shadow:0 2px 5px rgba(var(--accent-rgb),.15),0 7px 16px -8px rgba(var(--accent-rgb),.32)}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 3px 7px rgba(var(--accent-rgb),.18),0 10px 20px -8px rgba(var(--accent-rgb),.4)}
+.btn-primary:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.btn-sm{background:none;border:1px solid var(--border);color:var(--dim);font-size:.72rem;padding:.35rem .65rem}
+.btn-sm:hover{border-color:var(--text);color:var(--text)}
+.btn-zip{background:linear-gradient(135deg,var(--accent2),var(--accent2-dark));color:#1a1300;font-size:.8rem;
+  padding:.5rem .95rem;font-weight:700;box-shadow:0 2px 5px rgba(232,162,58,.2),0 7px 16px -8px rgba(232,162,58,.4)}
+.btn-zip:hover{transform:translateY(-1px);box-shadow:0 3px 7px rgba(232,162,58,.24),0 10px 20px -8px rgba(232,162,58,.5)}
+.btn-zip:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.btn-reset{background:none;border:1px solid var(--border);color:var(--dim);font-size:.72rem;padding:.35rem .65rem}
+.btn-reset:hover{border-color:var(--text);color:var(--text)}
+.btn-zipper-import{background:rgba(232,162,58,.12);border:1px solid var(--accent2);color:var(--accent2);
+  width:100%;margin-top:.5rem;justify-content:center;font-size:.78rem}
+.btn-zipper-import:hover{background:rgba(232,162,58,.22)}
 
 /* Progress */
 #progress-wrap{margin-top:1rem;display:none}
-.prog-label{font-family:var(--mono);font-size:.65rem;color:var(--dim);margin-bottom:.35rem;display:flex;justify-content:space-between}
-.prog-bar-bg{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
-.prog-bar{height:100%;background:linear-gradient(90deg,var(--accent),var(--success));border-radius:2px;width:0%;transition:width .3s}
+.prog-label{font-size:.72rem;color:var(--dim);margin-bottom:.35rem;display:flex;justify-content:space-between}
+.prog-bar-bg{height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+.prog-bar{height:100%;background:linear-gradient(90deg,var(--accent),var(--success));border-radius:2px;width:0%;transition:width .3s var(--ease)}
 
 /* File queue */
 .file-queue{margin-top:.75rem;max-height:100px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
-.file-item{font-family:var(--mono);font-size:.65rem;color:var(--dim);padding:.2rem 0;border-bottom:1px solid rgba(30,58,74,.4);display:flex;justify-content:space-between;gap:.5rem}
+.file-item{font-size:.72rem;color:var(--dim);padding:.25rem 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:.5rem}
 .file-item .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
-.file-item .fsize{color:var(--dim);flex-shrink:0}
+.file-item .fsize{color:var(--dim);flex-shrink:0;font-family:var(--mono)}
 
 /* ── Zipper panel ─────────────────────────────────────────────────────────── */
 .zipper-theme-row{display:flex;align-items:flex-end;gap:.6rem;margin-bottom:.9rem}
 .zipper-theme-row .field-wrap{flex:1}
 .zipper-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:.5rem;margin:.5rem 0 .75rem}
-.zipper-asset{background:var(--panel2);border:1px solid var(--border);border-radius:3px;overflow:hidden;cursor:pointer;transition:border-color .15s;position:relative}
+.zipper-asset{background:var(--panel2);border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;cursor:pointer;transition:border-color .15s var(--ease);position:relative}
 .zipper-asset:hover{border-color:var(--border2)}
 .zipper-asset.zactive{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
-.zipper-asset.crop-edited::after{content:'✎';position:absolute;top:2px;right:3px;font-size:.6rem;color:var(--warn);line-height:1}
+.zipper-asset.crop-edited::after{content:'✎';position:absolute;top:2px;right:3px;font-size:.65rem;color:var(--warn);line-height:1}
 .zipper-asset img{width:100%;aspect-ratio:1/2;object-fit:cover;display:block}
-.zipper-asset-label{font-family:var(--mono);font-size:.58rem;color:var(--text);padding:.2rem .3rem .05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.zipper-asset-path{font-family:var(--mono);font-size:.5rem;color:var(--dim);padding:0 .3rem .2rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.zipper-missing{font-family:var(--mono);font-size:.63rem;color:var(--warn);background:rgba(255,204,0,.07);border:1px solid rgba(255,204,0,.2);border-radius:3px;padding:.35rem .55rem;margin-bottom:.75rem}
+.zipper-asset-label{font-size:.65rem;color:var(--text);padding:.2rem .3rem .05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.zipper-asset-path{font-size:.58rem;color:var(--dim);padding:0 .3rem .2rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.zipper-missing{font-size:.75rem;color:var(--warn);background:rgba(232,162,58,.1);border:1px solid rgba(232,162,58,.25);border-radius:var(--radius-sm);padding:.4rem .6rem;margin-bottom:.75rem}
 .zipper-missing span{color:var(--dim)}
 .zipper-actions{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
-.zipper-status{font-family:var(--mono);font-size:.65rem;color:var(--dim)}
-.zipper-loading{display:flex;align-items:center;justify-content:center;padding:2rem;font-family:var(--mono);font-size:.75rem;color:var(--dim);gap:.75rem}
+.zipper-status{font-size:.75rem;color:var(--dim)}
+.zipper-loading{display:flex;align-items:center;justify-content:center;padding:2rem;font-size:.82rem;color:var(--dim);gap:.75rem}
 
 /* ── Crop Editor ─────────────────────────────────────────────────────────── */
 .crop-editor{display:none;gap:1.25rem}
 .crop-editor.active{display:grid;grid-template-columns:1fr 120px}
-.crop-stage-wrap{position:relative;background:#000;border:1px solid var(--border);border-radius:3px;overflow:hidden;line-height:0;cursor:crosshair;user-select:none;width:fit-content;max-width:100%}
+.crop-stage-wrap{position:relative;background:#000;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;line-height:0;cursor:crosshair;user-select:none;width:fit-content;max-width:100%}
 #crop-img{display:block;max-width:100%;max-height:480px;width:auto;height:auto}
 .crop-overlay{position:absolute;inset:0;pointer-events:none}
 #crop-box{
@@ -261,36 +291,45 @@ input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--
 #crop-box::after {top:-1px;right:-1px;border-width:2px 2px 0 0}
 .cb-bl{bottom:-1px;left:-1px;border-width:0 0 2px 2px}
 .cb-br{bottom:-1px;right:-1px;border-width:0 2px 2px 0}
-.rh{position:absolute;width:10px;height:10px;background:var(--accent);border-radius:1px;pointer-events:all}
+.rh{position:absolute;width:10px;height:10px;background:var(--accent);border-radius:2px;pointer-events:all}
 .rh-n {top:-5px;left:50%;transform:translateX(-50%);cursor:n-resize}
 .rh-s {bottom:-5px;left:50%;transform:translateX(-50%);cursor:s-resize}
 .rh-e {right:-5px;top:50%;transform:translateY(-50%);cursor:e-resize}
 .rh-w {left:-5px;top:50%;transform:translateY(-50%);cursor:w-resize}
 .preview-pane{display:flex;flex-direction:column;gap:.75rem}
-.preview-label{font-family:var(--mono);font-size:.62rem;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
-#preview-canvas{width:80px;height:160px;border:1px solid var(--border);display:block;image-rendering:pixelated;background:#000}
-.crop-coords{font-family:var(--mono);font-size:.6rem;color:var(--dim);line-height:1.8}
-.crop-coords span{color:var(--text)}
+.preview-label{font-size:.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.03em}
+#preview-canvas{width:80px;height:160px;border:1px solid var(--border);display:block;image-rendering:pixelated;background:#000;border-radius:var(--radius-sm)}
+.crop-coords{font-size:.7rem;color:var(--dim)}
+.crop-coords label{display:flex;align-items:center;justify-content:space-between;gap:.4rem;margin-top:.4rem}
+.crop-coords label:first-of-type{margin-top:0}
+.coord-input{width:58px;background:var(--panel2);border:1px solid var(--border);color:var(--text);
+  font-family:var(--mono);font-size:.72rem;padding:.25rem .4rem;border-radius:var(--radius-sm);outline:none;
+  text-align:right;-moz-appearance:textfield;box-shadow:inset 0 1px 3px rgba(0,0,0,.25);transition:border-color .15s var(--ease)}
+.coord-input:focus{border-color:var(--accent);box-shadow:inset 0 1px 3px rgba(0,0,0,.25),0 0 0 3px rgba(var(--accent-rgb),.18)}
+.coord-apply{width:100%;margin-top:.6rem;justify-content:center}
 
 /* Results */
 #results-panel{display:none}
 .results-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
-.stat-badge{font-family:var(--mono);font-size:.65rem;color:var(--success);background:rgba(0,255,136,.1);border:1px solid rgba(0,255,136,.3);padding:.2rem .5rem;border-radius:2px}
+.stat-badge{font-size:.72rem;color:var(--success);background:rgba(78,204,163,.12);border:1px solid rgba(78,204,163,.3);padding:.25rem .55rem;border-radius:var(--radius-sm)}
 .result-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:.75rem}
-.result-card{background:var(--panel2);border:1px solid var(--border);border-radius:4px;overflow:hidden;transition:border-color .2s;animation:fadeUp .3s ease both}
+.result-card{background:var(--panel2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:border-color .2s var(--ease);animation:fadeUp .3s ease both}
 .result-card:hover{border-color:var(--accent)}
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 .result-card img{width:100%;aspect-ratio:1/2;object-fit:cover;display:block}
 .card-info{padding:.5rem}
-.card-name{font-family:var(--mono);font-size:.6rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:.25rem}
-.card-meta{font-family:var(--mono);font-size:.55rem;color:var(--dim);margin-bottom:.4rem}
+.card-name{font-size:.72rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:.25rem}
+.card-meta{font-size:.65rem;color:var(--dim);margin-bottom:.4rem;font-family:var(--mono)}
 
 /* Error */
-.err-msg{font-family:var(--mono);font-size:.68rem;color:#ff4444;padding:.45rem;background:rgba(255,68,68,.08);border:1px solid rgba(255,68,68,.2);border-radius:3px;margin-top:.75rem;display:none}
+.err-msg{font-size:.78rem;color:var(--danger);padding:.5rem .6rem;background:rgba(227,75,60,.1);border:1px solid rgba(227,75,60,.3);border-radius:var(--radius-sm);margin-top:.75rem;display:none}
 
-::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+::-webkit-scrollbar-thumb{background-color:rgba(255,255,255,.14);border-radius:8px;border:2px solid var(--bg);background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background-color:rgba(255,255,255,.22)}
+::selection{background:rgba(var(--accent-rgb),.35);color:#fff}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
 
 @media(max-width:760px){.layout{grid-template-columns:1fr}.crop-editor.active{grid-template-columns:1fr}}
 </style>
@@ -298,10 +337,10 @@ input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--
 <body>
 <div class="container">
   <header>
-    <div class="logo">Nextube<br>Remaster</div>
+    <div class="logo">🖼️</div>
     <div>
-      <h1>IMAGE <span>CONVERTER</span></h1>
-      <div class="subtitle">// JPEG · PNG OUTPUT · INTERACTIVE CROP · BULK · .ZIPPER IMPORT</div>
+      <h1>Nextube <span>Image Converter</span></h1>
+      <div class="subtitle">JPEG · PNG output · interactive crop · bulk · .zipper import</div>
     </div>
   </header>
 
@@ -346,10 +385,14 @@ input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--
       <button class="btn btn-reset" id="btn-folder" style="width:100%;margin-top:.5rem;justify-content:center" onclick="document.getElementById('folder-input').click()">📁 Browse Folder</button>
       <button class="btn btn-zipper-import" id="btn-zipper" onclick="document.getElementById('zipper-input').click()">📦 Import .zipper Theme</button>
 
+      <div id="file-queue-head" style="display:none;justify-content:space-between;align-items:center;margin-top:.75rem">
+        <span style="font-size:.72rem;color:var(--dim)">Queued files</span>
+        <button class="btn btn-reset" id="btn-clear-files" style="font-size:.65rem">✕ Clear</button>
+      </div>
       <div class="file-queue" id="file-queue"></div>
       <div class="err-msg" id="err-msg"></div>
 
-      <button class="btn btn-primary" id="convert-btn" disabled>▶ CONVERT</button>
+      <button class="btn btn-primary" id="convert-btn" disabled>▶ Convert</button>
 
       <div id="progress-wrap">
         <div class="prog-label"><span id="prog-text">Processing...</span><span id="prog-pct">0%</span></div>
@@ -426,10 +469,11 @@ input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--
             <div class="preview-label">Output Preview</div>
             <canvas id="preview-canvas" width="80" height="160"></canvas>
             <div class="crop-coords">
-              X: <span id="cx-val">0</span><br>
-              Y: <span id="cy-val">0</span><br>
-              W: <span id="cw-val">0</span><br>
-              H: <span id="ch-val">0</span>
+              <label>X: <input type="number" id="cx-val" class="coord-input"></label>
+              <label>Y: <input type="number" id="cy-val" class="coord-input"></label>
+              <label>W: <input type="number" id="cw-val" class="coord-input"></label>
+              <label>H: <input type="number" id="ch-val" class="coord-input"></label>
+              <button class="btn btn-reset coord-apply" id="btn-apply-coords" type="button">Apply XY/WH</button>
             </div>
           </div>
         </div>
@@ -441,7 +485,7 @@ input[type=number]:focus,input[type=text]:focus,select:focus{border-color:var(--
           <div class="panel-title" style="margin-bottom:0">Results</div>
           <div style="display:flex;align-items:center;gap:.75rem">
             <span class="stat-badge" id="stat-badge">0 files</span>
-            <button class="btn btn-zip" id="dl-all-btn">↓ ZIP ALL</button>
+            <button class="btn btn-zip" id="dl-all-btn">↓ Zip All</button>
           </div>
         </div>
         <div class="result-grid" id="result-grid"></div>
@@ -558,16 +602,26 @@ function renderQueue(){
       <span class="fname" title="${fileRelPaths[i]||f.name}">${fileRelPaths[i]||f.name}</span>
       <span class="fsize">${formatBytes(f.size)}</span>
     </div>`).join('');
+  document.getElementById('file-queue-head').style.display = files.length ? 'flex' : 'none';
 }
+
+// Resets the regular-image queue — the same cleanup a successful Convert
+// used to do automatically. Now that Convert leaves the queue and crop
+// editor in place (so a crop can be tweaked and re-converted without
+// re-uploading), this is how you explicitly start a fresh batch instead.
+function clearFiles(){
+  files=[]; fileRelPaths=[]; cropData={}; renderQueue(); fileInput.value='';
+  lockCrop=false; document.getElementById('lock-crop').checked=false;
+  convertBtn.disabled=true;
+  cropPanel.style.display='none'; updateBatchCropUI();
+}
+document.getElementById('btn-clear-files').addEventListener('click', clearFiles);
 
 // ═══════════════════════════════════════════════════════════════
 //  Zipper import
 // ═══════════════════════════════════════════════════════════════
 async function handleZipperDrop(file){
-  // Clear any regular image queue
-  files=[]; fileRelPaths=[]; cropData={}; renderQueue();
-  convertBtn.disabled=true;
-  cropPanel.style.display='none';
+  clearFiles();   // clear any regular image queue
 
   zipperPanel.style.display='block';
   document.getElementById('zipper-grid').innerHTML =
@@ -636,6 +690,7 @@ function loadZipperCropEditor(idx){
     const crop = zipperCropOverrides[asset.stem] || asset.suggested_crop;
     setBoxFromNat(crop);
     drawBox();
+    syncCoordInputs();
     updatePreview();
   };
   // Serve the full original image from staging
@@ -656,10 +711,10 @@ function saveZipperCrop(){
   const card = document.querySelector(`.zipper-asset[data-idx="${zipperCurrentIdx}"]`);
   if(card) card.classList.add('crop-edited');
   // Update coord display
-  document.getElementById('cx-val').textContent = d.x;
-  document.getElementById('cy-val').textContent = d.y;
-  document.getElementById('cw-val').textContent = d.w;
-  document.getElementById('ch-val').textContent = d.h;
+  document.getElementById('cx-val').value = d.x;
+  document.getElementById('cy-val').value = d.y;
+  document.getElementById('cw-val').value = d.w;
+  document.getElementById('ch-val').value = d.h;
 }
 
 async function convertZipper(){
@@ -726,9 +781,24 @@ function loadCropEditor(idx){
     if(cropData[idx]) setBoxFromNat(cropData[idx]);
     else defaultBox();
     drawBox();
+    syncCoordInputs();
     updatePreview();
   };
   cropImg.src = url;
+}
+
+// Refreshes the X/Y/W/H fields from the current `box` (screen px → natural
+// image px) without touching cropData/zipperCropOverrides — unlike saveNat(),
+// which also persists the crop and marks a zipper asset "crop-edited". Used
+// wherever the box changes for a reason other than the user editing it
+// (loading a new image, switching between images).
+function syncCoordInputs(){
+  const scaleX = natW / cropImg.clientWidth;
+  const scaleY = natH / cropImg.clientHeight;
+  document.getElementById('cx-val').value = Math.round(box.x*scaleX);
+  document.getElementById('cy-val').value = Math.round(box.y*scaleY);
+  document.getElementById('cw-val').value = Math.round(box.w*scaleX);
+  document.getElementById('ch-val').value = Math.round(box.h*scaleY);
 }
 
 function defaultBox(){
@@ -751,14 +821,12 @@ function setBoxFromNat(nat){
   };
 }
 
-function saveNat(){
-  const scaleX = natW / cropImg.clientWidth;
-  const scaleY = natH / cropImg.clientHeight;
-  const d = {
-    x: Math.round(box.x*scaleX), y: Math.round(box.y*scaleY),
-    w: Math.round(box.w*scaleX), h: Math.round(box.h*scaleY),
-  };
-
+// Stores crop `d` (original image pixels) for whichever image is active and
+// refreshes the X/Y/W/H fields to match. Shared by saveNat() (derives d from
+// the dragged/resized on-screen box) and applyManualCoords() (d is already
+// exact, typed by the user) so both end up in cropData/zipperCropOverrides
+// the same way — including "Lock to all" propagation.
+function persistCrop(d){
   if(zipperMode && zipperCurrentIdx>=0 && zipperAssets[zipperCurrentIdx]){
     const stem = zipperAssets[zipperCurrentIdx].stem;
     zipperCropOverrides[stem] = d;
@@ -771,10 +839,19 @@ function saveNat(){
     }
   }
 
-  document.getElementById('cx-val').textContent = d.x;
-  document.getElementById('cy-val').textContent = d.y;
-  document.getElementById('cw-val').textContent = d.w;
-  document.getElementById('ch-val').textContent = d.h;
+  document.getElementById('cx-val').value = d.x;
+  document.getElementById('cy-val').value = d.y;
+  document.getElementById('cw-val').value = d.w;
+  document.getElementById('ch-val').value = d.h;
+}
+
+function saveNat(){
+  const scaleX = natW / cropImg.clientWidth;
+  const scaleY = natH / cropImg.clientHeight;
+  persistCrop({
+    x: Math.round(box.x*scaleX), y: Math.round(box.y*scaleY),
+    w: Math.round(box.w*scaleX), h: Math.round(box.h*scaleY),
+  });
 }
 
 function drawBox(){
@@ -790,6 +867,31 @@ function clampBox(){
   box.h = Math.max(10, Math.min(box.h, sh));
   box.x = Math.max(0,  Math.min(box.x, sw-box.w));
   box.y = Math.max(0,  Math.min(box.y, sh-box.h));
+}
+
+// Manual X/Y/W/H entry — typed values are in ORIGINAL image pixels (same
+// units the fields display), so a crop box can be re-entered exactly,
+// giving pixel-identical crops for a fresh image or a later run instead of
+// eyeballing a dragged box each time. Stored via persistCrop() with the
+// typed numbers themselves — NOT saveNat()'s box→nat round-trip, which
+// re-derives nat pixels from the on-screen box and can be off by a pixel
+// after the scale-factor rounding, defeating the point of typing exact
+// values. The on-screen box is still updated (setBoxFromNat) so the crop
+// rectangle and preview reflect what was typed.
+function applyManualCoords(){
+  if(!cropImg.naturalWidth || getMode()!=='manual') return;
+  const raw = id => Math.round(parseFloat(document.getElementById(id).value));
+  let x = raw('cx-val'), y = raw('cy-val'), w = raw('cw-val'), h = raw('ch-val');
+  if(!Number.isFinite(x)) x = 0;
+  if(!Number.isFinite(y)) y = 0;
+  if(!Number.isFinite(w) || w < 1) w = 1;
+  if(!Number.isFinite(h) || h < 1) h = 1;
+  w = Math.min(w, natW); h = Math.min(h, natH);
+  x = Math.max(0, Math.min(x, natW - w));
+  y = Math.max(0, Math.min(y, natH - h));
+  setBoxFromNat({x, y, w, h});
+  clampBox(); drawBox(); updatePreview();
+  persistCrop({x, y, w, h});
 }
 
 function lockAspect(edge, dx, dy){
@@ -865,6 +967,14 @@ window.addEventListener('resize', ()=>{
       defaultBox();
     }
     drawBox();
+  });
+});
+
+// Manual X/Y/W/H entry — Apply button, or Enter inside any of the 4 fields.
+document.getElementById('btn-apply-coords').addEventListener('click', applyManualCoords);
+['cx-val','cy-val','cw-val','ch-val'].forEach(id=>{
+  document.getElementById(id).addEventListener('keydown', e=>{
+    if(e.key==='Enter'){ e.preventDefault(); applyManualCoords(); }
   });
 });
 
@@ -993,9 +1103,10 @@ convertBtn.addEventListener('click', async ()=>{
     resultsPanel.style.display='block';
   }
   convertBtn.disabled=false;
-  files=[]; fileRelPaths=[]; cropData={}; renderQueue(); fileInput.value='';
-  lockCrop=false; document.getElementById('lock-crop').checked=false;
-  cropPanel.style.display='none'; updateBatchCropUI();
+  // The queue, crop editor and cropData are deliberately left in place (not
+  // wiped like they used to be) — Convert can be clicked again right away
+  // after tweaking a crop, with no re-upload needed. Use "Clear" (see
+  // clearFiles()) to start a fresh batch instead.
 });
 
 function addCard(r){
@@ -1023,7 +1134,7 @@ dlAllBtn.addEventListener('click', async ()=>{
   dlAllBtn.textContent='...';
   const res=await fetch('/download_zip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:results.map(r=>r.out_name)})});
   triggerDownload(await res.blob(),'nextube_images.zip');
-  dlAllBtn.textContent='↓ ZIP ALL';
+  dlAllBtn.textContent='↓ Zip All';
 });
 function triggerDownload(blob,name){
   const url=URL.createObjectURL(blob);
@@ -1044,6 +1155,24 @@ function hideErr(){ errMsg.style.display='none'; }
 # ── HTTP Server ───────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
+
+    # This server handles one request at a time (plain HTTPServer, not
+    # threaded) and never explicitly closes a connection — but a browser's
+    # fetch() always sends "HTTP/1.1" on its request line, and
+    # BaseHTTPRequestHandler.parse_request() honors THAT (not this class's
+    # own protocol_version) when deciding whether to keep the connection
+    # open for a following request. That's normally fine, but leaves this
+    # single-threaded server sitting in handle_one_request() waiting on the
+    # kept-alive socket instead of back at accept() — reproducibly wedges
+    # the entire server (even unrelated requests time out) the moment a
+    # second request follows a first one in the same page session, e.g.
+    # Convert clicked twice without a reload in between. Forcing
+    # close_connection here makes every request get its own fresh
+    # connection, matching how this tool was actually being used before
+    # anything relied on issuing back-to-back requests without a reload.
+    def handle_one_request(self):
+        super().handle_one_request()
+        self.close_connection = True
 
     def send_json(self, data, status=200):
         body = json.dumps(data).encode()

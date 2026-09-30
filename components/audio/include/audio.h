@@ -22,7 +22,6 @@ void audio_set_volume(int vol);
 void audio_set_enabled(bool enabled);   /* logs the change only; persistence to config.json
                                           * and the reboot that applies it are the caller's
                                           * responsibility (see web_server.c) */
-void audio_stop(void);
 
 /**
  * Inject a test signal on the DAC output for hardware diagnostics.
@@ -37,9 +36,6 @@ void audio_stop(void);
  *   mode "normal"  – restore idle (silence DMA loop); clears test mode
  */
 void audio_dac_test_set(const char *mode, int param_a, int param_b);
-
-/** Restore normal idle operation — alias for audio_dac_test_set("normal",0,0). */
-void audio_dac_test_stop(void);
 
 #ifdef __cplusplus
 }

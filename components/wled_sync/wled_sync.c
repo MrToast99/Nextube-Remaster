@@ -24,6 +24,7 @@ static wled_sync_state_t s_state      = {0};
 static bool              s_have_state = false;
 static SemaphoreHandle_t s_mutex      = NULL;
 static bool              s_started    = false;
+static bool              s_running    = false;   /* listener task actually created */
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
@@ -125,8 +126,15 @@ void wled_sync_start(void)
     s_mutex   = xSemaphoreCreateMutex();
     /* Core 0, priority 3 — below led_task (priority 4 on Core 1).
      * recvfrom() blocks so no CPU is wasted when no packets arrive. */
-    if (xTaskCreatePinnedToCore(wled_sync_task, "wled_sync", 3072, NULL, 3, NULL, 0) != pdPASS)
+    if (xTaskCreatePinnedToCore(wled_sync_task, "wled_sync", 3072, NULL, 3, NULL, 0) != pdPASS) {
         ESP_LOGE(TAG, "wled_sync_task creation failed");
-    else
+    } else {
+        s_running = true;
         ESP_LOGI(TAG, "WLED sync task started");
+    }
+}
+
+bool wled_sync_is_running(void)
+{
+    return s_running;
 }

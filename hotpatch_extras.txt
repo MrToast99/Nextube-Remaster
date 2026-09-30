@@ -19,3 +19,48 @@
 
 audio/click.wav
 audio/bell.wav
+
+# NixieOY refreshed artwork (new tube glyph art replacing the previous look) — same
+# filenames as before, so existing devices need these re-delivered via hotpatch to
+# actually see the change rather than keeping the old cached images.
+images/themes/NixieOY/AMPM/alarm1.jpg
+images/themes/NixieOY/AMPM/alarm2.jpg
+images/themes/NixieOY/AMPM/alarmoff.jpg
+images/themes/NixieOY/AMPM/am.jpg
+images/themes/NixieOY/AMPM/blank.jpg
+images/themes/NixieOY/AMPM/colon.jpg
+images/themes/NixieOY/AMPM/dot.jpg
+images/themes/NixieOY/AMPM/instagram.jpg
+images/themes/NixieOY/AMPM/k-sub.jpg
+images/themes/NixieOY/AMPM/mastodon.jpg
+images/themes/NixieOY/AMPM/m-sub.jpg
+images/themes/NixieOY/AMPM/pm.jpg
+images/themes/NixieOY/AMPM/sub.jpg
+images/themes/NixieOY/AMPM/tiktok.jpg
+images/themes/NixieOY/AMPM/youtube.jpg
+images/themes/NixieOY/MultiInfo/Humidity/degree.jpg
+images/themes/NixieOY/MultiInfo/Humidity/humidity.jpg
+images/themes/NixieOY/MultiInfo/Temperature/degreec.jpg
+images/themes/NixieOY/MultiInfo/Temperature/degreef.jpg
+images/themes/NixieOY/MultiInfo/Temperature/minus.jpg
+images/themes/NixieOY/MultiInfo/Weather/fewClouds.jpg
+images/themes/NixieOY/MultiInfo/Weather/fog.jpg
+images/themes/NixieOY/MultiInfo/Weather/overcastClouds.jpg
+images/themes/NixieOY/MultiInfo/Weather/rain.jpg
+images/themes/NixieOY/MultiInfo/Weather/sand.jpg
+images/themes/NixieOY/MultiInfo/Weather/snow.jpg
+images/themes/NixieOY/MultiInfo/Weather/squalls.jpg
+images/themes/NixieOY/MultiInfo/Weather/sun.jpg
+images/themes/NixieOY/MultiInfo/Weather/thunderstorm.jpg
+images/themes/NixieOY/MultiInfo/Weather/tornado.jpg
+images/themes/NixieOY/MultiInfo/Weather/volcanicAsh.jpg
+images/themes/NixieOY/Numbers/0.jpg
+images/themes/NixieOY/Numbers/1.jpg
+images/themes/NixieOY/Numbers/2.jpg
+images/themes/NixieOY/Numbers/3.jpg
+images/themes/NixieOY/Numbers/4.jpg
+images/themes/NixieOY/Numbers/5.jpg
+images/themes/NixieOY/Numbers/6.jpg
+images/themes/NixieOY/Numbers/7.jpg
+images/themes/NixieOY/Numbers/8.jpg
+images/themes/NixieOY/Numbers/9.jpg

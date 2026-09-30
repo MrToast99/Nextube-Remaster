@@ -9,5 +9,7 @@ idf_component_register(
         wifi_manager
         audio
         ntp_time
+        leds
+        wled_sync
         mqtt
 )

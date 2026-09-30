@@ -5,6 +5,7 @@
 #include "font_render.h"
 #include "esp_log.h"
 #include "esp_timer.h"          /* esp_timer_get_time — AP PIN phase clock */
+#include "esp_attr.h"           /* RTC_NOINIT_ATTR — scheduled burn-in day stamp */
 #include "esp_heap_caps.h"      /* PSRAM_MALLOC / heap_caps_malloc */
 #include "driver/spi_master.h"
 #include "driver/ledc.h"
@@ -274,7 +275,20 @@ static int8_t s_burnin_shift_x = 0;
  * sub-pixels at both voltage extremes.  Normal rendering runs for unmasked
  * tubes.  Set/cleared via display_set_burnin_mask().                          */
 static volatile uint8_t  s_burnin_mask     = 0;
-static volatile time_t   s_burnin_end_time = 0;  /* 0 = no timer; else epoch s */
+/* 0 = no timer; else esp_timer_get_time() µs deadline. Monotonic, not
+ * time(NULL): an RTC-seeded clock that NTP later steps would otherwise
+ * stretch or cut a timed session by the size of the step. Only ever
+ * read/written under s_timer_mutex (64-bit, not atomic on this core). */
+static int64_t           s_burnin_end_us   = 0;
+
+/* Scheduled burn-in: the slot — local day and hour,
+ * ((year * 1000 + day-of-year) * 24 + hour) — the last scheduled run started
+ * in. RTC_NOINIT so a software restart (OTA, crash, reboot) during that hour
+ * doesn't start a second run; RTC memory holds garbage after a power-on,
+ * hence the magic check. */
+#define BURNIN_SCHED_MAGIC 0xB5C4ED02u
+static RTC_NOINIT_ATTR uint32_t s_burnin_sched_magic;
+static RTC_NOINIT_ATTR int32_t  s_burnin_sched_slot;
 
 /* RGB565 color cycle — drives each sub-pixel high and low in turn. */
 static const uint16_t s_burnin_colors[] = {
@@ -286,6 +300,7 @@ static const uint16_t s_burnin_colors[] = {
 };
 #define BURNIN_COLOR_COUNT  ((int)(sizeof(s_burnin_colors)/sizeof(s_burnin_colors[0])))
 #define BURNIN_COLOR_SECS   30   /* seconds per color step in the cycle */
+#define BURNIN_REPAINT_US   2000000LL   /* safety repaint of an unchanged color, see the display task */
 
 /* SPI pixel transfer chunk height — 8 rows × 80 px × 2 B = 1280 B on the
  * stack (SRAM).  Used by display_show_image().
@@ -334,7 +349,7 @@ static struct {
  * tube in the mask, exercising each sub-pixel independently rather than as a
  * uniform color block.  State mirrors the color-cycle variables above. */
 static volatile uint8_t s_snow_mask     = 0;
-static volatile time_t  s_snow_end_time = 0;
+static int64_t          s_snow_end_us   = 0;   /* same convention as s_burnin_end_us */
 
 /* ── Panel profiles (VCOM + gamma) ──────────────────────────────────────────
  * ST7735 "Green Tab" (original panels) and ST7735S (replacements like
@@ -1220,12 +1235,63 @@ void display_set_burnin_mask(uint8_t mask, uint32_t duration_s)
     /* Take mutex so the two-field compound write is never observed as torn
      * by the display task's expiry check running on the other core. */
     if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-    s_burnin_mask     = mask & 0x3F;
-    s_burnin_end_time = (mask && duration_s) ? time(NULL) + (time_t)duration_s : 0;
+    s_burnin_mask   = mask & 0x3F;
+    s_burnin_end_us = (mask && duration_s)
+                    ? esp_timer_get_time() + (int64_t)duration_s * 1000000LL : 0;
     if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
     ESP_LOGI(TAG, "burn-in mask: 0x%02X  duration: %s",
              (unsigned)s_burnin_mask,
              duration_s ? "timed" : "manual");
+}
+
+bool display_start_burnin_if_idle(uint8_t mask, uint32_t duration_s)
+{
+    /* Check and set under one mutex hold so a scheduled session firing on
+     * the display task in between can't be overwritten. */
+    bool started = false;
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    if (!s_burnin_mask && !s_snow_mask && (mask & 0x3F)) {
+        s_burnin_mask   = mask & 0x3F;
+        s_burnin_end_us = duration_s
+                        ? esp_timer_get_time() + (int64_t)duration_s * 1000000LL : 0;
+        started = true;
+    }
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
+    if (started)
+        ESP_LOGI(TAG, "burn-in mask: 0x%02X  duration: %lus (start-if-idle)",
+                 (unsigned)(mask & 0x3F), (unsigned long)duration_s);
+    else
+        ESP_LOGI(TAG, "burn-in start-if-idle skipped: session already active");
+    return started;
+}
+
+bool display_burnin_status(uint32_t *remaining_s)
+{
+    bool active = false;
+    int64_t end_us = 0;
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    if (s_burnin_mask) { active = true; end_us = s_burnin_end_us; }
+    if (s_snow_mask) {
+        /* Either one untimed → the whole thing is untimed (0). */
+        end_us = (active && (end_us == 0 || s_snow_end_us == 0)) ? 0
+               : (s_snow_end_us > end_us ? s_snow_end_us : end_us);
+        active = true;
+    }
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
+    if (remaining_s) {
+        int64_t left = end_us ? end_us - esp_timer_get_time() : 0;
+        *remaining_s = left > 0 ? (uint32_t)((left + 999999) / 1000000) : 0;
+    }
+    return active;
+}
+
+void display_stop_burnin(void)
+{
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    s_burnin_mask = 0;  s_burnin_end_us = 0;
+    s_snow_mask   = 0;  s_snow_end_us   = 0;
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
+    ESP_LOGI(TAG, "burn-in/snow stopped by request");
 }
 
 /* Fill one tube with a single frame of random RGB565 pixels — the core of
@@ -1252,12 +1318,38 @@ static void display_fill_snow(int tube)
 void display_set_snow_mask(uint8_t mask, uint32_t duration_s)
 {
     if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-    s_snow_mask     = mask & 0x3F;
-    s_snow_end_time = (mask && duration_s) ? time(NULL) + (time_t)duration_s : 0;
+    s_snow_mask   = mask & 0x3F;
+    s_snow_end_us = (mask && duration_s)
+                  ? esp_timer_get_time() + (int64_t)duration_s * 1000000LL : 0;
     if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
     ESP_LOGI(TAG, "snow mask: 0x%02X  duration: %s",
              (unsigned)s_snow_mask,
              duration_s ? "timed" : "manual");
+}
+
+/* Snow's counterpart to display_start_burnin_if_idle() — same check-and-set
+ * under one mutex hold, so a scheduled snow session firing on the display
+ * task can't silently clobber a session (either mode) a web/HA request just
+ * started in between. display_set_snow_mask() itself stays unconditional,
+ * for the manual/HA-triggered "just start it" callers that don't want the
+ * idle check. */
+bool display_start_snow_if_idle(uint8_t mask, uint32_t duration_s)
+{
+    bool started = false;
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    if (!s_burnin_mask && !s_snow_mask && (mask & 0x3F)) {
+        s_snow_mask   = mask & 0x3F;
+        s_snow_end_us = duration_s
+                      ? esp_timer_get_time() + (int64_t)duration_s * 1000000LL : 0;
+        started = true;
+    }
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
+    if (started)
+        ESP_LOGI(TAG, "snow mask: 0x%02X  duration: %lus (start-if-idle)",
+                 (unsigned)(mask & 0x3F), (unsigned long)duration_s);
+    else
+        ESP_LOGI(TAG, "snow start-if-idle skipped: session already active");
+    return started;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1367,6 +1459,7 @@ static uint8_t *s_flip_frame_buf = NULL;   /* FLIP_FRAME_BYTES bytes (PSRAM)   *
  * ht_sample_theme_color() further down in this file. */
 static char     s_theme_color_memo_theme[32];
 static uint16_t s_theme_color_memo_color;
+static bool     s_theme_color_memo_light;   /* light background → a dark "ink" color */
 
 /* Evict all cache entries (called on theme change so stale paths age out). */
 static void img_cache_flush(void)
@@ -1409,6 +1502,12 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
      * cx_load_text_bg's blank.jpg, colon_box_compute, flip_prime_blank, …)
      * take their NULL/black fallback without flooding the log. */
     if (strstr(path, "/themes/DotMatrix/")) {
+        if (w_out) *w_out = 0;
+        if (h_out) *h_out = 0;
+        return NULL;
+    }
+    /* "Segments" ships no JPEG assets either — same silent-absent treatment. */
+    if (strstr(path, "/themes/Segments/")) {
         if (w_out) *w_out = 0;
         if (h_out) *h_out = 0;
         return NULL;
@@ -1505,6 +1604,9 @@ static void wl_render_asset(int tube, const char *path);
 /* Defined later (near wl_render_asset): the "DotMatrix" theme's analogous
  * procedural asset dispatcher — same idea, different (dot-matrix) glyphs. */
 static void dm_render_asset(int tube, const char *path);
+/* Defined later (with the Segments font block): the "Segments" theme's
+ * analogous procedural asset dispatcher — 16-segment glyphs instead. */
+static void seg_render_asset(int tube, const char *path);
 /* Defined later (with the DotMatrix font block): auto-sizing multi-char
  * dot-matrix label, used by wl_text()'s dm branch. */
 static void dm_draw_text(uint8_t *fb, int cx, int cy, const char *str,
@@ -1590,6 +1692,13 @@ void display_show_image(int tube, const char *path)
     if (strstr(path, "/themes/DotMatrix/")) {
         if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
         dm_render_asset(tube, path);
+        return;
+    }
+    /* "Segments" theme — same idea again: no on-disk assets, every requested
+     * image is a procedural 16-segment glyph instead. */
+    if (strstr(path, "/themes/Segments/")) {
+        if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
+        seg_render_asset(tube, path);
         return;
     }
     /* Skip any tube that is currently held by the color-cycle or snow burn-in.
@@ -2110,6 +2219,19 @@ void display_show_ampm(int tube, const char *name, const char *theme)
         display_show_image(tube, p);
         return;
     }
+    /* "Segments" — same reasoning as the DotMatrix branch just above. */
+    if (strstr(p, "/themes/Segments/")) {
+        if (!strcmp(name, "youtube")   || !strcmp(name, "instagram") ||
+            !strcmp(name, "tiktok")    || !strcmp(name, "mastodon")  ||
+            !strcmp(name, "wait")) {
+            if (sys_icon_has_png(name))
+                snprintf(p, sizeof(p), "/images/system/%s.png", name);
+            else
+                snprintf(p, sizeof(p), "/images/system/%s.jpg", name);
+        }
+        display_show_image(tube, p);
+        return;
+    }
     /* Prefer PNG over JPG when the theme supplies one. */
     if (theme_ampm_has_png(theme, name)) {
         char png_p[256];
@@ -2199,9 +2321,19 @@ static void colon_box_compute(const char *theme)
  * tube.  Falls back to a full display_show_ampm() if the box is unavailable.
  * Applies the same per-tube brightness/gamma as display_show_digit so the dots
  * match the digit color.  The non-box background is already on-screen from the
- * last full render (identical in both images), so it needs no repaint. */
+ * last full render (identical in both images), so it needs no repaint.
+ *
+ * Unlike display_show_image() (whose callers this bypasses on the fast diff-box
+ * path below), this writes straight to the tube's SPI framebuffer, so it needs
+ * its own burn-in/snow guard — without it, a classic asset theme's blinking
+ * colon overwrites tube 2's color-cycle fill every second during a running
+ * Anti Burn-in / LCD Refresh session (scheduled, manual or Quick Refresh).
+ * DotMatrix/Segments/WeatherLive never hit the fast path (no JPEG colon
+ * asset to diff), so they always fall back to the already-guarded
+ * display_show_ampm() below regardless. */
 static void display_show_colon_blink(int tube, const char *theme, bool show_colon)
 {
+    if ((s_burnin_mask | s_snow_mask) & (1u << tube)) return;
     colon_box_compute(theme);
     if (s_colon_box_state != 1) {
         display_show_ampm(tube, show_colon ? "colon" : "blank", theme);
@@ -2267,6 +2399,12 @@ static bool s_wl_scene_valid; /* tentative; defined with initialiser below */
 
 /* Forward declaration: defined in the H/T helpers section below render_ap_pin. */
 static uint16_t ht_sample_theme_color(const char *theme);
+/* Forward declaration: defined with the rest of the WeatherLive helpers below —
+ * needed early by ht_sample_theme_color()'s "Segments" shortcut. */
+static uint16_t wl_rgb565(int r, int g, int b);
+/* Forward declaration: defined with the "Segments" theme's other static state
+ * below — needed early by ht_sample_theme_color()'s "Segments" shortcut. */
+static uint8_t s_seg_on_r, s_seg_on_g, s_seg_on_b;
 
 /* ── S1 — AP PIN renderer ────────────────────────────────────────────
  * Called from the display task whenever the setup AP is broadcasting and
@@ -2509,15 +2647,32 @@ static void render_date(const nextube_config_t *cfg, const struct tm *t)
  * Memoised by theme name — runs once per theme switch, not every render tick. */
 /* Themes whose mid-tone background fools the bright/dark classifier.
  * Add entries here instead of fighting the heuristic.  Values are RGB565. */
-static const struct { const char *theme; uint16_t color; } s_fg_overrides[] = {
+static const struct { const char *theme; uint16_t color; bool light; } s_fg_overrides[] = {
     /* tan bg lum≈87 < threshold 93 → misclassified as dark; JPEG ringing picks white */
-    { "RetroPaper", 0x30E2 },   /* dark ink brown #321C11 from Numbers/1.jpg */
+    { "RetroPaper", 0x30E2, true },   /* dark ink brown #321C11 from Numbers/1.jpg */
 };
 
 static uint16_t ht_sample_theme_color(const char *theme)
 {
     if (theme && theme[0] && strcmp(theme, s_theme_color_memo_theme) == 0)
         return s_theme_color_memo_color;
+
+    /* "Segments" has no Numbers/1.jpg to sample (no on-disk assets at all) —
+     * use its own configured on-color directly instead of falling through
+     * to the JPEG-sampling path below, which would return the "not cached
+     * yet" 0xFFFF fallback and retry every single call forever (there is no
+     * image that will ever arrive to cache). Also populates the memo, like
+     * the JPEG path does (background is always black, so never "light") —
+     * without this, ht_theme_is_light("Segments") always compared against a
+     * stale memo_theme and returned false by accident, not by computing it. */
+    if (theme && !strcmp(theme, "Segments")) {
+        uint16_t color = wl_rgb565(s_seg_on_r, s_seg_on_g, s_seg_on_b);
+        strncpy(s_theme_color_memo_theme, theme, sizeof(s_theme_color_memo_theme) - 1);
+        s_theme_color_memo_theme[sizeof(s_theme_color_memo_theme) - 1] = '\0';
+        s_theme_color_memo_color = color;
+        s_theme_color_memo_light = false;
+        return color;
+    }
 
     for (size_t i = 0; i < sizeof(s_fg_overrides) / sizeof(s_fg_overrides[0]); i++) {
         if (theme && strcmp(theme, s_fg_overrides[i].theme) == 0)
@@ -2582,52 +2737,26 @@ static uint16_t ht_sample_theme_color(const char *theme)
             sizeof(s_theme_color_memo_theme) - 1);
     s_theme_color_memo_theme[sizeof(s_theme_color_memo_theme) - 1] = '\0';
     s_theme_color_memo_color = color;
+    s_theme_color_memo_light = bright_bg;
     return color;
 }
 
-/* Convert the U8g2 1-bpp tile buffer to RGB565 and push 64 rows to tube 5,
- * centred within the physical 80-row half (8 px top margin, 8 px bottom margin).
- *   dst_y  : 0 for top half, LCD_HEIGHT/2 (80) for bottom half
- *   fg     : RGB565 foreground color; background is always black (0x0000)   */
-static void ht_blit(int tube, const uint8_t *tile_buf, int dst_y, uint16_t fg)
+/* True when the theme's background is light, i.e. ht_sample_theme_color()
+ * picks a dark "ink" color (not the same as a dark color: RedDigits' red
+ * scores low on luminance but sits on a black background). False until
+ * Numbers/1 is cached. */
+static bool ht_theme_is_light(const char *theme)
 {
-    /* Apply per-tube brightness+gamma to fg once so the inner loop is
-     * branch-free (bg is always 0x0000; brightness/gamma of 0 stays 0).    */
-    fg = wl_apply_px(fg, tube, s_gamma_lut_active[tube]);
-    uint8_t fg_hi = (uint8_t)(fg >> 8);
-    uint8_t fg_lo = (uint8_t)(fg & 0xFF);
-
-    /* Centre the 64-row buffer in the 80-row physical half: 8 px top margin. */
-    const int BUF_H = 64;
-    const int BUF_W = 128;
-    int y_start = dst_y + (LCD_HEIGHT / 2 - BUF_H) / 2;   /* dst_y + 8 */
-
-    select_tube(tube);
-    uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
-                            + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
-    uint8_t oy = (uint8_t)((int)LCD_OFFSET_Y + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube] + y_start);
-    open_lcd_window(ox, oy, (uint8_t)LCD_WIDTH, (uint8_t)BUF_H);
-
-    /* U8g2 tile layout: byte[tile_row * BUF_W + col] stores 8 vertical pixel
-     * rows; bit 0 is the topmost row of that tile.  We only read the leftmost
-     * LCD_WIDTH (80) columns — the extra 48 cols of the 128-wide buffer are
-     * ignored (off-screen on the tube).                                       */
-    uint8_t line[LCD_WIDTH * 2];
-    for (int row = 0; row < BUF_H; row++) {
-        int tile_row = row / 8;
-        int bit      = row % 8;
-        for (int col = 0; col < LCD_WIDTH; col++) {
-            bool lit = (tile_buf[tile_row * BUF_W + col] >> bit) & 1;
-            line[col * 2]     = lit ? fg_hi : 0x00;
-            line[col * 2 + 1] = lit ? fg_lo : 0x00;
-        }
-        spi_tx_sync(line, sizeof(line));
-    }
-    deselect_all();
+    for (size_t i = 0; i < sizeof(s_fg_overrides) / sizeof(s_fg_overrides[0]); i++)
+        if (theme && strcmp(theme, s_fg_overrides[i].theme) == 0)
+            return s_fg_overrides[i].light;
+    ht_sample_theme_color(theme);   /* memoises s_theme_color_memo_light */
+    return theme && theme[0] && strcmp(theme, s_theme_color_memo_theme) == 0 &&
+           s_theme_color_memo_light;
 }
 
-/* Like ht_blit() but blits exactly `rows` rows of the U8g2 1-bpp buffer to
- * tube at absolute tube row y_tube, without adding any centring margin.
+/* Blits exactly `rows` rows of the U8g2 1-bpp buffer to tube at absolute
+ * tube row y_tube, without adding any centring margin.
  * Used by the label and region-text helpers that need arbitrary y positions.
  *
  * bg_rgb565: optional decoded RGB565 background image (LCD_WIDTH × LCD_HEIGHT,
@@ -2729,7 +2858,7 @@ static void ht_draw_str_at(int tube, const char *str, int y_tube, int height,
 
     int ascent  = (int)u8g2_GetAscent(&s_u8g2);
     int descent = (int)u8g2_GetDescent(&s_u8g2);   /* negative */
-    /* Vertical centre within blit_h (same formula as ht_draw_str). */
+    /* Vertical centre within blit_h. */
     int y = (blit_h + ascent + descent) / 2;
     if (y < ascent) y = ascent;
     if (y > BUF_H)  y = BUF_H;
@@ -2836,106 +2965,12 @@ static const char *inout_label(const char *lang, bool indoor)
     return indoor ? "In" : "Out";
 }
 
-/* Render a UTF-8 string into the U8g2 buffer using the 28-px
- * logisoso font, centred horizontally (within LCD_WIDTH=80) and vertically
- * (within the 64-row buffer), then blit to tube 5 at the given half offset.  */
-static void ht_draw_str(const char *str, int dst_y, uint16_t fg)
-{
-    u8g2_ClearBuffer(&s_u8g2);
-    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso28_tf);
-
-    /* Horizontal centre: measure with the UTF-8-aware width function so that
-     * multi-byte characters (° = 0xC2 0xB0) are counted as one glyph.       */
-    u8g2_uint_t str_w = u8g2_GetUTF8Width(&s_u8g2, str);
-    int x = ((int)LCD_WIDTH - (int)str_w) / 2;
-    if (x < 0) x = 0;
-
-    /* Vertical centre: place the baseline so the glyph span [ascent..descent]
-     * is centred in the 64-row buffer.
-     *   baseline = (BUF_H + ascent + descent) / 2
-     * For logisoso28: ascent≈28, descent≈-7 → baseline ≈ (64+28-7)/2 = 42.
-     * Glyph span: top≈14, bottom≈49, centre≈31.5 ≈ 32 = 64/2.              */
-    const int BUF_H = 64;
-    int ascent  = (int)u8g2_GetAscent(&s_u8g2);
-    int descent = (int)u8g2_GetDescent(&s_u8g2);   /* negative value */
-    int y = (BUF_H + ascent + descent) / 2;
-    if (y < ascent) y = ascent;   /* clamp: don't draw above buffer top */
-    if (y > BUF_H)  y = BUF_H;   /* clamp: don't draw below buffer bottom */
-
-    u8g2_DrawUTF8(&s_u8g2, (u8g2_uint_t)x, (u8g2_uint_t)y, str);
-    /* u8g2_SendBuffer is intentionally omitted: byte_cb is a no-op.
-     * Read the rendered pixels directly from U8g2's internal buffer. */
-    ht_blit(5, u8g2_GetBufferPtr(&s_u8g2), dst_y, fg);
-}
 
 /* ── NOAA solar calculator ───────────────────────────────────────────────────
  * Computes local sunrise and sunset as minutes past midnight (0–1439).
  * lat_deg / lon_deg: WGS-84 decimal degrees (N/E positive).
  * t: local struct tm for the desired date; uses tm_year/mon/mday/gmtoff.
  * Returns -1 for both outputs on polar day/night (sun never crosses horizon). */
-/* ── ht_draw_suntime ─────────────────────────────────────────────────────────
- * Renders one half of the Sunrise/Sunset panel onto tube 5 using U8g2 primitives.
- *
- * Layout (within the 128×64 U8g2 frame buffer, LCD_WIDTH=80 columns used):
- *   Rows  0–31  : sun icon — semicircle (radius 9, centred at x=40, y=16)
- *                 above a horizon line, three rays, and a direction caret:
- *                   rising=true  → ^ caret below horizon (sunrise)
- *                   rising=false → v caret below horizon (sunset)
- *   Rows 30–55  : "HH:MM" time string — logisoso20_tf, baseline at y=50,
- *                 centred in 80-px width.
- *
- * y_tube: absolute tube row for the top of the blit (56 rows written).
- * fg: RGB565 foreground color (from ht_sample_theme_color).
- * bg: optional decoded RGB565 background image (LCD_WIDTH × LCD_HEIGHT);
- *     NULL = solid black background for "off" pixels.                          */
-static void ht_draw_suntime(int tube, const char *timestr, bool rising,
-                             int y_tube, uint16_t fg, const uint8_t *bg)
-{
-    u8g2_ClearBuffer(&s_u8g2);
-
-    /* ── Sun icon — centred at (40, 16) ─────────────────────────────── */
-    const int cx = 40, cy = 16, r = 9;
-
-    /* Filled upper semicircle */
-    u8g2_DrawDisc(&s_u8g2, (u8g2_uint_t)cx, (u8g2_uint_t)cy, (u8g2_uint_t)r,
-                  U8G2_DRAW_UPPER_RIGHT | U8G2_DRAW_UPPER_LEFT);
-    /* Horizon line */
-    u8g2_DrawHLine(&s_u8g2, (u8g2_uint_t)(cx - r - 3), (u8g2_uint_t)cy,
-                   (u8g2_uint_t)((r + 3) * 2 + 1));
-    /* Three rays above the arc */
-    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)cx,       (u8g2_uint_t)(cy-r-2),
-                            (u8g2_uint_t)cx,       (u8g2_uint_t)(cy-r-5));  /* straight up  */
-    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-r-1), (u8g2_uint_t)(cy-2),
-                            (u8g2_uint_t)(cx-r-4), (u8g2_uint_t)(cy-5));    /* upper-left   */
-    u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+r+1), (u8g2_uint_t)(cy-2),
-                            (u8g2_uint_t)(cx+r+4), (u8g2_uint_t)(cy-5));    /* upper-right  */
-    /* Direction caret just below the horizon */
-    if (rising) {
-        /* ^ pointing up = sunrise */
-        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-4), (u8g2_uint_t)(cy+5),
-                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+2));
-        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+4), (u8g2_uint_t)(cy+5),
-                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+2));
-    } else {
-        /* v pointing down = sunset */
-        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx-4), (u8g2_uint_t)(cy+2),
-                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+5));
-        u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+4), (u8g2_uint_t)(cy+2),
-                                (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+5));
-    }
-
-    /* ── Time string — logisoso20, centred in 80 px, baseline at row 50 ── */
-    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso20_tf);
-    u8g2_uint_t tw = u8g2_GetStrWidth(&s_u8g2, timestr);
-    int tx = ((int)LCD_WIDTH - (int)tw) / 2;
-    if (tx < 0) tx = 0;
-    u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)tx, 50, timestr);
-
-    /* Blit 56 rows (0-55): captures icon (top ~y=2) and text (baseline y=50,
-     * descent to y=54).  ht_blit_at clamps if y_tube+56 > LCD_HEIGHT.        */
-    ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), 56, y_tube, fg, bg);
-}
-
 /* ── cx_stamp_update_indicator ───────────────────────────────────────────────
  * Panels rendered via ht_blit_at (weekdate, H/T, sunrise/sunset) bypass
  * display_show_digit(), so they never trigger the 4-row red stripe that
@@ -3001,6 +3036,13 @@ static void cx_stamp_update_indicator(int tube)
  * framebuffer and the temperature-panel drawing, reused here so the asset-theme
  * Outdoor Temperature panel renders identically to the WeatherLive one. */
 static uint8_t *wl_fb(void);
+static void wl_text(uint8_t *fb, int cx, int by, const uint8_t *font,
+                    const char *str, int r, int g, int b, uint16_t ft_px);
+static void wl_draw_temp_scaled(uint8_t *fb, int temp_disp, int zone_cy,
+                                 int r, int g, int b,
+                                 const int ft_px[4], const int u8_cap[4]);
+static void wl_suntime(uint8_t *fb, int top, bool rising, const char *timestr,
+                       int r, int g, int b);
 static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
                           int dmin_disp, int dmax_disp);
 static void wl_humidity_panel(uint8_t *fb, int hum);
@@ -3016,6 +3058,10 @@ static uint8_t s_wl_glyph_r = 255, s_wl_glyph_g = 255, s_wl_glyph_b = 255;
 static uint8_t s_wl_font_r  = 255, s_wl_font_g  = 255, s_wl_font_b  = 255;
 static bool    s_wl_shadow   = true;
 static uint8_t s_wl_shadow_r = 0,  s_wl_shadow_g = 0,  s_wl_shadow_b = 0;
+/* "Ink" panels: set by render_cx_panel() on a light-background image theme
+ * (e.g. RetroPaper), where text is dark ink on paper — wl_temp_panel() then
+ * draws its normally-white temperature and pale lo/hi labels in s_wl_font. */
+static bool    s_wl_ink      = false;
 /* Shadow blur radius (1..4), independently of shadow color. Threaded into
  * every shadow-drawing path (wl_text's u8g2 blur, fr_draw_text/fr_draw_
  * glyph_centered's shared fr_blit) as `shadow_size`; 2 reproduces the fixed
@@ -3051,6 +3097,10 @@ static uint8_t s_dm_off_r = 25, s_dm_off_g = 25, s_dm_off_b = 25;
 /* True only when cfg->theme == "DotMatrix"; set at the top of render_cx_panel()
  * and gates wl_text()'s dm rendering branch (see wl_text()). */
 static bool s_wl_dm_active = false;
+/* "Segments" theme's configured on/off colors — same refresh convention as
+ * s_dm_on_r/s_dm_off_r above. */
+static uint8_t s_seg_on_r = 255, s_seg_on_g = 255, s_seg_on_b = 255;
+static uint8_t s_seg_off_r = 25, s_seg_off_g = 25, s_seg_off_b = 25;
 
 /* DotMatrix never wants soft-shadow bloom — every cell is already a hard-
  * edged on/off square, so a blurred drop shadow behind it makes no visual
@@ -3225,6 +3275,35 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
      * fork instead, since they don't go through wl_text() at all. */
     s_wl_dm_active = !strcmp(cfg->theme, "DotMatrix");
 
+    /* Image themes: the WeatherLive-derived panels below (kinds 3/6/7/8/9)
+     * otherwise inherit whatever text shadow/font state the WeatherLive or
+     * Custom face last left behind. Pin it to the theme instead — white
+     * text with the dark shadow over a dark theme, or, over a light one
+     * (dark sampled "ink" color, e.g. RetroPaper), ink text with no shadow:
+     * a dark halo around dark ink on paper only smudges it. Restored on
+     * exit so WeatherLive's own state is untouched. */
+    const bool    sv_shadow = s_wl_shadow, sv_ink = s_wl_ink;
+    const uint8_t sv_sr = s_wl_shadow_r, sv_sg = s_wl_shadow_g, sv_sb = s_wl_shadow_b;
+    const uint8_t sv_ss = s_wl_shadow_size;
+    const uint8_t sv_fr = s_wl_font_r, sv_fg = s_wl_font_g, sv_fb = s_wl_font_b;
+    if (!(cx_is_wl_sky(cfg) && s_wl_scene_valid)) {
+        int ir, ig, ib;
+        cx_fg_rgb8(cfg, &ir, &ig, &ib);
+        s_wl_ink = ht_theme_is_light(cfg->theme);
+        s_wl_shadow = !s_wl_ink;
+        s_wl_shadow_r = s_wl_shadow_g = s_wl_shadow_b = 0;
+        s_wl_shadow_size = 2;
+        /* "Segments" (like DotMatrix above) has its own real, user-configured
+         * accent color — cx_fg_rgb8() already resolved ir/ig/ib to it. The
+         * ink/white choice below is a light-vs-dark-background heuristic
+         * that always picks white for a dark background; not meaningful for
+         * a theme with its own color, so use it outright instead of white. */
+        bool is_seg = !strcmp(cfg->theme, "Segments");
+        s_wl_font_r = (s_wl_ink || is_seg) ? (uint8_t)ir : 255;
+        s_wl_font_g = (s_wl_ink || is_seg) ? (uint8_t)ig : 255;
+        s_wl_font_b = (s_wl_ink || is_seg) ? (uint8_t)ib : 255;
+    }
+
     /* Resolve panel_id → concrete panel kind by walking the caller's enabled[].
      * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor temp+Hi/Lo,
      * 4=sunrise, 5=externally-pushed image, 6=outdoor humidity, 7=wind,
@@ -3321,15 +3400,38 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
             dm_draw_text_p_on(fb, 40, 132, line3, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
             display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
         } else {
-            const uint8_t *bg = cx_load_text_bg(lcd_tube, cfg);
-            if (!bg && kind != *last_kind) display_fill(lcd_tube, 0x0000);
-            uint16_t fg = (cx_is_wl_sky(cfg) && s_wl_scene_valid)
-                          ? wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b)
-                          : ht_sample_theme_color(cfg->theme);
+            /* wl_text() — the SAME TTF-aware text drawing already used below
+             * by kinds 3/6/7/8/9, and by wl_draw_panel()'s own WLP_WEEKDATE
+             * (the WeatherLive-sky version of this exact panel) — instead of
+             * ht_draw_str_at(), which always drew the fixed u8g2 bitmap font
+             * (logisoso28) regardless of cfg->custom_font.
+             *
+             * Color: cx_fg_rgb8(), freshly resolved here — NOT s_wl_font_r/
+             * g/b, which the top of this function pins to white for every
+             * asset theme except a light "ink" one or Segments (the
+             * white/shadow convention kinds 3/6/7/8/9 want, matching their
+             * WeatherLive sky counterparts). ht_draw_str_at() never had that
+             * forcing — every asset theme's Day & Date always showed the
+             * theme's own sampled accent color (e.g. Nixie's amber glow),
+             * same as cx_fg_rgb8() resolves via ht_sample_theme_color(),
+             * which already carries its own Segments special case. Using
+             * s_wl_font_r/g/b here silently turned that color white on
+             * every non-Segments dark theme. Same fg_r/g/b pattern as kinds
+             * 7 (wind) and 8 (AQI) below. */
+            int fg_r, fg_g, fg_b;
+            cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
 
-            ht_draw_str_at(lcd_tube, day,   2,  50, u8g2_font_logisoso28_tf, fg, bg);
-            ht_draw_str_at(lcd_tube, line2, 55, 50, u8g2_font_logisoso28_tf, fg, bg);
-            ht_draw_str_at(lcd_tube, line3, 108, 50, u8g2_font_logisoso28_tf, fg, bg);
+            uint8_t *fb = wl_fb();
+            if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+            cx_seed_framebuf(fb, lcd_tube, cfg);
+
+            int by1, by2, by3;
+            if (s_ft_face_id >= 0) { by1 =  54; by2 = 108; by3 = 162; }
+            else                   { by1 =  40; by2 =  94; by3 = 148; }
+            wl_text(fb, 40, by1, u8g2_font_logisoso28_tf, day,   fg_r, fg_g, fg_b, 40);
+            wl_text(fb, 40, by2, u8g2_font_logisoso28_tf, line2, fg_r, fg_g, fg_b, 40);
+            wl_text(fb, 40, by3, u8g2_font_logisoso28_tf, line3, fg_r, fg_g, fg_b, 40);
+            display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
         }
 
     } else if (kind == 2) {
@@ -3353,8 +3455,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         int hum = (int)(s.humidity + 0.5f);
         if (hum > 99) hum = 99;
         if (hum <  0) hum = 0;
-        char tbuf[16], hbuf[8];
-        snprintf(tbuf, sizeof(tbuf), "%d\xc2\xb0%s", temp, use_f ? "F" : "C");
+        char hbuf[8];
         snprintf(hbuf, sizeof(hbuf), "%d%%", hum);
 
         if (s_wl_dm_active) {
@@ -3379,15 +3480,31 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
             dm_draw_text_p_on(fb, 40, 133, hbuf, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
             display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
         } else {
-            const uint8_t *bg = cx_load_text_bg(lcd_tube, cfg);
-            if (!bg) display_fill(lcd_tube, 0x0000);
-            uint16_t fg = (cx_is_wl_sky(cfg) && s_wl_scene_valid)
-                          ? wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b)
-                          : ht_sample_theme_color(cfg->theme);
+            /* wl_text()/wl_draw_temp_scaled() — the SAME TTF-aware drawing
+             * wl_draw_panel()'s WLP_INDOOR_HT uses, and the same freshly
+             * resolved cx_fg_rgb8() color the WEEKDATE/wind/AQI panels use —
+             * instead of ht_draw_label()/ht_draw_str_at(), the fixed u8g2
+             * bitmap path, which ignored cfg->custom_font entirely. Drops
+             * the "°F"/"°C" unit letter this panel used to show (just the
+             * number + degree mark now), matching how the outdoor combined
+             * H/T panel (kind 9) already renders — one convention instead
+             * of two. */
+            uint8_t *fb = wl_fb();
+            if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+            cx_seed_framebuf(fb, lcd_tube, cfg);
 
-            ht_draw_label(lcd_tube, inout_label(cfg->language, true), 18, fg, bg);
-            ht_draw_str_at(lcd_tube, tbuf, HT_LABEL_H + 18, 56, u8g2_font_logisoso28_tf, fg, bg);
-            ht_draw_str_at(lcd_tube, hbuf, HALF + 18, 64, u8g2_font_logisoso28_tf, fg, bg);
+            int fg_r, fg_g, fg_b;
+            cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
+
+            wl_text(fb, 40, 28, u8g2_font_logisoso20_tf,
+                    inout_label(cfg->language, true), fg_r, fg_g, fg_b, 20);
+            static const int s_ht_ft_px[4]  = { 55, 55, 36, 28 };
+            static const int s_ht_u8_cap[4] = { 42, 42, 28, 28 };
+            wl_draw_temp_scaled(fb, temp, 64, fg_r, fg_g, fg_b, s_ht_ft_px, s_ht_u8_cap);
+            int by_h = (s_ft_face_id >= 0) ? 129 + 7 * 32 / 10 : 129 + 14;
+            wl_text(fb, 40, by_h, u8g2_font_logisoso28_tf, hbuf, fg_r, fg_g, fg_b, 32);
+
+            display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
         }
 
     } else if (kind == 3) {
@@ -3461,15 +3578,23 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
             dm_draw_text_on(fb, 40, 148, set_str,  s_dm_on_r, s_dm_on_g, s_dm_on_b);
             display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
         } else {
-            const uint8_t *bg = cx_load_text_bg(lcd_tube, cfg);
-            if (!bg) display_fill(lcd_tube, 0x0000);
-            uint16_t fg = (cx_is_wl_sky(cfg) && s_wl_scene_valid)
-                          ? wl_rgb565(s_wl_font_r, s_wl_font_g, s_wl_font_b)
-                          : ht_sample_theme_color(cfg->theme);
+            /* wl_suntime() — icon + wl_text()-drawn time, the same TTF-aware
+             * function wl_draw_panel()'s WLP_SUNRISE uses — instead of
+             * ht_draw_suntime(), which baked the time string into a fixed
+             * u8g2 bitmap alongside the icon with no cfg->custom_font
+             * support at all. Same fresh cx_fg_rgb8() color kinds 1/2/7/8
+             * use. Top half: sunrise (fb row 14), bottom half: sunset (fb
+             * row HALF+14) — same rows ht_draw_suntime() used. */
+            uint8_t *fb = wl_fb();
+            if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+            cx_seed_framebuf(fb, lcd_tube, cfg);
 
-            /* Top half: sunrise (y_tube=14), bottom half: sunset (y_tube=HALF+14) */
-            ht_draw_suntime(lcd_tube, rise_str, /*rising=*/true,  14,        fg, bg);
-            ht_draw_suntime(lcd_tube, set_str,  /*rising=*/false, HALF + 14, fg, bg);
+            int fg_r, fg_g, fg_b;
+            cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
+
+            wl_suntime(fb, 14,        /*rising=*/true,  rise_str, fg_r, fg_g, fg_b);
+            wl_suntime(fb, HALF + 14, /*rising=*/false, set_str,  fg_r, fg_g, fg_b);
+            display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
         }
 
     } else if (kind == 5) {
@@ -3581,6 +3706,11 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
     *last_kind = (int8_t)kind;   /* record which panel was just drawn */
 
 cx_tube6_done:
+    s_wl_shadow = sv_shadow;  s_wl_ink = sv_ink;
+    s_wl_shadow_r = sv_sr;  s_wl_shadow_g = sv_sg;  s_wl_shadow_b = sv_sb;
+    s_wl_shadow_size = sv_ss;
+    s_wl_font_r = sv_fr;  s_wl_font_g = sv_fg;  s_wl_font_b = sv_fb;
+
     /* Re-stamp the update indicator after every panel render.
      * ht_blit_at paths overwrite the bottom rows; display_fill misses it
      * entirely.  cx_stamp_update_indicator() is a no-op when inactive. */
@@ -3748,17 +3878,37 @@ static void wl_cloud_lump(uint8_t *fb, int cx, int cy, int R,
  *           untouched since callers derive those independently.
  * `out_sunrise`/`out_sunset` : resolved sunrise/sunset (minutes-of-day),
  *           optional — pass NULL if the caller doesn't need them back. */
-static void wl_build_scene_core(const struct tm *t, int mins, wl_scene_t *out,
-                                 int *out_sunrise, int *out_sunset)
+/* Geocoded sunrise/sunset (minutes-of-day) for date `t`, with the 6:00/19:00
+ * fallback until a location is known or on polar day/night. `lat` is 0 when
+ * there's no location. Shared by the scene builder and
+ * display_wl_sun_events() so the web UI preview can never disagree with it. */
+static void wl_sun_events(const struct tm *t, int *sunrise, int *sunset, float *lat_out)
 {
     int SUNRISE = 360, SUNSET = 1140;
     float lat = 0.0f, lon = 0.0f;
-    bool  have_loc = weather_get_location(&lat, &lon);
-    if (have_loc) {
+    if (weather_get_location(&lat, &lon)) {
         int rise = -1, set = -1;
         sun_calc_solar(lat, lon, t, &rise, &set);
         if (rise >= 0 && set >= 0 && set > rise) { SUNRISE = rise; SUNSET = set; }
     }
+    *sunrise = SUNRISE; *sunset = SUNSET; *lat_out = lat;
+}
+
+void display_wl_sun_events(int *sunrise, int *sunset, bool *south)
+{
+    struct tm t;
+    ntp_get_local(&t);
+    float lat;
+    wl_sun_events(&t, sunrise, sunset, &lat);
+    *south = lat < 0.0f;
+}
+
+static void wl_build_scene_core(const struct tm *t, int mins, wl_scene_t *out,
+                                 int *out_sunrise, int *out_sunset)
+{
+    int SUNRISE, SUNSET;
+    float lat;
+    wl_sun_events(t, &SUNRISE, &SUNSET, &lat);
 
     int top[3], hor[3];
     wl_sky_palette(mins, SUNRISE, SUNSET, top, hor);
@@ -5371,9 +5521,17 @@ static void wl_render_colon_tube(const struct tm *t, const wl_scene_t *sc)
  * region from the PSRAM-cached ON or OFF frame — same pixel-budget as
  * display_show_colon_blink() but uses the WL/TTF-rendered glyph instead of
  * a theme JPEG.  Falls back to wl_draw_tube() when the cache is not yet
- * populated.                                                                  */
+ * populated.
+ *
+ * Needs its own burn-in/snow guard for the same reason as
+ * display_show_colon_blink(): this writes straight to tube 2's SPI window,
+ * bypassing wl_draw_tube()'s guard below (which only covers the
+ * cache-not-yet-populated fallback), so without it a running Anti Burn-in /
+ * LCD Refresh session would get its tube 2 fill overwritten by the colon
+ * every second on a static custom/WeatherLive face. */
 static void wl_show_colon_blink(bool show_colon)
 {
+    if ((s_burnin_mask | s_snow_mask) & (1u << 2)) return;
     if (!s_wl_colon_cache_valid) {
         if (s_wl_scene_valid)
             wl_draw_tube(2, show_colon ? ':' : ' ', &s_wl_last_scene);
@@ -5577,6 +5735,19 @@ static void wl_draw_tube(int tube, char ch, const wl_scene_t *sc)
     display_show_digit_dirty(tube, fb, LCD_WIDTH, LCD_HEIGHT);
 }
 
+/* Extracts the filename stem (no directory, no extension) from an asset
+ * path, e.g. "/images/themes/Foo/Numbers/5.jpg" -> "5". Shared by the three
+ * procedural theme dispatchers below (wl_render_asset/dm_render_asset/
+ * seg_render_asset), which each used to inline this identically. */
+static void asset_basename(const char *path, char *name, size_t name_sz)
+{
+    const char *slash = strrchr(path, '/');
+    const char *bp    = slash ? slash + 1 : path;       /* e.g. "5.jpg" */
+    size_t i = 0;
+    for (; bp[i] && bp[i] != '.' && i < name_sz - 1; i++) name[i] = bp[i];
+    name[i] = '\0';
+}
+
 /* WeatherLive has no JPEG theme assets, so when a non-clock mode (weather,
  * follower counts, …) asks to show a theme image, we render
  * the requested asset procedurally as a glyph/number over a solid black
@@ -5586,12 +5757,8 @@ static void wl_draw_tube(int tube, char ch, const wl_scene_t *sc)
  * weather-condition icons and mode logos (no glyph equivalent) draw black. */
 static void wl_render_asset(int tube, const char *path)
 {
-    const char *slash = strrchr(path, '/');
-    const char *bp    = slash ? slash + 1 : path;       /* e.g. "5.jpg" */
     char name[32];
-    size_t i = 0;
-    for (; bp[i] && bp[i] != '.' && i < sizeof(name) - 1; i++) name[i] = bp[i];
-    name[i] = '\0';
+    asset_basename(path, name, sizeof(name));
 
     uint8_t *fb = wl_fb();
     if (!fb) { display_fill(tube, 0x0000); return; }
@@ -5637,12 +5804,8 @@ static void wl_render_asset(int tube, const char *path)
  * primitives. */
 static void dm_render_asset(int tube, const char *path)
 {
-    const char *slash = strrchr(path, '/');
-    const char *bp    = slash ? slash + 1 : path;
     char name[32];
-    size_t i = 0;
-    for (; bp[i] && bp[i] != '.' && i < sizeof(name) - 1; i++) name[i] = bp[i];
-    name[i] = '\0';
+    asset_basename(path, name, sizeof(name));
 
     uint8_t *fb = wl_fb();
     if (!fb) { display_fill(tube, 0x0000); return; }
@@ -5723,13 +5886,630 @@ static void dm_render_asset(int tube, const char *path)
     display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * "Segments" theme — procedural 16-segment display font.
+ *
+ * Ships with NO on-disk assets (like DotMatrix/WeatherLive): every glyph is
+ * drawn at runtime from the standard 16-segment topology — a1/a2 top,
+ * b/c right verticals, d1/d2 bottom, e/f left verticals, g1/g2 middle,
+ * h/i/j upper diagonals+vertical, k/l/m lower diagonals+vertical — each
+ * segment a hexagon that tapers to a SHARP POINT at both ends (not a flat
+ * chamfer), matching a real 16-segment display's construction — verified
+ * against reference diagrams and a real part's traced vector art (see
+ * seg_build_poly() and SEG_JOINTS below for what that verification changed).
+ * Designed and iterated in a browser prototype alongside
+ * tools/segments_font_editor.html, used to hand-tune the alphabet's harder
+ * letters.
+ *
+ * Corner points are inset from the glyph's bounding box by exactly half
+ * the segment thickness in both axes (not a fixed fraction) — this is what
+ * keeps the b/c (and e/f) verticals dead straight instead of zigzagging.
+ * Every segment always paints — on-color if lit, off-color if not — the
+ * same "always paint the whole grid" convention DotMatrix uses, so unlit
+ * segments read as a faint sleeping outline rather than nothing. */
+
+typedef struct { float x, y; } seg_pt_t;
+
+/* Skeleton (centerline) point names, in the order seg_corner_points() fills
+ * them. TC/BC = top/bottom-center, C = dead center. */
+enum { SP_TL, SP_TR, SP_BL, SP_BR, SP_ML, SP_MR, SP_TC, SP_BC, SP_C, SP_COUNT };
+
+/* The 16 segments — each a (point,point) pair by index into the array
+ * above. Matches the reference diagram exactly: h=TL-C, i=TC-C, j=TR-C,
+ * k=C-BL, l=C-BC, m=C-BR. This order also fixes which bit each segment
+ * gets in seg_lit_mask()'s uint16_t. */
+enum { SS_A1, SS_A2, SS_B, SS_C, SS_D1, SS_D2, SS_E, SS_F,
+       SS_G1, SS_G2, SS_H, SS_I, SS_J, SS_K, SS_L, SS_M, SS_COUNT };
+#define SB(name) (1u << SS_##name)
+
+static const uint8_t SEG_LINK[SS_COUNT][2] = {
+    { SP_TL, SP_TC }, { SP_TC, SP_TR }, { SP_TR, SP_MR }, { SP_MR, SP_BR },
+    { SP_BL, SP_BC }, { SP_BC, SP_BR }, { SP_ML, SP_BL }, { SP_TL, SP_ML },
+    { SP_ML, SP_C  }, { SP_C,  SP_MR }, { SP_TL, SP_C  }, { SP_TC, SP_C  },
+    { SP_TR, SP_C  }, { SP_C,  SP_BL }, { SP_C,  SP_BC }, { SP_C,  SP_BR },
+};
+
+/* Non-ASCII sentinels for the '°C'/'°F' composite (ring + a dedicated
+ * half-lit letter, independently designed from the plain 'C'/'F' letters —
+ * squeezed under the ring, a full letter reads too busy) and the bare
+ * ring by itself (used for the AQI/weather panels' plain degree mark
+ * elsewhere, though Segments doesn't wire those panels up yet). Kept out
+ * of the printable-ASCII range so they can never collide with a real
+ * character, same idea as DotMatrix's DM_CP_* sentinels. */
+#define SEG_CH_DEGREE    0x2100
+#define SEG_CH_DEGREE_C  0x2101
+#define SEG_CH_DEGREE_F  0x2102
+/* Daily Hi/Lo arrow (render_weather_hilo()'s tube-0 glyph): reuses two of
+ * the 16 segments' own diagonals rather than a bespoke shape — K+M (the
+ * two lower diagonals, meeting at center and spreading down to the bottom
+ * corners) forms a "^" caret for HI, H+J (the two upper diagonals, meeting
+ * at center from the top corners) forms a "v" chevron for LO. Keeps the
+ * arrow built from the same segment vocabulary as every digit/letter this
+ * theme draws, instead of a smooth procedural triangle. */
+#define SEG_CH_ARROW_UP    0x2103
+#define SEG_CH_ARROW_DOWN  0x2104
+
+/* Compact px sizing tuned in the browser prototype at this exact tube
+ * geometry (LCD_WIDTH=80, LCD_HEIGHT=160) — thickness/gap as a fraction of
+ * segment thickness (~14% gap, ~50% taper) are structural to the "pointed"
+ * look and live in seg_build_poly(), not here. */
+#define SEG_PAD_X   10
+#define SEG_PAD_TOP 6
+#define SEG_BOX_W   (LCD_WIDTH  - 2 * SEG_PAD_X)
+#define SEG_BOX_H   (LCD_HEIGHT - 2 * SEG_PAD_TOP)
+#define SEG_THICK   9.0f
+#define SEG_GAP     1.25f
+/* The gap at a segment's C (dead-center) end is much tighter than
+ * SEG_GAP — real 16-segment modules converge almost to a single point at
+ * the busy 8-way center, but keep a wider, cleaner notch at the simple
+ * 2-way elbow corners (TL/TR/BL/BR), which is what SEG_GAP still controls.
+ * Confirmed against an actual 16-segment part's traced vector art: the 8
+ * segments meeting at center sit within ~3% of digit width of each other,
+ * vs. ~13% at a corner. */
+#define SEG_GAP_CENTER 0.15f
+
+static void seg_corner_points(seg_pt_t p[SP_COUNT], float w, float h, float thick)
+{
+    float ht = thick * 0.5f;
+    p[SP_TL] = (seg_pt_t){ ht,     ht     };
+    p[SP_TR] = (seg_pt_t){ w - ht, ht     };
+    p[SP_BL] = (seg_pt_t){ ht,     h - ht };
+    p[SP_BR] = (seg_pt_t){ w - ht, h - ht };
+    p[SP_ML] = (seg_pt_t){ ht,     h * 0.5f };
+    p[SP_MR] = (seg_pt_t){ w - ht, h * 0.5f };
+    p[SP_TC] = (seg_pt_t){ w * 0.5f, ht     };
+    p[SP_BC] = (seg_pt_t){ w * 0.5f, h - ht };
+    p[SP_C]  = (seg_pt_t){ w * 0.5f, h * 0.5f };
+}
+
+/* Builds one segment's hexagon (p0->p1 at `thick` wide, tapering to a sharp
+ * point `gap0`/`gap1` short of p0/p1 respectively, then a further half-
+ * thickness taper before reaching the parallel-sided shaft) into out[6].
+ * Returns false for a degenerate (zero-length) segment — nothing to draw.
+ * The two gaps are independent (not just one `gap`) because a segment's
+ * two ends often want different values — see SEG_GAP_CENTER's comment.
+ *
+ * At this tube's narrow ~60:148 aspect ratio, this taper alone isn't enough
+ * at every joint: the angle between a side vertical and the diagonal
+ * sharing its corner (e.g. F and H at TL) is only ~20°, as is the angle
+ * between adjacent diagonal pairs converging on C (e.g. H and I) — two
+ * segments that close together already overlap along a stretch of their
+ * length before either one's taper finishes, seen as one bleeding into the
+ * other instead of crossing at a point. seg_clip_sharp_joints() (called
+ * after every segment's hexagon is built) fixes that separately, by
+ * trimming each pair against the angle bisector between them, so this
+ * function itself stays a plain symmetric-taper hexagon. */
+static bool seg_build_poly(seg_pt_t p0, seg_pt_t p1, float thick, float gap0, float gap1, seg_pt_t out[6])
+{
+    float dx = p1.x - p0.x, dy = p1.y - p0.y;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.01f) return false;
+    float ux = dx / len, uy = dy / len, nx = -uy, ny = ux;
+    float tip = thick * 0.5f;
+    float g0 = fminf(gap0, len * 0.45f), g1 = fminf(gap1, len * 0.45f);
+    seg_pt_t a0 = { p0.x + ux * g0, p0.y + uy * g0 };
+    seg_pt_t a1 = { p1.x - ux * g1, p1.y - uy * g1 };
+    float segLen = fmaxf(0.0f, len - g0 - g1);
+    float t = fminf(tip, segLen * 0.5f);
+    seg_pt_t s0 = { a0.x + ux * t, a0.y + uy * t };
+    seg_pt_t s1 = { a1.x - ux * t, a1.y - uy * t };
+    float half = thick * 0.5f;
+    out[0] = a0;
+    out[1] = (seg_pt_t){ s0.x + nx * half, s0.y + ny * half };
+    out[2] = (seg_pt_t){ s1.x + nx * half, s1.y + ny * half };
+    out[3] = a1;
+    out[4] = (seg_pt_t){ s1.x - nx * half, s1.y - ny * half };
+    out[5] = (seg_pt_t){ s0.x - nx * half, s0.y - ny * half };
+    return true;
+}
+
+/* Clips a convex polygon (`*n` points in `poly`, capacity 8) by the
+ * half-plane {p : dot(p-P, N) >= 0}, keeping the side N points into.
+ * Standard single-edge Sutherland-Hodgman; a hexagon can gain at most one
+ * vertex per clip, and every polygon here is clipped at most twice (see
+ * seg_clip_sharp_joints()), so 8 is always enough room. */
+static void seg_clip_halfplane(seg_pt_t *poly, int *n, seg_pt_t P, seg_pt_t N)
+{
+    seg_pt_t out[8];
+    int m = 0;
+    for (int i = 0; i < *n; i++) {
+        seg_pt_t curr = poly[i];
+        seg_pt_t prev = poly[(i + *n - 1) % *n];
+        float dCurr = (curr.x - P.x) * N.x + (curr.y - P.y) * N.y;
+        float dPrev = (prev.x - P.x) * N.x + (prev.y - P.y) * N.y;
+        bool currIn = dCurr >= 0.0f, prevIn = dPrev >= 0.0f;
+        if (currIn != prevIn && m < 8) {
+            float t = dPrev / (dPrev - dCurr);
+            out[m++] = (seg_pt_t){ prev.x + t * (curr.x - prev.x), prev.y + t * (curr.y - prev.y) };
+        }
+        if (currIn && m < 8) out[m++] = curr;
+    }
+    *n = m;
+    for (int i = 0; i < m; i++) poly[i] = out[i];
+}
+
+static seg_pt_t seg_dir(seg_pt_t from, seg_pt_t to)
+{
+    float dx = to.x - from.x, dy = to.y - from.y;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.0001f) return (seg_pt_t){ 0.0f, 0.0f };
+    return (seg_pt_t){ dx / len, dy / len };
+}
+
+/* Given two unit directions out of a shared vertex, returns the pair of
+ * opposing unit normals for the angle bisector between them: `*nA` points
+ * into dirA's half, `*nB` (= -*nA) into dirB's half. Both zero on the
+ * degenerate case (dirA opposite dirB) — never hit by SEG_JOINTS below. */
+static void seg_bisector_normals(seg_pt_t dirA, seg_pt_t dirB, seg_pt_t *nA, seg_pt_t *nB)
+{
+    float bx = dirA.x + dirB.x, by = dirA.y + dirB.y;
+    float blen = sqrtf(bx * bx + by * by);
+    if (blen < 0.0001f) { *nA = (seg_pt_t){ 0, 0 }; *nB = (seg_pt_t){ 0, 0 }; return; }
+    bx /= blen; by /= blen;
+    seg_pt_t n = { -by, bx };
+    if (n.x * dirA.x + n.y * dirA.y < 0.0f) { n.x = -n.x; n.y = -n.y; }
+    *nA = n;
+    *nB = (seg_pt_t){ -n.x, -n.y };
+}
+
+/* The 8 segment pairs that meet at a ~20° angle at this tube's narrow
+ * aspect ratio — the four elbow corners (a side vertical vs. the diagonal
+ * sharing it, e.g. F vs. H at TL) and the four analogous pairs of adjacent
+ * diagonals converging on C (e.g. H vs. I) — identified by shared vertex
+ * and each segment's OTHER endpoint (needed to get its direction out of
+ * that vertex), plus whether segA also gets clipped. At an elbow, segA is
+ * the straight side vertical (F/B/E/C) — it keeps its plain hexagon
+ * untouched, full thickness right up to the corner; only the diagonal
+ * (segB) gets mitered back to clear it. At C, both segA and segB are
+ * diagonals with equal claim, so both get clipped. Every other joint in the
+ * font (A1/A2 at TC, F/E at ML, the wide ~70°+ gaps elsewhere on C, …) is
+ * comfortably clear at the plain thick*0.5 taper and needs no clipping. */
+static const struct { uint8_t vertex, segA, otherA, segB, otherB; bool clip_a; } SEG_JOINTS[] = {
+    { SP_TL, SS_F, SP_ML, SS_H, SP_C,  false },
+    { SP_TR, SS_B, SP_MR, SS_J, SP_C,  false },
+    { SP_BL, SS_E, SP_ML, SS_K, SP_C,  false },
+    { SP_BR, SS_C, SP_MR, SS_M, SP_C,  false },
+    { SP_C,  SS_H, SP_TL, SS_I, SP_TC, true  },
+    { SP_C,  SS_I, SP_TC, SS_J, SP_TR, true  },
+    { SP_C,  SS_K, SP_BL, SS_L, SP_BC, true  },
+    { SP_C,  SS_L, SP_BC, SS_M, SP_BR, true  },
+};
+
+/* Trims each SEG_JOINTS pair against the bisector of the angle between
+ * them, so neither hexagon crosses into the other's territory — the two
+ * segments end in a flat, mitered facet at that end instead of overlapping
+ * (see seg_build_poly()'s comment for why the taper alone can't do this;
+ * see SEG_JOINTS' comment for why an elbow only mitres its diagonal side).
+ * `polys`/`cnt` are indexed by SS_* segment index, already filled in with
+ * each segment's un-clipped hexagon; `P` is seg_corner_points()'s output
+ * (already offset to this glyph's tube position). */
+static void seg_clip_sharp_joints(seg_pt_t polys[SS_COUNT][8], int cnt[SS_COUNT], const seg_pt_t P[SP_COUNT])
+{
+    for (size_t i = 0; i < sizeof(SEG_JOINTS) / sizeof(SEG_JOINTS[0]); i++) {
+        seg_pt_t V = P[SEG_JOINTS[i].vertex];
+        seg_pt_t dirA = seg_dir(V, P[SEG_JOINTS[i].otherA]);
+        seg_pt_t dirB = seg_dir(V, P[SEG_JOINTS[i].otherB]);
+        seg_pt_t nA, nB;
+        seg_bisector_normals(dirA, dirB, &nA, &nB);
+        if (nA.x == 0.0f && nA.y == 0.0f) continue;
+        int segB = SEG_JOINTS[i].segB;
+        if (SEG_JOINTS[i].clip_a) {
+            int segA = SEG_JOINTS[i].segA;
+            if (cnt[segA] >= 3) seg_clip_halfplane(polys[segA], &cnt[segA], V, nA);
+        }
+        if (cnt[segB] >= 3) seg_clip_halfplane(polys[segB], &cnt[segB], V, nB);
+    }
+}
+
+/* Fills a small (6- to 8-point, after seg_clip_sharp_joints()) polygon with
+ * a flat color via horizontal scanline spans — a real segment's edges read
+ * crisp against its off-color neighbor, not anti-aliased, so a hard-edge
+ * fill (no supersampling) is the correct look here, not a shortcut. */
+static void seg_fill_poly(uint8_t *fb, const seg_pt_t *pts, int n, int r, int g, int b)
+{
+    if (n < 3) return;
+    float miny = pts[0].y, maxy = pts[0].y;
+    for (int i = 1; i < n; i++) {
+        if (pts[i].y < miny) miny = pts[i].y;
+        if (pts[i].y > maxy) maxy = pts[i].y;
+    }
+    int y0 = (int)floorf(miny), y1 = (int)ceilf(maxy);
+    if (y0 < 0) y0 = 0;
+    if (y1 > LCD_HEIGHT - 1) y1 = LCD_HEIGHT - 1;
+    uint16_t col = wl_rgb565(r, g, b);
+    uint8_t hi = (uint8_t)(col >> 8), lo = (uint8_t)(col & 0xFF);
+    for (int y = y0; y <= y1; y++) {
+        float fy = (float)y + 0.5f;
+        float xs[8]; int nx = 0;
+        for (int i = 0; i < n; i++) {
+            seg_pt_t A = pts[i], B = pts[(i + 1) % n];
+            if ((A.y <= fy && B.y > fy) || (B.y <= fy && A.y > fy)) {
+                float t = (fy - A.y) / (B.y - A.y);
+                if (nx < 8) xs[nx++] = A.x + t * (B.x - A.x);
+            }
+        }
+        for (int i = 1; i < nx; i++) {   /* insertion sort — nx is tiny */
+            float k = xs[i]; int j = i - 1;
+            while (j >= 0 && xs[j] > k) { xs[j + 1] = xs[j]; j--; }
+            xs[j + 1] = k;
+        }
+        for (int i = 0; i + 1 < nx; i += 2) {
+            int xa = (int)ceilf(xs[i] - 0.5f), xb = (int)floorf(xs[i + 1] - 0.5f);
+            if (xa < 0) xa = 0;
+            if (xb > LCD_WIDTH - 1) xb = LCD_WIDTH - 1;
+            for (int x = xa; x <= xb; x++) {
+                uint8_t *px = fb + ((size_t)y * LCD_WIDTH + x) * 2;
+                px[0] = hi; px[1] = lo;
+            }
+        }
+    }
+}
+static void seg_fill_dot(uint8_t *fb, float cx, float cy, float r, int R, int G, int B)
+{
+    uint16_t col = wl_rgb565(R, G, B);
+    uint8_t hi = (uint8_t)(col >> 8), lo = (uint8_t)(col & 0xFF);
+    int x0 = (int)(cx - r), x1 = (int)(cx + r), y0 = (int)(cy - r), y1 = (int)(cy + r);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > LCD_WIDTH - 1) x1 = LCD_WIDTH - 1;
+    if (y1 > LCD_HEIGHT - 1) y1 = LCD_HEIGHT - 1;
+    float r2 = r * r;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+            float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+            if (dx * dx + dy * dy <= r2) {
+                uint8_t *px = fb + ((size_t)y * LCD_WIDTH + x) * 2;
+                px[0] = hi; px[1] = lo;
+            }
+        }
+}
+static void seg_stroke_ring(uint8_t *fb, float cx, float cy, float r, float thick, int R, int G, int B)
+{
+    uint16_t col = wl_rgb565(R, G, B);
+    uint8_t hi = (uint8_t)(col >> 8), lo = (uint8_t)(col & 0xFF);
+    float ro = r + thick * 0.5f, ri = r - thick * 0.5f;
+    int x0 = (int)(cx - ro), x1 = (int)(cx + ro), y0 = (int)(cy - ro), y1 = (int)(cy + ro);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > LCD_WIDTH - 1) x1 = LCD_WIDTH - 1;
+    if (y1 > LCD_HEIGHT - 1) y1 = LCD_HEIGHT - 1;
+    float ro2 = ro * ro, ri2 = ri * ri;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+            float dx = x + 0.5f - cx, dy = y + 0.5f - cy, d2 = dx * dx + dy * dy;
+            if (d2 <= ro2 && d2 >= ri2) {
+                uint8_t *px = fb + ((size_t)y * LCD_WIDTH + x) * 2;
+                px[0] = hi; px[1] = lo;
+            }
+        }
+}
+
+/* Which of the 16 segments light up for `ch` (an ASCII char, folded to
+ * uppercase, or one of the SEG_CH_* sentinels above). Digits are a clean
+ * 7-seg subset; letters use the diagonals/verticals too — hand-designed
+ * for this font (not a canonical reference), refined with
+ * tools/segments_font_editor.html. Returns 0 (nothing lit) for space,
+ * colon, dot, and the bare degree ring — those are drawn as non-segment
+ * decorations by seg_draw_glyph() instead. */
+static uint16_t seg_lit_mask(int ch)
+{
+    if (ch >= 'a' && ch <= 'z') ch = ch - 'a' + 'A';
+    switch (ch) {
+    case '0': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(D1)|SB(D2)|SB(E)|SB(F)|SB(J)|SB(K);
+    case '1': return SB(B)|SB(C);
+    case '2': return SB(A1)|SB(A2)|SB(B)|SB(D1)|SB(D2)|SB(E)|SB(G1)|SB(G2);
+    case '3': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(D1)|SB(D2)|SB(G1)|SB(G2);
+    case '4': return SB(B)|SB(C)|SB(F)|SB(G1)|SB(G2);
+    case '5': return SB(A1)|SB(A2)|SB(C)|SB(D1)|SB(D2)|SB(F)|SB(G1)|SB(G2);
+    case '6': return SB(A1)|SB(A2)|SB(C)|SB(D1)|SB(D2)|SB(E)|SB(F)|SB(G1)|SB(G2);
+    case '7': return SB(A1)|SB(A2)|SB(B)|SB(C);
+    case '8': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(D1)|SB(D2)|SB(E)|SB(F)|SB(G1)|SB(G2);
+    case '9': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(D1)|SB(D2)|SB(F)|SB(G1)|SB(G2);
+    case '-': return SB(G1)|SB(G2);
+    case '%': return SB(J)|SB(K);
+    case SEG_CH_DEGREE_C: return SB(A1)|SB(D1)|SB(E)|SB(F);
+    case SEG_CH_DEGREE_F: return SB(A1)|SB(E)|SB(F)|SB(G1);
+    case SEG_CH_ARROW_UP:   return SB(K)|SB(M);
+    case SEG_CH_ARROW_DOWN: return SB(H)|SB(J);
+    case 'A': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(E)|SB(F)|SB(G1)|SB(G2);
+    case 'B': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(D1)|SB(D2)|SB(G2)|SB(I)|SB(L);
+    case 'C': return SB(A1)|SB(A2)|SB(D1)|SB(D2)|SB(E)|SB(F);
+    case 'D': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(D1)|SB(D2)|SB(I)|SB(L);
+    case 'E': return SB(A1)|SB(A2)|SB(D1)|SB(D2)|SB(E)|SB(F)|SB(G1);
+    case 'F': return SB(A1)|SB(A2)|SB(E)|SB(F)|SB(G1);
+    case 'G': return SB(A1)|SB(A2)|SB(C)|SB(D1)|SB(D2)|SB(E)|SB(F)|SB(G2);
+    case 'H': return SB(B)|SB(C)|SB(E)|SB(F)|SB(G1)|SB(G2);
+    case 'I': return SB(A1)|SB(A2)|SB(D1)|SB(D2)|SB(I)|SB(L);
+    case 'J': return SB(B)|SB(C)|SB(D1)|SB(D2)|SB(E);
+    case 'K': return SB(E)|SB(F)|SB(G1)|SB(J)|SB(M);
+    case 'L': return SB(D1)|SB(D2)|SB(E)|SB(F);
+    case 'M': return SB(B)|SB(C)|SB(E)|SB(F)|SB(H)|SB(J);
+    case 'N': return SB(B)|SB(C)|SB(E)|SB(F)|SB(H)|SB(M);
+    case 'O': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(D1)|SB(D2)|SB(E)|SB(F);
+    case 'P': return SB(A1)|SB(A2)|SB(B)|SB(E)|SB(F)|SB(G1)|SB(G2);
+    case 'Q': return SB(A1)|SB(A2)|SB(B)|SB(C)|SB(D1)|SB(D2)|SB(E)|SB(F)|SB(M);
+    case 'R': return SB(A1)|SB(A2)|SB(B)|SB(E)|SB(F)|SB(G1)|SB(G2)|SB(M);
+    case 'S': return SB(A1)|SB(A2)|SB(C)|SB(D1)|SB(D2)|SB(F)|SB(G1)|SB(G2);
+    case 'T': return SB(A1)|SB(A2)|SB(I)|SB(L);
+    case 'U': return SB(B)|SB(C)|SB(D1)|SB(D2)|SB(E)|SB(F);
+    case 'V': return SB(H)|SB(J)|SB(L);
+    case 'W': return SB(B)|SB(C)|SB(E)|SB(F)|SB(K)|SB(M);
+    case 'X': return SB(H)|SB(J)|SB(K)|SB(M);
+    case 'Y': return SB(H)|SB(J)|SB(L);
+    case 'Z': return SB(A1)|SB(A2)|SB(D1)|SB(D2)|SB(H)|SB(M);
+    default:  return 0;   /* space, colon, dot, degree ring */
+    }
+}
+
+/* Draws one 16-segment glyph into fb at (x0,y0)-(x0+w,y0+h). Every segment
+ * is always painted — on-color if lit, off-color if not (see the file
+ * banner comment above). `thick`/`gap` are in px; SEG_THICK/SEG_GAP are the
+ * validated full-tube defaults. */
+static void seg_draw_glyph(uint8_t *fb, int ch, int x0, int y0, int w, int h,
+                           float thick, float gap,
+                           int on_r, int on_g, int on_b, int off_r, int off_g, int off_b)
+{
+    float cx = x0 + w * 0.5f;
+    if (ch == SEG_CH_DEGREE) {   /* the ring itself carries no segments */
+        seg_stroke_ring(fb, cx, y0 + h * 0.17f, w * 0.15f, thick * 0.42f, on_r, on_g, on_b);
+        return;
+    }
+    seg_pt_t P[SP_COUNT];
+    seg_corner_points(P, (float)w, (float)h, thick);
+    for (int i = 0; i < SP_COUNT; i++) { P[i].x += x0; P[i].y += y0; }
+    uint16_t lit = seg_lit_mask(ch);
+
+    /* Build every segment's plain hexagon first, then trim the sharp-angle
+     * pairs against each other (seg_clip_sharp_joints()) — clipping needs
+     * both hexagons in a pair on hand at once, so it can't happen inline in
+     * a single build-and-fill pass. Plain stack locals, not static: ~1.1KB
+     * is well inside what this task's stack already tolerates elsewhere
+     * (e.g. display_fill_snow()'s 1280B line buffer) — no reason to spend
+     * permanent DRAM on a buffer only needed while drawing one glyph. */
+    seg_pt_t polys[SS_COUNT][8];
+    int poly_n[SS_COUNT];
+    for (int s = 0; s < SS_COUNT; s++) {
+        seg_pt_t hex[6];
+        uint8_t p0 = SEG_LINK[s][0], p1 = SEG_LINK[s][1];
+        float gap0 = (p0 == SP_C) ? SEG_GAP_CENTER : gap;
+        float gap1 = (p1 == SP_C) ? SEG_GAP_CENTER : gap;
+        if (seg_build_poly(P[p0], P[p1], thick, gap0, gap1, hex)) {
+            for (int i = 0; i < 6; i++) polys[s][i] = hex[i];
+            poly_n[s] = 6;
+        } else {
+            poly_n[s] = 0;
+        }
+    }
+    seg_clip_sharp_joints(polys, poly_n, P);
+    for (int s = 0; s < SS_COUNT; s++) {
+        if (poly_n[s] < 3) continue;
+        bool on = (lit & (1u << s)) != 0;
+        seg_fill_poly(fb, polys[s], poly_n[s], on ? on_r : off_r, on ? on_g : off_g, on ? on_b : off_b);
+    }
+    if (ch == ':') {
+        seg_fill_dot(fb, cx, y0 + h * 0.275f, thick * 0.55f, on_r, on_g, on_b);
+        seg_fill_dot(fb, cx, y0 + h * 0.725f, thick * 0.55f, on_r, on_g, on_b);
+    } else if (ch == '.') {
+        seg_fill_dot(fb, cx, y0 + h * 0.96f, thick * 0.55f, on_r, on_g, on_b);
+    } else if (ch == '%') {
+        seg_fill_dot(fb, x0 + w * 0.22f, y0 + h * 0.21f, thick * 0.5f, on_r, on_g, on_b);
+        seg_fill_dot(fb, x0 + w * 0.78f, y0 + h * 0.79f, thick * 0.5f, on_r, on_g, on_b);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * "Segments" weather icons — simple outline-only pictograms (LCD-weather-
+ * station style), one per render_weather() condition name. User-supplied
+ * SVG art (viewBox 0 0 60 48, stroke-only, M/L/H/V/A/Z — no curves),
+ * flattened offline into polylines with a browser's own
+ * SVGGeometryElement.getPointAtLength() (straight runs kept as their 2
+ * endpoints, curves/arcs sampled every ~4.5 units) rather than hand-
+ * transcribed or reimplementing an SVG arc renderer here. Mirrors
+ * WEATHER_SVG in index.html and the browser prototype exactly — same
+ * source path data, same flattened points. Single-color line art (no
+ * on/off "ghost" pair like the segment font — these aren't segments). */
+typedef struct { uint8_t x, y; } wx_pt_t;
+
+/* Draws a `thick`-px-wide line with rounded caps from (x0,y0) to (x1,y1):
+ * a filled rectangle for the straight run plus a filled circle at each
+ * end, reusing seg_fill_poly()/seg_fill_dot() exactly like every other
+ * filled shape in this file — just applied to an arbitrary line instead
+ * of a segment hexagon. */
+static void wx_stroke_line(uint8_t *fb, float x0, float y0, float x1, float y1,
+                           float thick, int r, int g, int b)
+{
+    float dx = x1 - x0, dy = y1 - y0, len = sqrtf(dx * dx + dy * dy);
+    float half = thick * 0.5f;
+    if (len < 0.01f) { seg_fill_dot(fb, x0, y0, half, r, g, b); return; }
+    float ux = dx / len, uy = dy / len, nx = -uy, ny = ux;
+    seg_pt_t quad[4] = {
+        { x0 + nx * half, y0 + ny * half }, { x1 + nx * half, y1 + ny * half },
+        { x1 - nx * half, y1 - ny * half }, { x0 - nx * half, y0 - ny * half },
+    };
+    seg_fill_poly(fb, quad, 4, r, g, b);
+    seg_fill_dot(fb, x0, y0, half, r, g, b);
+    seg_fill_dot(fb, x1, y1, half, r, g, b);
+}
+
+/* Point streams below: subpaths separated by a {255,255} sentinel (never a
+ * valid coordinate — the source viewBox tops out at 60), terminated by the
+ * array's own end (no trailing sentinel needed, the caller has sizeof). */
+static const wx_pt_t WX_SUN[] = { {30,14}, {26,15}, {22,18}, {20,22}, {20,26}, {22,30}, {26,33}, {30,34}, {34,33}, {38,30}, {40,26}, {40,22}, {38,18}, {34,15}, {30,14}, {255,255}, {30,4}, {30,10}, {255,255}, {30,38}, {30,44}, {255,255}, {10,24}, {16,24}, {255,255}, {44,24}, {50,24}, {255,255}, {16,10}, {20,14}, {255,255}, {40,34}, {44,38}, {255,255}, {20,34}, {16,38}, {255,255}, {40,14}, {44,10}, {255,255} };
+static const wx_pt_t WX_FEWCLOUDS[] = { {20,38}, {16,36}, {14,33}, {15,28}, {19,26}, {21,23}, {23,19}, {27,17}, {31,16}, {35,17}, {38,21}, {40,25}, {43,27}, {46,30}, {45,35}, {42,38}, {38,38}, {33,38}, {29,38}, {24,38}, {20,38}, {255,255}, {31,14}, {27,13}, {22,14}, {19,17}, {17,21}, {17,25}, {255,255}, {23,3}, {23,0}, {255,255}, {15,7}, {12,4}, {255,255}, {10,15}, {13,15}, {255,255}, {31,7}, {34,4}, {255,255} };
+static const wx_pt_t WX_OVERCASTCLOUDS[] = { {18,36}, {14,34}, {12,31}, {13,26}, {17,24}, {19,21}, {21,17}, {25,15}, {29,14}, {33,15}, {36,19}, {38,23}, {41,25}, {44,28}, {43,33}, {40,36}, {36,36}, {31,36}, {27,36}, {22,36}, {18,36}, {255,255}, {34,16}, {37,13}, {42,13}, {46,15}, {49,18}, {52,20}, {54,24}, {52,28}, {48,30}, {44,30}, {255,255} };
+static const wx_pt_t WX_FOG[] = { {20,30}, {16,29}, {14,25}, {15,21}, {18,18}, {20,15}, {22,12}, {26,9}, {30,8}, {34,9}, {38,12}, {40,15}, {42,18}, {45,21}, {46,25}, {44,29}, {40,30}, {255,255}, {16,34}, {44,34}, {255,255}, {20,40}, {40,40}, {255,255} };
+static const wx_pt_t WX_RAIN[] = { {20,32}, {16,30}, {14,27}, {15,22}, {19,20}, {21,17}, {23,13}, {27,11}, {31,10}, {35,11}, {38,15}, {40,19}, {43,21}, {46,24}, {45,29}, {42,32}, {38,32}, {33,32}, {29,32}, {24,32}, {20,32}, {255,255}, {22,36}, {18,44}, {255,255}, {30,36}, {26,44}, {255,255}, {38,36}, {34,44}, {255,255} };
+/* Row 2 (middle streak) sits 10px right of paintWeatherIcon()'s own
+ * coordinates — a deliberate balance tweak against rows 1/3, not a
+ * transcription slip. Don't "fix" it back to match the source exactly. */
+static const wx_pt_t WX_SQUALLS[] = { {12,12}, {14,12}, {255,255}, {18,12}, {22,12}, {27,12}, {31,12}, {35,12}, {39,10}, {40,6}, {36,4}, {32,4}, {255,255}, {18,24}, {20,24}, {255,255}, {24,24}, {29,24}, {34,24}, {39,24}, {45,24}, {50,24}, {53,22}, {54,18}, {50,16}, {44,16}, {255,255}, {12,36}, {14,36}, {255,255}, {18,36}, {22,36}, {27,36}, {31,36}, {35,36}, {39,36}, {42,39}, {40,43}, {36,44}, {32,44}, {255,255} };
+static const wx_pt_t WX_THUNDERSTORM[] = { {20,32}, {16,30}, {14,27}, {15,22}, {19,20}, {21,17}, {23,13}, {27,11}, {31,10}, {35,11}, {38,15}, {40,19}, {43,21}, {46,24}, {45,29}, {42,32}, {38,32}, {33,32}, {29,32}, {24,32}, {20,32}, {255,255}, {30,32}, {27,35}, {25,39}, {27,40}, {29,41}, {27,45}, {27,47}, {30,44}, {33,41}, {36,38}, {32,38}, {31,36}, {34,32}, {30,32}, {255,255} };
+static const wx_pt_t WX_SNOW[] = { {20,32}, {16,30}, {14,27}, {15,22}, {19,20}, {21,17}, {23,13}, {27,11}, {31,10}, {35,11}, {38,15}, {40,19}, {43,21}, {46,24}, {45,29}, {42,32}, {38,32}, {33,32}, {29,32}, {24,32}, {20,32}, {255,255}, {18,34}, {18,40}, {255,255}, {15,37}, {21,37}, {255,255}, {16,35}, {20,39}, {255,255}, {16,39}, {20,35}, {255,255}, {29,38}, {29,44}, {255,255}, {26,41}, {32,41}, {255,255}, {27,39}, {31,43}, {255,255}, {27,43}, {31,39}, {255,255}, {39,34}, {39,38}, {255,255}, {37,36}, {41,36}, {255,255}, {38,35}, {40,37}, {255,255}, {38,37}, {40,35}, {255,255} };
+static const wx_pt_t WX_TORNADO[] = { {18,12}, {22,12}, {27,12}, {31,12}, {35,12}, {40,12}, {41,14}, {40,18}, {36,18}, {31,18}, {27,18}, {23,18}, {21,19}, {23,23}, {27,24}, {32,24}, {36,24}, {37,26}, {36,30}, {31,30}, {27,30}, {27,33}, {29,36}, {34,36}, {33,40}, {30,42}, {255,255} };
+static const wx_pt_t WX_SAND[] = { {10,24}, {50,24}, {255,255}, {14,16}, {46,16}, {255,255}, {14,32}, {38,32}, {255,255}, {18,40}, {20,40}, {255,255}, {26,40}, {28,40}, {255,255}, {34,40}, {36,40}, {255,255}, {42,32}, {44,32}, {255,255}, {22,28}, {24,28}, {255,255}, {34,20}, {36,20}, {255,255} };
+static const wx_pt_t WX_VOLCANICASH[] = { {14,44}, {16,40}, {18,37}, {21,33}, {23,29}, {25,25}, {29,24}, {33,24}, {36,27}, {38,31}, {40,34}, {42,38}, {45,42}, {44,44}, {40,44}, {36,44}, {31,44}, {27,44}, {23,44}, {18,44}, {14,44}, {255,255}, {26,24}, {24,20}, {22,16}, {20,12}, {24,14}, {26,15}, {28,10}, {29,6}, {31,6}, {32,10}, {34,15}, {36,14}, {40,12}, {38,16}, {36,20}, {34,24}, {255,255}, {14,12}, {16,14}, {255,255}, {44,12}, {42,14}, {255,255}, {22,4}, {24,6}, {255,255}, {36,4}, {34,6}, {255,255} };
+
+/* Scales the icon's native 60x48 design space to fill the tube's width
+ * edge-to-edge (this is already the max size that avoids clipping the
+ * widest icons' outer points, e.g. sun's ray tips) and centers it
+ * vertically — mirrors paintWeatherIcon() in index.html/the prototype
+ * exactly, including the resulting stroke weight (source stroke-width 2,
+ * scaled the same as the geometry). */
+#define WX_SCALE   (LCD_WIDTH / 60.0f)
+#define WX_Y0      ((LCD_HEIGHT - 48.0f * WX_SCALE) / 2.0f)
+#define WX_THICK   2.88f   /* max(1.5, SEG_THICK*0.24) * WX_SCALE */
+
+/* Draws one weather icon's point table at (0,y0), scaled by WX_SCALE, at the
+ * given stroke thickness — the shared primitive behind wx_draw_icon() below
+ * and every "universal" wind-streak glyph call site (render_weather_wind()'s
+ * full-tube glyph, wl_wind_panel()'s compact icon-above-value layout): same
+ * WX_SQUALLS point table everywhere a wind streak appears, just placed and
+ * weighted differently per call site, so the shape itself never drifts. */
+static void wx_draw_icon_ex(uint8_t *fb, const wx_pt_t *pts, size_t n,
+                             float y0, float thick, int r, int g, int b)
+{
+    bool have_prev = false;
+    float px = 0, py = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (pts[i].x == 255 && pts[i].y == 255) { have_prev = false; continue; }
+        float x = pts[i].x * WX_SCALE, y = y0 + pts[i].y * WX_SCALE;
+        if (have_prev) wx_stroke_line(fb, px, py, x, y, thick, r, g, b);
+        px = x; py = y; have_prev = true;
+    }
+}
+
+/* Draws one weather icon's point table at (0,WX_Y0), scaled by WX_SCALE. */
+static void wx_draw_icon(uint8_t *fb, const wx_pt_t *pts, size_t n, int r, int g, int b)
+{
+    wx_draw_icon_ex(fb, pts, n, WX_Y0, WX_THICK, r, g, b);
+}
+
+/* name -> point table, shared by seg_render_asset() below. Order matches
+ * render_weather()'s DEMO[] / DM_CP_ICON_* list (display.c's own weather-
+ * icon precedent), not that it matters for a linear strcmp scan. */
+static const struct { const char *name; const wx_pt_t *pts; size_t n; } WX_TABLE[] = {
+    { "sun",            WX_SUN,            sizeof(WX_SUN)            / sizeof(WX_SUN[0])            },
+    { "fewClouds",       WX_FEWCLOUDS,      sizeof(WX_FEWCLOUDS)      / sizeof(WX_FEWCLOUDS[0])      },
+    { "overcastClouds",  WX_OVERCASTCLOUDS, sizeof(WX_OVERCASTCLOUDS) / sizeof(WX_OVERCASTCLOUDS[0]) },
+    { "fog",             WX_FOG,            sizeof(WX_FOG)            / sizeof(WX_FOG[0])            },
+    { "rain",            WX_RAIN,           sizeof(WX_RAIN)           / sizeof(WX_RAIN[0])           },
+    { "squalls",         WX_SQUALLS,        sizeof(WX_SQUALLS)        / sizeof(WX_SQUALLS[0])        },
+    { "thunderstorm",    WX_THUNDERSTORM,   sizeof(WX_THUNDERSTORM)   / sizeof(WX_THUNDERSTORM[0])   },
+    { "snow",            WX_SNOW,           sizeof(WX_SNOW)           / sizeof(WX_SNOW[0])           },
+    { "tornado",         WX_TORNADO,        sizeof(WX_TORNADO)        / sizeof(WX_TORNADO[0])        },
+    { "sand",            WX_SAND,           sizeof(WX_SAND)           / sizeof(WX_SAND[0])           },
+    { "volcanicAsh",     WX_VOLCANICASH,    sizeof(WX_VOLCANICASH)    / sizeof(WX_VOLCANICASH[0])    },
+};
+
+/* Draws the weather icon matching `name` and returns true, or returns
+ * false (drawing nothing) if `name` isn't one of WX_TABLE's 11 — the
+ * caller falls back to the blank grid for those, same as it already does
+ * for "blank" and platform logos. */
+static bool wx_draw_by_name(uint8_t *fb, const char *name, int r, int g, int b)
+{
+    for (size_t i = 0; i < sizeof(WX_TABLE) / sizeof(WX_TABLE[0]); i++) {
+        if (!strcmp(name, WX_TABLE[i].name)) {
+            wx_draw_icon(fb, WX_TABLE[i].pts, WX_TABLE[i].n, r, g, b);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* "Segments" theme's asset dispatcher — same filename-parsing and branch
+ * structure as dm_render_asset() above (see that function's comments);
+ * differs only in drawing 16-segment glyphs instead of dot-matrix ones,
+ * and in a handful of names that map to a plain letter rather than a
+ * dedicated combined glyph: "am"/"pm"/"k-sub"/"m-sub" just draw a single
+ * 'A'/'P'/'K'/'M' — simpler, and reads fine at full-tube size, so there's
+ * no need for DotMatrix's compressed two-line combined glyphs here. */
+static void seg_render_asset(int tube, const char *path)
+{
+    char name[32];
+    asset_basename(path, name, sizeof(name));
+
+    uint8_t *fb = wl_fb();
+    if (!fb) { display_fill(tube, 0x0000); return; }
+    memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+
+    int on_r = s_seg_on_r, on_g = s_seg_on_g, on_b = s_seg_on_b;
+    int off_r = s_seg_off_r, off_g = s_seg_off_g, off_b = s_seg_off_b;
+    const int x0 = SEG_PAD_X, y0 = SEG_PAD_TOP, w = SEG_BOX_W, h = SEG_BOX_H;
+
+    if (name[0] >= '0' && name[0] <= '9' && name[1] == '\0') {
+        seg_draw_glyph(fb, name[0], x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "colon")) {
+        seg_draw_glyph(fb, ':', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "dot")) {
+        seg_draw_glyph(fb, '.', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "minus")) {
+        seg_draw_glyph(fb, '-', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "degreec") || !strcmp(name, "degreef")) {
+        /* Ring in the top zone, the independent (not shared with plain C/F)
+         * half-lit letter pattern in the bottom zone — exact px layout
+         * validated in the browser prototype for this tube geometry. */
+        seg_draw_glyph(fb, SEG_CH_DEGREE, 10, 6, 60, 60, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+        seg_draw_glyph(fb, (name[6] == 'f') ? SEG_CH_DEGREE_F : SEG_CH_DEGREE_C,
+                       10, 86, 60, 68, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "humidity")) {
+        /* Same precedent as DotMatrix: the "humidity" ASSET NAME is the "%"
+         * unit symbol, not the droplet icon. */
+        seg_draw_glyph(fb, '%', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "am")) {
+        seg_draw_glyph(fb, 'A', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "pm")) {
+        seg_draw_glyph(fb, 'P', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "m-sub")) {
+        seg_draw_glyph(fb, 'M', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!strcmp(name, "k-sub")) {
+        seg_draw_glyph(fb, 'K', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    } else if (!wx_draw_by_name(fb, name, on_r, on_g, on_b)) {
+        /* "blank", platform logos — nothing left in WX_TABLE recognizes
+         * these; leave the sleeping (all-off) grid, the Segments
+         * equivalent of DotMatrix's/wl_render_asset's "leave black"
+         * precedent for anything not representable. */
+        seg_draw_glyph(fb, ' ', x0, y0, w, h, SEG_THICK, SEG_GAP, on_r, on_g, on_b, off_r, off_g, off_b);
+    }
+
+    display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+}
+
+/* Forward declaration — defined later, next to its other callers. See that
+ * definition for the parameter doc. */
+static void wx_blit_glow_bloom(uint8_t *fb, const uint8_t *tile, int y0,
+                                int src_row_lo, int src_row_hi,
+                                int dy_lo, int dy_hi, int ny_lo,
+                                int r, int g, int b);
+
 /* Draw the asset-theme sun glyph (filled upper semicircle + horizon line +
- * three rays + a rise/set caret) and a time string into the panorama
- * framebuffer, composited over the live sky with a 1-px drop shadow.  Mirrors
- * ht_draw_suntime()'s iconography so WeatherLive's Sunrise panel matches the
- * JPEG asset themes.  `top` is the fb row of the icon/text block (56 rows). */
-static void wl_suntime(uint8_t *fb, int top, bool rising, const char *timestr,
-                       int r, int g, int b)
+ * three rays + a rise/set caret) into the panorama framebuffer, composited
+ * over the live sky with a 1-px drop shadow.  Mirrors ht_draw_suntime()'s
+ * iconography so WeatherLive's Sunrise panel matches the JPEG asset themes.
+ * `top` is the fb row of the icon block (56 rows). Icon only — the time
+ * string used to be baked into this same u8g2 buffer via a raw DrawStr,
+ * which could never pick up cfg->custom_font; wl_suntime() below now draws
+ * it separately via wl_text(), which can. */
+static void wl_sun_icon(uint8_t *fb, int top, bool rising, int r, int g, int b)
 {
     const int BUF_W = 128;
     const int cx = 40, cy = 16, rr = 9;
@@ -5759,37 +6539,15 @@ static void wl_suntime(uint8_t *fb, int top, bool rising, const char *timestr,
         u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)(cx+4), (u8g2_uint_t)(cy+2),
                                 (u8g2_uint_t)cx,     (u8g2_uint_t)(cy+5));
     }
-    /* Time string — logisoso20, centred in 80 px, baseline at row 50 */
-    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso20_tf);
-    u8g2_uint_t tw = u8g2_GetStrWidth(&s_u8g2, timestr);
-    int tx = ((int)LCD_WIDTH - (int)tw) / 2; if (tx < 0) tx = 0;
-    u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)tx, 50, timestr);
 
-    /* Composite the 56-row icon+text block into fb at `top`.
+    /* Composite the 56-row icon block into fb at `top`.
      * Two-pass bloom — same approach as wl_text — so the shadow body is wide
      * enough to read against bright sky backgrounds. */
     const uint8_t *tile = u8g2_GetBufferPtr(&s_u8g2);
     /* Pass 1: dark bloom around every set pixel */
-    if (wl_shadow_on()) {
-        for (int ry = 0; ry < 56; ry++) {
-            int fy = top + ry;
-            for (int rx = 0; rx < BUF_W && rx < LCD_WIDTH; rx++) {
-                if (!((tile[(ry / 8) * BUF_W + rx] >> (ry % 8)) & 1)) continue;
-                for (int dy = -2; dy <= 2; dy++) {
-                    int ny = fy + dy;
-                    if (ny < 0 || ny >= LCD_HEIGHT) continue;
-                    for (int dx = -2; dx <= 2; dx++) {
-                        int d2 = dx * dx + dy * dy;
-                        if (d2 == 0 || d2 > 5) continue;
-                        int nx = rx + dx;
-                        if (nx < 0 || nx >= LCD_WIDTH) continue;
-                        int a = (d2 <= 2) ? 180 : 90;
-                        wl_blend_px(fb + (ny * LCD_WIDTH + nx) * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, a);
-                    }
-                }
-            }
-        }
-    }
+    if (wl_shadow_on())
+        wx_blit_glow_bloom(fb, tile, top, 0, 56, -2, 2, 0,
+                           s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
     /* Pass 2: foreground color on top */
     for (int ry = 0; ry < 56; ry++) {
         int fy = top + ry;
@@ -5799,6 +6557,17 @@ static void wl_suntime(uint8_t *fb, int top, bool rising, const char *timestr,
             wl_blend_px(fb + (fy * LCD_WIDTH + rx) * 2, r, g, b, 255);
         }
     }
+}
+
+/* Icon (wl_sun_icon()) + time string, the latter via wl_text() so it picks
+ * up cfg->custom_font like every other CX text panel — the "56-row block"
+ * layout (icon top, time baseline at row 50) is unchanged from when the
+ * text was baked into the same u8g2 buffer as the icon. */
+static void wl_suntime(uint8_t *fb, int top, bool rising, const char *timestr,
+                       int r, int g, int b)
+{
+    wl_sun_icon(fb, top, rising, r, g, b);
+    wl_text(fb, 40, top + 50, u8g2_font_logisoso20_tf, timestr, r, g, b, 20);
 }
 
 /* Render a temperature value auto-scaled to fit a vertical zone centred at
@@ -5888,7 +6657,9 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
     }
     static const int s_temp_ft_px[4]  = { 72, 56, 40, 32 };
     static const int s_temp_u8_cap[4] = { 46, 42, 28, 20 };
-    wl_draw_temp_scaled(fb, temp_disp, 45, 255, 255, 255,
+    const int ink_r = s_wl_ink ? s_wl_font_r : 255, ink_g = s_wl_ink ? s_wl_font_g : 255,
+              ink_b = s_wl_ink ? s_wl_font_b : 255;
+    wl_draw_temp_scaled(fb, temp_disp, 45, ink_r, ink_g, ink_b,
                         s_temp_ft_px, s_temp_u8_cap);
     if (range_ok && dmax_disp > dmin_disp) {
         const int bx0 = 12, bx1 = 68, by = 90;
@@ -5903,7 +6674,8 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
         }
         for (int x = bx0; x <= bx1; x++)               /* range track */
             for (int yy = by; yy < by + 3; yy++)
-                wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2, 230, 235, 245, 90);
+                wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2,
+                            s_wl_ink ? ink_r : 230, s_wl_ink ? ink_g : 235, s_wl_ink ? ink_b : 245, 90);
         int tt = temp_disp;
         if (tt < dmin_disp) tt = dmin_disp;
         if (tt > dmax_disp) tt = dmax_disp;
@@ -5977,8 +6749,13 @@ static void wl_temp_panel(uint8_t *fb, int temp_disp, bool range_ok,
             s_lbl_dmax  = dmax_disp;
             s_lbl_face  = s_ft_face_id;
         }
-        wl_text(fb, s_lbl_cx_lo, s_lbl_by, s_lbl_font, lo, 200, 215, 235, s_lbl_px);
-        wl_text(fb, s_lbl_cx_hi, s_lbl_by, s_lbl_font, hi, 235, 225, 150, s_lbl_px);
+        if (s_wl_ink) {
+            wl_text(fb, s_lbl_cx_lo, s_lbl_by, s_lbl_font, lo, ink_r, ink_g, ink_b, s_lbl_px);
+            wl_text(fb, s_lbl_cx_hi, s_lbl_by, s_lbl_font, hi, ink_r, ink_g, ink_b, s_lbl_px);
+        } else {
+            wl_text(fb, s_lbl_cx_lo, s_lbl_by, s_lbl_font, lo, 200, 215, 235, s_lbl_px);
+            wl_text(fb, s_lbl_cx_hi, s_lbl_by, s_lbl_font, hi, 235, 225, 150, s_lbl_px);
+        }
     }
 }
 
@@ -6092,59 +6869,6 @@ static void wl_humidity_panel(uint8_t *fb, int hum)
  * 24H_CX Wind panel so both render identically. */
 static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, int g, int b)
 {
-    /* Three streaks: {x0, x1, y, curl-radius}.  Each is a thick rounded line
-     * with a loop curled off its right end. */
-    static const int st[3][4] = {
-        { 16, 50, 30, 7 },
-        { 10, 58, 50, 8 },
-        { 18, 46, 70, 7 },
-    };
-    typedef struct { int8_t x, y; } wl_px_t;
-    static wl_px_t s_cfg[3][80];   /* foreground curl pixels per streak */
-    static int     s_cfgn[3];
-    static wl_px_t s_csh[3][80];   /* shadow curl pixels per streak */
-    static int     s_cshn[3];
-    static bool    s_cinit;
-    if (!s_cinit) {
-        for (int si = 0; si < 3; si++) {
-            int x1 = st[si][1], sy2 = st[si][2], cr = st[si][3];
-            int ccx = x1, ccy = sy2 - cr;
-            s_cfgn[si] = s_cshn[si] = 0;
-            for (float a = 1.57f; a <= 7.0f; a += 0.05f) {
-                /* foreground: rings cr and cr-1 */
-                for (int t = 0; t < 2; t++) {
-                    int rr = cr - t;
-                    int px = ccx + (int)((float)rr * cosf(a) + 0.5f);
-                    int py = ccy + (int)((float)rr * sinf(a) + 0.5f);
-                    if (px < 0 || px >= LCD_WIDTH || py < 0 || py >= LCD_HEIGHT) continue;
-                    bool dup = false;
-                    for (int i = 0; i < s_cfgn[si]; i++)
-                        if (s_cfg[si][i].x == (int8_t)px && s_cfg[si][i].y == (int8_t)py) { dup = true; break; }
-                    if (!dup && s_cfgn[si] < 80) {
-                        s_cfg[si][s_cfgn[si]].x = (int8_t)px;
-                        s_cfg[si][s_cfgn[si]].y = (int8_t)py;
-                        s_cfgn[si]++;
-                    }
-                }
-                /* shadow: rings cr+1 and cr+2 */
-                for (int t = 0; t < 2; t++) {
-                    int rr = cr + 1 + t;
-                    int px = ccx + (int)((float)rr * cosf(a) + 0.5f);
-                    int py = ccy + (int)((float)rr * sinf(a) + 0.5f);
-                    if (px < 0 || px >= LCD_WIDTH || py < 0 || py >= LCD_HEIGHT) continue;
-                    bool dup = false;
-                    for (int i = 0; i < s_cshn[si]; i++)
-                        if (s_csh[si][i].x == (int8_t)px && s_csh[si][i].y == (int8_t)py) { dup = true; break; }
-                    if (!dup && s_cshn[si] < 80) {
-                        s_csh[si][s_cshn[si]].x = (int8_t)px;
-                        s_csh[si][s_cshn[si]].y = (int8_t)py;
-                        s_cshn[si]++;
-                    }
-                }
-            }
-        }
-        s_cinit = true;
-    }
     if (s_wl_dm_active) {
         /* DotMatrix theme: dedicated wind glyph instead of the curled-streak
          * icon below, so this panel stays consistently blocky. This panel
@@ -6157,44 +6881,15 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
         dm_paint_grid_bg(fb, 2, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
         dm_draw_glyph_on_scaled(fb, 40, 41, DM_CP_ICON_WIND, 2, 1, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
     } else {
-    /* Shadow pass: expanded geometry drawn first so the foreground sits on top.
-     * Gated on the global shadow setting and uses the configured shadow color. */
-    if (wl_shadow_on()) {
-        for (int s = 0; s < 3; s++) {
-            int x0 = st[s][0], x1 = st[s][1], y = st[s][2], cr = st[s][3];
-            /* Streak shadow: 1px wider each side, 2px taller. */
-            for (int yy = y - 2; yy <= y + 2; yy++) {
-                if (yy < 0 || yy >= LCD_HEIGHT) continue;
-                for (int x = x0 - 1; x <= x1 + 1; x++) {
-                    if (x < 0 || x >= LCD_WIDTH) continue;
-                    wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2,
-                                s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, 150);
-                }
-            }
-            /* Curl shadow from precomputed table. */
-            for (int pi = 0; pi < s_cshn[s]; pi++) {
-                int px = (int)s_csh[s][pi].x, py = (int)s_csh[s][pi].y;
-                wl_blend_px(fb + (py * LCD_WIDTH + px) * 2,
-                            s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, 150);
-            }
-        }
-    }
-    /* Foreground pass: white streaks and curls at original geometry. */
-    for (int s = 0; s < 3; s++) {
-        int x0 = st[s][0], x1 = st[s][1], y = st[s][2], cr = st[s][3];
-        for (int yy = y - 1; yy <= y + 1; yy++) {
-            if (yy < 0 || yy >= LCD_HEIGHT) continue;
-            for (int x = x0; x <= x1; x++) {
-                if (x < 0 || x >= LCD_WIDTH) continue;
-                wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2, r, g, b, 255);
-            }
-        }
-        /* Curl foreground from precomputed table. */
-        for (int pi = 0; pi < s_cfgn[s]; pi++) {
-            int px = (int)s_cfg[s][pi].x, py = (int)s_cfg[s][pi].y;
-            wl_blend_px(fb + (py * LCD_WIDTH + px) * 2, r, g, b, 255);
-        }
-    }
+        /* Same WX_SQUALLS icon as render_weather_wind() and the "squalls"
+         * weather condition — placed higher (y0=8, not the standard WX_Y0)
+         * since this tube shares space with the value below it. */
+        const size_t wn = sizeof(WX_SQUALLS) / sizeof(WX_SQUALLS[0]);
+        const float  icon_y0 = 8.0f;
+        if (wl_shadow_on())
+            wx_draw_icon_ex(fb, WX_SQUALLS, wn, icon_y0, WX_THICK + 4,
+                            s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
+        wx_draw_icon_ex(fb, WX_SQUALLS, wn, icon_y0, WX_THICK, r, g, b);
     }
     /* Convert km/h → the configured unit, then draw the value with a small
      * unit label beneath it.  wind_kph/unit only change on a weather poll
@@ -7609,6 +8304,8 @@ static void advance_theme(const char *current_theme,
     all[total][THEME_NAME_MAX_ROT - 1] = '\0'; total++;
     strncpy(all[total], "DotMatrix", THEME_NAME_MAX_ROT - 1);
     all[total][THEME_NAME_MAX_ROT - 1] = '\0'; total++;
+    strncpy(all[total], "Segments", THEME_NAME_MAX_ROT - 1);
+    all[total][THEME_NAME_MAX_ROT - 1] = '\0'; total++;
     DIR *dp = opendir("/spiffs/images/themes");
     if (dp) {
         struct dirent *e;
@@ -7719,6 +8416,18 @@ static float s_sun_pos = 30.0f;  /* sun starts at horizon — visible from first
 static int   s_sun_ph  = 0;
 static int   s_sun_cnt = 0;
 
+/* Restarts the rise from the horizon. Called whenever the Sun panel becomes
+ * newly visible — this animation's state only advances while the panel is
+ * on screen and otherwise carries over untouched, so without a reset a
+ * visit can begin mid-way through its ~2s pause at the top of the rise,
+ * looking like the disc is frozen on arrival. */
+static void wx_sun_anim_reset(void)
+{
+    s_sun_pos = 30.0f;
+    s_sun_ph  = 0;
+    s_sun_cnt = 0;
+}
+
 /* Composite a u8g2 tile buffer into an RGB565 framebuffer in place.
  * Lit bits (1) write fg color; unlit bits leave the background pixel
  * already in fb unchanged.  fg is raw RGB565 — display_show_digit applies
@@ -7740,6 +8449,141 @@ static void wl_blit_tile_into_fb(uint8_t *fb, const uint8_t *tile,
             }
         }
     }
+}
+
+/* Soft "glow" bloom around a u8g2 tile's lit pixels, blended into fb before
+ * the crisp foreground is drawn over it — shared by the sun/ray, mountain,
+ * and time-text blooms (wx_sun_anim_frame_buf(), wx_sun_draw_time_buf(),
+ * wl_sun_icon()). Same 5x5 falloff everywhere; callers differ only in which
+ * tile rows to scan and how far the blur reaches.
+ *
+ * src_row_lo/hi: tile row range (relative to y0) to scan for lit pixels —
+ *   lets a caller bloom just one zone of a shared tile (e.g. sky vs mountain).
+ * dy_lo/hi: vertical blur reach in px (asymmetric -1..2 for the mountain
+ *   bloom — see that call site).
+ * ny_lo: lowest absolute fb row the blur may touch — y0 for a windowed
+ *   multi-pass render (don't bleed into an already-blitted earlier pass),
+ *   0 for a single-shot render like the time text.
+ *
+ * Skips a neighbor already lit in the tile: the foreground pass right after
+ * this overwrites every lit pixel anyway, so blooming onto one is wasted
+ * work — for a filled disc or triangle this cuts blends to roughly the
+ * boundary ring. Only applied when safely in range (tile rows are always
+ * freshly cleared, so out-of-range just falls back to blending regardless —
+ * never wrong, just occasionally less optimal at a tile's edge). */
+static void wx_blit_glow_bloom(uint8_t *fb, const uint8_t *tile, int y0,
+                                int src_row_lo, int src_row_hi,
+                                int dy_lo, int dy_hi, int ny_lo,
+                                int r, int g, int b)
+{
+    const int BUF_W = 128;
+    for (int ry = src_row_lo; ry < src_row_hi; ry++) {
+        int fy = y0 + ry;
+        if (fy < 0 || fy >= LCD_HEIGHT) continue;
+        for (int rx = 0; rx < LCD_WIDTH; rx++) {
+            if (!((tile[(ry / 8) * BUF_W + rx] >> (ry % 8)) & 1)) continue;
+            for (int dy = dy_lo; dy <= dy_hi; dy++) {
+                int ny = fy + dy;
+                if (ny < ny_lo || ny >= LCD_HEIGHT) continue;
+                int ty = ry + dy;
+                for (int dx = -2; dx <= 2; dx++) {
+                    int d2 = dx * dx + dy * dy;
+                    if (d2 == 0 || d2 > 5) continue;
+                    int nx = rx + dx;
+                    if (nx < 0 || nx >= LCD_WIDTH) continue;
+                    if (ty >= 0 && ty < 64 &&
+                        ((tile[(ty / 8) * BUF_W + nx] >> (ty % 8)) & 1))
+                        continue;   /* overwritten by the fg blit anyway */
+                    wl_blend_px(fb + (ny * LCD_WIDTH + nx) * 2, r, g, b,
+                                (d2 <= 2) ? 180 : 90);
+                }
+            }
+        }
+    }
+}
+
+/* Advances the shared sun-animation position (once per frame, on the
+ * rising=true call only) and returns this tube's current sun Y position.
+ * Shared by wx_sun_anim_frame() (tube-direct) and wx_sun_anim_frame_buf()
+ * (fb-direct, WeatherLive sky) — both drive the same two-tube animation
+ * from one shared s_sun_pos/s_sun_ph/s_sun_cnt state so it's never
+ * double-advanced (see wx_sun_anim_frame's doc comment for the full
+ * rise/set travel-distance explanation). */
+static float wx_sun_advance(bool rising)
+{
+    if (rising) {
+        if (s_sun_ph == 0) {
+            s_sun_pos += 2.25f;
+            if (s_sun_pos >= 110.0f) { s_sun_pos = 110.0f; s_sun_ph = 1; s_sun_cnt = 0; }
+        } else {
+            if (++s_sun_cnt >= 40) { s_sun_ph = 0; s_sun_pos = 30.0f; }
+        }
+    }
+    return rising ? (150.0f - s_sun_pos) : (40.0f + s_sun_pos);
+}
+
+/* Draws one pass's disc + rays + horizon-mask + horizon-line into s_u8g2 —
+ * steps 1-4 of wx_sun_anim_frame()'s 5-step layout (see its doc comment),
+ * byte-identical between the tube-direct and fb-direct render paths.
+ * Step 5 (mountains) and the final blit are left to each caller: the
+ * fb-direct path interleaves a shadow-bloom pass with the mountain draw
+ * order (sun glow behind mountains) that the tube-direct path doesn't have,
+ * so unlike steps 1-4 they aren't safe to share without either duplicating
+ * that ordering dependency here or forcing it onto the tube-direct path
+ * too. Neither caller needs bSun/bHor past this point, so they're kept
+ * local rather than returned. */
+static void wx_sun_anim_pass_core(int y0, int nrow, float sy, int HY, int SR)
+{
+    int bSun = (int)sy - y0;
+    int bHor = HY      - y0;
+
+    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_SetDrawColor(&s_u8g2, 1);
+
+    if (bSun >= 0) {
+        u8g2_DrawDisc(&s_u8g2, 40, (u8g2_uint_t)bSun, (u8g2_uint_t)SR,
+                      U8G2_DRAW_ALL);
+    } else if (bSun > -SR) {
+        int visible = bSun + SR;
+        for (int row = 0; row < visible; row++) {
+            int dy = row - bSun;
+            int hw = (int)sqrtf((float)(SR * SR - dy * dy));
+            u8g2_DrawHLine(&s_u8g2, (u8g2_uint_t)(40 - hw), (u8g2_uint_t)row,
+                           (u8g2_uint_t)(2 * hw + 1));
+        }
+    }
+
+    if (bSun >= 0) {
+        /* i=1..5: skip horizontal rays (i=0 left, i=6 right) — see
+         * wx_sun_anim_frame's comment for why. */
+        for (int i = 1; i < 6; i++) {
+            float ang = (float)M_PI + (float)i * ((float)M_PI / 6.0f);
+            float ca  = cosf(ang), sa = sinf(ang);
+            int rx0 = 40   + (int)(ca * (float)(SR + 3));
+            int ry0 = bSun + (int)(sa * (float)(SR + 3));
+            int rx1 = 40   + (int)(ca * (float)(SR + 11));
+            int ry1 = bSun + (int)(sa * (float)(SR + 11));
+            if ((ry0 < 0 && ry1 < 0) || (ry0 >= nrow && ry1 >= nrow)) continue;
+            if (ry0 < 0) ry0 = 0;
+            if (ry1 < 0) ry1 = 0;
+            u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)rx0, (u8g2_uint_t)ry0,
+                          (u8g2_uint_t)rx1, (u8g2_uint_t)ry1);
+        }
+    }
+
+    u8g2_SetDrawColor(&s_u8g2, 0);
+    if (bHor < 0) {
+        u8g2_DrawBox(&s_u8g2, 0, 0, 80, (u8g2_uint_t)nrow);
+    } else if (bHor < nrow) {
+        int mask_h = nrow - bHor - 1;
+        if (mask_h > 0)
+            u8g2_DrawBox(&s_u8g2, 0, (u8g2_uint_t)(bHor + 1),
+                         80, (u8g2_uint_t)mask_h);
+    }
+    u8g2_SetDrawColor(&s_u8g2, 1);
+
+    if (bHor >= 0 && bHor < nrow)
+        u8g2_DrawHLine(&s_u8g2, 0, (u8g2_uint_t)bHor, 80);
 }
 
 /* ── wx_sun_anim_frame ───────────────────────────────────────────────────────
@@ -7778,20 +8622,11 @@ static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
      * other disappears behind them.
      *
      * State is advanced only on the rising=true call (tube 0) so that both
-     * tubes read the same s_pos within the same render frame.               */
-    if (rising) {                /* advance exactly once per render frame */
-        if (s_sun_ph == 0) {
-            s_sun_pos += 2.25f;
-            if (s_sun_pos >= 110.0f) { s_sun_pos = 110.0f; s_sun_ph = 1; s_sun_cnt = 0; }
-        } else {
-            if (++s_sun_cnt >= 40) { s_sun_ph = 0; s_sun_pos = 30.0f; }
-        }
-    }
-
+     * tubes read the same s_pos within the same render frame — see
+     * wx_sun_advance(). */
     const int HY = 110;      /* tube-absolute Y of horizon line */
     const int SR = 10;       /* sun disc radius                 */
-    /* Derive this tube's sun position from the shared travel distance */
-    float sy = rising ? (150.0f - s_sun_pos) : (40.0f + s_sun_pos);
+    float sy = wx_sun_advance(rising);
 
     /* ── 3-pass render covering the full 160-px tube ── */
     static const int STARTS[3] = {0,  64, 128};
@@ -7801,101 +8636,11 @@ static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
         int y0   = STARTS[p];
         int nrow = ROWS[p];
 
-        int bSun = (int)sy - y0;   /* sun centre in buffer rows (may be negative) */
-        int bHor = HY      - y0;   /* horizon    in buffer rows                   */
-
-        u8g2_ClearBuffer(&s_u8g2);
-        u8g2_SetDrawColor(&s_u8g2, 1);
-
-        /* ── 1. Sun disc ──────────────────────────────────────────────────────
-         * IMPORTANT: bSun may be negative when the sun centre is above this
-         * pass's buffer window.  Casting a small negative int to u8g2_uint_t
-         * (uint16_t with U8G2_16BIT) yields a value near 65535; adding the
-         * disc radius then wraps back into [0, SR], so DrawDisc renders
-         * phantom rows — the "downward lines" artifact.
-         *
-         * Safe rule:
-         *   bSun >= 0        → DrawDisc works correctly (large positive coords
-         *                      produced by disc top rows are ≥ 64 → clipped).
-         *   -SR < bSun < 0   → Only the bottom cap [0 .. bSun+SR-1] is visible.
-         *                      Draw each row with DrawHLine using signed math.
-         *   bSun <= -SR      → Disc entirely above this pass; skip.            */
-        if (bSun >= 0) {
-            u8g2_DrawDisc(&s_u8g2, 40, (u8g2_uint_t)bSun, (u8g2_uint_t)SR,
-                          U8G2_DRAW_ALL);
-        } else if (bSun > -SR) {
-            /* Sun centre is |bSun| rows above the buffer top.
-             * Visible rows: 0 … (bSun + SR - 1).  Use signed dy to avoid cast. */
-            int visible = bSun + SR;   /* > 0 because bSun > -SR */
-            for (int row = 0; row < visible; row++) {
-                int dy = row - bSun;   /* always positive: row >= 0, bSun < 0 */
-                int hw = (int)sqrtf((float)(SR * SR - dy * dy));
-                u8g2_DrawHLine(&s_u8g2,
-                               (u8g2_uint_t)(40 - hw),
-                               (u8g2_uint_t)row,
-                               (u8g2_uint_t)(2 * hw + 1));
-            }
-        }
-        /* bSun <= -SR: disc entirely above this pass — nothing to draw */
-
-        /* ── 2. Seven rays: angles π … 2π (left → up → right) ────────────
-         * All rays have sin(ang) ≤ 0 (upward in screen coords), so both
-         * endpoints are at or above bSun.  When bSun < 0 every endpoint is
-         * also negative → all out of range.  Only draw when bSun >= 0.
-         *
-         * CRITICAL: even when bSun >= 0, upward ray endpoints can be negative
-         * when bSun < (SR+11) ≈ 21.  A negative int cast to u8g2_uint_t
-         * (uint16_t) becomes ~65000+.  U8g2's Bresenham DrawLine then treats
-         * this as a very large positive y, and if the other endpoint is in-range
-         * (e.g. y=2), draws a line from y=2 all the way down to the buffer
-         * edge — exactly the "downward lines from the sun" artifact.
-         * Fix: skip any ray whose endpoints are outside [0, nrow).            */
-        if (bSun >= 0) {
-            /* i=1..5 skips the two horizontal rays (i=0: left, i=6: right).
-             * Horizontal rays cast a wide dark shadow band at the sun's centre y,
-             * producing a visible "shadow line" in the sky. */
-            for (int i = 1; i < 6; i++) {
-                float ang = (float)M_PI + (float)i * ((float)M_PI / 6.0f);
-                float ca  = cosf(ang), sa = sinf(ang);
-                int rx0 = 40   + (int)(ca * (float)(SR + 3));
-                int ry0 = bSun + (int)(sa * (float)(SR + 3));
-                int rx1 = 40   + (int)(ca * (float)(SR + 11));
-                int ry1 = bSun + (int)(sa * (float)(SR + 11));
-                /* Skip only if ray is entirely outside the pass window.
-                 * Clamp negative endpoints to 0 (safe uint16_t cast);
-                 * u8g2 clips the >= nrow end naturally within its buffer. */
-                if ((ry0 < 0 && ry1 < 0) || (ry0 >= nrow && ry1 >= nrow)) continue;
-                if (ry0 < 0) ry0 = 0;
-                if (ry1 < 0) ry1 = 0;
-                u8g2_DrawLine(&s_u8g2,
-                              (u8g2_uint_t)rx0, (u8g2_uint_t)ry0,
-                              (u8g2_uint_t)rx1, (u8g2_uint_t)ry1);
-            }
-        }
-
-        /* ── 3. Mask — erase everything below the horizon ─────────────────
-         * Draw-color 0 sets bits to 0.  Where bg != NULL, ht_blit_at maps
-         * zero-bits to the theme background, so the "sky" region above the
-         * horizon shows the theme texture while below-horizon stays black
-         * only because the mask is applied AFTER the disc/rays (overwriting
-         * any disc pixels that extended past the horizon).                  */
-        u8g2_SetDrawColor(&s_u8g2, 0);
-        if (bHor < 0) {
-            /* Entire pass is below the horizon — blank the whole buffer */
-            u8g2_DrawBox(&s_u8g2, 0, 0, 80, (u8g2_uint_t)nrow);
-        } else if (bHor < nrow) {
-            /* Partial pass — erase rows horizon+1 … nrow-1 */
-            int mask_h = nrow - bHor - 1;
-            if (mask_h > 0)
-                u8g2_DrawBox(&s_u8g2, 0, (u8g2_uint_t)(bHor + 1),
-                             80, (u8g2_uint_t)mask_h);
-        }
-        /* (bHor >= nrow: entire pass is above horizon — no mask needed) */
-        u8g2_SetDrawColor(&s_u8g2, 1);
-
-        /* ── 4. Horizon line ── */
-        if (bHor >= 0 && bHor < nrow)
-            u8g2_DrawHLine(&s_u8g2, 0, (u8g2_uint_t)bHor, 80);
+        /* Steps 1-4 (disc/rays/mask/horizon) — see wx_sun_anim_pass_core()
+         * for the negative-bSun cast pitfall ("downward lines" artifact)
+         * and the horizontal-ray skip ("shadow line" artifact) this guards
+         * against. */
+        wx_sun_anim_pass_core(y0, nrow, sy, HY, SR);
 
         /* ── 5. Mountain silhouettes — only in pass 1 (tube rows 64–127) ──
          * Mountain left:  vertices (5,110)(20,90)(35,110) → buf (5,46)(20,26)(35,46)
@@ -7920,24 +8665,16 @@ static void wx_sun_anim_frame(int tube, bool rising, uint16_t fg,
 /* Buffer-path variant of wx_sun_anim_frame for the WeatherLive sky case.
  * Runs the same 3-pass draw loop but composites directly into fb (RGB565)
  * instead of issuing 3 partial LCD window writes.  Shares s_sun_pos/s_sun_ph/
- * s_sun_cnt with wx_sun_anim_frame so state is never double-advanced.
- * Caller must call display_show_digit() for the single SPI blit.
- * Same bSun negative-cast guards and horizontal-ray skip as wx_sun_anim_frame
- * above — see that function's comments for why they're needed. */
+ * s_sun_cnt with wx_sun_anim_frame (via wx_sun_advance()) so state is never
+ * double-advanced. Caller must call display_show_digit() for the single
+ * SPI blit. Same bSun negative-cast guards and horizontal-ray skip as
+ * wx_sun_anim_frame (shared via wx_sun_anim_pass_core()) — see that
+ * function's comments for why they're needed. */
 static void wx_sun_anim_frame_buf(uint8_t *fb, bool rising, uint16_t fg)
 {
-    if (rising) {
-        if (s_sun_ph == 0) {
-            s_sun_pos += 2.25f;
-            if (s_sun_pos >= 110.0f) { s_sun_pos = 110.0f; s_sun_ph = 1; s_sun_cnt = 0; }
-        } else {
-            if (++s_sun_cnt >= 40) { s_sun_ph = 0; s_sun_pos = 30.0f; }
-        }
-    }
-
     const int HY = 110;
     const int SR = 10;
-    float sy = rising ? (150.0f - s_sun_pos) : (40.0f + s_sun_pos);
+    float sy = wx_sun_advance(rising);
 
     static const int STARTS[3] = {0,  64, 128};
     static const int ROWS  [3] = {64, 64,  32};
@@ -7945,56 +8682,8 @@ static void wx_sun_anim_frame_buf(uint8_t *fb, bool rising, uint16_t fg)
     for (int p = 0; p < 3; p++) {
         int y0   = STARTS[p];
         int nrow = ROWS[p];
-        int bSun = (int)sy - y0;
-        int bHor = HY      - y0;
 
-        u8g2_ClearBuffer(&s_u8g2);
-        u8g2_SetDrawColor(&s_u8g2, 1);
-
-        if (bSun >= 0) {
-            u8g2_DrawDisc(&s_u8g2, 40, (u8g2_uint_t)bSun, (u8g2_uint_t)SR,
-                          U8G2_DRAW_ALL);
-        } else if (bSun > -SR) {
-            int visible = bSun + SR;
-            for (int row = 0; row < visible; row++) {
-                int dy = row - bSun;
-                int hw = (int)sqrtf((float)(SR * SR - dy * dy));
-                u8g2_DrawHLine(&s_u8g2, (u8g2_uint_t)(40 - hw), (u8g2_uint_t)row,
-                               (u8g2_uint_t)(2 * hw + 1));
-            }
-        }
-
-        if (bSun >= 0) {
-            /* i=1..5: skip horizontal rays (i=0 left, i=6 right) — see
-             * wx_sun_anim_frame's comment above for why. */
-            for (int i = 1; i < 6; i++) {
-                float ang = (float)M_PI + (float)i * ((float)M_PI / 6.0f);
-                float ca  = cosf(ang), sa = sinf(ang);
-                int rx0 = 40   + (int)(ca * (float)(SR + 3));
-                int ry0 = bSun + (int)(sa * (float)(SR + 3));
-                int rx1 = 40   + (int)(ca * (float)(SR + 11));
-                int ry1 = bSun + (int)(sa * (float)(SR + 11));
-                if ((ry0 < 0 && ry1 < 0) || (ry0 >= nrow && ry1 >= nrow)) continue;
-                if (ry0 < 0) ry0 = 0;
-                if (ry1 < 0) ry1 = 0;
-                u8g2_DrawLine(&s_u8g2, (u8g2_uint_t)rx0, (u8g2_uint_t)ry0,
-                              (u8g2_uint_t)rx1, (u8g2_uint_t)ry1);
-            }
-        }
-
-        u8g2_SetDrawColor(&s_u8g2, 0);
-        if (bHor < 0) {
-            u8g2_DrawBox(&s_u8g2, 0, 0, 80, (u8g2_uint_t)nrow);
-        } else if (bHor < nrow) {
-            int mask_h = nrow - bHor - 1;
-            if (mask_h > 0)
-                u8g2_DrawBox(&s_u8g2, 0, (u8g2_uint_t)(bHor + 1),
-                             80, (u8g2_uint_t)mask_h);
-        }
-        u8g2_SetDrawColor(&s_u8g2, 1);
-
-        if (bHor >= 0 && bHor < nrow)
-            u8g2_DrawHLine(&s_u8g2, 0, (u8g2_uint_t)bHor, 80);
+        wx_sun_anim_pass_core(y0, nrow, sy, HY, SR);
 
         /* Shadow bloom #1 — sun disc + rays only (mountains not drawn yet).
          * Covers the sky zone (fy < HY-20) with full 360° bloom.
@@ -8003,27 +8692,13 @@ static void wx_sun_anim_frame_buf(uint8_t *fb, bool rising, uint16_t fg)
          * that appeared each time the disc crossed the pass-0/pass-1 boundary
          * at tube y=64). */
         if (wl_shadow_on()) {
-            const uint8_t *tile = u8g2_GetBufferPtr(&s_u8g2);
-            for (int ry = 0; ry < nrow; ry++) {
-                int fy = y0 + ry;
-                if (fy >= HY - 20) continue;  /* sky zone only; mountain zone handled below */
-                for (int rx = 0; rx < LCD_WIDTH; rx++) {
-                    if (!((tile[(ry / 8) * 128 + rx] >> (ry % 8)) & 1)) continue;
-                    for (int dy = -2; dy <= 2; dy++) {
-                        int ny = fy + dy;
-                        if (ny < y0 || ny >= LCD_HEIGHT) continue;
-                        for (int dx = -2; dx <= 2; dx++) {
-                            int d2 = dx * dx + dy * dy;
-                            if (d2 == 0 || d2 > 5) continue;
-                            int nx = rx + dx;
-                            if (nx < 0 || nx >= LCD_WIDTH) continue;
-                            wl_blend_px(fb + (ny * LCD_WIDTH + nx) * 2,
-                                        s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b,
-                                        (d2 <= 2) ? 180 : 90);
-                        }
-                    }
-                }
-            }
+            /* Sky zone only (fy < HY-20); mountain zone handled below. */
+            int hi = HY - 20 - y0;
+            if (hi > nrow) hi = nrow;
+            if (hi > 0)
+                wx_blit_glow_bloom(fb, u8g2_GetBufferPtr(&s_u8g2), y0, 0, hi,
+                                   -2, 2, y0,
+                                   s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
         }
 
         /* Draw mountains after sun shadow so the mountain fill sits on top of
@@ -8045,38 +8720,24 @@ static void wx_sun_anim_frame_buf(uint8_t *fb, bool rising, uint16_t fg)
         if (wl_shadow_on() && p == 1) {
             int mry0 = HY - 20 - y0;
             if (mry0 < 0) mry0 = 0;
-            const uint8_t *tile = u8g2_GetBufferPtr(&s_u8g2);
-            for (int ry = mry0; ry < nrow; ry++) {
-                int fy = y0 + ry;
-                if (fy >= HY) continue;
-                for (int rx = 0; rx < LCD_WIDTH; rx++) {
-                    if (!((tile[(ry / 8) * 128 + rx] >> (ry % 8)) & 1)) continue;
-                    for (int dy = -1; dy <= 2; dy++) {
-                        int ny = fy + dy;
-                        if (ny < y0 || ny >= LCD_HEIGHT) continue;
-                        for (int dx = -2; dx <= 2; dx++) {
-                            int d2 = dx * dx + dy * dy;
-                            if (d2 == 0 || d2 > 5) continue;
-                            int nx = rx + dx;
-                            if (nx < 0 || nx >= LCD_WIDTH) continue;
-                            wl_blend_px(fb + (ny * LCD_WIDTH + nx) * 2,
-                                        s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b,
-                                        (d2 <= 2) ? 180 : 90);
-                        }
-                    }
-                }
-            }
+            int mry1 = HY - y0;
+            if (mry1 > nrow) mry1 = nrow;
+            if (mry1 > mry0)
+                wx_blit_glow_bloom(fb, u8g2_GetBufferPtr(&s_u8g2), y0, mry0, mry1,
+                                   -1, 2, y0,
+                                   s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
         }
 
         wl_blit_tile_into_fb(fb, u8g2_GetBufferPtr(&s_u8g2), nrow, y0, fg);
     }
 }
 
-/* ── wx_sun_draw_time ────────────────────────────────────────────────────────
- * Render "HH:MM" time centred both axes in a full 80×160 tube (logisoso28).
- * bg: decoded RGB565 background (LCD_WIDTH × LCD_HEIGHT); NULL = solid black. */
-static void wx_sun_draw_time(int tube, const char *timestr, uint16_t fg,
-                              const uint8_t *bg)
+/* Renders "HH:MM" into s_u8g2 (logisoso24, centred horizontally) — shared
+ * by wx_sun_draw_time() (tube-direct) and wx_sun_draw_time_buf() (fb-direct,
+ * WeatherLive sky), which need the identical text layout and differ only
+ * in the final blit (and the buf path's added shadow bloom). Returns
+ * glyph_h (ascent - descent), the row count the caller should blit. */
+static int wx_sun_text_layout(const char *timestr)
 {
     u8g2_ClearBuffer(&s_u8g2);
     u8g2_SetFont(&s_u8g2, u8g2_font_logisoso24_tf);
@@ -8087,7 +8748,16 @@ static void wx_sun_draw_time(int tube, const char *timestr, uint16_t fg,
     int tx = ((int)LCD_WIDTH - (int)tw) / 2;
     if (tx < 0) tx = 0;
     u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)tx, (u8g2_uint_t)ascent, timestr);
+    return glyph_h;
+}
 
+/* ── wx_sun_draw_time ────────────────────────────────────────────────────────
+ * Render "HH:MM" time centred both axes in a full 80×160 tube (logisoso28).
+ * bg: decoded RGB565 background (LCD_WIDTH × LCD_HEIGHT); NULL = solid black. */
+static void wx_sun_draw_time(int tube, const char *timestr, uint16_t fg,
+                              const uint8_t *bg)
+{
+    int glyph_h = wx_sun_text_layout(timestr);
     int y_tube = (LCD_HEIGHT - glyph_h) / 2;
     ht_blit_at(tube, u8g2_GetBufferPtr(&s_u8g2), glyph_h, y_tube, fg, bg);
 }
@@ -8098,37 +8768,12 @@ static void wx_sun_draw_time(int tube, const char *timestr, uint16_t fg,
  * overlay) that causes text to flicker at 20 Hz over an animated sky.     */
 static void wx_sun_draw_time_buf(uint8_t *fb, const char *timestr, uint16_t fg)
 {
-    u8g2_ClearBuffer(&s_u8g2);
-    u8g2_SetFont(&s_u8g2, u8g2_font_logisoso24_tf);
-    int ascent  = (int)u8g2_GetAscent(&s_u8g2);
-    int descent = (int)u8g2_GetDescent(&s_u8g2);
-    int glyph_h = ascent - descent;
-    u8g2_uint_t tw = u8g2_GetStrWidth(&s_u8g2, timestr);
-    int tx = ((int)LCD_WIDTH - (int)tw) / 2;
-    if (tx < 0) tx = 0;
-    u8g2_DrawStr(&s_u8g2, (u8g2_uint_t)tx, (u8g2_uint_t)ascent, timestr);
+    int glyph_h = wx_sun_text_layout(timestr);
     int y0_t = (LCD_HEIGHT - glyph_h) / 2;
     if (wl_shadow_on()) {
-        const uint8_t *tile = u8g2_GetBufferPtr(&s_u8g2);
-        for (int ry = 0; ry < glyph_h; ry++) {
-            int fy = y0_t + ry;
-            for (int rx = 0; rx < LCD_WIDTH; rx++) {
-                if (!((tile[(ry / 8) * 128 + rx] >> (ry % 8)) & 1)) continue;
-                for (int dy = -2; dy <= 2; dy++) {
-                    int ny = fy + dy;
-                    if (ny < 0 || ny >= LCD_HEIGHT) continue;
-                    for (int dx = -2; dx <= 2; dx++) {
-                        int d2 = dx * dx + dy * dy;
-                        if (d2 == 0 || d2 > 5) continue;
-                        int nx = rx + dx;
-                        if (nx < 0 || nx >= LCD_WIDTH) continue;
-                        wl_blend_px(fb + (ny * LCD_WIDTH + nx) * 2,
-                                    s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b,
-                                    (d2 <= 2) ? 180 : 90);
-                    }
-                }
-            }
-        }
+        wx_blit_glow_bloom(fb, u8g2_GetBufferPtr(&s_u8g2), y0_t, 0, glyph_h,
+                           -2, 2, 0,
+                           s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
     }
     wl_blit_tile_into_fb(fb, u8g2_GetBufferPtr(&s_u8g2), glyph_h, y0_t, fg);
 }
@@ -8203,11 +8848,21 @@ static const char *effective_bg_theme(const nextube_config_t *cfg)
     return cfg->theme;
 }
 
-static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
-                                bool anim_only)
+/* Resolves the effective background theme AND scopes wl_text()'s DotMatrix
+ * branch to it — every Weather Mode panel renderer below needs both of
+ * these together as its first step, and each used to do so with its own
+ * copy of this same two-line preamble. */
+static const char *wx_panel_prep(const nextube_config_t *cfg)
 {
     const char *th = effective_bg_theme(cfg);
     s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
+    return th;
+}
+
+static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
+                                bool anim_only)
+{
+    const char *th = wx_panel_prep(cfg);
     bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
     uint8_t *wl_bgfb = wl_sky ? wl_fb() : NULL;
 
@@ -8369,8 +9024,7 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
  * the shared PSRAM framebuffer; digit tubes use standard theme images. */
 static void render_weather_wind(const nextube_config_t *cfg)
 {
-    const char *th = effective_bg_theme(cfg);
-    s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
+    const char *th = wx_panel_prep(cfg);
     const weather_data_t *w = weather_get();
     int wind_kph = (w && w->valid) ? (int)lroundf(w->wind_kph) : 0;
     const char *unit = cfg->wind_unit[0] ? cfg->wind_unit : "km/h";
@@ -8390,14 +9044,30 @@ static void render_weather_wind(const nextube_config_t *cfg)
     char path[128];
     bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
 
+    /* "Segments" has its own configured accent color (same as every other
+     * Segments-drawn element — digits via seg_render_asset(), weather
+     * icons, the CX wind panel's wl_wind_panel() call) — unlike every other
+     * asset theme, where the streak glyph and unit label below are
+     * deliberately plain white/pale-blue regardless of theme, same as the
+     * humidity droplet's fixed blue. Without this, both ignored the user's
+     * on-color entirely. */
+    int wind_r = 255, wind_g = 255, wind_b = 255;
+    int lbl_r = 210, lbl_g = 220, lbl_b = 235;   /* label's own original pale blue-white */
+    if (!strcmp(th, "Segments")) {
+        wind_r = lbl_r = s_seg_on_r; wind_g = lbl_g = s_seg_on_g; wind_b = lbl_b = s_seg_on_b;
+    }
+
     /* Tube 0: blank (2-digit only) */
     if (!three_digit) {
         if (wl_sky) wl_tube_sky(0);
         else display_show_ampm(0, "blank", th);
     }
 
-    /* Wind-streak glyph — 3 horizontal lines with right-hand curls, centred
-     * vertically in the 80×160 canvas; pushed to tube 0 on 3-digit values. */
+    /* Wind-streak glyph — the same WX_SQUALLS icon used for the "squalls"
+     * weather condition and wl_wind_panel()'s tube 5/6 info panel below, at
+     * its standard full-tube placement (wx_draw_icon() / WX_Y0), so every
+     * wind glyph in the UI is visibly the same design, not three variants
+     * that can drift apart over time. Pushed to tube 0 on 3-digit values. */
     uint8_t *fb = wl_fb();
     if (fb) {
         if (wl_sky) {
@@ -8412,54 +9082,13 @@ static void render_weather_wind(const nextube_config_t *cfg)
             dm_draw_glyph(fb, 40, 80, DM_CP_ICON_WIND, 9, 2, true,
                           s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
         } else {
-        static const int wst[3][4] = { { 16, 50, 60, 7 },
-                                        { 10, 58, 80, 8 },
-                                        { 18, 46, 100, 7 } };
-        /* Shadow pass: expanded geometry drawn first. */
-        if (wl_shadow_on()) {
-            for (int s = 0; s < 3; s++) {
-                int x0 = wst[s][0], x1 = wst[s][1], y = wst[s][2], cr = wst[s][3];
-                for (int yy = y - 2; yy <= y + 2; yy++) {
-                    if (yy < 0 || yy >= LCD_HEIGHT) continue;
-                    for (int x = x0 - 1; x <= x1 + 1; x++) {
-                        if (x < 0 || x >= LCD_WIDTH) continue;
-                        wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2,
-                                    s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, 150);
-                    }
-                }
-                int ccx = x1, ccy = y - cr;
-                for (float a = 1.57f; a <= 7.0f; a += 0.05f) {
-                    for (int t = 0; t < 2; t++) {
-                        int rr = cr + 1 + t;
-                        int x  = ccx + (int)((float)rr * cosf(a) + 0.5f);
-                        int yy = ccy + (int)((float)rr * sinf(a) + 0.5f);
-                        if (x >= 0 && x < LCD_WIDTH && yy >= 0 && yy < LCD_HEIGHT)
-                            wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2,
-                                        s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, 150);
-                    }
-                }
-            }
-        }
-        for (int s = 0; s < 3; s++) {
-            int x0 = wst[s][0], x1 = wst[s][1], y = wst[s][2], cr = wst[s][3];
-            for (int yy = y - 1; yy <= y + 1; yy++) {
-                if (yy < 0 || yy >= LCD_HEIGHT) continue;
-                for (int x = x0; x <= x1; x++) {
-                    if (x < 0 || x >= LCD_WIDTH) continue;
-                    wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2, 255, 255, 255, 255);
-                }
-            }
-            int ccx = x1, ccy = y - cr;
-            for (float a = 1.57f; a <= 7.0f; a += 0.05f) {
-                for (int tt = 0; tt < 2; tt++) {
-                    int rr = cr - tt;
-                    int x  = ccx + (int)((float)rr * cosf(a) + 0.5f);
-                    int yy = ccy + (int)((float)rr * sinf(a) + 0.5f);
-                    if (x >= 0 && x < LCD_WIDTH && yy >= 0 && yy < LCD_HEIGHT)
-                        wl_blend_px(fb + (yy * LCD_WIDTH + x) * 2, 255, 255, 255, 255);
-                }
-            }
-        }
+            const size_t wn = sizeof(WX_SQUALLS) / sizeof(WX_SQUALLS[0]);
+            /* Shadow pass: same icon, thicker stroke, shadow color, drawn
+             * first so only its edges peek out from under the real glyph. */
+            if (wl_shadow_on())
+                wx_draw_icon_ex(fb, WX_SQUALLS, wn, WX_Y0, WX_THICK + 4,
+                                s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
+            wx_draw_icon(fb, WX_SQUALLS, wn, wind_r, wind_g, wind_b);
         }
         display_show_digit(glyph_tube, fb, LCD_WIDTH, LCD_HEIGHT);
     } else {
@@ -8519,7 +9148,7 @@ static void render_weather_wind(const nextube_config_t *cfg)
             dm_draw_glyph(fb, 40, 80, unit_cp, 9, 2, false,
                           s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
         } else {
-            wl_text(fb, 40, 88, u8g2_font_logisoso20_tf, label, 210, 220, 235, 0);
+            wl_text(fb, 40, 88, u8g2_font_logisoso20_tf, label, lbl_r, lbl_g, lbl_b, 0);
         }
         display_show_digit(4, fb, LCD_WIDTH, LCD_HEIGHT);
     } else {
@@ -8555,8 +9184,7 @@ static temp_val_t temp_sign_magnitude(float celsius, bool use_fahrenheit)
 
 static void render_weather_hilo(const nextube_config_t *cfg, bool show_hi)
 {
-    const char *th = effective_bg_theme(cfg);
-    s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
+    const char *th = wx_panel_prep(cfg);
     const weather_data_t *w = weather_get();
     char path[128];
 
@@ -8598,6 +9226,20 @@ static void render_weather_hilo(const nextube_config_t *cfg, bool show_hi)
              * apart). */
             dm_draw_glyph(fb, 40, 80, show_hi ? DM_CP_ARROW_UP : DM_CP_ARROW_DOWN, 9, 2, true,
                           s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        } else if (!strcmp(th, "Segments")) {
+            /* Same idea as the DotMatrix branch above — a dedicated glyph in
+             * the theme's own on/off colors instead of the semantic
+             * red/blue every other theme uses below. Here that glyph is
+             * built from two of the font's own 16 segments rather than a
+             * separate icon: K+M (the lower diagonals, spreading from
+             * center down to the bottom corners) reads as a "^" caret for
+             * HI; H+J (the upper diagonals, meeting at center from the top
+             * corners) reads as a "v" chevron for LO. Drawn through the
+             * normal seg_draw_glyph() full-box path, so it shows the same
+             * lit-segments-over-a-ghost-frame look as every digit. */
+            seg_draw_glyph(fb, show_hi ? SEG_CH_ARROW_UP : SEG_CH_ARROW_DOWN,
+                          SEG_PAD_X, SEG_PAD_TOP, SEG_BOX_W, SEG_BOX_H, SEG_THICK, SEG_GAP,
+                          s_seg_on_r, s_seg_on_g, s_seg_on_b, s_seg_off_r, s_seg_off_g, s_seg_off_b);
         } else {
         /* Arrow geometry: total height 80 px centred in 160 px (y=40..120).
          * Head = 40 px tall, max half-width 20 px.  Shaft = 40 px, half-width 7 px. */
@@ -8747,6 +9389,9 @@ static void render_weather_hilo(const nextube_config_t *cfg, bool show_hi)
  * renders its own temp/humidity as generic text instead of the theme's
  * number JPEGs, once more than one thing has to share the tube.
  *
+ * label: NULL when the matching Indoor/Outdoor panel of the same kind isn't
+ * enabled — with only one side in the rotation there's nothing to
+ * disambiguate, so the tube falls back to blank-or-minus-sign content.
  * center_glyph: "-" (temperature, 2-digit negative) or NULL (every other
  * case — humidity never passes anything here). Called by
  * wx_draw_temp_digits()/wx_draw_humidity_digits() below, defined first
@@ -8765,13 +9410,14 @@ static void wx_draw_label_tube_shared(const nextube_config_t *cfg, const char *t
         uint8_t *fb = wl_fb();
         if (!fb) return;
         memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
-        int cell = dm_fit_cell(label);
+        int cell = label ? dm_fit_cell(label) : 9;   /* 9 = standard full-tube glyph pitch */
         if (center_glyph) {
             int c2 = dm_fit_cell(center_glyph);
             if (c2 < cell) cell = c2;
         }
         dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
-        dm_draw_text_p_on(fb, 40, 40, label, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        if (label)
+            dm_draw_text_p_on(fb, 40, 40, label, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
         if (center_glyph)
             dm_draw_text_p_on(fb, 40, 116, center_glyph, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
         display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
@@ -8789,20 +9435,22 @@ static void wx_draw_label_tube_shared(const nextube_config_t *cfg, const char *t
          * reasoning as before this moved off tube 5: fr_draw_text()'s
          * per-string auto-fit would otherwise size "In" and "Out"
          * differently just because one has a letter less. */
-        const int REQ_PX = 20;
-        int label_by = (s_ft_face_id >= 0) ? 54 : 47;
-        if (s_ft_face_id >= 0) {
-            uint16_t fit_px = fr_fit_px_size(LCD_WIDTH, (uint8_t)s_ft_face_id,
-                                              REQ_PX, inout_label(cfg->language, false));
-            int ttf_by = label_by - (int)(fit_px / 5);   /* same nudge wl_text() applies */
-            fr_draw_text_exact(fb, LCD_WIDTH, LCD_HEIGHT, 40, ttf_by,
-                               (uint8_t)s_ft_face_id, fit_px, label,
-                               (uint8_t)s_wl_font_r, (uint8_t)s_wl_font_g, (uint8_t)s_wl_font_b,
-                               s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b,
-                               s_wl_shadow_size);
-        } else {
-            wl_text(fb, 40, label_by, u8g2_font_logisoso20_tf, label,
-                    s_wl_font_r, s_wl_font_g, s_wl_font_b, REQ_PX);
+        if (label) {
+            const int REQ_PX = 20;
+            int label_by = (s_ft_face_id >= 0) ? 54 : 47;
+            if (s_ft_face_id >= 0) {
+                uint16_t fit_px = fr_fit_px_size(LCD_WIDTH, (uint8_t)s_ft_face_id,
+                                                  REQ_PX, inout_label(cfg->language, false));
+                int ttf_by = label_by - (int)(fit_px / 5);   /* same nudge wl_text() applies */
+                fr_draw_text_exact(fb, LCD_WIDTH, LCD_HEIGHT, 40, ttf_by,
+                                   (uint8_t)s_ft_face_id, fit_px, label,
+                                   (uint8_t)s_wl_font_r, (uint8_t)s_wl_font_g, (uint8_t)s_wl_font_b,
+                                   s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b,
+                                   s_wl_shadow_size);
+            } else {
+                wl_text(fb, 40, label_by, u8g2_font_logisoso20_tf, label,
+                        s_wl_font_r, s_wl_font_g, s_wl_font_b, REQ_PX);
+            }
         }
 
         /* center_glyph — lower zone. */
@@ -8818,7 +9466,8 @@ static void wx_draw_label_tube_shared(const nextube_config_t *cfg, const char *t
     const uint8_t *bg = cx_load_text_bg(tube, cfg);
     if (!bg) display_fill(tube, 0x0000);
     uint16_t fg = ht_sample_theme_color(cfg->theme);
-    ht_draw_label(tube, label, 12, fg, bg);
+    if (label)
+        ht_draw_label(tube, label, 12, fg, bg);
     if (center_glyph)
         ht_draw_str_at(tube, center_glyph, HT_LABEL_H + 12, 90, u8g2_font_logisoso42_tf, fg, bg);
 }
@@ -9000,6 +9649,34 @@ static void wx_draw_humidity_digits(int hum, const char *th, bool wl_sky,
     } else { display_path_humidity(path, sizeof(path), th, "humidity"); display_show_image(4, path); }
 }
 
+/* Shared prep for the two indoor SHT30 panels below: resolves th/wl_sky and
+ * reads the sensor. On failure (absent or not yet valid) draws the same
+ * "no data" dot pattern render_weather() shows before the first outdoor
+ * fetch succeeds and returns false — the caller just returns immediately. */
+static bool wx_indoor_prep(const nextube_config_t *cfg, const char **th_out,
+                           bool *wl_sky_out, sht30_reading_t *s)
+{
+    if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);
+    const char *th = wx_panel_prep(cfg);
+    bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
+    *th_out = th;
+    *wl_sky_out = wl_sky;
+
+    if (sht30_get(s)) return true;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        if (wl_sky) wl_tube_str(i, u8g2_font_logisoso46_tf, ".", 100);
+        else display_show_ampm(i, "dot", th);
+    }
+    return false;
+}
+
+/* Blanks tube 5 — neither indoor panel has a weather icon to show there. */
+static void wx_tube5_blank(bool wl_sky, const char *th)
+{
+    if (wl_sky) wl_tube_sky(5);
+    else display_show_ampm(5, "blank", th);
+}
+
 /* Panel 5 — Indoor Temperature (SHT30). Same tube layout as the outdoor
  * Temperature panel (wx_draw_temp_digits, including the "In" label shared
  * on tube 1 — see wx_draw_label_tube_shared()); tube 5 is plain blank, since
@@ -9008,28 +9685,16 @@ static void wx_draw_humidity_digits(int hum, const char *th, bool wl_sky,
  * outdoor fetch has never succeeded. */
 static void render_weather_indoor_temp(const nextube_config_t *cfg)
 {
-    if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);
-    const char *th = effective_bg_theme(cfg);
-    s_wl_dm_active = !strcmp(th, "DotMatrix");
-    bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
-
-    sht30_reading_t s;
-    if (!sht30_get(&s)) {
-        /* Sensor absent or not yet valid — same "no data" dot pattern
-         * render_weather() shows before the first outdoor fetch succeeds. */
-        for (int i = 0; i < LCD_COUNT; i++) {
-            if (wl_sky) wl_tube_str(i, u8g2_font_logisoso46_tf, ".", 100);
-            else display_show_ampm(i, "dot", th);
-        }
-        return;
-    }
+    const char *th; bool wl_sky; sht30_reading_t s;
+    if (!wx_indoor_prep(cfg, &th, &wl_sky, &s)) return;
 
     bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
     temp_val_t tv = temp_sign_magnitude(s.temp_c, fahrenheit);
+    /* Only label "In" when Outdoor Temp is also enabled — see
+     * wx_draw_label_tube_shared(). */
     wx_draw_temp_digits(tv.value, tv.negative, fahrenheit, th, wl_sky, cfg,
-                        inout_label(cfg->language, true));
-    if (wl_sky) wl_tube_sky(5);
-    else display_show_ampm(5, "blank", th);
+                        cfg->weather_panel0_en ? inout_label(cfg->language, true) : NULL);
+    wx_tube5_blank(wl_sky, th);
 }
 
 /* Panel 6 — Indoor Humidity (SHT30). Same tube layout as the outdoor
@@ -9037,28 +9702,18 @@ static void render_weather_indoor_temp(const nextube_config_t *cfg)
  * wx_draw_label_tube_shared()); tube 5 is plain blank. */
 static void render_weather_indoor_hum(const nextube_config_t *cfg)
 {
-    if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);
-    const char *th = effective_bg_theme(cfg);
-    s_wl_dm_active = !strcmp(th, "DotMatrix");
-    bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
-
-    sht30_reading_t s;
-    if (!sht30_get(&s)) {
-        for (int i = 0; i < LCD_COUNT; i++) {
-            if (wl_sky) wl_tube_str(i, u8g2_font_logisoso46_tf, ".", 100);
-            else display_show_ampm(i, "dot", th);
-        }
-        return;
-    }
+    const char *th; bool wl_sky; sht30_reading_t s;
+    if (!wx_indoor_prep(cfg, &th, &wl_sky, &s)) return;
 
     int hum = (int)(s.humidity + 0.5f);
     if (hum < 0)  hum = 0;
     if (hum > 99) hum = 99;
 
     wx_draw_humidity_droplet(th, wl_sky);
-    wx_draw_humidity_digits(hum, th, wl_sky, cfg, inout_label(cfg->language, true));
-    if (wl_sky) wl_tube_sky(5);
-    else display_show_ampm(5, "blank", th);
+    /* Only label "In" when Outdoor Humidity is also enabled — see above. */
+    wx_draw_humidity_digits(hum, th, wl_sky, cfg,
+                        cfg->weather_panel1_en ? inout_label(cfg->language, true) : NULL);
+    wx_tube5_blank(wl_sky, th);
 }
 
 /* render_weather – panel 0 = temperature + icon, panel 1 = humidity + icon,
@@ -9067,25 +9722,28 @@ static void render_weather_indoor_hum(const nextube_config_t *cfg)
  *
  * Panel layout (auto-cycles in the display task):
  *
- *  Panel 0 — temperature (tubes 0-indexed). Tube 1 always carries the
- *  "Out" label; it's otherwise blank except for a 2-digit-negative minus
- *  sign, which shares the tube with it (see wx_draw_label_tube_shared()).
- *  Tube 2 is unaffected by the label — same minus/tens/blank content:
+ *  Panel 0 — temperature (tubes 0-indexed). Tube 1 carries the "Out" label
+ *  only when the matching Indoor Temp panel is also enabled (SHT30 present);
+ *  otherwise blank except for a 2-digit-negative minus sign, which shares
+ *  the tube with it (see wx_draw_label_tube_shared()). Tube 2 is unaffected
+ *  by the label — same minus/tens/blank content:
  *    positive 1-digit:  0=blank  1=Out       2=blank  3=units  4=°C/°F
  *    positive 2-digit:  0=blank  1=Out       2=tens   3=units  4=°C/°F
  *    negative 1-digit:  0=blank  1=Out       2=minus  3=units  4=°C/°F
  *    negative 2-digit:  0=blank  1=Out+minus 2=tens   3=units  4=°C/°F
  *                     tube 5 = weather icon (untouched by the label)
  *
- *  Panel 1 — humidity (tube 1 = "Out" always; humidity has no minus sign):
+ *  Panel 1 — humidity (tube 1 = "Out", same enabled-Indoor-Hum condition as
+ *  above; humidity has no minus sign):
  *    [droplet glyph] [Out] [hum_tens/blank] [hum_units] [%] [icon]
  *
  *  Panel 2 — sunrise + sunset:
  *    [rise_icon] [rise_time] [blank] [blank] [set_icon] [set_time]
  *
  *  Panels 5/6 — indoor temp/humidity: identical layout to 0/1 but with "In"
- *    on tube 1 and tube 5 plain blank (render_weather_indoor_*() above,
- *    dispatched before this function's outdoor-weather validity check).
+ *    on tube 1 (shown only when the matching Outdoor panel is also enabled)
+ *    and tube 5 plain blank (render_weather_indoor_*() above, dispatched
+ *    before this function's outdoor-weather validity check).
  */
 static void render_weather(const nextube_config_t *cfg, int panel, bool anim_only,
                            int hilo_phase)
@@ -9098,8 +9756,7 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
     if (panel == WEATHER_PANEL_INHUM) { render_weather_indoor_hum(cfg);  return; }
 
     if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);   /* keep anim_t current */
-    const char *th = effective_bg_theme(cfg);
-    s_wl_dm_active = !strcmp(th, "DotMatrix");   /* scope wl_text()'s dm branch to this frame */
+    const char *th = wx_panel_prep(cfg);
     const weather_data_t *w = weather_get();
     bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
     char path[128];
@@ -9155,17 +9812,22 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
         display_show_image(5, path);
     }
 
+    /* "Out" only shows when the matching Indoor panel is also enabled and
+     * the sensor is present — mirrors the check in render_weather_indoor_*(). */
+    bool sht_present = sht30_is_present();
+
     /* ── Panel 1: humidity ─────────────────────────────────────────── */
     /* Layout: 0=droplet glyph  1=label  2=tens/blank  3=units  4=%  5=icon */
     if (panel == 1) {
         wx_draw_humidity_droplet(th, wl_sky);
-        wx_draw_humidity_digits(hum, th, wl_sky, cfg, inout_label(cfg->language, false));
+        wx_draw_humidity_digits(hum, th, wl_sky, cfg,
+                            (cfg->weather_panel6_en && sht_present) ? inout_label(cfg->language, false) : NULL);
         return;
     }
 
     /* ── Panel 0: temperature ──────────────────────────────────────── */
     wx_draw_temp_digits(temp, negative, fahrenheit, th, wl_sky, cfg,
-                        inout_label(cfg->language, false));
+                        (cfg->weather_panel5_en && sht_present) ? inout_label(cfg->language, false) : NULL);
 }
 
 
@@ -9373,7 +10035,11 @@ static void display_task(void *arg)
     int           hilo_phase        = 0;       /* 0 = show HI, 1 = show LO (panel 4 only) */
     bool          first              = true;
     int           last_hour             = -1;  /* for hourly burn-in shift update */
-    int           burnin_last_run_yday  = -1;  /* day-of-year the scheduled burn-in last ran */
+    int32_t       burnin_note_key       = -1;  /* schedule slot a skip/wait was last logged for */
+    int64_t       burnin_sched_start_us = 0;   /* running scheduled session's start; 0 = none */
+    uint8_t       burnin_painted_mask   = 0;   /* color-cycle: tubes/color/time last painted */
+    uint16_t      burnin_painted_col    = 0;
+    int64_t       burnin_painted_us     = 0;
     /* AP PIN exit guard: set true each AP-PIN tick so the FIRST normal-mode
      * tick after a client connects does a blank fill instead of a JPEG read.
      * Reason: WPA2 4-way handshake runs AES ops on Core 0 at a high interrupt
@@ -9414,6 +10080,10 @@ static void display_task(void *arg)
      * producing a truncated panic with no backtrace.  The display task is
      * single-instance and single-threaded, so a static local is safe. */
     static nextube_config_t cfg_snap;
+    if (s_burnin_sched_magic != BURNIN_SCHED_MAGIC) {   /* power-on: RTC memory is garbage */
+        s_burnin_sched_magic = BURNIN_SCHED_MAGIC;
+        s_burnin_sched_slot  = -1;
+    }
     while (1) {
         /* OTA park request — honour it here, at the loop boundary, where no
          * SPI transaction is open and no buffers are mid-render.  The task
@@ -9433,6 +10103,9 @@ static void display_task(void *arg)
          * don't have direct access to cfg. Cheap unconditional copy. */
         s_dm_on_r  = cfg->dm_on_color[0];  s_dm_on_g  = cfg->dm_on_color[1];  s_dm_on_b  = cfg->dm_on_color[2];
         s_dm_off_r = cfg->dm_off_color[0]; s_dm_off_g = cfg->dm_off_color[1]; s_dm_off_b = cfg->dm_off_color[2];
+        /* Same reasoning as the DotMatrix refresh above, for "Segments". */
+        s_seg_on_r  = cfg->seg_on_color[0];  s_seg_on_g  = cfg->seg_on_color[1];  s_seg_on_b  = cfg->seg_on_color[2];
+        s_seg_off_r = cfg->seg_off_color[0]; s_seg_off_g = cfg->seg_off_color[1]; s_seg_off_b = cfg->seg_off_color[2];
         app_mode_t mode = cfg->current_mode;
 
         /* ── Controlled-boot gate ─────────────────────────────────────────
@@ -9762,8 +10435,8 @@ static void display_task(void *arg)
          * whenever it changes.  Formula: hour%5 - 2 → {-2,-1,0,+1,+2}.
          * Self-correcting from NTP; no step counter needed.
          * Also checks at midnight whether the scheduled burn-in interval
-         * (weekly = Sunday, monthly = 1st of month) has been met, and
-         * fires display_set_burnin_mask() automatically if so.
+         * (daily = every day, weekly = Sunday, monthly = 1st of month) has
+         * been met, and fires display_set_burnin_mask() automatically if so.
          * Skipped on the very first tick (first==true). */
         if (!first) {
             struct tm burn_tm; ntp_get_local(&burn_tm);
@@ -9780,40 +10453,63 @@ static void display_task(void *arg)
                          last_hour, (int)s_burnin_shift_x);
             }
 
-            /* ── Scheduled burn-in: midnight trigger ─────────────────────
-             * Only evaluates at midnight (tm_hour == 0).
-             * burnin_last_run_yday tracks the last day-of-year that was
-             * checked to prevent re-triggering every 200 ms tick while
-             * still within the same midnight window.  Any day stamped as
-             * "checked" is skipped on subsequent ticks that same day, so
-             * only one check per calendar day is ever performed.
-             * An already-active session (s_burnin_mask != 0) is not
-             * interrupted — a manual session takes precedence. */
-            if (cfg->burnin_auto_enabled && !s_burnin_mask &&
-                    burn_tm.tm_hour == (int)cfg->burnin_auto_hour &&
-                    burn_tm.tm_yday != burnin_last_run_yday) {
+            /* ── Scheduled burn-in ────────────────────────────────────────
+             * Evaluated on each tick of the configured hour until a run
+             * starts in it. Only a run that actually STARTS stamps its slot
+             * (day + hour, s_burnin_sched_slot) — so a run ending, or being
+             * cancelled, within the hour doesn't start another, while moving
+             * the schedule to a different hour re-arms it the same day (e.g.
+             * to test it). Stamping every check instead meant that once the
+             * configured hour had passed on a non-matching day (Weekly, not a
+             * Sunday), moving the hour or switching to Daily later that day
+             * couldn't run until tomorrow. Cost: one int compare outside the
+             * hour, two strcmps inside it.
+             * A session already running (manual or scheduled, either mode)
+             * isn't interrupted — the run waits for it to end, within the
+             * hour. Same ntp_has_valid_time() guard as the pixel shift:
+             * before a real time source, local time is epoch + uptime and
+             * could match the hour spuriously. Skip/wait notes are logged
+             * once per slot, not every tick. */
+            if (ntp_has_valid_time() && cfg->burnin_auto_enabled &&
+                    burn_tm.tm_hour == (int)cfg->burnin_auto_hour) {
+                const int32_t slot = ((int32_t)(burn_tm.tm_year + 1900) * 1000 + burn_tm.tm_yday) * 24
+                                   + burn_tm.tm_hour;
+                if (slot != s_burnin_sched_slot) {
+                    const bool  snow = strcmp(cfg->burnin_auto_mode, "snow") == 0;
+                    const char *skip = NULL;
+                    if (strcmp(cfg->burnin_auto_interval, "monthly") == 0) {
+                        if (burn_tm.tm_mday != 1) skip = "monthly: runs on the 1st";
+                    } else if (strcmp(cfg->burnin_auto_interval, "daily") != 0) {
+                        if (burn_tm.tm_wday != 0) skip = "weekly: runs on Sunday";
+                    }
+                    if (!skip && !(cfg->burnin_auto_mask & 0x3F)) skip = "no tubes selected";
 
-                burnin_last_run_yday = burn_tm.tm_yday; /* stamp regardless of fire */
-
-                bool should_fire = false;
-                if (strcmp(cfg->burnin_auto_interval, "monthly") == 0)
-                    should_fire = (burn_tm.tm_mday == 1);
-                else                                       /* "weekly" = every Sunday */
-                    should_fire = (burn_tm.tm_wday == 0);
-
-                if (should_fire) {
-                    if (strcmp(cfg->burnin_auto_mode, "snow") == 0)
-                        display_set_snow_mask(cfg->burnin_auto_mask,
-                                              cfg->burnin_auto_duration_s);
-                    else
-                        display_set_burnin_mask(cfg->burnin_auto_mask,
-                                                cfg->burnin_auto_duration_s);
-                    ESP_LOGI(TAG,
-                             "Scheduled burn-in fired (%s, %s): mask=0x%02X  dur=%lus",
-                             cfg->burnin_auto_interval,
-                             cfg->burnin_auto_mode,
-                             (unsigned)cfg->burnin_auto_mask,
-                             (unsigned long)cfg->burnin_auto_duration_s);
+                    bool started = false;
+                    /* Both branches check-and-set under one mutex hold (display_start_
+                     * {burnin,snow}_if_idle()) rather than trusting this unlocked
+                     * !skip && !s_burnin_mask && !s_snow_mask read — otherwise a
+                     * session a web/HA request just started in the gap between that
+                     * read and the write below could get silently overwritten. */
+                    if (!skip) {
+                        started = snow
+                                ? display_start_snow_if_idle(cfg->burnin_auto_mask, cfg->burnin_auto_duration_s)
+                                : display_start_burnin_if_idle(cfg->burnin_auto_mask, cfg->burnin_auto_duration_s);
+                    }
+                    if (started) {
+                        s_burnin_sched_slot   = slot;
+                        burnin_sched_start_us = esp_timer_get_time();
+                        ESP_LOGI(TAG, "Scheduled burn-in started (%s, %s): mask=0x%02X  duration=%lus",
+                                 cfg->burnin_auto_interval, cfg->burnin_auto_mode,
+                                 (unsigned)(cfg->burnin_auto_mask & 0x3F),
+                                 (unsigned long)cfg->burnin_auto_duration_s);
+                    } else if (burnin_note_key != slot) {
+                        burnin_note_key = slot;
+                        if (skip)
+                            ESP_LOGI(TAG, "Scheduled burn-in skipped today (%s)", skip);
+                        else
+                            ESP_LOGI(TAG, "Scheduled burn-in waiting: another session is running "
+                                          "(starts if it ends before %02d:59)", burn_tm.tm_hour);
+                    }
                 }
             }
         }
@@ -9914,22 +10610,25 @@ static void display_task(void *arg)
          * command sent from the web UI between ticks).  Added to each mode's
          * render condition so restoration is immediate even when normal change
          * detection would otherwise skip the draw. */
+        bool burnin_expired = false;
         {
-            time_t _exp_now = time(NULL);
+            int64_t _exp_now = esp_timer_get_time();
             /* Hold mutex for both pairs of field clears so display_set_burnin_mask()
              * called concurrently from the web-server task cannot observe a torn state
-             * (mask cleared, end_time still non-zero). */
+             * (mask cleared, end time still non-zero). */
             xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-            if (s_burnin_mask && s_burnin_end_time != 0 &&
-                    _exp_now >= s_burnin_end_time) {
-                s_burnin_mask     = 0;
-                s_burnin_end_time = 0;
+            if (s_burnin_mask && s_burnin_end_us != 0 &&
+                    _exp_now >= s_burnin_end_us) {
+                s_burnin_mask   = 0;
+                s_burnin_end_us = 0;
+                burnin_expired  = true;
                 ESP_LOGI(TAG, "burn-in timer expired — restoring normal display");
             }
-            if (s_snow_mask && s_snow_end_time != 0 &&
-                    _exp_now >= s_snow_end_time) {
-                s_snow_mask     = 0;
-                s_snow_end_time = 0;
+            if (s_snow_mask && s_snow_end_us != 0 &&
+                    _exp_now >= s_snow_end_us) {
+                s_snow_mask   = 0;
+                s_snow_end_us = 0;
+                burnin_expired = true;
                 ESP_LOGI(TAG, "snow timer expired — restoring normal display");
             }
             xSemaphoreGive(s_timer_mutex);
@@ -9937,6 +10636,12 @@ static void display_task(void *arg)
         uint8_t cur_burnin_snap     = (uint8_t)(s_burnin_mask | s_snow_mask);
         bool    burnin_force_render = (last_burnin_snap != 0) && (cur_burnin_snap == 0);
         last_burnin_snap = cur_burnin_snap;
+        if (burnin_force_render && burnin_sched_start_us) {
+            ESP_LOGI(TAG, "Scheduled burn-in finished (%s) after %lus",
+                     burnin_expired ? "completed" : "stopped early",
+                     (unsigned long)((esp_timer_get_time() - burnin_sched_start_us) / 1000000LL));
+            burnin_sched_start_us = 0;
+        }
         /* Set true inside APP_MODE_WEATHER when the sun animation panel is
          * active; used below to drive FAST tick and per-frame anim updates. */
         bool    sun_anim            = false;
@@ -10508,6 +11213,7 @@ static void display_task(void *arg)
              * fire flips hilo_phase 0→1; the second fire advances to the next panel.
              * If the currently active panel has been disabled, jumps to the next
              * enabled one immediately without waiting for the rotation timer.   */
+            int  prev_weather_panel = weather_panel;
             bool panel_flipped = false;
             {
                 /* Build ordered list of enabled panel indices — always, not
@@ -10572,6 +11278,11 @@ static void display_task(void *arg)
             /* True when the animated sunrise/sunset panel is visible — drives
              * FAST tick (20 Hz) and per-frame animation blit of tubes 0 and 4. */
             sun_anim = (weather_panel == WEATHER_PANEL_SUN);  /* FAST tick whenever sun anim is on screen, regardless of panel2_en */
+
+            /* Restart the sun's rise on every fresh entry — see
+             * wx_sun_anim_reset()'s comment. */
+            if (sun_anim && prev_weather_panel != WEATHER_PANEL_SUN)
+                wx_sun_anim_reset();
 
             /* Trigger re-render when: first draw, mode/theme change, new data
              * values arrived, validity flips, panel switched, or solar-time
@@ -10681,15 +11392,38 @@ static void display_task(void *arg)
          * Runs after normal mode render; unmasked tubes show live content.
          * Color advances every BURNIN_COLOR_SECS seconds, cycling through
          * red→green→blue→white→black to stress every sub-pixel at both
-         * voltage extremes.  Timer expiry is handled in the pre-check above. */
+         * voltage extremes.  Timer expiry is handled in the pre-check above.
+         *
+         * Painted only when the color or the tube set changes, plus a safety
+         * repaint every BURNIN_REPAINT_US — not every tick. A full-tube fill
+         * busy-waits on the SPI bus, and at WeatherLive's 10–20 Hz tick six
+         * of them per tick for a whole session starved httpd/MQTT (web UI
+         * dropping mid-session). Most render paths already skip masked tubes;
+         * the safety repaint covers the few that don't (ticker overlay, AP
+         * PIN, direct display_show_digit users), so anything they draw over
+         * a masked tube is gone within 2 s. */
         if (s_burnin_mask) {
-            time_t now_t = time(NULL);
+            /* Monotonic, not time(NULL) — same reasoning as the expiry timer
+             * above: a wall-clock step (NTP correction) would otherwise skip
+             * or repeat colors. Harmless either way (this only picks which
+             * of 5 colors shows), but kept consistent now that it's the last
+             * wall-clock read in this feature. */
+            int64_t now_us = esp_timer_get_time();
             uint16_t col = s_burnin_colors[
-                (size_t)(now_t / BURNIN_COLOR_SECS) % (size_t)BURNIN_COLOR_COUNT];
-            for (int _t = 0; _t < LCD_COUNT; _t++) {
-                if (s_burnin_mask & (1u << _t))
-                    display_fill(_t, col);
+                (size_t)(now_us / (BURNIN_COLOR_SECS * 1000000LL)) % (size_t)BURNIN_COLOR_COUNT];
+            uint8_t mask = s_burnin_mask;
+            if (mask != burnin_painted_mask || col != burnin_painted_col ||
+                    now_us - burnin_painted_us >= BURNIN_REPAINT_US) {
+                for (int _t = 0; _t < LCD_COUNT; _t++) {
+                    if (mask & (1u << _t))
+                        display_fill(_t, col);
+                }
+                burnin_painted_mask = mask;
+                burnin_painted_col  = col;
+                burnin_painted_us   = now_us;
             }
+        } else {
+            burnin_painted_mask = 0;   /* next session paints on its first tick */
         }
 
         /* Static-snow burn-in: write random RGB565 pixels to masked tubes.

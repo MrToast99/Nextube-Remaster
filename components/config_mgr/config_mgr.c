@@ -32,9 +32,10 @@ static void set_defaults(void)
 
     s_cfg.current_mode    = APP_MODE_CLOCK;
     strncpy(s_cfg.theme, "NixieOY", sizeof(s_cfg.theme) - 1);
-    strncpy(s_cfg.time_type, "24H", sizeof(s_cfg.time_type) - 1);
+    strncpy(s_cfg.time_type, "12H", sizeof(s_cfg.time_type) - 1);
     strncpy(s_cfg.clock_tube5, "blank", sizeof(s_cfg.clock_tube5) - 1);
     s_cfg.leading_zero    = false;
+    s_cfg.web_live_preview = true;
     s_cfg.led_brightness  = 60;
     s_cfg.lcd_brightness  = 60;
     s_cfg.auto_brightness = false;
@@ -77,6 +78,8 @@ static void set_defaults(void)
     s_cfg.custom_font[0]        = '\0';
     s_cfg.dm_on_color[0]  = 255; s_cfg.dm_on_color[1]  = 255; s_cfg.dm_on_color[2]  = 255;
     s_cfg.dm_off_color[0] = 25;  s_cfg.dm_off_color[1] = 25;  s_cfg.dm_off_color[2] = 25;
+    s_cfg.seg_on_color[0]  = 255; s_cfg.seg_on_color[1]  = 255; s_cfg.seg_on_color[2]  = 255;
+    s_cfg.seg_off_color[0] = 10;  s_cfg.seg_off_color[1] = 10;  s_cfg.seg_off_color[2] = 10;
     /* All modes enabled by default. Clock and Date are independent — both
      * can be active simultaneously in the touch cycle. */
     s_cfg.enabled_modes   = 0xFFF;   /* all 12 modes (bits 0–11) */
@@ -516,6 +519,7 @@ static void parse_json(const char *json, size_t len)
     if (s_cfg.sht30_temp_offset >  20.0f) s_cfg.sht30_temp_offset =  20.0f;
     if (s_cfg.sht30_temp_offset < -20.0f) s_cfg.sht30_temp_offset = -20.0f;
     json_read_bool(root, "leading_zero", &s_cfg.leading_zero);
+    json_read_bool(root, "web_live_preview", &s_cfg.web_live_preview);
 
     /* NTP servers — new array format, with fallback to legacy single key */
     {
@@ -618,19 +622,21 @@ static void parse_json(const char *json, size_t len)
     {
         bool have_glyph_shadow_color       = cJSON_IsArray(cJSON_GetObjectItem(root, "custom_glyph_shadow_color"));
         bool have_glyph_shadow_color_night = cJSON_IsArray(cJSON_GetObjectItem(root, "custom_glyph_shadow_color_night"));
-        static const char *const color_keys[12] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
+        static const char *const color_keys[14] = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
                                                     "dm_on_color", "dm_off_color",
+                                                    "seg_on_color", "seg_off_color",
                                                     "custom_bg_color1", "custom_bg_color2",
                                                     "custom_font_color_night", "custom_glyph_color_night",
                                                     "custom_shadow_color_night",
                                                     "custom_glyph_shadow_color", "custom_glyph_shadow_color_night" };
-        uint8_t *const color_ptrs[12] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
+        uint8_t *const color_ptrs[14] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
                                           s_cfg.dm_on_color, s_cfg.dm_off_color,
+                                          s_cfg.seg_on_color, s_cfg.seg_off_color,
                                           s_cfg.custom_bg_color1, s_cfg.custom_bg_color2,
                                           s_cfg.custom_font_color_night, s_cfg.custom_glyph_color_night,
                                           s_cfg.custom_shadow_color_night,
                                           s_cfg.custom_glyph_shadow_color, s_cfg.custom_glyph_shadow_color_night };
-        for (int ci = 0; ci < 12; ci++) {
+        for (int ci = 0; ci < 14; ci++) {
             cJSON *arr = cJSON_GetObjectItem(root, color_keys[ci]);
             if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= 3) {
                 for (int ch = 0; ch < 3; ch++) {
@@ -732,12 +738,12 @@ static void parse_json(const char *json, size_t len)
     /* Backlight mode */
     char bl_mode[16] = {0};
     json_read_str(root, "backlight_mode", bl_mode, sizeof(bl_mode));
-    if      (strcmp(bl_mode, "Static")  == 0) s_cfg.backlight_mode = BL_MODE_STATIC;
-    else if (strcmp(bl_mode, "Breath")  == 0) s_cfg.backlight_mode = BL_MODE_BREATH;
-    else if (strcmp(bl_mode, "Rainbow") == 0) s_cfg.backlight_mode = BL_MODE_RAINBOW;
-    else if (strcmp(bl_mode, "Off")     == 0) s_cfg.backlight_mode = BL_MODE_OFF;
-    else if (strcmp(bl_mode, "WLED")    == 0) s_cfg.backlight_mode = BL_MODE_WLED;
-    else if (strcmp(bl_mode, "SunMoon") == 0) s_cfg.backlight_mode = BL_MODE_SUNMOON;
+    for (int m = 0; m <= BL_MODE_LAST; m++) {
+        if (strcmp(bl_mode, backlight_mode_name((backlight_mode_t)m)) == 0) {
+            s_cfg.backlight_mode = (backlight_mode_t)m;
+            break;
+        }
+    }
 
     /* sunmoon_sun_RGB / sunmoon_moon_RGB — Follow Sun/Moon mode colors,
      * [R,G,B] arrays following the spectrum_RGB pattern. */
@@ -852,8 +858,9 @@ static void parse_json(const char *json, size_t len)
     }
     json_read_str(root, "burnin_auto_interval", s_cfg.burnin_auto_interval,
                   sizeof(s_cfg.burnin_auto_interval));
-    /* Only "weekly" and "monthly" are valid; default to "weekly" for any other string */
-    if (strcmp(s_cfg.burnin_auto_interval, "monthly") != 0)
+    /* Only "daily", "weekly", and "monthly" are valid; default to "weekly" for any other string */
+    if (strcmp(s_cfg.burnin_auto_interval, "monthly") != 0 &&
+        strcmp(s_cfg.burnin_auto_interval, "daily")   != 0)
         strncpy(s_cfg.burnin_auto_interval, "weekly", sizeof(s_cfg.burnin_auto_interval) - 1);
     json_read_u8(root, "burnin_auto_hour", &s_cfg.burnin_auto_hour);
     if (s_cfg.burnin_auto_hour > 23) s_cfg.burnin_auto_hour = 0;
@@ -1348,6 +1355,7 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "mic_calibration_saved", s_cfg.mic_calibration_saved);
     cJSON_AddNumberToObject(root, "sht30_temp_offset", (double)s_cfg.sht30_temp_offset);
     cJSON_AddBoolToObject  (root, "leading_zero",     s_cfg.leading_zero);
+    cJSON_AddBoolToObject  (root, "web_live_preview", s_cfg.web_live_preview);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
     cJSON_AddNumberToObject(root, "led_effect_speed", s_cfg.led_effect_speed);
@@ -1369,19 +1377,21 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "custom_glyph_shadow_night",  s_cfg.custom_glyph_shadow_night);
     cJSON_AddStringToObject(root, "custom_font",          s_cfg.custom_font);
     {
-        const char *const keys[12]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
+        const char *const keys[14]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
                                         "dm_on_color", "dm_off_color",
+                                        "seg_on_color", "seg_off_color",
                                         "custom_bg_color1", "custom_bg_color2",
                                         "custom_font_color_night", "custom_glyph_color_night",
                                         "custom_shadow_color_night",
                                         "custom_glyph_shadow_color", "custom_glyph_shadow_color_night" };
-        const uint8_t *const ptrs[12] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
+        const uint8_t *const ptrs[14] = { s_cfg.custom_font_color, s_cfg.custom_glyph_color, s_cfg.custom_shadow_color,
                                           s_cfg.dm_on_color, s_cfg.dm_off_color,
+                                          s_cfg.seg_on_color, s_cfg.seg_off_color,
                                           s_cfg.custom_bg_color1, s_cfg.custom_bg_color2,
                                           s_cfg.custom_font_color_night, s_cfg.custom_glyph_color_night,
                                           s_cfg.custom_shadow_color_night,
                                           s_cfg.custom_glyph_shadow_color, s_cfg.custom_glyph_shadow_color_night };
-        for (int ci = 0; ci < 12; ci++) {
+        for (int ci = 0; ci < 14; ci++) {
             cJSON *arr = cJSON_CreateArray();
             for (int ch = 0; ch < 3; ch++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(ptrs[ci][ch]));
             cJSON_AddItemToObject(root, keys[ci], arr);
@@ -1427,10 +1437,7 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "tube5_panel_outdoor_ht", s_cfg.tube5_panel_outdoor_ht);
     cJSON_AddStringToObject(root, "aqi_standard",           s_cfg.aqi_standard);
 
-    const char *bl_modes[] = {"Static","Breath","Rainbow","Off","WLED","SunMoon"};
-    unsigned bl_idx = (unsigned)s_cfg.backlight_mode;
-    if (bl_idx >= sizeof(bl_modes) / sizeof(bl_modes[0])) bl_idx = 0;
-    cJSON_AddStringToObject(root, "backlight_mode",  bl_modes[bl_idx]);
+    cJSON_AddStringToObject(root, "backlight_mode",  backlight_mode_name(s_cfg.backlight_mode));
     cJSON_AddStringToObject(root, "backlight_onoff", s_cfg.backlight_on ? "ON" : "OFF");
     cJSON_AddBoolToObject  (root, "wled_sync_enabled", s_cfg.wled_sync_enabled);
     cJSON_AddNumberToObject(root, "wled_sync_port",    s_cfg.wled_sync_port);
@@ -1645,5 +1652,24 @@ const char *app_mode_name(app_mode_t mode)
         [APP_MODE_MASTODON]     = "Mastodon",
     };
     if ((unsigned)mode >= APP_MODE_MAX) return names[APP_MODE_CLOCK];
+    return names[mode];
+}
+
+/* Single authoritative mapping from backlight_mode_t -> string, same
+ * reasoning as app_mode_name() above — the settings JSON, the MQTT LED Mode
+ * select's options/state/commands all go through this. Designated
+ * initializers so a future enum value added with a gap just reads back as
+ * "Static" (the NULL check) instead of misaligning every name after it. */
+const char *backlight_mode_name(backlight_mode_t mode)
+{
+    static const char *const names[BL_MODE_LAST + 1] = {
+        [BL_MODE_STATIC]  = "Static",
+        [BL_MODE_BREATH]  = "Breath",
+        [BL_MODE_RAINBOW] = "Rainbow",
+        [BL_MODE_OFF]     = "Off",
+        [BL_MODE_WLED]    = "WLED",
+        [BL_MODE_SUNMOON] = "SunMoon",
+    };
+    if ((unsigned)mode > BL_MODE_LAST || !names[mode]) return names[BL_MODE_STATIC];
     return names[mode];
 }

@@ -62,6 +62,14 @@ void wled_sync_start(void);
  */
 bool wled_sync_get(wled_sync_state_t *out);
 
+/**
+ * True once the UDP listener task has been started successfully. It's only
+ * started at boot (when wled_sync_enabled), so enabling WLED Sync later
+ * doesn't make this true until the next reboot — callers offering the
+ * WLED backlight mode should check this, not the config flag.
+ */
+bool wled_sync_is_running(void);
+
 #ifdef __cplusplus
 }
 #endif

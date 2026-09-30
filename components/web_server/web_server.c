@@ -265,10 +265,10 @@ static void stock_files_check(void)
     snprintf(s_stock_missing_example, sizeof(s_stock_missing_example), "%s", example);
 
     if (missing > 0)
-        ESP_LOGW(TAG, "stock-file check: %d missing (e.g. '%s') — LittleFS Recovery recommended",
+        ESP_LOGW(TAG, "stock-file count check: %d missing (e.g. '%s') — LittleFS Recovery recommended",
                  missing, example);
     else
-        ESP_LOGI(TAG, "stock-file check: all %u present", (unsigned)(STOCK_FILES_COUNT + 1));
+        ESP_LOGI(TAG, "stock-file count check: all %u present", (unsigned)(STOCK_FILES_COUNT + 1));
 }
 
 /* Task-creation params for the deferred stock_files_check() call, shared by
@@ -316,7 +316,7 @@ static bool stock_files_check_spawn(void)
  *
  * The exception picker's whole point is instant feedback ("I just
  * excepted this file, the banner should clear now") — waiting for the
- * next full stock_files_check() (next boot, or a manual Check & Repair
+ * next full stock_files_check() (next boot, or a manual Verify & Repair
  * click, which itself takes 13-15s scanning hundreds of files) would make
  * the picker feel broken, and the fix wouldn't visibly do anything: the
  * count/example shown by /api/status come from
@@ -389,7 +389,7 @@ static void stock_missing_recompute_after_exception_change(uint8_t old_exc_count
  * stock_missing_recompute_after_exception_change() above, just triggered
  * by an upload finishing instead of a settings save. A path not found in
  * the cache (never was missing, or the cache was truncated past it) is
- * left untouched; the next real scan (boot, or a manual Check & Repair)
+ * left untouched; the next real scan (boot, or a manual Verify & Repair)
  * still catches up eventually. */
 static void stock_missing_mark_present(const char *relpath)
 {
@@ -1255,6 +1255,56 @@ static esp_err_t api_reboot(httpd_req_t *r)
     return ESP_OK;
 }
 
+/* GET /api/wl_scene — the live inputs the WeatherLive sky is drawn from
+ * (render_weatherlive()): weather icon, cloud cover, precipitation, wind,
+ * today's range and the resolved sunrise/sunset. Lets the web UI's Display
+ * tab live preview render the same scene the tubes show. Auth'd (unlike
+ * /api/status) since sunrise/sunset reveal the device's approximate
+ * location. Weather fields are omitted until the first successful fetch. */
+static esp_err_t api_wl_scene(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    int sunrise, sunset;
+    bool south;
+    display_wl_sun_events(&sunrise, &sunset, &south);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "sunrise", sunrise);
+    cJSON_AddNumberToObject(root, "sunset", sunset);
+    cJSON_AddBoolToObject(root, "south", south);
+    float lat, lon;   /* no location: sunrise/sunset above are the 6:00/19:00 fallback */
+    cJSON_AddBoolToObject(root, "has_loc", weather_get_location(&lat, &lon));
+    const weather_data_t *w = weather_get();
+    cJSON_AddBoolToObject(root, "valid", w && w->valid);
+    if (w && w->valid) {
+        cJSON_AddStringToObject(root, "icon", w->icon);
+        cJSON_AddNumberToObject(root, "temp_c", w->temp_c);
+        cJSON_AddNumberToObject(root, "humidity", w->humidity);
+        cJSON_AddNumberToObject(root, "wind_kph", w->wind_kph);
+        cJSON_AddNumberToObject(root, "cloud_cover_pct", w->cloud_cover_pct);
+        cJSON_AddNumberToObject(root, "precip_mm", w->precip_mm);
+        cJSON_AddBoolToObject(root, "day_range_valid", w->day_range_valid);
+        cJSON_AddNumberToObject(root, "day_min_c", w->day_min_c);
+        cJSON_AddNumberToObject(root, "day_max_c", w->day_max_c);
+    }
+    bool aqi_eu;
+    int aqi = weather_get_aqi(&aqi_eu);   /* -1 until the first AQI fetch */
+    if (aqi >= 0) {
+        cJSON_AddNumberToObject(root, "aqi", aqi);
+        cJSON_AddBoolToObject(root, "aqi_eu", aqi_eu);
+    }
+    sht30_reading_t sensor;
+    if (sht30_get(&sensor)) {   /* indoor H/T panel */
+        cJSON_AddNumberToObject(root, "indoor_temp_c", sensor.temp_c);
+        cJSON_AddNumberToObject(root, "indoor_hum", sensor.humidity);
+    }
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    esp_err_t ret = send_json(r, json);
+    free(json);
+    return ret;
+}
+
 static esp_err_t api_status(httpd_req_t *r)
 {
     /* NOT REQUIRE_AUTH'd, deliberately — frontend bootAuth() does a plain
@@ -1414,6 +1464,12 @@ static esp_err_t api_status(httpd_req_t *r)
     int64_t t_config = esp_timer_get_time();
     cJSON_AddStringToObject(root, "mode", app_mode_name(status_mode));
     cJSON_AddBoolToObject(root, "mic_calibration_saved", status_mic_cal);
+    {   /* anti burn-in session: drives the Display tab's running note + Cancel */
+        uint32_t bi_left;
+        bool bi_on = display_burnin_status(&bi_left);
+        cJSON_AddBoolToObject(root, "burnin_active", bi_on);
+        if (bi_on) cJSON_AddNumberToObject(root, "burnin_remaining_s", bi_left);
+    }
     /* —— auth state.  The web UI gates its first-boot setup flow on these.
      * admin_set is the only auth-related field exposed unauthenticated; the
      * AP PIN itself is on a separate auth'd route (/api/wifi/ap_pin). */
@@ -2146,6 +2202,27 @@ static void hp_drop_stale_index(void)
         ESP_LOGW(TAG, "[webui] could not remove stale index.html: %s", strerror(errno));
 }
 
+/* Same reasoning and pattern as hp_drop_stale_index() above, for a
+ * different rename: pre-1.18.6 builds shipped marked.min.js (a minified,
+ * years-old marked release); 1.18.6 replaced it outright with an
+ * unminified, current marked.js rather than shipping both. A device
+ * updating from an older build would otherwise keep the orphaned old file
+ * forever — nothing loads it once marked.js exists, it just wastes ~36 KB
+ * of LittleFS. Called from the same two sites as hp_drop_stale_index(). */
+static void hp_drop_stale_marked(void)
+{
+    FILE *nf = fopen("/spiffs/web/marked.js", "rb");
+    if (!nf) return;                 /* new file not present yet — nothing to do */
+    fclose(nf);
+    FILE *old = fopen("/spiffs/web/marked.min.js", "rb");
+    if (!old) return;                /* no stale copy */
+    fclose(old);
+    if (remove("/spiffs/web/marked.min.js") == 0)
+        ESP_LOGI(TAG, "[webui] removed stale marked.min.js (superseded by marked.js)");
+    else
+        ESP_LOGW(TAG, "[webui] could not remove stale marked.min.js: %s", strerror(errno));
+}
+
 /* Shared ZIP local-file-header extractor for both flash-write paths that
  * apply a WebUI patch ZIP: api_fs_hotpatch (whole ZIP already buffered in
  * PSRAM from an authenticated POST body) and webui_pull_task (ZIP just
@@ -2382,6 +2459,7 @@ static esp_err_t api_fs_hotpatch_impl(httpd_req_t *r)
 
     free(zip);
     hp_drop_stale_index();
+    hp_drop_stale_marked();
     display_theme_cache_flush();   /* re-probe PNG format on next render */
     fs_usage_invalidate();
     /* Async, not a direct call: stock_files_check() paces itself in batches
@@ -2402,7 +2480,7 @@ static esp_err_t api_fs_hotpatch_impl(httpd_req_t *r)
      * this now runs before tls_sem_give() below releases the lock that used
      * to keep this scan single-instance for free — see that function's own
      * comment. A creation failure here just means the banner doesn't
-     * refresh this cycle — no retry; the next boot or manual Check & Repair
+     * refresh this cycle — no retry; the next boot or manual Verify & Repair
      * still catches it. */
     stock_files_check_spawn();
     ESP_LOGI(TAG, "hotpatch complete: %d written, %d skipped, %d failed, %d unchanged, extraction took %lld ms",
@@ -3348,6 +3426,7 @@ static void webui_pull_task(void *arg)
 
         free(zip);
         hp_drop_stale_index();
+        hp_drop_stale_marked();
         display_theme_cache_flush();   /* re-probe PNG format on next render */
         /* Async, via stock_files_check_spawn() — see the hotpatch handler's
          * identical call for why a direct call here would block this task's
@@ -3590,16 +3669,15 @@ static esp_err_t api_webui_pull_reboot(httpd_req_t *r)
  * boot: hashing ~380 files' full content is real work with no business
  * running unattended or in a request path. No manifest is ever fetched —
  * STOCK_SHA256 baked into this firmware image already is the manifest.
- * If more than STOCK_REPAIR_MAX_FILES need fixing, this stops and
- * recommends a full LittleFS Recovery instead of many small serial
- * fetches. Obsolete files (no longer part of STOCK_FILES at all) aren't
- * this mechanism's job — verifying a known path can't discover an unknown
+ * The work list is sized to STOCK_FILES_COUNT (see s_work below), so one
+ * pass repairs however many files actually need it — no separate cap.
+ * Obsolete files (no longer part of STOCK_FILES at all) aren't this
+ * mechanism's job — verifying a known path can't discover an unknown
  * stray one; those are left for LittleFS Recovery too. */
-#define STOCK_REPAIR_MAX_FILES 25
 #define STOCK_REPAIR_MAX_FILE_BYTES (1 * 1024 * 1024)   /* sanity cap — largest stock file today is ~90 KB */
 
 typedef enum { STOCK_REPAIR_IDLE=0, STOCK_REPAIR_VERIFYING, STOCK_REPAIR_FETCHING,
-               STOCK_REPAIR_DONE, STOCK_REPAIR_ERROR, STOCK_REPAIR_TOO_MANY } stock_repair_state_t;
+               STOCK_REPAIR_DONE, STOCK_REPAIR_ERROR } stock_repair_state_t;
 
 static struct {
     stock_repair_state_t state;
@@ -3651,46 +3729,97 @@ static bool hp_file_sha256_matches(const char *vpath, const char *expected_hex)
     return match;
 }
 
-/* Fetches ONE STOCK_FILES[idx] from the tag-pinned raw-content URL via the
- * shared hp_https_open()/hp_https_read_body() (same machinery ota_pull_task
- * and webui_pull_task use, at a much smaller scale — one small file instead
- * of one multi-hundred-KB image/ZIP), verifies it against STOCK_SHA256[idx],
- * and writes it to /spiffs/ on success. Returns true on a verified, written
- * file; false on any failure (caller counts it). */
-static bool hp_fetch_verify_write(size_t idx, const char *user_agent)
+/* Builds one esp_http_client_handle_t meant to be reused across MANY
+ * sequential requests to the same host (raw.githubusercontent.com) for the
+ * whole of stock_repair_task's phase 2 — one TLS handshake instead of one
+ * per file. Same config fields as hp_https_open() (buffer sizes,
+ * crt_bundle_attach, timeout, user_agent) so per-request behavior stays
+ * identical aside from lifecycle; .url is a placeholder, overwritten by the
+ * first real call. Deliberately no redirect-hop handling — unlike
+ * hp_https_open(), which follows up to 5 hops for GitHub Release assets
+ * that commonly redirect to Azure Blob Storage — raw.githubusercontent.com
+ * (Fastly-backed) serves content directly, so a non-200 here is just
+ * treated as a per-file failure like any other. Caller owns the returned
+ * handle for the whole phase-2 loop and must esp_http_client_cleanup() it
+ * exactly once when done. */
+static esp_http_client_handle_t hp_stock_client_init(const char *user_agent, int timeout_ms)
+{
+    esp_http_client_config_t hcfg = {
+        .url               = "https://raw.githubusercontent.com",
+        .timeout_ms        = timeout_ms,
+        .user_agent        = user_agent,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size       = 16384,
+        .buffer_size_tx    = 4096,
+    };
+    return esp_http_client_init(&hcfg);
+}
+
+/* Fetches ONE STOCK_FILES[idx] from the tag-pinned raw-content URL using a
+ * caller-owned, potentially-already-open `client` (see hp_stock_client_init()
+ * above) instead of opening/closing its own — so a whole phase-2 run can
+ * share one TLS connection. Can't reuse hp_https_read_body() here: its
+ * contract is that it ALWAYS closes and cleans up the client, which would
+ * defeat reuse, so the chunked read-with-hard-deadline loop is inlined.
+ *
+ * On success, leaves `client` open/connected for the next call. On ANY
+ * failure — open failure, bad status, bad content-length, OOM, short read,
+ * or short write — closes `client` (but does not clean it up) before
+ * returning, so an unread error body (e.g. a 404's small body) can never
+ * desync the next file's response parsing over a reused connection; only
+ * that one file loses the reuse benefit, not the whole run. */
+static bool hp_fetch_verify_write_ka(esp_http_client_handle_t client, size_t idx,
+                                      const char *owner_repo, int timeout_ms)
 {
     char url[512];
     snprintf(url, sizeof(url), "https://raw.githubusercontent.com/%s/v%s/data/%s",
-             s_stock_repair_owner_repo, FS_VERSION_STR, STOCK_FILES[idx]);
+             owner_repo, FS_VERSION_STR, STOCK_FILES[idx]);
 
-    esp_http_client_handle_t client;
-    int content_len;
-    char err[64];
-    if (!hp_https_open(url, user_agent, 15000, STOCK_REPAIR_MAX_FILE_BYTES,
-                        &client, &content_len, err, sizeof(err), "stock_repair")) {
-        /* hp_https_open() already logged the HTTP-level detail generically —
-         * this loop runs per-file, so add back which STOCK_FILES entry that
-         * was for (the one piece of context the shared helper can't know). */
-        ESP_LOGW(TAG, "[stock_repair] %s: %s", STOCK_FILES[idx], err);
+    esp_timer_handle_t deadline = hp_arm_hard_deadline(timeout_ms);
+    if (esp_http_client_set_url(client, url) != ESP_OK ||
+        esp_http_client_open(client, 0) != ESP_OK) {
+        ESP_LOGW(TAG, "[stock_repair] %s: HTTP open failed", STOCK_FILES[idx]);
+        hp_disarm_hard_deadline(deadline);
+        esp_http_client_close(client);
         return false;
     }
+    int content_len = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    if (status != 200 || content_len <= 0 || content_len > STOCK_REPAIR_MAX_FILE_BYTES) {
+        ESP_LOGW(TAG, "[stock_repair] %s: HTTP %d (content-length=%d)",
+                 STOCK_FILES[idx], status, content_len);
+        hp_disarm_hard_deadline(deadline);
+        esp_http_client_close(client);   /* any unread error body must not leak into the next request */
+        return false;
+    }
+    hp_disarm_hard_deadline(deadline);
 
     /* PSRAM — same reasoning as hp_file_sha256_matches() above: a
      * data-sized download buffer has no business competing with the
      * internal heap a task stack allocation just failed against. */
     uint8_t *buf = heap_caps_malloc((size_t)content_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) {
-        esp_http_client_close(client); esp_http_client_cleanup(client);
+        esp_http_client_close(client);
         return false;
     }
 
-    int received = hp_https_read_body(client, buf, content_len, NULL, "stock_repair", 15000);
+    esp_timer_handle_t rdeadline = hp_arm_hard_deadline(timeout_ms + (content_len / 20480) * 1000);
+    int received = 0;
+    while (received < content_len) {
+        int want = content_len - received;
+        if (want > HP_READ_CHUNK) want = HP_READ_CHUNK;
+        int n = esp_http_client_read(client, (char *)buf + received, want);
+        if (n <= 0) break;
+        received += n;
+    }
+    hp_disarm_hard_deadline(rdeadline);
 
     bool ok = (received == content_len) && sha256_verify(buf, (size_t)received, STOCK_SHA256[idx]);
     if (!ok) {
         ESP_LOGW(TAG, "[stock_repair] %s: %s", STOCK_FILES[idx],
                  received != content_len ? "short download" : "SHA-256 mismatch — rejected, not written");
         free(buf);
+        esp_http_client_close(client);
         return false;
     }
 
@@ -3698,21 +3827,22 @@ static bool hp_fetch_verify_write(size_t idx, const char *user_agent)
     snprintf(vpath, sizeof(vpath), "/spiffs/%s", STOCK_FILES[idx]);
     hp_mkdir_p(vpath);
     FILE *f = fopen(vpath, "wb");
-    if (!f) { free(buf); return false; }
+    if (!f) { free(buf); esp_http_client_close(client); return false; }
     size_t written = fwrite(buf, 1, (size_t)received, f);
     fclose(f);
     free(buf);
 
     if (written != (size_t)received) {
         ESP_LOGW(TAG, "[stock_repair] %s: short write (%u/%d)", STOCK_FILES[idx], (unsigned)written, received);
+        esp_http_client_close(client);
         return false;
     }
     ESP_LOGI(TAG, "[stock_repair] repaired '%s' (%d B)", STOCK_FILES[idx], received);
-    return true;
+    return true;   /* client left open/connected for reuse by the next file */
 }
 
 /* Checks whether a GitHub Release tagged v{FS_VERSION_STR} exists in `repo`
- * before Phase 2 below attempts even one per-file fetch. hp_fetch_verify_write()
+ * before Phase 2 below attempts even one per-file fetch. hp_fetch_verify_write_ka()
  * pins every raw-content URL to that exact tag — a tag that hasn't been
  * published yet makes every file 404 identically to a genuinely
  * missing/corrupt one, with no way to tell the difference from a single
@@ -3774,14 +3904,31 @@ static void stock_repair_task(void *arg)
 
     /* ── Phase 1: verify — local only, no network yet ────────────────── */
     {
-        size_t work[STOCK_REPAIR_MAX_FILES];
+        /* Sized to STOCK_FILES_COUNT — the true ceiling, since you can never
+         * need to repair more files than exist — so one pass always covers
+         * however many actually need it, no separate cap to track.
+         *
+         * PSRAM, NOT a stack local and NOT a static internal-RAM array —
+         * same reasoning as exc_buf below: a stack local this size would
+         * overflow this function's own measured ~4544 B peak on a 6144 B
+         * stack, but making it `static` instead only trades that for a
+         * permanent internal-DRAM cost. See stock_missing_paths_buf() above
+         * for the heap_init evidence that cost was real and severe on this
+         * device's memory budget. */
+        static size_t *s_work = NULL;
+        if (!s_work)
+            s_work = heap_caps_malloc(STOCK_FILES_COUNT * sizeof(*s_work),
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_work) {
+            snprintf(s_stock_repair.error, sizeof(s_stock_repair.error), "Out of memory (work buffer)");
+            s_stock_repair.state = STOCK_REPAIR_ERROR;
+            goto stock_repair_done;
+        }
         int work_n = 0;
-        bool too_many = false;
 
         /* Same exception snapshot as stock_files_check() — a file the user
          * deliberately removed (and excepted via the missing-files picker)
-         * should never be flagged as needing repair, and must not eat into
-         * STOCK_REPAIR_MAX_FILES on a device with many such files.
+         * should never be flagged as needing repair.
          *
          * PSRAM, NOT a stack local and NOT a static internal-RAM array —
          * same reasoning as stock_files_check()'s copy: a stack local here
@@ -3803,7 +3950,7 @@ static void stock_repair_task(void *arg)
             config_unlock();
         }
 
-        for (size_t i = 0; i < STOCK_FILES_COUNT && !too_many; i++) {
+        for (size_t i = 0; i < STOCK_FILES_COUNT; i++) {
             s_stock_repair.checked = (int)i + 1;
             /* Real-hardware telemetry: 383 files took ~37s here (fopen +
              * fread + SHA-256 per file, no yield) and starved IDLE0 on this
@@ -3818,17 +3965,11 @@ static void stock_repair_task(void *arg)
             if (stock_path_excepted(exc_buf, exc_count, STOCK_FILES[i])) continue;
             char vpath[320];
             snprintf(vpath, sizeof(vpath), "/spiffs/%s", STOCK_FILES[i]);
-            if (!hp_file_sha256_matches(vpath, STOCK_SHA256[i])) {
-                if (work_n >= STOCK_REPAIR_MAX_FILES) { too_many = true; break; }
-                work[work_n++] = i;
-            }
+            if (!hp_file_sha256_matches(vpath, STOCK_SHA256[i]))
+                s_work[work_n++] = i;
         }
-        s_stock_repair.need_repair = too_many ? (work_n + 1) : work_n;   /* +1: at least one more than fit */
+        s_stock_repair.need_repair = work_n;
 
-        if (too_many) {
-            s_stock_repair.state = STOCK_REPAIR_TOO_MANY;
-            goto stock_repair_resume;
-        }
         if (work_n == 0) {
             s_stock_repair.state = STOCK_REPAIR_DONE;
             goto stock_repair_resume;
@@ -3862,17 +4003,30 @@ static void stock_repair_task(void *arg)
         s_stock_repair.state = STOCK_REPAIR_FETCHING;
         char ua[128];
         snprintf(ua, sizeof(ua), HTTP_UA_BASE "%s", s_stock_repair_owner_repo);
+
+        /* One connection reused across every file below instead of one TLS
+         * handshake per file — see hp_stock_client_init()/hp_fetch_verify_write_ka(). */
+        esp_http_client_handle_t ka_client = hp_stock_client_init(ua, 15000);
+        if (!ka_client) {
+            snprintf(s_stock_repair.error, sizeof(s_stock_repair.error), "HTTP client init failed");
+            s_stock_repair.failed = work_n;
+            s_stock_repair.state  = STOCK_REPAIR_ERROR;
+            goto stock_repair_resume;
+        }
+
         size_t rf_len = 0;
         for (int k = 0; k < work_n; k++) {
-            if (hp_fetch_verify_write(work[k], ua)) {
+            if (hp_fetch_verify_write_ka(ka_client, s_work[k], s_stock_repair_owner_repo, 15000)) {
                 s_stock_repair.fetched++;
                 append_bounded_list(s_stock_repair.repaired_files, sizeof(s_stock_repair.repaired_files),
-                                     &rf_len, STOCK_FILES[work[k]], work_n - k);
+                                     &rf_len, STOCK_FILES[s_work[k]], work_n - k);
             } else {
                 s_stock_repair.failed++;
             }
             vTaskDelay(1);
         }
+        esp_http_client_cleanup(ka_client);   /* close() already called per-file as needed; this frees the handle */
+
         s_stock_repair.state = (s_stock_repair.failed == 0) ? STOCK_REPAIR_DONE : STOCK_REPAIR_ERROR;
         if (s_stock_repair.failed > 0)
             snprintf(s_stock_repair.error, sizeof(s_stock_repair.error),
@@ -3934,7 +4088,7 @@ static esp_err_t api_stock_repair(httpd_req_t *r)
 static esp_err_t api_stock_repair_status(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    static const char *const names[] = { "idle","verifying","fetching","done","error","too_many" };
+    static const char *const names[] = { "idle","verifying","fetching","done","error" };
     /* 1024: needs to clear GCC's -Werror=format-truncation worst case, which
      * assumes error[192] and repaired_files[512] (see their struct-field
      * comments) are BOTH filled to their full declared size at once —
@@ -3943,23 +4097,22 @@ static esp_err_t api_stock_repair_status(httpd_req_t *r)
     char buf[1024];
     snprintf(buf, sizeof(buf),
              "{\"state\":\"%s\",\"error\":\"%s\",\"checked\":%d,\"total\":%u,"
-             "\"need_repair\":%d,\"fetched\":%d,\"failed\":%d,\"max_files\":%d,"
+             "\"need_repair\":%d,\"fetched\":%d,\"failed\":%d,"
              "\"repaired_files\":\"%s\"}",
              names[s_stock_repair.state], s_stock_repair.error,
              s_stock_repair.checked, (unsigned)STOCK_FILES_COUNT,
              s_stock_repair.need_repair, s_stock_repair.fetched, s_stock_repair.failed,
-             STOCK_REPAIR_MAX_FILES, s_stock_repair.repaired_files);
+             s_stock_repair.repaired_files);
     return send_json(r, buf);
 }
 
 /* GET /api/stock_missing_list — full list backing the missing-files
  * exception picker (Settings → System → "Manage exceptions"). Distinct from
- * stock_repair_status: that one verifies CONTENT (SHA-256, capped at
- * STOCK_REPAIR_MAX_FILES so a slow per-file fetch loop stays bounded) — this
- * just reports the last stock_files_check() presence scan's results
- * (already computed, uncapped, existence-only), so a device with hundreds
- * of deliberately-removed files can still list every one of them for the
- * picker to build its checkbox tree from. */
+ * stock_repair_status: that one verifies CONTENT (SHA-256) — this just
+ * reports the last stock_files_check() presence scan's results (already
+ * computed, existence-only), so a device with hundreds of deliberately-
+ * removed files can still list every one of them for the picker to build
+ * its checkbox tree from. */
 static esp_err_t api_stock_missing_list(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
@@ -4126,6 +4279,10 @@ static esp_err_t api_themes(httpd_req_t *r)
      * dm_render_asset()/dm_draw_text()), independently on/off colorable.
      * Also ships with no asset folder, for the same reason. */
     strlcpy(names[count++], "DotMatrix", THEME_NAME_MAX);
+    /* "Segments" — procedural 16-segment display glyphs (display.c's
+     * seg_render_asset()/seg_draw_glyph()), independently on/off colorable.
+     * Also ships with no asset folder, for the same reason. */
+    strlcpy(names[count++], "Segments", THEME_NAME_MAX);
 
     DIR *dp = opendir("/spiffs/images/themes");
     if (dp) {
@@ -4564,23 +4721,36 @@ static esp_err_t api_social_refresh(httpd_req_t *r)
 }
 
 /* POST /api/debug/burnin
- * Body: {"mask": <0–63>}
+ * Body: {"mask": <0–63>, "duration_s": <seconds>, "only_if_idle": <bool>}
  *   mask is a 6-bit field, one bit per tube (bit 0 = tube 1 … bit 5 = tube 6).
- *   63 (0x3F) = all tubes white.  0 = restore all tubes to normal rendering.
- * While any bit is set the affected tubes show solid white at 100% backlight
- * indefinitely until mask=0 is sent. */
+ *   0 = restore all tubes to normal rendering.
+ *   duration_s: 0 = run until mask=0 is sent; otherwise auto-stops.
+ *   only_if_idle: true = don't touch an already-running color-cycle or snow
+ *     session (responds {"status":"busy"} instead) — used by Quick Refresh.
+ *   stop_all: true = stop any running color-cycle AND snow session (the
+ *     Display tab's Cancel button); mask/duration_s are ignored.
+ * Masked tubes run the color cycle (see display_set_burnin_mask()). */
 static esp_err_t api_debug_burnin(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char body[64];
+    char body[96];
     cJSON *root = read_json_body_small(r, body, sizeof(body));
     if (!root) return ESP_FAIL;
     cJSON *jm = cJSON_GetObjectItem(root, "mask");
     cJSON *jd = cJSON_GetObjectItem(root, "duration_s");
     uint8_t  mask       = cJSON_IsNumber(jm) ? (uint8_t)(jm->valueint & 0x3F) : 0;
     uint32_t duration_s = cJSON_IsNumber(jd) ? (uint32_t)jd->valueint : 0;
+    bool     only_idle  = cJSON_IsTrue(cJSON_GetObjectItem(root, "only_if_idle"));
+    bool     stop_all   = cJSON_IsTrue(cJSON_GetObjectItem(root, "stop_all"));
     cJSON_Delete(root);
-    display_set_burnin_mask(mask, duration_s);
+    if (stop_all) {
+        display_stop_burnin();
+    } else if (only_idle) {
+        if (!display_start_burnin_if_idle(mask, duration_s))
+            return send_json(r, "{\"status\":\"busy\"}");
+    } else {
+        display_set_burnin_mask(mask, duration_s);
+    }
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
@@ -5509,6 +5679,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/weather",         api_post_weather),
     R(HTTP_POST, "/api/cx_image",        api_cx_image),
     R(HTTP_GET,  "/api/status",          api_status),
+    R(HTTP_GET,  "/api/wl_scene",        api_wl_scene),
     R(HTTP_GET,  "/api/network_info",    api_network_info),
     R(HTTP_POST, "/api/update_firmware", api_ota),
     R(HTTP_POST, "/api/update_fs",          api_fs_ota),
@@ -5671,6 +5842,18 @@ static void post_ota_autostart_timer_cb(void *arg)
  * from landing mid an SPI/LEDC critical section there. */
 static void stock_files_check_task(void *arg)
 {
+    /* Grace delay before the first pause — the hotpatch/webui-pull/stock_repair
+     * call sites spawn this task the instant they resume normal operation
+     * (tasks resumed, display un-parked), so without this, the display's
+     * very first frames back are immediately chopped up by this scan's
+     * batch pauses: a boot log showed the "all present" result landing
+     * ~29s after resume, all of it stock_files_check()'s own pause/150ms-
+     * delay loop, starting at essentially the same instant as resume — read
+     * by a user as the tube going stale right when the update finished,
+     * not a brief post-update hitch. Applies uniformly to every trigger
+     * (including the periodic boot-time check), since none of them need
+     * the scan to start any sooner than this. */
+    vTaskDelay(pdMS_TO_TICKS(5000));
     stock_files_check();
     ESP_LOGI(TAG, "stock_files_check_task stack high-water mark: %u B unused (of %u allocated)",
              (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)STOCK_CHECK_STACK_SIZE);
@@ -5702,7 +5885,7 @@ static void stock_files_check_timer_cb(void *arg)
     /* Auto-check opt-out (Settings → System → Verify & Repair Stock Files).
      * Checked first, ahead of every defer guard below: if it's off there's
      * nothing to defer or retry, just skip the automatic scan outright. The
-     * standalone "Check & Repair" button and the post-hotpatch/webui-pull
+     * standalone "Verify & Repair" button and the post-hotpatch/webui-pull
      * refreshes call stock_files_check()/stock_repair_task() directly, not
      * through this timer, so they're unaffected and the missing-files
      * banner still updates correctly after either. */
@@ -5712,7 +5895,7 @@ static void stock_files_check_timer_cb(void *arg)
     if (!auto_check_on) return;
 
     if (s_ota_active) {
-        ESP_LOGI(TAG, "stock-file check: OTA/webUI pull active — deferring 10 s");
+        ESP_LOGI(TAG, "stock-file count check: OTA/webUI pull active — deferring 10 s");
         if (s_stock_check_timer)
             esp_timer_start_once(s_stock_check_timer, 10000 * 1000ULL);  /* 10 s in µs */
         return;
@@ -5722,7 +5905,7 @@ static void stock_files_check_timer_cb(void *arg)
      * every ~200ms, so a pause here reads as the tubes visibly stuttering.
      * Same defer-and-retry pattern as the s_ota_active guard above. */
     if (wifi_manager_ap_pin_visible()) {
-        ESP_LOGI(TAG, "stock-file check: AP PIN visible — deferring 5 s to avoid stalling its redraw");
+        ESP_LOGI(TAG, "stock-file count check: AP PIN visible — deferring 5 s to avoid stalling its redraw");
         if (s_stock_check_timer)
             esp_timer_start_once(s_stock_check_timer, 5000 * 1000ULL);  /* 5 s in µs */
         return;
@@ -5732,7 +5915,7 @@ static void stock_files_check_timer_cb(void *arg)
      * not a brief hitch — and under flash contention (busy WiFi/MQTT/NVS)
      * that hang can run into the tens of seconds. */
     if (display_boot_wait_active()) {
-        ESP_LOGI(TAG, "stock-file check: boot splash active — deferring 5 s to avoid pausing it");
+        ESP_LOGI(TAG, "stock-file count check: boot splash active — deferring 5 s to avoid pausing it");
         if (s_stock_check_timer)
             esp_timer_start_once(s_stock_check_timer, 5000 * 1000ULL);  /* 5 s in µs */
         return;

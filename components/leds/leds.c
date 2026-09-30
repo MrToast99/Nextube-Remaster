@@ -43,6 +43,18 @@ static inline uint8_t night_adjusted_led_brightness(const nextube_config_t *cfg)
     return cfg->led_brightness;
 }
 
+uint8_t leds_effective_brightness(const nextube_config_t *cfg)
+{
+    /* Mirrors led_task()'s own order: Spectrum + custom glow color drives
+     * the LEDs at the night-adjusted brightness before the backlight_mode
+     * switch is ever reached, so it's lit even in Off mode; otherwise Off
+     * means leds_off(). */
+    bool spectrum_glow = cfg->current_mode == APP_MODE_SPECTRUM &&
+                         cfg->spectrum_led_source == 0;
+    if (cfg->backlight_mode == BL_MODE_OFF && !spectrum_glow) return 0;
+    return night_adjusted_led_brightness(cfg);
+}
+
 /* Set true by audio driver while a sound is playing.
  * The LED task skips ws2812_write() while this is set, stopping RMT
  * 10 MHz bursts that cause current spikes on the shared 3.3 V rail.

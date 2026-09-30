@@ -10,6 +10,8 @@
  *   nextube/<host>/mode/state                "Clock"
  *   nextube/<host>/display/state             "ON" or "OFF"
  *   nextube/<host>/brightness/state          "75"
+ *   nextube/<host>/led_brightness/state      "60"
+ *   nextube/<host>/led_mode/state             "Breath"
  *   nextube/<host>/theme/state               "NixieOY"
  *   nextube/<host>/rotation/state            "ON" or "OFF"
  *   nextube/<host>/ticker/state              current ticker text, or "" when cleared
@@ -29,6 +31,8 @@
  *   nextube/<host>/mode/set                  "Weather"
  *   nextube/<host>/display/set               "ON" or "OFF"
  *   nextube/<host>/brightness/set            "75"
+ *   nextube/<host>/led_brightness/set        "60"
+ *   nextube/<host>/led_mode/set              "Breath"
  *   nextube/<host>/theme/set                 "DarkSlate"
  *   nextube/<host>/rotation/set              "ON" or "OFF"
  *   nextube/<host>/ticker/set                UTF-8 string ≤ 255 chars; empty = cancel
@@ -44,6 +48,8 @@
  *   homeassistant/switch/<host>_display/config
  *   homeassistant/switch/<host>_rotation/config
  *   homeassistant/number/<host>_brightness/config
+ *   homeassistant/number/<host>_led_brightness/config
+ *   homeassistant/select/<host>_led_mode/config
  *   homeassistant/text/<host>_ticker/config
  *   homeassistant/number/<host>_ticker_speed/config
  *   homeassistant/switch/<host>_ticker_sound/config
@@ -65,6 +71,8 @@
 #include "update_check.h" /* autonomous GitHub release check → update binary sensor */
 #include "audio.h"       /* ticker notification chime (audio_play_file) */
 #include "ntp_time.h"    /* NTP sync-stats listener → HA sensors        */
+#include "leds.h"        /* leds_effective_brightness — LED Brightness state */
+#include "wled_sync.h"   /* wled_sync_is_running — gates the LED Mode "WLED" option */
 #include "esp_wifi.h"    /* RSSI for the optional health sensors, and
                           * WIFI_EVENT for the outage-detection handler  */
 #include "esp_netif.h"   /* IP_EVENT for the outage-detection handler   */
@@ -135,31 +143,30 @@ static void sanitize_mqtt_token(char *s)
     }
 }
 
+/* Shared LCD + LED night window (auto_brightness toggle + night hours) —
+ * the same condition display.c and leds.c apply. Call with config_lock()
+ * held. */
+static bool night_mode_active(const nextube_config_t *cfg)
+{
+    return cfg->auto_brightness &&
+           ntp_is_night_window(cfg->night_start_hour, cfg->night_end_hour);
+}
+
 /* True current brightness of the panels right now — NOT simply
  * cfg->lcd_brightness, which is just the primary/daytime SETTING. The
- * actual output can differ from it in two cases the display task itself
- * already accounts for (see its own target_brt computation in display.c,
- * around the "Apply backlight on/off" comment): the backlight switched off
- * (real output is 0 regardless of the configured brightness), and Night
- * Mode currently active (real output is night_brightness, not
- * lcd_brightness). Reported here so the MQTT "Nextube Brightness" number's
- * STATE always matches reality.
+ * actual output differs from it when the backlight is switched off (0) or
+ * Night Mode is active (night_brightness). Reported so the MQTT "Nextube LCD
+ * Brightness" number's STATE always matches reality.
  *
- * Writing to it (brightness/set, in mqtt_event_handler() below) still
- * always sets lcd_brightness regardless of which of these is currently
- * overriding it — so moving the slider during Night Mode may appear to
- * "snap back" on the very next publish. That's intentional, not a bug:
- * Night Mode is still in effect either way and the display task will keep
- * enforcing it, so the reported state should say so rather than show a
- * number the panels aren't actually running at. Must be called with
- * config_lock() already held, same as every other cfg-> field read here. */
+ * Writes (brightness/set) go to whichever setting is currently in effect —
+ * night_brightness during the night window, lcd_brightness otherwise — so
+ * the slider changes exactly what it shows instead of snapping back and
+ * silently changing the other one. The LED Brightness number works the same
+ * way (leds_effective_brightness()). Call with config_lock() held. */
 static uint8_t effective_brightness(const nextube_config_t *cfg)
 {
     if (!cfg->backlight_on) return 0;
-    if (cfg->auto_brightness &&
-        ntp_is_night_window(cfg->night_start_hour, cfg->night_end_hour))
-        return cfg->night_brightness;
-    return cfg->lcd_brightness;
+    return night_mode_active(cfg) ? cfg->night_brightness : cfg->lcd_brightness;
 }
 
 /* ── Publish helpers ───────────────────────────────────────────────── */
@@ -200,6 +207,7 @@ static void build_theme_options_json(char *out, size_t out_sz)
     ADD_THEME("WeatherLive");
     ADD_THEME("WeatherLive Demo");
     ADD_THEME("DotMatrix");
+    ADD_THEME("Segments");
 
     DIR *dp = opendir("/spiffs/images/themes");
     if (dp) {
@@ -232,6 +240,10 @@ static void build_theme_options_json(char *out, size_t out_sz)
 static void publish_discovery(bool include_sensors)
 {
     char topic[TOPIC_MAXLEN];
+    /* One state/command topic pair reused by every entity below, rather
+     * than a fresh pair per entity — they all shared one scope, so each
+     * new entity grew this frame on the MQTT task's fixed stack. */
+    char st[TOPIC_MAXLEN], cmd[TOPIC_MAXLEN];
     /* 1024, not the 768 every other payload in this function actually needs:
      * the Theme select's payload alone (skeleton + dev[] + both topics +
      * theme_opts[440] below) runs up to ~845 B worst case once a device
@@ -252,8 +264,7 @@ static void publish_discovery(bool include_sensors)
 
     if (include_sensors) {
         /* ── Temperature sensor ── */
-        char state_t[TOPIC_MAXLEN];
-        make_topic(state_t, sizeof(state_t), "sensor/temperature/state");
+        make_topic(st, sizeof(st), "sensor/temperature/state");
         snprintf(topic, sizeof(topic),
                  "homeassistant/sensor/%s_temp/config", s_hostname);
         snprintf(payload, sizeof(payload),
@@ -266,12 +277,12 @@ static void publish_discovery(bool include_sensors)
                  "\"device_class\":\"temperature\","
                  "\"device\":{%s}"
                  "}",
-                 s_hostname, state_t, dev);
+                 s_hostname, st, dev);
         publish(topic, payload, 1);
         vTaskDelay(pdMS_TO_TICKS(1));
 
         /* ── Humidity sensor ── */
-        make_topic(state_t, sizeof(state_t), "sensor/humidity/state");
+        make_topic(st, sizeof(st), "sensor/humidity/state");
         snprintf(topic, sizeof(topic),
                  "homeassistant/sensor/%s_hum/config", s_hostname);
         snprintf(payload, sizeof(payload),
@@ -284,12 +295,12 @@ static void publish_discovery(bool include_sensors)
                  "\"device_class\":\"humidity\","
                  "\"device\":{%s}"
                  "}",
-                 s_hostname, state_t, dev);
+                 s_hostname, st, dev);
         publish(topic, payload, 1);
         vTaskDelay(pdMS_TO_TICKS(1));
 
         /* ── Air-quality sensor (outdoor AQI from Open-Meteo) ── */
-        make_topic(state_t, sizeof(state_t), "sensor/aqi/state");
+        make_topic(st, sizeof(st), "sensor/aqi/state");
         snprintf(topic, sizeof(topic),
                  "homeassistant/sensor/%s_aqi/config", s_hostname);
         snprintf(payload, sizeof(payload),
@@ -302,15 +313,14 @@ static void publish_discovery(bool include_sensors)
                  "\"state_class\":\"measurement\","
                  "\"device\":{%s}"
                  "}",
-                 s_hostname, state_t, dev);
+                 s_hostname, st, dev);
         publish(topic, payload, 1);
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     /* ── Mode select ── */
-    char mode_state[TOPIC_MAXLEN], mode_cmd[TOPIC_MAXLEN];
-    make_topic(mode_state, sizeof(mode_state), "mode/state");
-    make_topic(mode_cmd,   sizeof(mode_cmd),   "mode/set");
+    make_topic(st, sizeof(st), "mode/state");
+    make_topic(cmd, sizeof(cmd), "mode/set");
     snprintf(topic, sizeof(topic),
              "homeassistant/select/%s_mode/config", s_hostname);
     snprintf(payload, sizeof(payload),
@@ -326,14 +336,13 @@ static void publish_discovery(bool include_sensors)
              "],"
              "\"device\":{%s}"
              "}",
-             s_hostname, mode_state, mode_cmd, dev);
+             s_hostname, st, cmd, dev);
     publish(topic, payload, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Display switch (backlight on/off) ── */
-    char disp_state[TOPIC_MAXLEN], disp_cmd[TOPIC_MAXLEN];
-    make_topic(disp_state, sizeof(disp_state), "display/state");
-    make_topic(disp_cmd,   sizeof(disp_cmd),   "display/set");
+    make_topic(st, sizeof(st), "display/state");
+    make_topic(cmd, sizeof(cmd), "display/set");
     snprintf(topic, sizeof(topic),
              "homeassistant/switch/%s_display/config", s_hostname);
     snprintf(payload, sizeof(payload),
@@ -346,19 +355,18 @@ static void publish_discovery(bool include_sensors)
              "\"payload_off\":\"OFF\","
              "\"device\":{%s}"
              "}",
-             s_hostname, disp_state, disp_cmd, dev);
+             s_hostname, st, cmd, dev);
     publish(topic, payload, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Brightness number ── */
-    char br_state[TOPIC_MAXLEN], br_cmd[TOPIC_MAXLEN];
-    make_topic(br_state, sizeof(br_state), "brightness/state");
-    make_topic(br_cmd,   sizeof(br_cmd),   "brightness/set");
+    make_topic(st, sizeof(st), "brightness/state");
+    make_topic(cmd, sizeof(cmd), "brightness/set");
     snprintf(topic, sizeof(topic),
              "homeassistant/number/%s_brightness/config", s_hostname);
     snprintf(payload, sizeof(payload),
              "{"
-             "\"name\":\"Nextube Brightness\","
+             "\"name\":\"Nextube LCD Brightness\","
              "\"unique_id\":\"%s_brightness\","
              "\"state_topic\":\"%s\","
              "\"command_topic\":\"%s\","
@@ -366,14 +374,63 @@ static void publish_discovery(bool include_sensors)
              "\"mode\":\"slider\","
              "\"device\":{%s}"
              "}",
-             s_hostname, br_state, br_cmd, dev);
+             s_hostname, st, cmd, dev);
+    publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    /* ── LED brightness number ── */
+    make_topic(st, sizeof(st), "led_brightness/state");
+    make_topic(cmd, sizeof(cmd), "led_brightness/set");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/number/%s_led_brightness/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube LED Brightness\","
+             "\"unique_id\":\"%s_led_brightness\","
+             "\"state_topic\":\"%s\","
+             "\"command_topic\":\"%s\","
+             "\"min\":0,\"max\":100,\"step\":1,"
+             "\"mode\":\"slider\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, st, cmd, dev);
+    publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    /* ── LED mode select ── */
+    /* Options come from backlight_mode_name(), the same list the settings
+     * JSON uses. "WLED" is only offered while the WLED Sync listener is
+     * running — it only starts at boot, and without it WLED mode just holds
+     * the LEDs off with no explanation in HA (led_mode/set refuses it too). */
+    char led_opts[96] = "";
+    size_t lo = 0;
+    for (int m = 0; m <= BL_MODE_LAST; m++) {
+        if (m == BL_MODE_WLED && !wled_sync_is_running()) continue;
+        int n = snprintf(led_opts + lo, sizeof(led_opts) - lo, "%s\"%s\"",
+                         lo ? "," : "", backlight_mode_name((backlight_mode_t)m));
+        if (n < 0 || (size_t)n >= sizeof(led_opts) - lo) break;
+        lo += (size_t)n;
+    }
+    make_topic(st, sizeof(st), "led_mode/state");
+    make_topic(cmd, sizeof(cmd), "led_mode/set");
+    snprintf(topic, sizeof(topic),
+             "homeassistant/select/%s_led_mode/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube LED Mode\","
+             "\"unique_id\":\"%s_led_mode\","
+             "\"state_topic\":\"%s\","
+             "\"command_topic\":\"%s\","
+             "\"options\":[%s],"
+             "\"device\":{%s}"
+             "}",
+             s_hostname, st, cmd, led_opts, dev);
     publish(topic, payload, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Theme select ── */
-    char theme_state[TOPIC_MAXLEN], theme_cmd[TOPIC_MAXLEN];
-    make_topic(theme_state, sizeof(theme_state), "theme/state");
-    make_topic(theme_cmd,   sizeof(theme_cmd),   "theme/set");
+    make_topic(st, sizeof(st), "theme/state");
+    make_topic(cmd, sizeof(cmd), "theme/set");
     /* 440 keeps the full theme payload below (skeleton + dev[] + both
      * topics + this) comfortably under sizeof(payload) even at each field's
      * worst case (~845 B total — see payload[]'s own comment above) — not
@@ -395,14 +452,13 @@ static void publish_discovery(bool include_sensors)
              "\"icon\":\"mdi:palette\","
              "\"device\":{%s}"
              "}",
-             s_hostname, theme_state, theme_cmd, theme_opts, dev);
+             s_hostname, st, cmd, theme_opts, dev);
     publish(topic, payload, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Mode rotation switch ── */
-    char rot_state[TOPIC_MAXLEN], rot_cmd[TOPIC_MAXLEN];
-    make_topic(rot_state, sizeof(rot_state), "rotation/state");
-    make_topic(rot_cmd,   sizeof(rot_cmd),   "rotation/set");
+    make_topic(st, sizeof(st), "rotation/state");
+    make_topic(cmd, sizeof(cmd), "rotation/set");
     snprintf(topic, sizeof(topic),
              "homeassistant/switch/%s_rotation/config", s_hostname);
     snprintf(payload, sizeof(payload),
@@ -416,13 +472,12 @@ static void publish_discovery(bool include_sensors)
              "\"icon\":\"mdi:autorenew\","
              "\"device\":{%s}"
              "}",
-             s_hostname, rot_state, rot_cmd, dev);
+             s_hostname, st, cmd, dev);
     publish(topic, payload, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Firmware version sensor (diagnostic) ── */
-    char fw_state[TOPIC_MAXLEN];
-    make_topic(fw_state, sizeof(fw_state), "firmware/state");
+    make_topic(st, sizeof(st), "firmware/state");
     snprintf(topic, sizeof(topic),
              "homeassistant/sensor/%s_fw/config", s_hostname);
     snprintf(payload, sizeof(payload),
@@ -434,13 +489,12 @@ static void publish_discovery(bool include_sensors)
              "\"icon\":\"mdi:chip\","
              "\"device\":{%s}"
              "}",
-             s_hostname, fw_state, dev);
+             s_hostname, st, dev);
     publish(topic, payload, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Update available binary sensor ── */
-    char upd_state[TOPIC_MAXLEN];
-    make_topic(upd_state, sizeof(upd_state), "update/state");
+    make_topic(st, sizeof(st), "update/state");
     snprintf(topic, sizeof(topic),
              "homeassistant/binary_sensor/%s_update/config", s_hostname);
     snprintf(payload, sizeof(payload),
@@ -454,13 +508,12 @@ static void publish_discovery(bool include_sensors)
              "\"entity_category\":\"diagnostic\","
              "\"device\":{%s}"
              "}",
-             s_hostname, upd_state, dev);
+             s_hostname, st, dev);
     publish(topic, payload, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
 
     /* ── Latest available version sensor (diagnostic) ── */
-    char upd_ver_state[TOPIC_MAXLEN];
-    make_topic(upd_ver_state, sizeof(upd_ver_state), "update/latest_version/state");
+    make_topic(st, sizeof(st), "update/latest_version/state");
     snprintf(topic, sizeof(topic),
              "homeassistant/sensor/%s_update_ver/config", s_hostname);
     snprintf(payload, sizeof(payload),
@@ -472,7 +525,7 @@ static void publish_discovery(bool include_sensors)
              "\"icon\":\"mdi:cloud-download\","
              "\"device\":{%s}"
              "}",
-             s_hostname, upd_ver_state, dev);
+             s_hostname, st, dev);
     publish(topic, payload, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
 
@@ -512,6 +565,22 @@ static void publish_brightness(uint8_t val)
     make_topic(topic, sizeof(topic), "brightness/state");
     snprintf(buf, sizeof(buf), "%u", val);
     publish(topic, buf, 1);
+}
+
+static void publish_led_brightness(uint8_t val)
+{
+    char topic[TOPIC_MAXLEN];
+    char buf[8];
+    make_topic(topic, sizeof(topic), "led_brightness/state");
+    snprintf(buf, sizeof(buf), "%u", val);
+    publish(topic, buf, 1);
+}
+
+static void publish_led_mode(backlight_mode_t mode)
+{
+    char topic[TOPIC_MAXLEN];
+    make_topic(topic, sizeof(topic), "led_mode/state");
+    publish(topic, backlight_mode_name(mode), 1);
 }
 
 static void publish_theme(const char *theme)
@@ -927,6 +996,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             make_topic(topic, sizeof(topic), "brightness/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
             vTaskDelay(pdMS_TO_TICKS(1));
+            make_topic(topic, sizeof(topic), "led_brightness/set");
+            esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
+            make_topic(topic, sizeof(topic), "led_mode/set");
+            esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             make_topic(topic, sizeof(topic), "theme/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
             vTaskDelay(pdMS_TO_TICKS(1));
@@ -946,7 +1021,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
          * the current-state-publish block below (~24ms and ~68ms) are fast;
          * the earlier connect-burst fix only ever timed
          * Connected-to-discovery-published, not these two. See CHANGELOG. */
-        ESP_LOGI(TAG, "subscribed to 8 command topics");
+        ESP_LOGI(TAG, "subscribed to 10 command topics");
 
         /* HA auto-discovery: ticker entity — added after both SHT30 branches */
         if (s_discovery) {
@@ -962,6 +1037,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             app_mode_t  cur_mode     = cfg->current_mode;
             bool        cur_on       = cfg->backlight_on;
             uint8_t     cur_br       = effective_brightness(cfg);
+            uint8_t     cur_led_br   = leds_effective_brightness(cfg);
+            backlight_mode_t cur_led_mode = cfg->backlight_mode;
             bool        cur_rot      = cfg->rotation_enabled;
             bool        cur_tsnd     = cfg->ticker_sound;
             char        cur_theme[32];
@@ -974,6 +1051,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             publish_display(cur_on);
             vTaskDelay(pdMS_TO_TICKS(1));
             publish_brightness(cur_br);
+            vTaskDelay(pdMS_TO_TICKS(1));
+            publish_led_brightness(cur_led_br);
+            vTaskDelay(pdMS_TO_TICKS(1));
+            publish_led_mode(cur_led_mode);
             vTaskDelay(pdMS_TO_TICKS(1));
             publish_theme(cur_theme);
             vTaskDelay(pdMS_TO_TICKS(1));
@@ -1053,10 +1134,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
         ESP_LOGI(TAG, "Received: %s = %s", t, p);
 
+        /* One buffer reused for every command-topic comparison below (same
+         * stack reasoning as publish_discovery()'s st/cmd pair). */
+        char cmd_topic[TOPIC_MAXLEN];
+
         /* ── mode/set ── */
-        char mode_cmd_topic[TOPIC_MAXLEN];
-        make_topic(mode_cmd_topic, sizeof(mode_cmd_topic), "mode/set");
-        if (strcmp(t, mode_cmd_topic) == 0) {
+        make_topic(cmd_topic, sizeof(cmd_topic), "mode/set");
+        if (strcmp(t, cmd_topic) == 0) {
             for (int i = 0; i < APP_MODE_MAX; i++) {
                 if (strcmp(p, app_mode_name((app_mode_t)i)) == 0) {
                     config_set_mode((app_mode_t)i);
@@ -1068,9 +1152,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         }
 
         /* ── display/set ── */
-        char disp_cmd_topic[TOPIC_MAXLEN];
-        make_topic(disp_cmd_topic, sizeof(disp_cmd_topic), "display/set");
-        if (strcmp(t, disp_cmd_topic) == 0) {
+        make_topic(cmd_topic, sizeof(cmd_topic), "display/set");
+        if (strcmp(t, cmd_topic) == 0) {
             if (strcmp(p, "ON") == 0) {
                 config_set_json("{\"backlight_onoff\":\"ON\"}", 24);
                 ESP_LOGI(TAG, "Display ON via MQTT");
@@ -1082,23 +1165,74 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         }
 
         /* ── brightness/set ── */
-        char br_cmd_topic[TOPIC_MAXLEN];
-        make_topic(br_cmd_topic, sizeof(br_cmd_topic), "brightness/set");
-        if (strcmp(t, br_cmd_topic) == 0) {
+        make_topic(cmd_topic, sizeof(cmd_topic), "brightness/set");
+        if (strcmp(t, cmd_topic) == 0) {
             int val = atoi(p);
             if (val < 0)   val = 0;
             if (val > 100) val = 100;
+            /* Write the setting currently in effect (see effective_brightness()). */
+            config_lock();
+            bool night = night_mode_active(config_get());
+            config_unlock();
+            const char *key = night ? "night_brightness" : "lcd_brightness";
             char json[48];
-            snprintf(json, sizeof(json), "{\"lcd_brightness\":%d}", val);
+            snprintf(json, sizeof(json), "{\"%s\":%d}", key, val);
             config_set_json(json, strlen(json));
-            ESP_LOGI(TAG, "Brightness set to %d via MQTT", val);
+            ESP_LOGI(TAG, "LCD %s set to %d via MQTT", key, val);
+            break;
+        }
+
+        /* ── led_brightness/set ── */
+        make_topic(cmd_topic, sizeof(cmd_topic), "led_brightness/set");
+        if (strcmp(t, cmd_topic) == 0) {
+            int val = atoi(p);
+            if (val < 0)   val = 0;
+            if (val > 100) val = 100;
+            /* Same as brightness/set: night value during the night window. */
+            config_lock();
+            bool night = night_mode_active(config_get());
+            config_unlock();
+            const char *key = night ? "led_night_brightness" : "led_brightness";
+            char json[48];
+            snprintf(json, sizeof(json), "{\"%s\":%d}", key, val);
+            config_set_json(json, strlen(json));
+            ESP_LOGI(TAG, "LED %s set to %d via MQTT", key, val);
+            break;
+        }
+
+        /* ── led_mode/set ── */
+        make_topic(cmd_topic, sizeof(cmd_topic), "led_mode/set");
+        if (strcmp(t, cmd_topic) == 0) {
+            /* Only apply a name this device itself recognizes (same as
+             * mode/set). The JSON is built from the matched canonical name,
+             * not p — p is a char[128] the compiler can't bound, which trips
+             * -Werror=format-truncation against json[]. */
+            for (int m = 0; m <= BL_MODE_LAST; m++) {
+                const char *name = backlight_mode_name((backlight_mode_t)m);
+                if (strcmp(p, name) != 0) continue;
+                if (m == BL_MODE_WLED && !wled_sync_is_running()) {
+                    /* Not offered in discovery either — see publish_discovery().
+                     * Republish the real mode so HA snaps back. */
+                    ESP_LOGW(TAG, "LED mode WLED refused via MQTT: WLED Sync "
+                                  "isn't running (enable it and reboot)");
+                    config_lock();
+                    backlight_mode_t cur = config_get()->backlight_mode;
+                    config_unlock();
+                    publish_led_mode(cur);
+                    break;
+                }
+                char json[48];
+                snprintf(json, sizeof(json), "{\"backlight_mode\":\"%s\"}", name);
+                config_set_json(json, strlen(json));
+                ESP_LOGI(TAG, "LED mode set to %s via MQTT", name);
+                break;
+            }
             break;
         }
 
         /* ── theme/set ── */
-        char theme_cmd_topic[TOPIC_MAXLEN];
-        make_topic(theme_cmd_topic, sizeof(theme_cmd_topic), "theme/set");
-        if (strcmp(t, theme_cmd_topic) == 0) {
+        make_topic(cmd_topic, sizeof(cmd_topic), "theme/set");
+        if (strcmp(t, cmd_topic) == 0) {
             config_set_theme(p);
             publish_theme(p);
             ESP_LOGI(TAG, "Theme set to %s via MQTT", p);
@@ -1106,9 +1240,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         }
 
         /* ── rotation/set ── */
-        char rot_cmd_topic[TOPIC_MAXLEN];
-        make_topic(rot_cmd_topic, sizeof(rot_cmd_topic), "rotation/set");
-        if (strcmp(t, rot_cmd_topic) == 0) {
+        make_topic(cmd_topic, sizeof(cmd_topic), "rotation/set");
+        if (strcmp(t, cmd_topic) == 0) {
             bool enable = (strcmp(p, "ON") == 0);
             char json[48];
             snprintf(json, sizeof(json), "{\"rotation_enabled\":%s}",
@@ -1120,9 +1253,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         }
 
         /* ── ticker_speed/set ── */
-        char tspeed_cmd_topic[TOPIC_MAXLEN];
-        make_topic(tspeed_cmd_topic, sizeof(tspeed_cmd_topic), "ticker_speed/set");
-        if (strcmp(t, tspeed_cmd_topic) == 0) {
+        make_topic(cmd_topic, sizeof(cmd_topic), "ticker_speed/set");
+        if (strcmp(t, cmd_topic) == 0) {
             display_set_ticker_speed(atoi(p));        /* clamps to 1–20 internally */
             publish_ticker_speed(display_get_ticker_speed());  /* echo clamped value */
             ESP_LOGI(TAG, "Ticker speed set to %d via MQTT", display_get_ticker_speed());
@@ -1130,9 +1262,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         }
 
         /* ── ticker_sound/set ── */
-        char tsnd_cmd_topic[TOPIC_MAXLEN];
-        make_topic(tsnd_cmd_topic, sizeof(tsnd_cmd_topic), "ticker_sound/set");
-        if (strcmp(t, tsnd_cmd_topic) == 0) {
+        make_topic(cmd_topic, sizeof(cmd_topic), "ticker_sound/set");
+        if (strcmp(t, cmd_topic) == 0) {
             bool on = (strcmp(p, "ON") == 0);
             if (on || strcmp(p, "OFF") == 0) {
                 const char *json = on ? "{\"ticker_sound\":true}"
@@ -1231,9 +1362,12 @@ static void ha_mqtt_task(void *arg)
         .session.keepalive  = 30,
         .network.reconnect_timeout_ms = 5000,
         /* Default stack (6144) is too small once discovery payloads are
-         * generated — publish_discovery() alone allocates ~2.4 KB of locals
-         * on top of ~1-2 KB of MQTT library frames. 10240 gives headroom
-         * for future additions.
+         * generated — publish_discovery() alone allocates ~2.0 KB of locals
+         * (payload 1024 + theme_opts 440 + dev 192 + led_opts 96 + three
+         * 96-byte topic buffers) on top of ~1-2 KB of MQTT library frames. 10240 gives
+         * headroom for future additions — keep new entities reusing the
+         * shared st/cmd topic pair there (and cmd_topic in the event
+         * handler) rather than declaring their own, or this number creeps.
          *
          * DO NOT shrink this without measuring real peak usage under a run
          * with every feature active — a smaller value here previously
@@ -1307,6 +1441,8 @@ static void ha_mqtt_task(void *arg)
     app_mode_t last_mode       = (app_mode_t)-1;
     bool       last_on         = true;
     uint8_t    last_brightness = 255;   /* sentinel — forces publish on first tick */
+    uint8_t    last_led_brightness = 255; /* sentinel — forces publish on first tick */
+    int        last_led_mode   = -1;    /* sentinel — forces publish on first tick */
     bool       last_rotation   = false;
     char       last_theme[32]  = {0};   /* empty = sentinel, forces publish on first tick */
     int        last_update_avail = -1;  /* impossible bool value — forces publish on first tick,
@@ -1330,6 +1466,8 @@ static void ha_mqtt_task(void *arg)
         app_mode_t  cur_mode   = cfg->current_mode;
         bool        cur_on     = cfg->backlight_on;
         uint8_t     cur_br     = effective_brightness(cfg);
+        uint8_t     cur_led_br = leds_effective_brightness(cfg);
+        backlight_mode_t cur_led_mode = cfg->backlight_mode;
         bool        cur_rot    = cfg->rotation_enabled;
         char        cur_theme[32];
         strncpy(cur_theme, cfg->theme, sizeof(cur_theme) - 1);
@@ -1378,6 +1516,18 @@ static void ha_mqtt_task(void *arg)
         if (cur_br != last_brightness) {
             publish_brightness(cur_br);
             last_brightness = cur_br;
+        }
+
+        /* LED brightness — publish when changed */
+        if (cur_led_br != last_led_brightness) {
+            publish_led_brightness(cur_led_br);
+            last_led_brightness = cur_led_br;
+        }
+
+        /* LED mode — publish when changed */
+        if ((int)cur_led_mode != last_led_mode) {
+            publish_led_mode(cur_led_mode);
+            last_led_mode = (int)cur_led_mode;
         }
 
         /* Theme — publish when changed */

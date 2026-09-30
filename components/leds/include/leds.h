@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include "config_mgr.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -22,6 +23,11 @@ void leds_set_audio_active(bool active);
  * by the WeatherLive thunderstorm effect when the "weather override" option is
  * enabled.  Setting 0 after a flash restores the configured accent. */
 void leds_weather_flash(uint8_t level);
+/* Brightness (0-100) the accent LEDs are actually lit at right now per the
+ * config: night-window dimming, 0 in Off mode (except Spectrum's custom glow,
+ * which stays lit). Doesn't model WLED-synced brightness. Call with
+ * config_lock() held. */
+uint8_t leds_effective_brightness(const nextube_config_t *cfg);
 #ifdef __cplusplus
 }
 #endif

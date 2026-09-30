@@ -1,6 +1,36 @@
 # Changelog
 
 
+## [1.19.0] - 2026-09-29
+
+### Added
+- New **Segments** clock theme — a procedural 16-segment display font (like DotMatrix, no images to install), with independent on/off segment colors.
+- Home Assistant MQTT now exposes a **Nextube LED Brightness** slider (0–100) alongside the existing display Brightness one, so the rear accent LEDs can be dimmed or turned off from HA automations independently of the tube backlight.
+- Home Assistant MQTT now also exposes a **Nextube LED Mode** selector (`Static` / `Breath` / `Rainbow` / `Off` / `WLED` / `SunMoon`) — the LED Accent Lighting mode (Display tab) can now be read and changed from HA automations too, not just its brightness. `WLED` only appears when WLED Sync is enabled and running.
+- **Scheduled Anti Burn-in / LCD Refresh** (Display tab) has a new **Quick Refresh** button — runs a one-off 5-minute color-cycle recovery on all 6 tubes right now, without waiting for the next scheduled run or needing the schedule enabled at all.
+- The Scheduled Anti Burn-in / LCD Refresh schedule now offers a **Daily** option alongside the existing Weekly and Monthly ones.
+- While an Anti Burn-in / LCD Refresh session is running (scheduled, manual or Quick Refresh), the Display tab shows how long is left and a **Cancel** button to stop it early.
+- **Display** tab has a new **Live preview** at the top: six tubes showing what the clock would look like with your current settings, before you save — the selected theme's real digits, your time format, and the accent LEDs as a glow above each tube. It stays pinned at the top while you scroll through Display Settings, and can be switched off (saved with your other settings). Replaces the smaller preview that only appeared for the Custom face. DotMatrix and WeatherLive/Custom faces are drawn the same way the clock draws them — including WeatherLive's live sky from your current weather, sun/moon, clouds, rain and snow, and the 24H Custom info panels on every theme.
+
+### Fixed
+- 24H Custom info panels on the RetroPaper theme (air quality, wind, temperature, humidity, outdoor temp/humidity) drew their text with a dark shadow that smudged the ink-on-paper look; on light themes they now use the theme's ink color with no shadow. On the other themes, these panels no longer pick up the Custom face's shadow settings.
+- Scheduled Anti Burn-in / LCD Refresh could skip a day it should have run — once the scheduled hour had passed on a day that wasn't due (e.g. Weekly, not a Sunday), changing the schedule later that same day didn't take effect until the next day. It now takes effect immediately, and a restart during the scheduled hour no longer starts a second run.
+- The web UI and Home Assistant connection could become slow or drop during an Anti Burn-in / LCD Refresh color-cycle session, especially on the animated WeatherLive face — the tubes were being repainted many times a second with the same color. They're now repainted only when the color changes (plus a light refresh every couple of seconds).
+- Anti Burn-in / LCD Refresh (scheduled or manual) could get stuck showing indefinitely, needing a power cycle to recover — its session timer compared against the clock time, so an NTP time correction arriving while a session was running could push the "done" time out of reach for hours or longer. It now times itself independently of the clock, so a time correction can no longer extend or cancel a running session.
+- The Online Updater's changelog preview was capped at a fixed 160px tall regardless of screen size — cramped on a desktop monitor with room to spare, and on a very short viewport (e.g. a phone in landscape) the whole dialog had no fallback if it ran out of room. It now scales with the window (up to 400px), and the dialog itself gains its own scrollbar as a last resort so nothing can ever be pushed off-screen with no way to reach it.
+- Weather Mode's Outdoor/Indoor Temperature and Humidity panels always showed an "Out"/"In" label, even with only one of the two enabled. The label now only appears when both the indoor and outdoor version of that panel are turned on.
+- On asset (JPEG) clock themes and the static Custom/WeatherLive face, the once-a-second blinking colon kept overwriting tube 2 during a running Anti Burn-in / LCD Refresh session (scheduled, manual or Quick Refresh) — causing that tube to flicker between the colon and the intended solid color-cycle fill instead of holding steady like the other tubes.
+
+### Changed
+- Updated the Markdown renderer behind the Online Updater's changelog preview (nine major versions newer) — more correct GitHub-flavored Markdown rendering. Now shipped unminified as `marked.js` (~45 KB) rather than the old `marked.min.js` (~36 KB minified) — a small size tradeoff not worth adding a minification build step for. Applying this update (Web UI Update or Online Updater) automatically removes the old `marked.min.js` left behind by the previous build, rather than leaving it to waste space forever.
+- The web UI's section headers, Dashboard tiles and Quick Actions buttons now have icons, matching the tab icons.
+- Renamed the Home Assistant MQTT **Nextube Brightness** entity to **Nextube LCD Brightness**, to distinguish it from the new Nextube LED Brightness slider. The entity itself is unchanged (same unique ID and topics), so existing automations referencing it keep working — only the friendly name shown in HA updates.
+- During the Night Mode window, the HA LCD and LED Brightness sliders now set the night brightness they're showing, instead of silently changing the daytime value and snapping back.
+- The **NixieOY** theme now ships new tube glyph artwork, replacing its previous look.
+- Retired the **RedDigits** theme — the new **Segments** theme covers that look.
+- Verify & Repair Stock Files no longer stops and asks you to use LittleFS Recovery once more than 25 files need fixing — one Verify & Repair pass now repairs everything found, reusing the same connection for the whole run instead of reconnecting per file. Past 25 files it still notes that a full reflash may be faster, but keeps going either way.
+- Renamed the **Check & Repair** button to **Verify & Repair**, matching its own card's title, and the **Enable auto boot-up check** toggle to **Enable auto boot-up scan** — both used "check" for two different things (a quick presence scan vs. a full content verification), which read as more related than they are.
+
 ## [1.18.5] - 2026-09-18
 
 ### Added

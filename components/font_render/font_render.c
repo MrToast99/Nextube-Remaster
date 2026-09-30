@@ -88,14 +88,6 @@ typedef struct {
 static fr_layout_memo_t s_layout_memo[FR_LAYOUT_MEMO_N];
 static int s_layout_memo_next = 0;
 
-/* ── Init ───────────────────────────────────────────────────────────────────── */
-void fr_init(void)
-{
-    memset(s_faces, 0, sizeof(s_faces));
-    memset(s_cache, 0, sizeof(s_cache));
-    s_cache_next = 0;
-}
-
 /* ── Face management ────────────────────────────────────────────────────────── */
 int fr_load_face(const char *spiffs_path)
 {

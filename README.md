@@ -67,6 +67,7 @@ Like the work? Help keep me Caffeinated! <br>
   - [Built-in Themes](#built-in-themes)
   - [WeatherLive theme](#weatherlive-theme)
   - [DotMatrix theme](#dotmatrix-theme)
+  - [Segments theme](#segments-theme)
   - [Custom Face](#custom-face)
   - [Adding a Custom Theme](#adding-a-custom-theme)
   - [Image Converter Helper](#image-converter-helper)
@@ -301,15 +302,15 @@ After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web
 
 The version-mismatch banner above only catches a *version number* disagreement — it can't tell you that one specific built-in file (a sound, a font, an icon) is actually missing from the device while everything else reports the correct version. That gap is real: a device that skipped over an update where a particular file changed, or had one removed by hand through the LittleFS file browser, can end up on a "matching" version with a genuine hole in it.
 
-The device checks every stock file it shipped with — once at boot (a few seconds in, and only while **Enable auto boot-up check** under **System → Verify & Repair Stock Files** is on, which it is by default), and again in the background right after any Web UI Update, Online Updater pull, or Check & Repair completes — and shows a **"Missing built-in files"** banner if anything expected is actually gone, naming one example and the total count. That check only looks at whether each file exists (a cheap check, safe to run automatically); it can't tell a *stale* file (present, but wrong content — e.g. left over from a version that predates a later change) from a healthy one. The scan itself is paced in small batches so it never freezes the display, and it always runs in the background — applying an update or running Check & Repair finishes immediately, without waiting for this scan to catch up first.
+The device checks every stock file it shipped with — once at boot (a few seconds in, and only while **Enable auto boot-up scan** under **System → Verify & Repair Stock Files** is on, which it is by default), and again in the background right after any Web UI Update, Online Updater pull, or Verify & Repair completes — and shows a **"Missing built-in files"** banner if anything expected is actually gone, naming one example and the total count. That check only looks at whether each file exists (a cheap check, safe to run automatically); it can't tell a *stale* file (present, but wrong content — e.g. left over from a version that predates a later change) from a healthy one. The scan itself is paced in small batches so it never freezes the display, and it always runs in the background — applying an update or running Verify & Repair finishes immediately, without waiting for this scan to catch up first.
 
-Turning **Enable auto boot-up check** off only skips that automatic run at boot; the manual **Check & Repair** button and the exception picker below keep working anytime regardless.
+Turning **Enable auto boot-up scan** off only skips that automatic run at boot; the manual **Verify & Repair** button and the exception picker below keep working anytime regardless.
 
 **Deliberately removed a stock theme or file to save space?** Click **Manage exceptions** on the missing-files banner to pick exactly which of the currently-missing files or folders to stop flagging — grouped by folder, so excluding an entire theme you don't use is one click. Excepted files are remembered across every future scan and never counted as missing again, while anything genuinely new going missing later still shows up normally. The full saved list is also viewable and editable anytime — even when nothing is currently missing — via the separate **Manage exceptions** button under **System → Verify & Repair Stock Files**, with a **Remove** option per entry. Saving or removing an exception updates the banner immediately rather than waiting for the next scan.
 
-**Manually restoring a missing file instead?** Uploading it back through **System → LittleFS Files** — a single file, or a whole folder at once (see [Adding a Custom Theme](#adding-a-custom-theme) for the folder-upload workflow) — checks it off the missing list the moment the upload finishes, no need to wait for the next scan or run Check & Repair afterward.
+**Manually restoring a missing file instead?** Uploading it back through **System → LittleFS Files** — a single file, or a whole folder at once (see [Adding a Custom Theme](#adding-a-custom-theme) for the folder-upload workflow) — checks it off the missing list the moment the upload finishes, no need to wait for the next scan or run Verify & Repair afterward.
 
-**Repair without a full reflash — "Verify & Repair Stock Files"** (**System** tab, and a **Repair now** button on the missing-files banner itself): a heavier, explicitly user-triggered check that verifies every stock file's actual *content* against what this exact firmware build shipped, then re-downloads only the files found missing or stale — one at a time, directly from the public GitHub repo at the git tag matching the device's own installed version (never a newer tag than what's actually installed). Nothing is ever bundled ahead of time for this: the device's own firmware image already carries the expected checksum for every stock file, so the only network activity is fetching bytes for something already known, locally, to be wrong. The result tells you exactly which files were repaired, not just a count. If too many files need fixing at once (more efficient as one larger transfer than dozens of small ones), it says so and points at LittleFS Recovery instead, which remains the guaranteed-complete fallback for anything this can't handle — no internet reachable, a very old device whose version predates this mechanism, or a repair that partially fails.
+**Repair without a full reflash — "Verify & Repair Stock Files"** (**System** tab, and a **Repair now** button on the missing-files banner itself): a heavier, explicitly user-triggered check that verifies every stock file's actual *content* against what this exact firmware build shipped, then re-downloads only the files found missing or stale — reusing one connection for the whole run — directly from the public GitHub repo at the git tag matching the device's own installed version (never a newer tag than what's actually installed). Nothing is ever bundled ahead of time for this: the device's own firmware image already carries the expected checksum for every stock file, so the only network activity is fetching bytes for something already known, locally, to be wrong. One pass repairs however many files actually need it; past 25 files it shows a note that a full LittleFS Recovery reflash may finish faster, but keeps repairing automatically either way. The result tells you exactly which files were repaired, not just a count. LittleFS Recovery remains the guaranteed-complete fallback for anything this can't handle — no internet reachable, a very old device whose version predates this mechanism, or a repair that partially fails.
 
 #### Automatic Update Checks
 
@@ -377,6 +378,7 @@ After setup, access the management interface via:
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
 - **Display**
+  - **Live preview** — six tubes at the top of Display Settings mirroring what the clock would show with the settings currently on the page, saved or not: the selected theme's own digit images (DotMatrix is drawn exactly as the device draws it; Custom/WeatherLive faces use a port of the device's own renderer — the live sky, sun/moon, stars, clouds, rain/snow and lightning from the device's current weather, the real logisoso digits or your custom TTF font, AM/PM, and every info panel), the 24H Custom info panels on image themes and DotMatrix, the time format's tube layout, and the accent LED mode/colors as a glowing arch above each tube (Follow Sun/Moon cross-fades between tubes like the clock). Pins under the search box while you scroll through Display Settings, until the Theme Rotation card pushes it away. Can be switched off; the toggle is saved with your other settings (`web_live_preview`). A custom TTF font is drawn by the browser, so it can differ slightly from the clock's rasterizer, and pushed `/api/cx_image` images aren't shown
   - Theme — populated dynamically from LittleFS; add a folder to `/images/themes/` and it appears in the dropdown automatically
   - **Custom Face** — select a TrueType font as the clockface digit renderer and weather-panel text font; choose from any `.ttf` uploaded to `/fonts/` on the device; selecting **None** reverts to the theme's JPEG digit artwork. Configure drop shadow color and toggle under this section (see [Custom TTF Fonts](#custom-ttf-fonts))
   - Brightness; LED accent lighting (Static / Breath / Rainbow / Off / **Follow Sun/Moon**) with per-tube color pickers — see [Follow Sun/Moon LED mode](#follow-sunmoon-led-mode)
@@ -485,7 +487,8 @@ Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, on
 |---|---|
 | **Color Cycle** | Cycles each selected tube through red → green → blue → white → black (30 s per step) to exercise every sub-pixel at both voltage extremes. Can run for 1–4 hours or until manually stopped. |
 | **Static Snow** | Writes truly random RGB565 pixels to every selected tube each frame (5 Hz) — more thorough than the color cycle because every pixel address receives an independent random level. Tube selection and duration are the same as color cycle. |
-| **Scheduled** | Automatic overnight burn-in recovery. Fires at a configured hour on a **weekly** (Sunday midnight) or **monthly** (1st of month) schedule. Tube bitmask, session duration, and trigger hour are all configurable. Disabled by default. |
+| **Scheduled** | Automatic overnight burn-in recovery. Fires at a configured hour on a **daily**, **weekly** (every Sunday), or **monthly** (1st of month) schedule. Tube bitmask, session duration, and trigger hour are all configurable. Disabled by default. |
+| **Quick Refresh** | One-click, one-off 5-minute color-cycle recovery on all 6 tubes, in the Scheduled Anti Burn-in / LCD Refresh card (Display tab). Works whether or not the schedule above is enabled, and doesn't change any of its settings. If a burn-in or snow session is already running, it's left alone rather than cut short. |
 
 The CASET window also drifts ±2 px every hour automatically (synchronized to the real-time hour value) as a passive column-shift anti-burn-in measure — no configuration needed.
 
@@ -921,7 +924,9 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 | **Nextube Air Quality** | `sensor` | Always | Outdoor AQI (US or European per the panel's scale setting) from Open-Meteo, updated every 60 s |
 | **Nextube Mode** | `select` | Always | Read and set the active display mode (Clock, Weather, YouTube, …) |
 | **Nextube Display** | `switch` | Always | Turn the backlight ON or OFF (same as the middle touch button) |
-| **Nextube Brightness** | `number` | Always | LCD brightness 0–100 slider |
+| **Nextube LCD Brightness** | `number` | Always | LCD brightness 0–100 slider. Shows the brightness actually in use; during the Night Mode window it reads and sets the night brightness, otherwise the daytime one. Reads 0 while the display is off. |
+| **Nextube LED Brightness** | `number` | Always | Accent LED (rear glow) brightness 0–100 slider. Same night/day behavior as LCD Brightness. Reads 0 while LED mode is Off (except Spectrum mode's custom glow, which stays lit). |
+| **Nextube LED Mode** | `select` | Always | Accent LED effect. Options (exact values for automations): `Static`, `Breath`, `Rainbow`, `Off`, `WLED` (= WLED Controller in the web UI), `SunMoon` (= Follow Sun/Moon). `WLED` is only offered when WLED Sync is enabled and the device has been rebooted since. |
 | **Nextube Ticker** | `text` | Always | Scrolling message ticker — type any text and press Enter to display it across all 6 tubes |
 | **Nextube Ticker Speed** | `number` | Always | Marquee scroll speed slider, 1–20 px per tick (higher = faster). RAM-only; resets to 4 on reboot |
 | **Nextube Ticker Sound** | `switch` | Always | Enable/disable the chime played on each incoming ticker message |
@@ -960,6 +965,10 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | **Subscribe** | `nextube/<hostname>/display/set` | `ON` or `OFF` |
 | Publish | `nextube/<hostname>/brightness/state` | `75` (integer 0–100) |
 | **Subscribe** | `nextube/<hostname>/brightness/set` | `75` (integer 0–100) |
+| Publish | `nextube/<hostname>/led_brightness/state` | `60` (integer 0–100) |
+| **Subscribe** | `nextube/<hostname>/led_brightness/set` | `60` (integer 0–100) |
+| Publish | `nextube/<hostname>/led_mode/state` | `Breath` (`Static`/`Breath`/`Rainbow`/`Off`/`WLED`/`SunMoon`) |
+| **Subscribe** | `nextube/<hostname>/led_mode/set` | Same 6 values as above |
 | Publish | `nextube/<hostname>/ticker/state` | Current ticker text, or `""` when cleared |
 | **Subscribe** | `nextube/<hostname>/ticker/set` | UTF-8 string ≤ 255 chars; empty payload = cancel |
 | Publish | `nextube/<hostname>/ticker_speed/state` | `4` (integer 1–20, px per tick) |
@@ -977,6 +986,8 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | Publish | `homeassistant/select/<hostname>_mode/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/switch/<hostname>_display/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/number/<hostname>_brightness/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/number/<hostname>_led_brightness/config` | HA discovery JSON (retained) |
+| Publish | `homeassistant/select/<hostname>_led_mode/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/text/<hostname>_ticker/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/number/<hostname>_ticker_speed/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/switch/<hostname>_ticker_sound/config` | HA discovery JSON (retained) |
@@ -1069,7 +1080,7 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 
 ### Built-in Themes
 
-Ten themes ship pre-loaded in LittleFS with every firmware image. Select them from **Display → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
+Nine themes ship pre-loaded in LittleFS with every firmware image. Select them from **Display → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
 
 | Theme | Style |
 |---|---|
@@ -1080,7 +1091,6 @@ Ten themes ship pre-loaded in LittleFS with every firmware image. Select them fr
 | **GlitchGR** | Green-on-dark with glitch-art distortion |
 | **LightFuture** | Light background, dark digits — inverted minimal look |
 | **NotionRain** | Dark rain-effect styling |
-| **RedDigits** | Bright red classic digit art |
 | **RetroPaper** | Off-white paper tone — old VFD or e-ink feel |
 | **WireMesh** | Wireframe outlined glyphs — technical circuit-board aesthetic |
 
@@ -1128,6 +1138,19 @@ Notes:
 - This theme never applies drop shadows, regardless of the Custom Face shadow setting.
 
 Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image panel options — Weather Icon uses the same dot-matrix condition pictograms as the other weather panels, and Pushed Image shows the raw pushed JPG/PNG as-is (unaffected by theme, same as any asset theme). In non-Clock modes (weather, follower counts, …) social-media platform logos still load from the built-in system assets; anything else with no dedicated dot-matrix glyph falls back to a plain unlit grid.
+
+### Segments theme
+
+**Segments** is a third built-in **procedural** theme (no JPEG assets, like WeatherLive/DotMatrix) — every glyph is drawn at runtime as a real 16-segment display character (the kind used on classic alphanumeric LED/VFD displays), each segment a hexagon tapering to a point at both ends rather than a blocky dot grid.
+
+**Settings:** when Segments is selected, two color pickers appear under the theme picker:
+- **Segment color (on)** — color of lit segments.
+- **Segment color (off)** — color of unlit segments. Every one of a glyph's 16 segments is always painted one or the other, so the display always shows the full sleeping segment pattern rather than glyphs floating on black.
+
+**Coverage:**
+- Clock digits, AM/PM (shown as a plain **A**/**P**), colon/dot/minus, and the °C/°F unit mark all render from the segment font.
+- Weather-condition icons, the humidity/wind/AQI panel icons, and platform logos have no segment-shaped equivalent — anything without a dedicated glyph falls back to the plain unlit segment pattern.
+- **24H Custom info panels** (tube 5/6) are not yet segment-styled — they currently render with the same text rendering other asset themes use, over a black background.
 
 ### Custom Face
 
@@ -1416,8 +1439,17 @@ POST /api/wifi/regen_pin     → generate and persist a new AP PIN → {"pin":"�
 
 # Status (open)
 GET  /api/ping               → {"status":"ok"}
-GET  /api/status             → live status: time, wifi, weather, heap, firmware, admin_set, auth_enabled, ap_active
+GET  /api/status             → live status: time, wifi, weather, heap, firmware, admin_set, auth_enabled, ap_active,
+                               burnin_active (+ burnin_remaining_s while one runs; 0 = no time limit)
 GET  /api/network_info       → WiFi diagnostics: disconnect_count, last_disconnect_reason, connected_duration_s, mac, bssid, channel, rssi, netmask, gateway, dns1, dns2, phy_11n
+
+# Display (requires auth)
+GET  /api/wl_scene           → what the WeatherLive sky is drawn from, for the web UI's live preview:
+                               {"sunrise","sunset" (minutes of day; 6:00/19:00 unless "has_loc"),"south",
+                               "has_loc","valid", plus when weather is
+                               valid "icon","temp_c","humidity","wind_kph","cloud_cover_pct","precip_mm",
+                               "day_range_valid","day_min_c","day_max_c"; "aqi","aqi_eu" once air quality
+                               has been fetched; "indoor_temp_c","indoor_hum" if SHT30}
 
 # Settings (requires auth)
 GET  /api/settings           → full configuration JSON
@@ -1462,7 +1494,8 @@ POST /api/debug/pwm          → override backlight PWM: {"freq_hz":10000,"brigh
                                or {"restore":true}
 POST /api/debug/loglevel     → runtime per-tag log verbosity: {"tag":"ntp","level":4}
                                (0=none … 5=verbose) or {"tag":"…","enabled":false}; resets on reboot
-POST /api/debug/burnin       → trigger the burn-in / color-cycle routine (see Advanced Display)
+POST /api/debug/burnin       → trigger the burn-in / color-cycle routine (see Advanced Display);
+                               {"stop_all":true} stops any running color-cycle or snow session
 POST /api/debug/snow         → trigger the static-snow routine (see Advanced Display)
 GET  /api/debug/micframe     → atomic snapshot of one DMA capture: {"samples":[512 raw ADC values],
                                "dec":[128 decimated values]} — both arrays come from the same frame
@@ -1823,16 +1856,22 @@ nextube-fw/
 │   │   └── include/fw_version.h  # Auto-generated by CMake — do not edit manually
 │   ├── display/                   # 6× ST7735 SPI display driver + mode renderer
 │   ├── leds/                      # WS2812 RGB LED accent lighting task
+│   ├── wled_sync/                 # Receives WLED UDP Notifier broadcasts; syncs accent LEDs to WLED color
 │   ├── microphone/                # ADC mic sampling, Goertzel band analysis, peak-hold envelope
 │   ├── touch/                     # Capacitive touch input (L/R = mode cycle, M = pause/resume or backlight)
 │   ├── rtc/                       # PCF8563 RTC driver
+│   ├── sht30/                     # SHT30 I²C temperature/humidity sensor driver
 │   ├── audio/                     # DAC audio playback (WAV)
 │   ├── wifi_manager/              # AP+STA WiFi (WPA2 setup AP; on-demand via LEFT+RIGHT hotkey; NVS-backed per-device PIN)
 │   ├── web_server/                # HTTP server + REST API + OTA handlers + log viewer
+│   ├── update_check/              # Automatic firmware update check (compares against latest GitHub release)
 │   ├── ntp_time/                  # NTP synchronisation
 │   ├── ha_mqtt/                   # Home Assistant MQTT auto-discovery + optional telemetry groups
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
+│   ├── sun_calc/                  # Sunrise/sunset time calculation (NOAA algorithm) from lat/lon
 │   ├── subscribers/               # Subscriber/follower counter (YouTube, Bilibili, Instagram, TikTok, Mastodon)
+│   ├── periodic_net_poll/         # Scheduled background task driving weather/subscribers/update_check polling
+│   ├── u8g2/                      # Vendored u8g2 bitmap font library (fetched via CMake FetchContent)
 │   └── font_render/               # stb_truetype TrueType rasterizer — PSRAM glyph cache, norm_ratio height correction
 │       ├── font_render.c          # Renderer implementation (stb_truetype.h must be placed here before building)
 │       └── include/font_render.h  # Public API: fr_init, fr_load_face, fr_draw_glyph_centered, fr_draw_text, …

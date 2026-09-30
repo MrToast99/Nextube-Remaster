@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS "update_check.c"
     INCLUDE_DIRS "include"
-    REQUIRES config_mgr periodic_net_poll display esp_http_client
+    REQUIRES config_mgr periodic_net_poll display esp_http_client json_util
     PRIV_REQUIRES mbedtls
 )

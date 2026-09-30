@@ -1,6 +1,7 @@
 #include "update_check.h"
 #include "config_mgr.h"
 #include "periodic_net_poll.h"
+#include "json_util.h"
 #include "fw_version.h"
 #include "display.h"
 #include "esp_log.h"
@@ -100,38 +101,23 @@ static int semver_cmp(const char *a, const char *b)
     return 0;
 }
 
-/* Lightweight extraction of a JSON string value (first match) — same
- * technique as weather.c's fetch_met_no(), and for the same reason: GitHub's
- * releases response routinely exceeds HTTP_MAX_BODY once release notes and
- * an assets array are included, and a full-document parser (cJSON_Parse)
- * fails on the WHOLE document if it's truncated anywhere — even after
- * tag_name has already been fully captured earlier in the buffer.  A plain
- * strstr works on a truncated buffer as long as the target field itself is
- * intact, which "tag_name" reliably is (it appears within the first ~1 KB
- * of GitHub's response, well inside the 4 KB window). Also correct for
- * both response shapes (object for /releases/latest, array for
- * /releases?per_page=1): GitHub always lists the newest release first, so
- * the first "tag_name" in the byte stream is always the one we want. */
-static bool json_extract_string(const char *buf, const char *key,
-                                 char *dst, size_t dstsz)
-{
-    char search[32];
-    snprintf(search, sizeof(search), "\"%s\"", key);
-    const char *p = strstr(buf, search);
-    if (!p) return false;
-    p += strlen(search);
-    while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    if (*p != '"') return false;
-    p++;
-    size_t i = 0;
-    while (*p && *p != '"' && i < dstsz - 1) dst[i++] = *p++;
-    dst[i] = '\0';
-    return i > 0;
-}
-
 /* Runs one GitHub release check.  Any failure (bad HTTP status, unparsable
  * body, missing tag_name) is logged at WARN and otherwise a no-op — retried
- * on the next 24 h cycle. */
+ * on the next 24 h cycle.
+ *
+ * Reads tag_name via json_util's json_extract_string() — a plain strstr,
+ * not a full JSON parse (same technique and reason as weather.c's
+ * fetch_met_no()) — because GitHub's releases response routinely exceeds
+ * HTTP_MAX_BODY once release notes and an assets array are included, and a
+ * full-document parser (cJSON_Parse) fails on the WHOLE document if it's
+ * truncated anywhere, even after tag_name has already been fully captured
+ * earlier in the buffer. A plain strstr works on a truncated buffer as long
+ * as the target field itself is intact, which "tag_name" reliably is (it
+ * appears within the first ~1 KB of GitHub's response, well inside the 4 KB
+ * window). Also correct for both response shapes (object for
+ * /releases/latest, array for /releases?per_page=1): GitHub always lists
+ * the newest release first, so the first "tag_name" in the byte stream is
+ * always the one we want. */
 static void do_check(void)
 {
     ESP_LOGI(TAG, "checking for updates...");

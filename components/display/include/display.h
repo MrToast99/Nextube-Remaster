@@ -15,7 +15,7 @@
  * the legacy spelling per-asset for themes uploaded before the rename.)
  *
  * Available themes: NixieOY, FlipClock, DarkSlate, Formula1, GlitchGR,
- *   LightFuture, NotionRain, RedDigits, RetroPaper, WireMesh
+ *   LightFuture, NotionRain, RetroPaper, WireMesh
  */
 #pragma once
 #include <stdint.h>
@@ -198,6 +198,24 @@ int32_t display_rotation_pause_remaining_s(void);
  *  Thread-safe: safe to call from any task. */
 void display_set_burnin_mask(uint8_t mask, uint32_t duration_s);
 
+/** Like display_set_burnin_mask(), but only starts if no color-cycle or snow
+ *  session is currently active — never shortens or overlays a running one.
+ *  Returns true if the session was started.  Thread-safe. */
+bool display_start_burnin_if_idle(uint8_t mask, uint32_t duration_s);
+
+/** True while a color-cycle or snow session is running (manual, Quick Refresh
+ *  or scheduled). remaining_s (optional) gets the seconds left, rounded up —
+ *  0 if the session has no timer. Thread-safe. */
+bool display_burnin_status(uint32_t *remaining_s);
+
+/** Stops any running color-cycle and snow session at once. Thread-safe. */
+void display_stop_burnin(void);
+
+/** Today's sunrise/sunset (minutes-of-day) exactly as the WeatherLive sky
+ *  resolves them (geocoded, or the 6:00/19:00 fallback), and whether the
+ *  location is in the southern hemisphere (mirrors the moon's lit limb). */
+void display_wl_sun_events(int *sunrise, int *sunset, bool *south);
+
 /** Static-snow burn-in mode: each display tick writes truly random RGB565
  *  pixels to every tube in mask, exercising each sub-pixel independently.
  *  More thorough than the color-cycle because every pixel address receives
@@ -207,6 +225,12 @@ void display_set_burnin_mask(uint8_t mask, uint32_t duration_s);
  *  Calling with mask = 0 stops an active session immediately.
  *  Thread-safe: safe to call from any task. */
 void display_set_snow_mask(uint8_t mask, uint32_t duration_s);
+
+/* Snow's counterpart to display_start_burnin_if_idle(): starts a snow
+ * session only if neither a burn-in nor a snow session is already active,
+ * checked and set atomically. Returns true iff it actually started one.
+ * Thread-safe: safe to call from any task. */
+bool display_start_snow_if_idle(uint8_t mask, uint32_t duration_s);
 
 /* ── Debug helpers ─────────────────────────────────────────────────── */
 /**

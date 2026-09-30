@@ -24,9 +24,6 @@ typedef struct {
     int16_t  advance;
 } fr_glyph_t;
 
-/* ── Lifecycle ──────────────────────────────────────────────────────────────── */
-void  fr_init(void);
-
 /* Load a TTF from the VFS (e.g. "/spiffs/fonts/MyFont.ttf").
  * Returns a face_id (0 .. FR_MAX_FACES-1) on success, or -1.
  * If the same path is already loaded, the existing id is returned immediately. */

@@ -1,6 +1,8 @@
 #include "weather.h"
 #include "config_mgr.h"
 #include "periodic_net_poll.h"
+#include "json_util.h"
+#include "url_util.h"
 #include "fw_version.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
@@ -182,29 +184,6 @@ static char *http_get(const char *url)
     return http_get_sized(url, HTTP_MAX_BODY);
 }
 
-/* Percent-encode a query-string / path value (RFC 3986 unreserved set kept
- * literal; everything else — spaces and UTF-8 bytes included — escaped as %XX).
- * Every provider embeds the configured city in a URL, and a raw space breaks
- * the HTTP request line, so multi-word names like "Thousand Oaks" failed to
- * resolve on all of them without this. */
-static void url_encode_query(const char *in, char *out, size_t out_sz)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    size_t o = 0;
-    for (const unsigned char *p = (const unsigned char *)in; *p && o + 4 < out_sz; p++) {
-        unsigned char c = *p;
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-            out[o++] = (char)c;
-        } else {
-            out[o++] = '%';
-            out[o++] = hex[c >> 4];
-            out[o++] = hex[c & 0x0F];
-        }
-    }
-    out[o] = '\0';
-}
-
 /* ── wttr.in  (no API key required) ────────────────────────────────── */
 /*
  * URL:  https://wttr.in/{city}?format=j1
@@ -219,6 +198,9 @@ static void fetch_wttr(const wx_cfg_snap_t *cfg)
 {
     if (cfg->city[0] == '\0') return;
 
+    /* Every provider embeds the configured city in a URL, and a raw space
+     * breaks the HTTP request line, so multi-word names like "Thousand
+     * Oaks" failed to resolve on all of them without url_encode_query(). */
     char enc_city[192];
     url_encode_query(cfg->city, enc_city, sizeof(enc_city));
     char url[256];
@@ -721,24 +703,6 @@ static bool json_extract_number(const char *buf, const char *key, float *out)
         return true;
     }
     return false;
-}
-
-/* Lightweight extraction of a JSON string value (first match). */
-static bool json_extract_string(const char *buf, const char *key,
-                                char *dst, size_t dstsz)
-{
-    char search[64];
-    snprintf(search, sizeof(search), "\"%s\"", key);
-    const char *p = strstr(buf, search);
-    if (!p) return false;
-    p += strlen(search);
-    while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    if (*p != '"') return false;
-    p++;  /* skip opening quote */
-    size_t i = 0;
-    while (*p && *p != '"' && i < dstsz - 1) dst[i++] = *p++;
-    dst[i] = '\0';
-    return i > 0;
 }
 
 static void fetch_met_no(const wx_cfg_snap_t *cfg)

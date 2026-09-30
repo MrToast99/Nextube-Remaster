@@ -1,6 +1,7 @@
 #include "subscribers.h"
 #include "config_mgr.h"
 #include "periodic_net_poll.h"
+#include "url_util.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "cJSON.h"
@@ -83,28 +84,23 @@ static esp_err_t http_event_heap(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-/* Percent-encode a value for embedding in a URL query/path segment (RFC 3986
- * unreserved set kept literal; everything else — including '&', '?', '"',
- * spaces — escaped as %XX).  Small duplicate of weather.c's
- * url_encode_query() (that one is file-static there too, so this copy avoids
- * a larger cross-component refactor).  Used to safely embed usernames /
- * instance names sourced from user-editable config into request URLs. */
-static void url_encode_query(const char *in, char *out, size_t out_sz)
+/* Runs an already-configured esp_http_client to completion and returns its
+ * HTTP status (0 if it couldn't even be initialised or performed). Always
+ * cleans up the handle (esp_http_client_cleanup is NULL-safe). Shared by
+ * every fetch below that doesn't need to touch the client handle between
+ * init and perform (a couple of sites set custom headers or a POST body
+ * there and call esp_http_client_init/perform directly instead) — the
+ * config itself (URL, event handler, timeout, TLS bundle, user_data) still
+ * varies per site and is the caller's job. Does NOT take/give tls_sem —
+ * callers that need TLS serialised still bracket the call with that
+ * themselves, same as before. */
+static int http_run(const esp_http_client_config_t *cfg)
 {
-    static const char hex[] = "0123456789ABCDEF";
-    size_t o = 0;
-    for (const unsigned char *p = (const unsigned char *)in; *p && o + 4 < out_sz; p++) {
-        unsigned char c = *p;
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-            out[o++] = (char)c;
-        } else {
-            out[o++] = '%';
-            out[o++] = hex[c >> 4];
-            out[o++] = hex[c & 0x0F];
-        }
-    }
-    out[o] = '\0';
+    esp_http_client_handle_t client = esp_http_client_init(cfg);
+    esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
+    int status = client ? esp_http_client_get_status_code(client) : 0;
+    esp_http_client_cleanup(client);   /* NULL-safe */
+    return (err == ESP_OK) ? status : 0;
 }
 
 /* Shared heap RX buffer for the Instagram-internal, TikTok-API, and Mastodon
@@ -158,15 +154,10 @@ static void fetch_youtube(void)
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
         tls_sem_take();
-        /* init returns NULL on heap exhaustion — perform/get_status would
-         * deref it (same guard at every fetch site in this file). */
-        esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
-        int status = client ? esp_http_client_get_status_code(client) : 0;
-        esp_http_client_cleanup(client);   /* NULL-safe */
+        int status = http_run(&http_cfg);
         tls_sem_give();
 
-        if (err == ESP_OK && status == 200) {
+        if (status == 200) {
             s_http_buf[s_http_buf_len] = 0;
             cJSON *root = cJSON_Parse(s_http_buf);
             if (root) {
@@ -186,7 +177,7 @@ static void fetch_youtube(void)
                 cJSON_Delete(root);
             }
         } else {
-            ESP_LOGW(TAG, "YouTube fetch failed: err=%d status=%d", err, status);
+            ESP_LOGW(TAG, "YouTube fetch failed: status=%d", status);
         }
 
     } else if (relay_host[0] != '\0') {
@@ -205,12 +196,9 @@ static void fetch_youtube(void)
             .user_data     = &ctx,
             .timeout_ms    = 45000,   /* Playwright fetch can take up to ~30 s on cold start */
         };
-        esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_err_t err    = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
-        int       status = client ? esp_http_client_get_status_code(client) : 0;
-        esp_http_client_cleanup(client);   /* NULL-safe */
+        int status = http_run(&http_cfg);
 
-        if (err == ESP_OK && status == 200) {
+        if (status == 200) {
             relay_buf[ctx.buf_len] = '\0';
             const char *needle = "\"subscribers\":";
             const char *p = strstr(relay_buf, needle);
@@ -226,7 +214,7 @@ static void fetch_youtube(void)
                 ESP_LOGW(TAG, "YouTube relay: unexpected response: %s", relay_buf);
             }
         } else {
-            ESP_LOGW(TAG, "YouTube relay fetch failed: err=%d status=%d url=%s", err, status, url);
+            ESP_LOGW(TAG, "YouTube relay fetch failed: status=%d url=%s", status, url);
         }
         /* relay_buf is stack-allocated — nothing to free */
 
@@ -257,13 +245,10 @@ static void fetch_bilibili(void)
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     tls_sem_take();
-    esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-    esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
-    int status = client ? esp_http_client_get_status_code(client) : 0;
-    esp_http_client_cleanup(client);   /* NULL-safe */
+    int status = http_run(&http_cfg);
     tls_sem_give();
 
-    if (err == ESP_OK && status == 200) {
+    if (status == 200) {
         s_http_buf[s_http_buf_len] = 0;
         cJSON *root = cJSON_Parse(s_http_buf);
         if (root) {
@@ -280,7 +265,7 @@ static void fetch_bilibili(void)
             cJSON_Delete(root);
         }
     } else {
-        ESP_LOGW(TAG, "Bilibili fetch failed: err=%d status=%d", err, status);
+        ESP_LOGW(TAG, "Bilibili fetch failed: status=%d", status);
     }
 }
 
@@ -337,12 +322,9 @@ static void fetch_instagram(void)
             .url = url, .event_handler = http_event_heap,
             .user_data = &ctx, .timeout_ms = 15000,
         };
-        esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
-        int status    = client ? esp_http_client_get_status_code(client) : 0;
-        esp_http_client_cleanup(client);   /* NULL-safe */
+        int status = http_run(&http_cfg);
 
-        if (err == ESP_OK && status == 200) {
+        if (status == 200) {
             relay_buf[ctx.buf_len] = '\0';
             const char *p = strstr(relay_buf, "\"followers\":");
             if (p) {
@@ -357,7 +339,7 @@ static void fetch_instagram(void)
                 ESP_LOGW(TAG, "Instagram relay: unexpected response: %s", relay_buf);
             }
         } else {
-            ESP_LOGW(TAG, "Instagram relay failed: err=%d status=%d", err, status);
+            ESP_LOGW(TAG, "Instagram relay failed: status=%d", status);
         }
 
     } else {
@@ -532,12 +514,9 @@ static void fetch_tiktok(void)
             .url = url, .event_handler = http_event_heap,
             .user_data = &ctx, .timeout_ms = 10000,
         };
-        esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-        esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
-        int status    = client ? esp_http_client_get_status_code(client) : 0;
-        esp_http_client_cleanup(client);   /* NULL-safe */
+        int status = http_run(&http_cfg);
 
-        if (err == ESP_OK && status == 200) {
+        if (status == 200) {
             relay_buf[ctx.buf_len] = '\0';
             const char *p = strstr(relay_buf, "\"followers\":");
             if (p) {
@@ -552,7 +531,7 @@ static void fetch_tiktok(void)
                 ESP_LOGW(TAG, "TikTok relay: unexpected response: %s", relay_buf);
             }
         } else {
-            ESP_LOGW(TAG, "TikTok relay fetch failed: err=%d status=%d url=%s", err, status, url);
+            ESP_LOGW(TAG, "TikTok relay fetch failed: status=%d url=%s", status, url);
         }
 
     } else {
@@ -602,13 +581,10 @@ static void fetch_mastodon(void)
         .timeout_ms = 10000, .crt_bundle_attach = esp_crt_bundle_attach,
     };
     tls_sem_take();
-    esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
-    esp_err_t err    = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
-    int       status = client ? esp_http_client_get_status_code(client) : 0;
-    esp_http_client_cleanup(client);   /* NULL-safe */
+    int status = http_run(&http_cfg);
     tls_sem_give();
 
-    if (err == ESP_OK && status == 200) {
+    if (status == 200) {
         ctx.buf[ctx.buf_len] = '\0';
         const char *needle = "\"followers_count\":";
         const char *p = strstr(ctx.buf, needle);
@@ -625,7 +601,7 @@ static void fetch_mastodon(void)
                      ctx.buf_len, ctx.buf);
         }
     } else {
-        ESP_LOGW(TAG, "Mastodon fetch failed: err=%d status=%d", err, status);
+        ESP_LOGW(TAG, "Mastodon fetch failed: status=%d", status);
     }
     /* ctx.buf is the shared buffer — not freed here, see get_shared_rx_buf(). */
 }

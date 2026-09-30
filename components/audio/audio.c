@@ -728,17 +728,6 @@ void audio_set_volume(int vol)
     s_volume = vol;
 }
 
-void audio_stop(void)
-{
-    if (!s_play_mutex) return;
-    s_stop_flag = true;
-    /* s_play_mutex is Given when idle and Taken while a clip plays.
-     * Taking it here blocks until the task exits and gives it back,
-     * then we restore the idle (Given) state for the next caller. */
-    if (xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(300)) == pdTRUE)
-        xSemaphoreGive(s_play_mutex);
-}
-
 /* ── DAC test API ────────────────────────────────────────────────────── */
 /*
  * All four modes drive the pad through the same dac_oneshot + gptimer engine
@@ -870,7 +859,3 @@ done:
     if (s_dac_test_mutex) xSemaphoreGive(s_dac_test_mutex);
 }
 
-void audio_dac_test_stop(void)
-{
-    audio_dac_test_set("normal", 0, 0);
-}
