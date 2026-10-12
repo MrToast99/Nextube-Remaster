@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "pack_version": 1,
-  "updated": "2026-10-11",
+  "pack_version": 2,
+  "updated": "2026-10-12",
   "themes": [
     {
       "id": "DarkSlate",
@@ -126,6 +126,24 @@
       "preview_full": "previews/full/NixieCage.jpg"
     },
     {
+      "id": "NixieCageMint",
+      "name": "Nixie",
+      "family": "Nixie",
+      "variant": "Cage, green mint",
+      "category": "",
+      "rev": 1,
+      "zip": "packs/NixieCageMint-r1.zip",
+      "preview": "previews/NixieCageMint.jpg",
+      "preview_full": "previews/full/NixieCageMint.jpg",
+      "size": 178775,
+      "sha256": "13200bb5076bdffbe325b8255630c94317d9f8ec4d095e2b2ad875cebf770b77",
+      "content_sha256": "2dcabd7f7c5b44e29976360c4d2d0e6e47f675531d798641520e4fa3c57eca4a",
+      "files": 42,
+      "bundled": false,
+      "min_fw": "",
+      "notes": "Hex mesh cage with a green mint glow"
+    },
+    {
       "id": "NixieCageTrue",
       "name": "Nixie Cage (true order)",
       "family": "Nixie",
@@ -246,5 +264,5 @@
       "preview_full": "previews/full/WireMesh.jpg"
     }
   ],
-  "data_sha256": "5589e9c031677b96e56d1eef6e012aea7ace6c9000775d661f7fbc624f7397ec"
+  "data_sha256": "1767d400eb6ea8367728557d930aeaf90cbc8a6105476867142665ffca606b25"
 }
