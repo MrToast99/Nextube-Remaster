@@ -785,7 +785,8 @@ bool wifi_manager_reconnect_sta(void)
 
 bool wifi_manager_is_connected(void)
 {
-    return (xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT) != 0;
+    /* The event group doesn't exist until wifi init; the display task's boot gate can ask before then. */
+    return s_wifi_events && (xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT) != 0;
 }
 
 const char *wifi_manager_get_ip(void) { return s_ip_str; }

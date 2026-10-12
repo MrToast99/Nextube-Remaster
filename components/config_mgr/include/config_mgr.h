@@ -59,6 +59,8 @@ typedef enum {
 #define BL_MODE_LAST BL_MODE_SUNMOON
 
 /* ── Configuration structure ───────────────────────────────────────── */
+#define MIC_FLOOR_CHAIN_FLAG  0x8000u   /* see nextube_config_t.mic_floor_top_hz */
+
 typedef struct {
     /* Display */
     app_mode_t       current_mode;
@@ -150,6 +152,12 @@ typedef struct {
                                                falls back to spectrum_lcd_rgb otherwise */
     uint8_t          spectrum_peak_rgb[3];  /* LCD bar peak-hold dot color [R, G, B];
                                                default white matches the old hardcoded dot */
+    uint8_t          spectrum_bar_rise;     /* bar rise speed, 1 (slow, smooth) .. 10 (instant); default 4 */
+    uint8_t          spectrum_bar_fall;     /* bar fall speed, 1 (lingers) .. 10 (drops at once); default 4 */
+    uint8_t          spectrum_peak_fall;    /* peak dot fall speed, 1 (slow) .. 10 (fast); default 3 = 1.8 s top to bottom */
+    uint8_t          spectrum_scope_thick;  /* oscilloscope trace thickness in pixels (1-8, default 2) */
+    uint8_t          spectrum_style;        /* 0 = bars, 1 = oscilloscope trace across all six tubes */
+    uint16_t         spectrum_peak_hold_ms; /* how long the peak dot waits at its peak before it starts to fall (0-2000, default 350) */
     uint8_t          spectrum_led_source;   /* 0 = custom glow color (amplitude-modulated),
                                                1 = follow configured accent mode (Static/Breath/Rainbow/Off) */
     bool             spectrum_led_beat_react; /* Breath/Rainbow only, and only while
@@ -197,6 +205,17 @@ typedef struct {
     int8_t           lcd_col_offset[6];  /* per-tube CASET column offset adj. -8..+8 (ST7735S variants need +2) */
     int8_t           lcd_row_offset[6];  /* per-tube RASET row offset adj. -8..+8 (ST7735S variants need +1) */
     uint8_t          lcd_tube_brightness[6]; /* per-tube software brightness 0-100 (100 = no scaling, default) */
+    uint8_t          lcd_gain_r[6];          /* per-tube color balance 50-150 % (100 = neutral, default) */
+    uint8_t          lcd_gain_g[6];
+    uint8_t          lcd_gain_b[6];
+    uint8_t          lcd_black_level[6];     /* per-tube black level 0-30 (0 = off, default); clips the darkest values to pure black */
+    uint8_t          lcd_curve_r[6];         /* per-channel gamma multiplier 50-200 % (100 = neutral); <100 lifts that channel's darks */
+    uint8_t          lcd_curve_g[6];
+    uint8_t          lcd_curve_b[6];
+    uint8_t          lcd_pedestal_r[6];      /* per-channel black pedestal 0-30 % (0 = off): the level pure black is raised to */
+    uint8_t          lcd_pedestal_g[6];
+    uint8_t          lcd_pedestal_b[6];
+    uint8_t          lcd_shadow_lift[6];     /* per-tube shadow lift 0-100 (0 = off, default); brightens dark pixels only */
 
     /* Network */
     char             ssid[64];
@@ -260,6 +279,11 @@ typedef struct {
     uint8_t          mic_adc_channel;    /* ADC1 channel 0-7 (0=GPIO36, 1=GPIO37, 2=GPIO38, 3=GPIO39,
                                            4=GPIO32, 5=GPIO33, 6=GPIO34, 7=GPIO35). Runtime-changeable
                                            via the debug panel without a rebuild. */
+    uint16_t         mic_top_hz;         /* Spectrum range: centre of the highest of the 24 bands, Hz
+                                            (1200-8000, default 8000); bands run from 280 Hz up to it */
+    uint16_t         mic_floor_top_hz;   /* mic_top_hz | MIC_FLOOR_CHAIN_FLAG when mic_noise_floor[] was captured:
+                                            a baseline from another layout, or from the older 8 kHz analysis
+                                            chain (no flag), is ignored; 0 = unknown */
     float            mic_silence_gate;   /* Spectral silence gate: display blanks when
                                             the SUM of post-floor band power falls below
                                             this (silence <10, quiet audio >50; 0 = off).

@@ -14,8 +14,8 @@
  * until this fix; display_path_weather/_temperature/_humidity fall back to
  * the legacy spelling per-asset for themes uploaded before the rename.)
  *
- * Available themes: NixieOY, FlipClock, DarkSlate, Formula1, GlitchGR,
- *   LightFuture, NotionRain, RetroPaper, WireMesh
+ * Themes shipped in the firmware: Nixie, FlipClock, DarkSlate, NotionRain,
+ *   RetroPaper, WireMesh (more are downloadable via the Theme Manager)
  */
 #pragma once
 #include <stdint.h>
@@ -118,6 +118,42 @@ void display_apply_tube_offsets(const int8_t col_off[6], const int8_t row_off[6]
  *  Thread-safe: values are cached; takes effect on the next render tick.
  *  Call after display_init() and again when lcd_tube_brightness changes. */
 void display_apply_tube_brightness(const uint8_t br[6]);
+
+/** Set per-tube shadow lift (0-100; 0 = off, default). Brightens dark pixels
+ *  only — black stays black and whites are untouched — to recover a dim
+ *  background glow that gamma/VCOM tuning crushed on replacement panels.
+ *  Call after display_init() and again when lcd_shadow_lift changes. */
+void display_apply_tube_shadow_lift(const uint8_t lift[6]);
+
+/** Set per-tube color balance and black level.
+ *  gain_r/g/b: 50-150 % per channel (100 = neutral) — corrects a tint
+ *  (e.g. orange looking pink or yellow) on a replacement panel.
+ *  black: 0-30 — values at or below this % of full scale become pure
+ *  black, removing faint haze in dark areas (0 = off).
+ *  Folded into the same lookup table as gamma/brightness/shadow lift. */
+void display_apply_tube_color(const uint8_t gain_r[6], const uint8_t gain_g[6],
+                              const uint8_t gain_b[6], const uint8_t black[6]);
+
+/** Set per-tube, per-channel curve shape and black pedestal.
+ *  curve_*: 50-200 % multiplier on the gamma exponent for that channel only
+ *  (100 = neutral; below 100 lifts that channel's dark end, above 100 deepens
+ *  it) — shapes the dim-swatch hue independently of the other channels.
+ *  ped_*: 0-30 % — the level that pure black is raised to for that channel,
+ *  to neutralize a panel whose black leaks a color (e.g. blue backlight).
+ *  Same lookup table as everything else; no extra per-pixel cost. */
+void display_apply_tube_channel_curves(const uint8_t curve_r[6], const uint8_t curve_g[6],
+                                       const uint8_t curve_b[6], const uint8_t ped_r[6],
+                                       const uint8_t ped_g[6], const uint8_t ped_b[6]);
+
+/** Calibration test screen: paints a fixed pattern on the masked tubes
+ *  (pattern 1 = grey ramp, 2 = orange + dim glow swatches, 3 = color bars,
+ *  4 = full white) through the tube's full correction chain, so settings
+ *  can be judged by eye. Shares the burn-in mask/timer; returns false if a
+ *  burn-in or snow session is already running. mask 0 or pattern 0 stops it.
+ *  duration_s 0 = until stopped. */
+bool display_start_test_pattern(uint8_t mask, uint32_t duration_s, uint8_t pattern);
+/** True while a test pattern (not a burn-in session) is on screen. */
+bool display_test_pattern_active(void);
 
 /* ── JPEG asset loader ─────────────────────────────────────────────── */
 /** Load JPEG from SPIFFS, decode RGB565, push to tube.  Falls back to

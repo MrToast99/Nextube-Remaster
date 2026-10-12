@@ -31,7 +31,7 @@ static void set_defaults(void)
     memset(&s_cfg, 0, sizeof(s_cfg));
 
     s_cfg.current_mode    = APP_MODE_CLOCK;
-    strncpy(s_cfg.theme, "NixieOY", sizeof(s_cfg.theme) - 1);
+    strncpy(s_cfg.theme, "Nixie", sizeof(s_cfg.theme) - 1);
     strncpy(s_cfg.time_type, "12H", sizeof(s_cfg.time_type) - 1);
     strncpy(s_cfg.clock_tube5, "blank", sizeof(s_cfg.clock_tube5) - 1);
     s_cfg.leading_zero    = false;
@@ -108,6 +108,12 @@ static void set_defaults(void)
      * 1 = follow configured accent mode. Default 0 for backward compatibility. */
     s_cfg.spectrum_led_source = 0;
     s_cfg.spectrum_led_beat_react = false;   /* off by default — see config_mgr.h */
+    s_cfg.spectrum_bar_rise = 4;
+    s_cfg.spectrum_bar_fall = 4;
+    s_cfg.spectrum_peak_fall = 3;
+    s_cfg.spectrum_peak_hold_ms = 350;
+    s_cfg.spectrum_style = 0;
+    s_cfg.spectrum_scope_thick = 2;
 
     /* Clock-face update indicator — opt-in (off by default) */
     s_cfg.notify_update_on_display = false;
@@ -143,6 +149,17 @@ static void set_defaults(void)
     /* Per-tube software brightness (100 = full, no pixel scaling).
      * Replacement panels are often brighter than the originals; reduce to match. */
     for (int i = 0; i < 6; i++) s_cfg.lcd_tube_brightness[i] = 100;
+    memset(s_cfg.lcd_shadow_lift, 0, sizeof(s_cfg.lcd_shadow_lift));
+    memset(s_cfg.lcd_gain_r, 100, sizeof(s_cfg.lcd_gain_r));
+    memset(s_cfg.lcd_gain_g, 100, sizeof(s_cfg.lcd_gain_g));
+    memset(s_cfg.lcd_gain_b, 100, sizeof(s_cfg.lcd_gain_b));
+    memset(s_cfg.lcd_black_level, 0, sizeof(s_cfg.lcd_black_level));
+    memset(s_cfg.lcd_curve_r, 100, sizeof(s_cfg.lcd_curve_r));
+    memset(s_cfg.lcd_curve_g, 100, sizeof(s_cfg.lcd_curve_g));
+    memset(s_cfg.lcd_curve_b, 100, sizeof(s_cfg.lcd_curve_b));
+    memset(s_cfg.lcd_pedestal_r, 0, sizeof(s_cfg.lcd_pedestal_r));
+    memset(s_cfg.lcd_pedestal_g, 0, sizeof(s_cfg.lcd_pedestal_g));
+    memset(s_cfg.lcd_pedestal_b, 0, sizeof(s_cfg.lcd_pedestal_b));
 
     /* Default rainbow-ish backlight colors */
     uint8_t defaults[6][3] = {
@@ -185,6 +202,8 @@ static void set_defaults(void)
     s_cfg.volume = 20;
     s_cfg.mic_enabled      = true;
     s_cfg.mic_adc_channel  = 7;      /* ADC1_CH7 = GPIO35 — confirmed via hardware debug */
+    s_cfg.mic_top_hz       = 8000;
+    s_cfg.mic_floor_top_hz = 0;
     s_cfg.mic_silence_gate = 25.0f; /* SPECTRAL gate (sum of post-floor band
                                      * power): silence ≈ <10, quiet real audio
                                      * >50.  NOTE: semantics changed from the
@@ -499,6 +518,10 @@ static void parse_json(const char *json, size_t len)
     }
     json_read_u8(root, "mic_adc_channel", &s_cfg.mic_adc_channel);
     if (s_cfg.mic_adc_channel > 7) s_cfg.mic_adc_channel = 0; /* clamp to valid ADC1 range */
+    json_read_u16(root, "mic_top_hz", &s_cfg.mic_top_hz);
+    if (s_cfg.mic_top_hz < 1200) s_cfg.mic_top_hz = 1200;
+    if (s_cfg.mic_top_hz > 8000) s_cfg.mic_top_hz = 8000;
+    json_read_u16(root, "mic_floor_top_hz", &s_cfg.mic_floor_top_hz);
     json_read_float(root, "mic_silence_gate", &s_cfg.mic_silence_gate);
     if (s_cfg.mic_silence_gate < 0.0f) s_cfg.mic_silence_gate = 0.0f; /* no negative gate */
     if (s_cfg.mic_silence_gate > 16777216.0f) s_cfg.mic_silence_gate = 16777216.0f; /* matches web UI's f-gate-num/dbg-gate-num max */
@@ -933,6 +956,22 @@ static void parse_json(const char *json, size_t len)
     json_read_u8(root, "spectrum_led_source", &s_cfg.spectrum_led_source);
     if (s_cfg.spectrum_led_source > 1) s_cfg.spectrum_led_source = 0;
     json_read_bool(root, "spectrum_led_beat_react", &s_cfg.spectrum_led_beat_react);
+    json_read_u8 (root, "spectrum_bar_rise",   &s_cfg.spectrum_bar_rise);
+    json_read_u8 (root, "spectrum_bar_fall",   &s_cfg.spectrum_bar_fall);
+    json_read_u8 (root, "spectrum_peak_fall",  &s_cfg.spectrum_peak_fall);
+    json_read_u16(root, "spectrum_peak_hold_ms", &s_cfg.spectrum_peak_hold_ms);
+    json_read_u8 (root, "spectrum_style", &s_cfg.spectrum_style);
+    if (s_cfg.spectrum_style > 1) s_cfg.spectrum_style = 0;
+    json_read_u8 (root, "spectrum_scope_thick", &s_cfg.spectrum_scope_thick);
+    if (s_cfg.spectrum_scope_thick < 1) s_cfg.spectrum_scope_thick = 1;
+    if (s_cfg.spectrum_scope_thick > 8) s_cfg.spectrum_scope_thick = 8;
+    if (s_cfg.spectrum_bar_rise  < 1) s_cfg.spectrum_bar_rise  = 1;
+    if (s_cfg.spectrum_bar_rise  > 10) s_cfg.spectrum_bar_rise  = 10;
+    if (s_cfg.spectrum_bar_fall  < 1) s_cfg.spectrum_bar_fall  = 1;
+    if (s_cfg.spectrum_bar_fall  > 10) s_cfg.spectrum_bar_fall  = 10;
+    if (s_cfg.spectrum_peak_fall < 1) s_cfg.spectrum_peak_fall = 1;
+    if (s_cfg.spectrum_peak_fall > 10) s_cfg.spectrum_peak_fall = 10;
+    if (s_cfg.spectrum_peak_hold_ms > 2000) s_cfg.spectrum_peak_hold_ms = 2000;
 
     /* spectrum_lcd_wled — LCD bars follow the WLED primary color */
     json_read_bool(root, "spectrum_lcd_wled", &s_cfg.spectrum_lcd_wled);
@@ -1008,6 +1047,17 @@ static void parse_json(const char *json, size_t len)
     JSON_READ_TUBE_INT_ARRAY(root, "lcd_row_offset", lcd_row_offset, -8, 8, int8_t);
     /* Per-tube software brightness — clamped to 0-100 */
     JSON_READ_TUBE_INT_ARRAY(root, "lcd_tube_brightness", lcd_tube_brightness, 0, 100, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_shadow_lift", lcd_shadow_lift, 0, 100, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_gain_r", lcd_gain_r, 50, 150, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_gain_g", lcd_gain_g, 50, 150, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_gain_b", lcd_gain_b, 50, 150, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_black_level", lcd_black_level, 0, 30, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_curve_r", lcd_curve_r, 50, 200, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_curve_g", lcd_curve_g, 50, 200, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_curve_b", lcd_curve_b, 50, 200, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_pedestal_r", lcd_pedestal_r, 0, 30, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_pedestal_g", lcd_pedestal_g, 0, 30, uint8_t);
+    JSON_READ_TUBE_INT_ARRAY(root, "lcd_pedestal_b", lcd_pedestal_b, 0, 30, uint8_t);
 
     json_read_str(root, "update_repo", s_cfg.update_repo, sizeof(s_cfg.update_repo));
 
@@ -1346,6 +1396,8 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "mqtt_pub_buttons",  s_cfg.mqtt_pub_buttons);
     cJSON_AddNumberToObject(root, "mqtt_publish_interval_s", s_cfg.mqtt_publish_interval_s);
     cJSON_AddNumberToObject(root, "mic_adc_channel",   s_cfg.mic_adc_channel);
+    cJSON_AddNumberToObject(root, "mic_top_hz",       s_cfg.mic_top_hz);
+    cJSON_AddNumberToObject(root, "mic_floor_top_hz", s_cfg.mic_floor_top_hz);
     cJSON_AddNumberToObject(root, "mic_silence_gate",  (double)s_cfg.mic_silence_gate);
     {
         cJSON *mf = cJSON_AddArrayToObject(root, "mic_noise_floor");
@@ -1504,6 +1556,12 @@ char *config_to_json(bool include_password)
 
     cJSON_AddNumberToObject(root, "spectrum_led_source", s_cfg.spectrum_led_source);
     cJSON_AddBoolToObject(root, "spectrum_led_beat_react", s_cfg.spectrum_led_beat_react);
+    cJSON_AddNumberToObject(root, "spectrum_bar_rise",   s_cfg.spectrum_bar_rise);
+    cJSON_AddNumberToObject(root, "spectrum_bar_fall",   s_cfg.spectrum_bar_fall);
+    cJSON_AddNumberToObject(root, "spectrum_peak_fall",  s_cfg.spectrum_peak_fall);
+    cJSON_AddNumberToObject(root, "spectrum_peak_hold_ms", s_cfg.spectrum_peak_hold_ms);
+    cJSON_AddNumberToObject(root, "spectrum_style", s_cfg.spectrum_style);
+    cJSON_AddNumberToObject(root, "spectrum_scope_thick", s_cfg.spectrum_scope_thick);
     cJSON_AddBoolToObject(root, "spectrum_lcd_wled",   s_cfg.spectrum_lcd_wled);
 
     cJSON_AddBoolToObject(root, "notify_update_on_display", s_cfg.notify_update_on_display);
@@ -1525,6 +1583,17 @@ char *config_to_json(bool include_password)
     json_add_tube_i8(root, "lcd_col_offset",      s_cfg.lcd_col_offset);
     json_add_tube_i8(root, "lcd_row_offset",      s_cfg.lcd_row_offset);
     json_add_tube_u8(root, "lcd_tube_brightness", s_cfg.lcd_tube_brightness);
+    json_add_tube_u8(root, "lcd_shadow_lift",     s_cfg.lcd_shadow_lift);
+    json_add_tube_u8(root, "lcd_gain_r",          s_cfg.lcd_gain_r);
+    json_add_tube_u8(root, "lcd_gain_g",          s_cfg.lcd_gain_g);
+    json_add_tube_u8(root, "lcd_gain_b",          s_cfg.lcd_gain_b);
+    json_add_tube_u8(root, "lcd_black_level",     s_cfg.lcd_black_level);
+    json_add_tube_u8(root, "lcd_curve_r",         s_cfg.lcd_curve_r);
+    json_add_tube_u8(root, "lcd_curve_g",         s_cfg.lcd_curve_g);
+    json_add_tube_u8(root, "lcd_curve_b",         s_cfg.lcd_curve_b);
+    json_add_tube_u8(root, "lcd_pedestal_r",      s_cfg.lcd_pedestal_r);
+    json_add_tube_u8(root, "lcd_pedestal_g",      s_cfg.lcd_pedestal_g);
+    json_add_tube_u8(root, "lcd_pedestal_b",      s_cfg.lcd_pedestal_b);
 
     if (s_cfg.update_repo[0])
         cJSON_AddStringToObject(root, "update_repo", s_cfg.update_repo);

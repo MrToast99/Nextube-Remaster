@@ -4,7 +4,7 @@
     {
       "name": "app1",
       "app": "Clock",
-      "theme": "NixieOY",
+      "theme": "Nixie",
       "type": "24H",
       "info_du": 1,
       "info_lst": [

@@ -460,6 +460,9 @@ void app_main(void)
     int8_t   boot_col_offset[6];
     int8_t   boot_row_offset[6];
     uint8_t  boot_tube_brightness[6];
+    uint8_t  boot_shadow_lift[6];
+    uint8_t  boot_gain_r[6], boot_gain_g[6], boot_gain_b[6], boot_black[6];
+    uint8_t  boot_curve[3][6], boot_ped[3][6];
     uint16_t boot_debug_log_persist_mask;
     config_lock();
     const nextube_config_t *cfg_boot = config_get();
@@ -474,6 +477,14 @@ void app_main(void)
     memcpy(boot_col_offset,      cfg_boot->lcd_col_offset,      sizeof(boot_col_offset));
     memcpy(boot_row_offset,      cfg_boot->lcd_row_offset,      sizeof(boot_row_offset));
     memcpy(boot_tube_brightness, cfg_boot->lcd_tube_brightness, sizeof(boot_tube_brightness));
+    memcpy(boot_shadow_lift,     cfg_boot->lcd_shadow_lift,     sizeof(boot_shadow_lift));
+    memcpy(boot_gain_r,          cfg_boot->lcd_gain_r,          sizeof(boot_gain_r));
+    memcpy(boot_gain_g,          cfg_boot->lcd_gain_g,          sizeof(boot_gain_g));
+    memcpy(boot_gain_b,          cfg_boot->lcd_gain_b,          sizeof(boot_gain_b));
+    memcpy(boot_black,           cfg_boot->lcd_black_level,     sizeof(boot_black));
+    memcpy(boot_curve[0], cfg_boot->lcd_curve_r,    6); memcpy(boot_curve[1], cfg_boot->lcd_curve_g,    6);
+    memcpy(boot_curve[2], cfg_boot->lcd_curve_b,    6); memcpy(boot_ped[0],   cfg_boot->lcd_pedestal_r, 6);
+    memcpy(boot_ped[1],   cfg_boot->lcd_pedestal_g, 6); memcpy(boot_ped[2],   cfg_boot->lcd_pedestal_b, 6);
     boot_debug_log_persist_mask = cfg_boot->debug_log_persist_mask;
     config_unlock();
 
@@ -489,6 +500,10 @@ void app_main(void)
     display_apply_init_profiles(boot_init_profile);               /* gamma per-tube profile          */
     display_apply_tube_offsets(boot_col_offset, boot_row_offset); /* ST7735S window alignment        */
     display_apply_tube_brightness(boot_tube_brightness);          /* per-tube brightness scale       */
+    display_apply_tube_shadow_lift(boot_shadow_lift);             /* per-tube shadow lift            */
+    display_apply_tube_color(boot_gain_r, boot_gain_g, boot_gain_b, boot_black); /* color balance + black level */
+    display_apply_tube_channel_curves(boot_curve[0], boot_curve[1], boot_curve[2],
+                                      boot_ped[0], boot_ped[1], boot_ped[2]);      /* per-channel curves + pedestal */
     pcf8563_init();        /* must come before ntp_seed_rtc_early — initialises the I²C driver */
     ntp_seed_rtc_early();  /* seed system clock from RTC before the display task starts so the
                             * first render sees a valid wall-clock time instead of a stopwatch */
@@ -524,7 +539,9 @@ void app_main(void)
     if (mic_init()) {
         mic_task_start();
         config_lock();
-        bool  cal_saved = config_get()->mic_calibration_saved;
+        /* A baseline is per band, so it only means anything for the frequency layout it was captured in. */
+        bool  cal_saved = config_get()->mic_calibration_saved &&
+                          config_get()->mic_floor_top_hz == (uint16_t)(config_get()->mic_top_hz | MIC_FLOOR_CHAIN_FLAG);
         float noise_floor[CFG_MIC_BAND_COUNT];
         if (cal_saved) memcpy(noise_floor, config_get()->mic_noise_floor, sizeof(noise_floor));
         config_unlock();

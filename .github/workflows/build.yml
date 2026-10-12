@@ -7,11 +7,15 @@ on:
     paths-ignore:
       - 'README.md'
       - 'docs/**'
+      - 'themes/**'            # theme packs are not part of the firmware build (see themes-check.yml)
+      - 'helpers/theme_pack/**'
   pull_request:
     branches: [ main ]
     paths-ignore:
       - 'README.md'
       - 'docs/**'
+      - 'themes/**'            # theme packs are not part of the firmware build (see themes-check.yml)
+      - 'helpers/theme_pack/**'
   workflow_dispatch:
     inputs:
       keep_elf:
@@ -24,6 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v5.5.3
+      # Authenticated pull: Docker Hub rate-limits anonymous pulls per runner IP, which made this job fail intermittently.
+      # DOCKERHUB_TOKEN is a read-only (Public Repo) access token. Secrets are not passed to workflows from fork PRs.
+      credentials:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
     outputs:
       fw_version:    ${{ steps.version.outputs.fw_version }}
       fs_version:    ${{ steps.version.outputs.fs_version }}

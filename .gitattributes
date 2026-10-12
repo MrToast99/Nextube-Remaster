@@ -1,0 +1,4 @@
+# Theme packs are binary and the catalog's hashes depend on the exact bytes: never convert line endings.
+themes/packs/*.zip      binary
+themes/previews/**/*.jpg binary
+themes/catalog.json     text eol=lf

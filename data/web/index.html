@@ -149,6 +149,36 @@ select option{background:var(--accent);color:var(--text)}
 .btn-primary{background:linear-gradient(135deg,var(--hi),var(--hi-dark));color:#fff;box-shadow:0 2px 5px rgba(var(--hi-rgb),.15),0 7px 16px -8px rgba(var(--hi-rgb),.32)}
 .btn-primary:hover{transform:translateY(-1px);box-shadow:0 3px 7px rgba(var(--hi-rgb),.18),0 10px 20px -8px rgba(var(--hi-rgb),.4)}
 .btn-outline{background:none;border:1px solid var(--border);color:var(--dim)}.btn-outline:hover{border-color:var(--text);color:var(--text)}
+.tm-bar{display:flex;align-items:center;gap:.8rem;flex-wrap:wrap;margin-bottom:.7rem}
+.tm-meta{font-size:.78rem;color:var(--dim)}
+.tm-status{font-size:.82rem;color:var(--text);margin:.2rem 0 .7rem;padding:.5rem .7rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--accent)}
+.tm-prog{height:4px;border-radius:2px;background:var(--border);margin-top:.4rem;overflow:hidden}
+.tm-prog>i{display:block;height:100%;width:0;background:var(--hi);transition:width .3s var(--ease)}
+.tm-fam{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:.9rem 0 .2rem}
+.tm-row{display:flex;align-items:center;gap:.5rem .7rem;flex-wrap:wrap;padding:.5rem 0;border-bottom:1px solid var(--border)}
+.tm-row:last-child{border-bottom:none}
+.tm-grow{flex:1 1 11rem;min-width:0}
+.tm-name{font-size:.9rem;font-weight:600;color:var(--text)}
+.tm-sub{font-size:.76rem;color:var(--dim)}
+.tm-tag{font-size:.68rem;font-weight:600;padding:.12rem .45rem;border-radius:999px;border:1px solid var(--border);color:var(--dim);white-space:nowrap}
+.tm-tag.on{border-color:var(--hi);color:var(--hi)}
+.tm-btn{font-size:.78rem;padding:.3rem .8rem}
+.tm-rowprog{display:none;margin-top:.4rem;font-size:.78rem;color:var(--text)}
+.tm-rowprog.on{display:block}
+.tm-zoom{cursor:zoom-in}
+.tm-lb{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;padding:1rem}
+.tm-lb[hidden]{display:none}
+.tm-lb-box{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1rem;max-width:min(100%,520px);max-height:100%;overflow:auto;text-align:center}
+.tm-lb-title{font-size:.9rem;font-weight:600;margin-bottom:.6rem}
+.tm-lb-body{font-size:.82rem;color:var(--dim);min-height:2rem}
+.tm-lb-body img{display:block;max-width:100%;height:auto;margin:0 auto;background:#000;border-radius:4px}
+.tm-lb-box .btn{margin-top:.8rem}
+.tm-prev{flex:0 0 auto;height:34px;max-width:100%;border-radius:4px;background:#000;border:1px solid var(--border)}
+.tm-variants{margin:.7rem 0 .8rem}
+.tm-vlabel{font-size:.7rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);padding:.4rem .7rem;margin:0 0 .5rem;border-radius:var(--radius-sm);background:rgba(var(--hi-rgb),.08);box-shadow:inset 3px 0 0 rgba(var(--hi-rgb),.5)}
+.tm-vlist{margin-left:1rem;padding-left:.8rem;border-left:2px solid rgba(var(--hi-rgb),.35)}
+.tm-child .tm-prev{height:28px}
+.tm-child .tm-name{font-size:.85rem}
 .btn-danger{background:linear-gradient(135deg,var(--danger),var(--danger-dark));color:#fff;box-shadow:0 2px 5px rgba(var(--danger-rgb),.2),0 7px 16px -8px rgba(var(--danger-rgb),.4)}
 .btn-danger:hover{transform:translateY(-1px);box-shadow:0 3px 7px rgba(var(--danger-rgb),.24),0 10px 20px -8px rgba(var(--danger-rgb),.5)}
 .btn-group{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.8rem}
@@ -326,6 +356,8 @@ label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-we
  * rule sets — .auth-card button has higher specificity than a single
  * class and would otherwise win, flattening .btn-outline to solid red. */
 .auth-card button:not(.btn){width:100%;padding:.65rem;margin-top:.35rem;background:linear-gradient(135deg,var(--hi),var(--hi-dark));color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-weight:600;font-size:.95rem;transition:filter .15s var(--ease),box-shadow .2s var(--ease)}
+.tube-reset{flex:none;background:none;border:1px solid var(--accent);color:var(--dim);border-radius:4px;padding:0 .45rem;font-size:.9rem;line-height:1.6;cursor:pointer}
+.tube-reset:hover{color:var(--text);border-color:var(--hi)}
 .auth-card button:not(.btn):hover:not(:disabled){filter:brightness(1.05);box-shadow:0 3px 7px rgba(var(--hi-rgb),.2)}
 .auth-card button:disabled{opacity:.7;cursor:default}
 .auth-err{color:#f87171;font-size:.82rem;min-height:1.2em;margin-top:.35rem}
@@ -441,6 +473,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <option value="it">Italiano</option>
       <option value="nl">Nederlands</option>
       <option value="no">Norsk</option>
+      <option value="pl">Polski</option>
       <option value="pt">Português</option>
       <option value="fi">Suomi</option>
       <option value="sv">Svenska</option>
@@ -826,6 +859,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <option value="it">Italiano (Italian)</option>
         <option value="nl">Nederlands (Dutch)</option>
         <option value="no">Norsk (Norwegian)</option>
+        <option value="pl">Polski (Polish)</option>
         <option value="pt">Português (Portuguese)</option>
         <option value="fi">Suomi (Finnish)</option>
         <option value="sv">Svenska (Swedish)</option>
@@ -909,10 +943,40 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <div style="padding:.75rem 1rem;border-top:1px solid var(--accent)">
         <p style="color:var(--dim);font-size:.82rem;margin:0 0 1.2rem" data-i18n="adv.intro">Panel correction settings for replacement screens. The LCD Brightness and Night Brightness sliders above apply uniformly to all tubes as a group; the individual trim below scales each tube within that baseline.</p>
 
+        <!-- Calibration test screen -->
+        <div class="field" style="padding-bottom:.2rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.test_title">Calibration Test Screen</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.test_desc">Shows a fixed pattern on the chosen tubes so you can judge the settings below by eye, next to a stock tube. Save to apply a change — the pattern updates right away. Stops by itself after 5 minutes.</div>
+          <div class="tube-ctl-indent">
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <span style="font-size:.82rem;color:var(--dim)" data-i18n="disp.bi_tubes">Tubes:</span>
+          <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="tp-tube" value="0" data-no-dirty="1" checked> 1</label>
+          <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="tp-tube" value="1" data-no-dirty="1" checked> 2</label>
+          <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="tp-tube" value="2" data-no-dirty="1" checked> 3</label>
+          <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="tp-tube" value="3" data-no-dirty="1" checked> 4</label>
+          <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="tp-tube" value="4" data-no-dirty="1" checked> 5</label>
+          <label style="display:flex;align-items:center;gap:3px;font-size:.82rem;cursor:pointer"><input type="checkbox" class="tp-tube" value="5" data-no-dirty="1" checked> 6</label>
+              <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem;margin-left:4px" onclick="tpSelect(true)" data-i18n="btn.all">All</button>
+              <button class="btn btn-outline" style="padding:.2rem .55rem;font-size:.82rem" onclick="tpSelect(false)" data-i18n="btn.none">None</button>
+            </div>
+            <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-top:.6rem">
+              <select id="tp-pattern" class="select" data-no-dirty="1" aria-label="Pattern" style="width:auto;min-width:11rem">
+                <option value="2" data-i18n="adv.tp_glow">Orange + dim glow</option>
+                <option value="1" data-i18n="adv.tp_ramp">Grey ramp</option>
+                <option value="3" data-i18n="adv.tp_bars">Color bars</option>
+                <option value="4" data-i18n="adv.tp_white">Full white</option>
+              </select>
+              <button class="btn btn-outline" onclick="tpStart(this)" data-i18n="adv.test_show">Show on tubes</button>
+              <button class="btn btn-outline" onclick="tpStop(this)" data-i18n="adv.test_stop">Stop</button>
+              <span id="tp-status" style="font-size:.8rem;color:var(--dim)"></span>
+            </div>
+          </div>
+        </div>
+
         <!-- Gamma -->
         <div class="field" style="padding-bottom:.2rem">
           <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.gamma">Gamma Correction</div>
-          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem" data-i18n-html="adv.gamma_desc">Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and color depth on panels with a flat native response. Try <b>1.8–2.2</b> for washed replacement panels. Takes effect after Save.</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.7rem" data-i18n-html="adv.gamma_desc">Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and color depth on panels with a flat native response. Try <b>1.3–1.8</b> for washed replacement panels. Above about 1.5 the dim tube-fill glow starts to fade — <b>Shadow Lift</b> below brings it back. Takes effect after Save.</div>
           <div class="tube-ctl-indent">
             <div style="display:flex;flex-direction:column;gap:.3rem" id="tube-gamma-list"></div>
           </div>
@@ -967,6 +1031,51 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
             <div style="display:flex;flex-direction:column;gap:.3rem" id="tube-brightness-list"></div>
           </div>
         </div>
+
+        <!-- Per-tube shadow lift -->
+        <div class="field" style="padding-bottom:0;margin-top:.9rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.shadow_lift">Shadow Lift</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.shadow_lift_desc">Brightens dark pixels only — black stays black and bright digits are untouched. Use when tuning gamma/VCOM for a replacement panel costs you the dim tube-fill glow. Raise until the glow returns (0 = off).</div>
+          <div class="tube-ctl-indent">
+            <div style="display:flex;flex-direction:column;gap:.3rem" id="tube-shadow-list"></div>
+          </div>
+        </div>
+
+        <!-- Per-tube color balance -->
+        <div class="field" style="padding-bottom:0;margin-top:.9rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.color_balance">Color Balance</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.color_balance_desc">Per-tube red / green / blue gain (100 = neutral). Use when a replacement panel has a tint — for example orange looking pink (lower blue) or yellow (lower green) next to a stock tube. Gains above 100 can clip that channel's brightest values.</div>
+          <div class="tube-ctl-indent">
+            <div style="display:flex;flex-direction:column;gap:.45rem" id="tube-color-list"></div>
+          </div>
+        </div>
+
+        <!-- Per-tube channel curves -->
+        <div class="field" style="padding-bottom:0;margin-top:.9rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.channel_curves">Channel Curves</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.channel_curves_desc">Per-tube red / green / blue gamma shaping (100 = neutral). Below 100 lifts that color's dark end, above 100 deepens it. Use when the dim steps of a replacement panel come out the wrong color — for example dim oranges looking purple (lower R and G, or raise B).</div>
+          <div class="tube-ctl-indent">
+            <div style="display:flex;flex-direction:column;gap:.45rem" id="tube-curve-list"></div>
+          </div>
+        </div>
+
+        <!-- Per-tube black pedestal -->
+        <div class="field" style="padding-bottom:0;margin-top:.9rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.black_pedestal">Black Pedestal</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.black_pedestal_desc">Raises what pure black shows as, per color (0 = off). Use when a replacement panel's black has a color cast — a blue-leaking black can be neutralized by adding a little red and green. Keep it small: it makes every black pixel on that tube slightly lighter.</div>
+          <div class="tube-ctl-indent">
+            <div style="display:flex;flex-direction:column;gap:.45rem" id="tube-ped-list"></div>
+          </div>
+        </div>
+
+        <!-- Per-tube black level -->
+        <div class="field" style="padding-bottom:0;margin-top:.9rem">
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);border-left:3px solid var(--hi);padding-left:.55rem;margin-bottom:.55rem" data-i18n="adv.black_level">Black Level</div>
+          <div style="color:var(--dim);font-size:.82rem;margin-bottom:.6rem" data-i18n="adv.black_level_desc">Pushes the darkest pixels to pure black, removing faint haze in dark areas of a replacement panel (0 = off). Keep it low — high values also swallow the dim tube-fill glow; use Shadow Lift to bring that back.</div>
+          <div class="tube-ctl-indent">
+            <div style="display:flex;flex-direction:column;gap:.3rem" id="tube-black-list"></div>
+          </div>
+        </div>
       </div>
     </details>
   </div>
@@ -1003,6 +1112,18 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       </div>
       <div id="theme-rot-list" style="display:flex;flex-wrap:wrap;gap:.4rem .8rem"></div>
     </div>
+  </div>
+  <!-- Theme Manager -->
+  <div class="card" id="theme-manager-card">
+    <h2 data-ico="layers" data-i18n="tm.title">Theme Manager</h2>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="tm.desc">Download extra themes and colour variants from the project repository, or remove the ones you don't use. WeatherLive, DotMatrix and Segments are built into the firmware and are always available.</p>
+    <div class="tm-bar">
+      <button class="btn btn-outline tm-btn" id="tm-refresh" onclick="tmRefresh()" data-i18n="tm.check">Check for themes</button>
+      <button class="btn btn-outline tm-btn" id="tm-verify" onclick="tmVerify()" data-i18n="tm.verify">Verify installed</button>
+      <span class="tm-meta" id="tm-meta"></span>
+    </div>
+    <div class="tm-status" id="tm-status" style="display:none"></div>
+    <div id="tm-list"></div>
   </div>
   <div class="card">
     <h2 data-ico="sparkle" data-i18n="disp.led_accent">LED Accent Lighting</h2>
@@ -1058,8 +1179,14 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
   </div>
   <div class="card">
     <h2 data-ico="bars" data-i18n="disp.spectrum_mode">Spectrum Mode</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="disp.spectrum_desc">Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left → treble right).</p>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem" data-i18n="disp.spectrum_desc">Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, log-spaced from 280 Hz up to the top frequency below, bass left → treble right), or switch to an oscilloscope trace across all six tubes.</p>
     <div class="field" style="display:grid;grid-template-columns:max-content 44px 1fr;gap:.6rem 1rem;align-items:center">
+      <label data-i18n="spec.style" for="f-spec-style">Display style</label>
+      <select id="f-spec-style" onchange="specStyleChange()" style="grid-column:2/4;height:36px;background:var(--surface);color:var(--text);border:1px solid #444;border-radius:6px;padding:0 .5rem;font-size:.9rem">
+        <option value="0" data-i18n="spec.style_bars">Bars</option>
+        <option value="1" data-i18n="spec.style_scope">Oscilloscope (waveform across all six tubes)</option>
+      </select>
+      <div class="meter" id="spec-thick-row" style="grid-column:1/4;display:none"><label data-i18n="spec.scope_thick" for="f-spec-thick">Oscilloscope line thickness</label><input type="range" id="f-spec-thick" min="1" max="8" step="1" style="flex:1" oninput="document.getElementById('v-spec-thick').textContent=this.value"><span id="v-spec-thick">2</span> px</div>
       <label data-i18n="spec.led_src" for="f-spec-led-src">LED Source</label>
       <select id="f-spec-led-src" onchange="specLedSrcChange()" style="grid-column:2/4;height:36px;background:var(--surface);color:var(--text);border:1px solid #444;border-radius:6px;padding:0 .5rem;font-size:.9rem">
         <option value="0" data-i18n="spec.led_src_custom">Custom glow color (amplitude-modulated)</option>
@@ -1071,7 +1198,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <label data-i18n="spec.lcd_color_label" for="f-spec-lcd-color">LCD Bar Color</label>
       <input type="color" id="f-spec-lcd-color" class="color-swatch">
       <span style="color:var(--dim);font-size:.82rem" data-i18n="spec.lcd_color_hint">Bar color for the LCD spectrum display</span>
-      <label data-i18n="spec.peak_color_label" for="f-spec-peak-color">Peak Dot Color</label>
+      <label id="spec-peak-label" data-i18n="spec.peak_color_label" for="f-spec-peak-color">Peak Dot Color</label>
       <input type="color" id="f-spec-peak-color" class="color-swatch">
       <span style="color:var(--dim);font-size:.82rem" data-i18n="spec.peak_color_hint">Color of the peak-hold dot that tops each bar</span>
     </div>
@@ -1088,6 +1215,15 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         Only affects Breath and Rainbow accent modes. Reacts to detected percussive hits (snare/hihat/kick) —
         not true beats-per-minute tracking, since the analyser doesn't resolve sub-bass frequencies.
       </p>
+    </div>
+    <div class="field meter" style="margin-top:.6rem"><label data-i18n="spec.top_hz" for="f-mic-top-hz">Spectrum top frequency</label><input type="range" id="f-mic-top-hz" min="1200" max="8000" step="100" oninput="document.getElementById('v-mic-top-hz').textContent=this.value"><span id="v-mic-top-hz">8000</span> Hz</div>
+    <p style="color:var(--dim);font-size:.78rem;margin:0 0 .4rem" data-i18n="spec.top_hz_hint">Highest frequency the six tubes show. The 24 bands are spread from 280 Hz up to this value, so a lower setting gives each tube a narrower slice of the range this microphone hears best. Default 8000 Hz. Takes effect after Save; capture the quiet-room baseline again for the new range.</p>
+    <div id="spec-bar-speeds">
+    <div class="field meter" style="margin-top:.6rem"><label data-i18n="spec.bar_rise" for="f-spec-rise">Bar rise speed</label><input type="range" id="f-spec-rise" min="1" max="10" step="1" oninput="document.getElementById('v-spec-rise').textContent=this.value"><span id="v-spec-rise">4</span></div>
+    <div class="field meter" style="margin-top:.6rem"><label data-i18n="spec.bar_fall" for="f-spec-fall">Bar fall speed</label><input type="range" id="f-spec-fall" min="1" max="10" step="1" oninput="document.getElementById('v-spec-fall').textContent=this.value"><span id="v-spec-fall">4</span></div>
+    <div class="field meter" style="margin-top:.6rem"><label data-i18n="spec.peak_fall" for="f-spec-pfall">Peak dot fall speed</label><input type="range" id="f-spec-pfall" min="1" max="10" step="1" oninput="document.getElementById('v-spec-pfall').textContent=this.value"><span id="v-spec-pfall">3</span></div>
+    <div class="field meter" style="margin-top:.6rem"><label data-i18n="spec.peak_hold" for="f-spec-phold">Peak dot hold</label><input type="range" id="f-spec-phold" min="0" max="2000" step="50" oninput="document.getElementById('v-spec-phold').textContent=this.value"><span id="v-spec-phold">350</span> ms</div>
+    <p style="color:var(--dim);font-size:.78rem;margin:0 0 .4rem" data-i18n="spec.speeds_hint">How fast the bars jump up and drop back, how fast the white peak dot falls, and how long it waits at its peak first. Higher = faster (1 = slow and smooth, 10 = instant); the hold is in milliseconds. Takes effect after Save.</p>
     </div>
     <div class="field" style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-top:.4rem">
       <button onclick="micCalibrate()" style="padding:.35rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem" data-i18n="spec.capture_baseline_btn">📸 Capture Baseline</button>
@@ -1837,7 +1973,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
          saved-exceptions list, not the banner's currently-missing picker. -->
     <h2 data-ico="wrench" data-i18n="stock.card_title">Verify &amp; Repair Stock Files</h2>
     <p style="color:var(--dim);font-size:.85rem;margin-bottom:.6rem" data-i18n-html="stock.card_desc">
-      Checks every built-in file (sounds, fonts, icons, themes, web UI) against what this firmware's own build actually shipped — catches a <em>stale</em> file the "Missing built-in files" banner above can't (it only checks whether a file exists, not whether its content is current). Only files found missing or different get re-downloaded, directly from the public repo at this device's own installed version — nothing else is touched, and nothing is ever downloaded speculatively.
+      Checks every built-in file (sounds, fonts, icons, web UI) against what this firmware's own build actually shipped — catches a <em>stale</em> file the "Missing built-in files" banner above can't (it only checks whether a file exists, not whether its content is current). Only files found missing or different get re-downloaded, directly from the public repo at this device's own installed version — nothing else is touched, and nothing is ever downloaded speculatively.
     </p>
     <div class="field" style="display:flex;align-items:center;gap:8px;margin-bottom:.7rem">
       <label class="toggle"><input type="checkbox" id="f-stock-auto-check"><span class="track"><span class="thumb"></span></span></label>
@@ -2067,6 +2203,36 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         </p>
       </div>
 
+      <!-- ── Spectrum tuning (live) ───────────────────────────────── -->
+      <hr style="border:none;border-top:1px solid rgba(255,160,0,.25);margin:1rem 0">
+      <h3 style="color:#ffa000;font-size:.95rem;margin:.2rem 0 .5rem">Spectrum tuning (live)</h3>
+      <p style="font-size:.78rem;color:var(--dim);margin-bottom:.6rem">
+        Changes apply immediately while you watch the tubes &mdash; no rebuild. Runtime only: they reset on reboot, so copy the
+        values you like into the <code>#define</code>s in <code>microphone.c</code> (box below).
+      </p>
+      <div id="dbg-mt-rows"></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:.5rem 0">
+        <button class="btn btn-outline" style="padding:.3rem .7rem;font-size:.85rem" onclick="dbgMicTuneReset()">Reset to defaults</button>
+        <span id="dbg-mt-msg" style="font-family:monospace;font-size:.82rem;color:var(--dim)"></span>
+      </div>
+      <textarea id="dbg-mt-defs" readonly rows="8" style="width:100%;font-family:monospace;font-size:.8rem" onclick="this.select()"></textarea>
+
+      <!-- ── Live band monitor ────────────────────────────────────── -->
+      <hr style="border:none;border-top:1px solid rgba(255,160,0,.25);margin:1rem 0">
+      <h3 style="color:#ffa000;font-size:.95rem;margin:.2rem 0 .5rem">Live band monitor</h3>
+      <p style="font-size:.78rem;color:var(--dim);margin-bottom:.6rem">
+        The 24 bands as the clock sees them: raw energy, noise floor, power after the dead zone, and what the tube shows.
+        Polling is Wi-Fi traffic the mic can pick up as noise bursts (about 18 requests a second did), so use 1&ndash;2 per second when judging a quiet room.
+        Needs Spectrum mode (or the mic test mode).
+      </p>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:.4rem">
+        <label style="font-weight:normal;cursor:pointer"><input type="checkbox" id="dbg-mon-on" onchange="dbgMonToggle()"> Monitor</label>
+        <label style="font-weight:normal">rate <select id="dbg-mon-rate"><option value="1">1 / s</option><option value="2">2 / s</option><option value="4">4 / s</option></select></label>
+        <span id="dbg-mon-msg" style="font-size:.8rem;color:var(--dim)"></span>
+      </div>
+      <canvas id="dbg-mon" width="760" height="340" style="width:100%;max-width:760px;border:1px solid rgba(255,160,0,.25);border-radius:6px"></canvas>
+      <div id="dbg-mon-stats" style="font-family:monospace;font-size:.78rem;color:var(--dim);margin-top:.3rem">&mdash;</div>
+
       <!-- ── DAC Output Test ──────────────────────────────────────── -->
       <hr style="border:none;border-top:1px solid rgba(255,160,0,.25);margin:1rem 0">
       <h3 style="color:#ffa000;font-size:.95rem;margin:.2rem 0 .5rem">DAC Output Test</h3>
@@ -2226,7 +2392,7 @@ let UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
 const UI_LANGS = [
   ["en","English"],["da","Dansk"],["de","Deutsch"],["es","Español"],
   ["fr","Français"],["it","Italiano"],["nl","Nederlands"],["no","Norsk"],
-  ["pt","Português"],["fi","Suomi"],["sv","Svenska"]
+  ["pl","Polski"],["pt","Português"],["fi","Suomi"],["sv","Svenska"]
 ];
 const I18N = {
   en: {
@@ -2280,7 +2446,7 @@ Object.assign(I18N.en, {
   "disp.sunmoon_colors":"Sun / Moon Colors","disp.sunmoon_sun":"Sun","disp.sunmoon_moon":"Moon",
   "disp.led_weather_override":"Weather event override — flash LEDs on thunderstorm (WeatherLive theme)",
   "disp.spectrum_mode":"Spectrum Mode",
-  "disp.spectrum_desc":"Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, 280–3800 Hz log-spaced, bass left → treble right).",
+  "disp.spectrum_desc":"Audio visualiser using the onboard electret microphone. Each tube displays 4 frequency bars (24 bands total, log-spaced from 280 Hz up to the top frequency below, bass left → treble right), or switch to an oscilloscope trace across all six tubes.",
   "disp.enabled_modes":"Enabled Modes",
   "disp.enabled_modes_desc":"Choose which modes are accessible via the touch buttons. Clock and Date can both be enabled at the same time.",
   "disp.hint_time":"(time)","disp.hint_full_date":"(full date)","disp.hint_mic_restart":"(mic — restart required)",
@@ -2432,7 +2598,7 @@ Object.assign(I18N.en, {
  * count and an example path, substituted by tr() — see refreshStatus(). */
 Object.assign(I18N.en, {
   "stock.card_title":"Verify & Repair Stock Files",
-  "stock.card_desc":"Checks every built-in file (sounds, fonts, icons, themes, web UI) against what this firmware's own build actually shipped — catches a <em>stale</em> file the \"Missing built-in files\" banner above can't (it only checks whether a file exists, not whether its content is current). Only files found missing or different get re-downloaded, directly from the public repo at this device's own installed version — nothing else is touched, and nothing is ever downloaded speculatively.",
+  "stock.card_desc":"Checks every built-in file (sounds, fonts, icons, web UI) against what this firmware's own build actually shipped — catches a <em>stale</em> file the \"Missing built-in files\" banner above can't (it only checks whether a file exists, not whether its content is current). Only files found missing or different get re-downloaded, directly from the public repo at this device's own installed version — nothing else is touched, and nothing is ever downloaded speculatively.",
   "stock.auto_scan_label":"Enable auto boot-up scan — scans for missing files ~6s after every boot. Turning this off only stops that automatic scan; Verify & Repair below still works anytime.",
   "stock.verify_repair_btn":"Verify & Repair",
   "stock.missing_main":"⚠️ <strong>Missing built-in files</strong> — {0} file(s) that should ship with this firmware, e.g. <code>{1}</code>, aren't on the device.",
@@ -2445,7 +2611,7 @@ Object.assign(I18N.en, {
   "stock.manage_exceptions":"Manage exceptions",
   "stock.exception_suffix":"— pick exactly which files or folders to stop flagging.",
   "stock.manage_title":"Manage missing files",
-  "stock.manage_desc":"Uncheck a file — or a whole folder, like a removed theme — to stop flagging it as missing. Leave checked to keep it flagged for repair.",
+  "stock.manage_desc":"Uncheck a file to stop flagging it as missing. Leave checked to keep it flagged for repair.",
   "stock.truncated_hint":"Showing the first files found — save and reopen this to see more after they're excepted.",
   "stock.cancel":"Cancel",
   "stock.save_exceptions":"Save exceptions",
@@ -2464,7 +2630,7 @@ Object.assign(I18N.en, {
 Object.assign(I18N.en, {
   "adv.intro":"Panel correction settings for replacement screens. The LCD Brightness and Night Brightness sliders above apply uniformly to all tubes as a group; the individual trim below scales each tube within that baseline.",
   "adv.gamma":"Gamma Correction",
-  "adv.gamma_desc":"Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and color depth on panels with a flat native response. Try <b>1.8–2.2</b> for washed replacement panels. Takes effect after Save.",
+  "adv.gamma_desc":"Per-tube software midtone correction — <b>1.0</b> = no correction (zero overhead). Values above 1.0 darken midtones, increasing perceived contrast and color depth on panels with a flat native response. Try <b>1.3–1.8</b> for washed replacement panels. Above about 1.5 the dim tube-fill glow starts to fade — <b>Shadow Lift</b> below brings it back. Takes effect after Save.",
   "adv.profile":"Panel Profile",
   "adv.profile_desc":"<b>Profile</b> selects the hardware gamma curve. <b>VCOM</b> (0–63) sets the AC driving voltage — higher values increase contrast and color depth. For ST7735S replacement panels (e.g. LH096NT-IF09W) start with Profile <b>Vivid</b> + VCOM <b>40</b>, then tune: raise toward 60 if still washed, lower toward 25 if over-saturated. Changes take effect after Save.",
   "adv.tube":"Tube","adv.profile_col":"Profile (gamma)","adv.vcom_col":"VCOM (0–63)",
@@ -2475,10 +2641,73 @@ Object.assign(I18N.en, {
   "adv.offset_desc":"Shift the pixel window to fix 1 px static at the right/bottom edge of replacement panels. ST7735S variants (e.g. LH096NT-IF09W) typically need Col +2 / Row +1.",
   "adv.col_header":"Col","adv.row_header":"Row",
   "adv.brightness_trim":"Individual Brightness Trim",
-  "adv.brightness_trim_desc":"Scale each tube's pixels relative to the group LCD Brightness above. Use when one replacement panel is noticeably brighter or dimmer than the others (100 = no change)."
+  "adv.brightness_trim_desc":"Scale each tube's pixels relative to the group LCD Brightness above. Use when one replacement panel is noticeably brighter or dimmer than the others (100 = no change).",
+  "adv.shadow_lift":"Shadow Lift",
+  "adv.shadow_lift_desc":"Brightens dark pixels only — black stays black and bright digits are untouched. Use when tuning gamma/VCOM for a replacement panel costs you the dim tube-fill glow. Raise until the glow returns (0 = off).",
+  "adv.test_title":"Calibration Test Screen",
+  "adv.test_desc":"Shows a fixed pattern on the chosen tubes so you can judge the settings below by eye, next to a stock tube. Save to apply a change — the pattern updates right away. Stops by itself after 5 minutes.",
+  "adv.tp_glow":"Orange + dim glow",
+  "adv.tp_ramp":"Grey ramp",
+  "adv.tp_bars":"Color bars",
+  "adv.tp_white":"Full white",
+  "adv.test_show":"Show on tubes",
+  "adv.test_stop":"Stop",
+  "adv.test_running":"Showing — about {0} min left",
+  "adv.tp_busy":"An anti burn-in session is running — cancel it first.",
+  "adv.color_balance":"Color Balance",
+  "adv.color_balance_desc":"Per-tube red / green / blue gain (100 = neutral). Use when a replacement panel has a tint — for example orange looking pink (lower blue) or yellow (lower green) next to a stock tube. Gains above 100 can clip that channel's brightest values.",
+  "adv.black_level":"Black Level",
+  "adv.black_level_desc":"Pushes the darkest pixels to pure black, removing faint haze in dark areas of a replacement panel (0 = off). Keep it low — high values also swallow the dim tube-fill glow; use Shadow Lift to bring that back.",
+  "adv.channel_curves":"Channel Curves",
+  "adv.channel_curves_desc":"Per-tube red / green / blue gamma shaping (100 = neutral). Below 100 lifts that color's dark end, above 100 deepens it. Use when the dim steps of a replacement panel come out the wrong color — for example dim oranges looking purple (lower R and G, or raise B).",
+  "adv.black_pedestal":"Black Pedestal",
+  "adv.black_pedestal_desc":"Raises what pure black shows as, per color (0 = off). Use when a replacement panel's black has a color cast — a blue-leaking black can be neutralized by adding a little red and green. Keep it small: it makes every black pixel on that tube slightly lighter.",
+  "adv.reset_slider":"Reset to default"
 });
 /* ── Translation batch: Spectrum Mode card ── */
 Object.assign(I18N.en, {
+  "tm.tag_differs":"Differs from catalog",
+  "tm.phase_checking":"Checking installed themes…",
+  "tm.confirm_replace":"Replace your copy of \"{0}\" with the catalog version? Changes you made to its files will be lost.",
+  "tm.variants_of":"Variants of {0}",
+  "tm.view_full":"Click to view full size",
+  "tm.full_loading":"Loading the full-size preview…",
+  "tm.full_failed":"Couldn't load the full-size preview. It comes from GitHub, so this browser needs internet access.",
+  "tm.close":"Close",
+  "tm.verify":"Verify installed",
+  "tm.verify_ok":"All installed themes are intact.",
+  "tm.verify_bad":"{0} theme(s) differ from the catalog or have damaged files. They are tagged “Differs from catalog”; use Update to repair them.",
+  "tm.title":"Theme Manager",
+  "tm.desc":"Download extra themes and colour variants from the project repository, or remove the ones you don't use. WeatherLive, DotMatrix and Segments are built into the firmware and are always available.",
+  "tm.check":"Check for themes",
+  "tm.meta":"Catalog v{0} · {1} themes · updated {2}",
+  "tm.never":"Not checked yet. Press Check for themes to load the list.",
+  "tm.install":"Install",
+  "tm.update":"Update",
+  "tm.remove":"Remove",
+  "tm.tag_active":"In use",
+  "tm.tag_installed":"Installed",
+  "tm.tag_update":"Update available",
+  "tm.tag_builtin":"Built in",
+  "tm.tag_fw":"Needs firmware {0}",
+  "tm.confirm_remove":"Remove the theme \"{0}\"? You can install it again from the catalog.",
+  "tm.confirm_remove_active":"\"{0}\" is the theme in use. Remove it and switch to WeatherLive?",
+  "tm.legacy_title":"Legacy",
+  "tm.local_title":"Other installed themes",
+  "tm.phase_catalog":"Fetching the catalog…",
+  "tm.phase_download":"Downloading…",
+  "tm.phase_verify":"Verifying…",
+  "tm.phase_extract":"Installing…",
+  "tm.done_install":"{0} installed",
+  "tm.done_remove":"{0} removed",
+  "tm.err":"Theme manager: {0}",
+  "tm.busy":"Another update is in progress — try again in a moment.",
+  "tm.none":"The catalog has no themes yet.",
+  "tm.updates":"{0} theme update(s) available",
+  "spec.style":"Display style",
+  "spec.scope_thick":"Oscilloscope line thickness",
+  "spec.style_bars":"Bars",
+  "spec.style_scope":"Oscilloscope (waveform across all six tubes)",
   "spec.led_src":"LED Source",
   "spec.led_src_custom":"Custom glow color (amplitude-modulated)",
   "spec.led_src_follow":"Follow accent mode (Static / Breath / Rainbow / Off / WLED)",
@@ -2488,6 +2717,13 @@ Object.assign(I18N.en, {
   "spec.lcd_wled":"Follow WLED primary color (requires WLED Sync service; falls back to the color above when no WLED data)",
   "spec.beat_react":"Beat-reactive nudge for Breath / Rainbow",
   "spec.beat_react_hint":"Only affects Breath and Rainbow accent modes. Reacts to detected percussive hits (snare/hihat/kick) — not true beats-per-minute tracking, since the analyser doesn't resolve sub-bass frequencies.",
+  "spec.top_hz":"Spectrum top frequency",
+  "spec.bar_rise":"Bar rise speed",
+  "spec.bar_fall":"Bar fall speed",
+  "spec.peak_fall":"Peak dot fall speed",
+  "spec.peak_hold":"Peak dot hold",
+  "spec.speeds_hint":"How fast the bars jump up and drop back, how fast the white peak dot falls, and how long it waits at its peak first. Higher = faster (1 = slow and smooth, 10 = instant); the hold is in milliseconds. Takes effect after Save.",
+  "spec.top_hz_hint":"Highest frequency the six tubes show. The 24 bands are spread from 280 Hz up to this value, so a lower setting gives each tube a narrower slice of the range this microphone hears best. Default 8000 Hz. Takes effect after Save; capture the quiet-room baseline again for the new range.",
   "spec.capture_baseline_btn":"📸 Capture Baseline","spec.reset_auto_btn":"↺ Reset to Auto",
   "spec.capture_help":"While the room is quiet, click <strong>Capture Baseline</strong> to snapshot the hardware noise floor. The baseline is saved to flash and applied instantly on every boot, eliminating the startup bar-dance and persistent interference lines.",
   "spec.capture_warn":"⚠️ <strong>Switch away from Spectrum mode before capturing.</strong> In Spectrum mode the mic is continuously processing live audio — this interferes with baseline capture and will cause a timeout error. Switch to Clock or any other mode first, then capture.",
@@ -2625,6 +2861,7 @@ async function setUiLang(lang) {
   document.documentElement.setAttribute("lang", lang);
   const sel = $("ui-lang"); if (sel) sel.value = lang;
   applyI18n();
+  try { tmRender(); } catch(_) {}   /* Theme Manager rows are built in script, so redo them in the new language */
 }
 function initUiLang() {
   let lang = null;
@@ -3098,6 +3335,20 @@ function abortTimeoutSignal(ms) {
   return c.signal;
 }
 
+/* Device wall-clock for the Live preview — new Date() is the BROWSER's zone,
+ * which can differ from the device's configured timezone. Anchored on
+ * /api/status's naive local "time" and advanced by the browser's elapsed ms. */
+const _devClock = { base: 0, at: 0 };
+function devClockSet(ts) {
+  const m = /^(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)/.exec(ts || '');
+  if (!m) return;
+  _devClock.base = new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+  _devClock.at   = Date.now();
+}
+function devNow() {
+  return _devClock.base ? new Date(_devClock.base + (Date.now() - _devClock.at)) : new Date();
+}
+
 async function secureFetch(url, opts) {
   opts = opts || {};
   opts.headers = Object.assign({}, opts.headers || {});
@@ -3132,9 +3383,8 @@ async function api(path, opts) {
 
 /* ── Theme list (dynamic from /api/themes) ─────────── */
 const DEFAULT_THEMES = [
-  'DarkSlate','DotMatrix','FlipClock','Formula1',
-  'GlitchGR','LightFuture','NixieOY','NotionRain',
-  'RetroPaper','Segments','WireMesh'
+  'DarkSlate','DotMatrix','FlipClock','Nixie',
+  'NotionRain','RetroPaper','Segments','WireMesh'
 ];
 let s_themes = DEFAULT_THEMES.slice();  /* kept in sync by loadThemes() */
 
@@ -3601,7 +3851,7 @@ const WL_DAYS = {
   it: ['Dom','Lun','Mar','Mer','Gio','Ven','Sab'], pt: ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'],
   nl: ['Zo','Ma','Di','Wo','Do','Vr','Za'], sv: ['Sön','Mån','Tis','Ons','Tor','Fre','Lör'],
   no: ['Søn','Man','Tir','Ons','Tor','Fre','Lør'], da: ['Søn','Man','Tir','Ons','Tor','Fre','Lør'],
-  fi: ['Su','Ma','Ti','Ke','To','Pe','La'] };
+  fi: ['Su','Ma','Ti','Ke','To','Pe','La'], pl: ['Nd','Pn','Wt','Sr','Cz','Pt','So'] };
 const WL_MONTHS = {
   en: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
   de: ['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'],
@@ -3613,9 +3863,9 @@ const WL_MONTHS = {
   sv: ['Jan','Feb','Mar','Apr','Maj','Jun','Jul','Aug','Sep','Okt','Nov','Dec'],
   no: ['Jan','Feb','Mar','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Des'],
   da: ['Jan','Feb','Mar','Apr','Maj','Jun','Jul','Aug','Sep','Okt','Nov','Dec'],
-  fi: ['Tam','Hel','Maa','Huh','Tou','Kes','Hei','Elo','Syy','Lok','Mar','Jou'] };
+  fi: ['Tam','Hel','Maa','Huh','Tou','Kes','Hei','Elo','Syy','Lok','Mar','Jou'], pl: ['Sty','Lut','Mar','Kwi','Maj','Cze','Lip','Sie','Wrz','Paz','Lis','Gru'] };
 const WL_INOUT = { de: ['Inn','Auss'], fr: ['Int','Ext'], es: ['Int','Ext'], it: ['Int','Est'], pt: ['Int','Ext'],
-  nl: ['Bin','Bui'], sv: ['Inne','Ute'], no: ['Inne','Ute'], da: ['Inde','Ude'], fi: ['Sisä','Ulko'], en: ['In','Out'] };
+  nl: ['Bin','Bui'], sv: ['Inne','Ute'], no: ['Inne','Ute'], da: ['Inde','Ude'], fi: ['Sisä','Ulko'], pl: ['Wew','Zew'], en: ['In','Out'] };
 const WL_DEMO = ['sun', 'fewClouds', 'overcastClouds', 'fog', 'rain', 'squalls', 'thunderstorm', 'snow'];
 const _wl = {
   fb: Array.from({ length: 6 }, () => new Uint16Array(WL_N)),
@@ -4468,7 +4718,7 @@ function _wlAnimated(face) {
 }
 function _wlFrame(face) {
   if (!_lpTubes) return;
-  const d = new Date(), nowMs = Date.now(), data = _wl.data;
+  const d = devNow(), nowMs = Date.now(), data = _wl.data;
   const isCustom = face === 'Custom', demo = face === 'WeatherLive Demo';
   const bgSel = ($('f-custom-bg') && $('f-custom-bg').value) || 'WeatherLive';
   const animate = _wlAnimated(face);
@@ -4777,7 +5027,7 @@ function _cxAssetPanel(fb, kind, c) {
      * _htStrAt(..., fg565) call never forced white — every theme's Day &
      * Date always showed its own sampled accent color (e.g. Nixie's amber
      * glow). Relying on st.font here silently turned that white on every
-     * non-Segments dark theme (Nixie, NixieOY, WireMesh, …). */
+     * non-Segments dark theme (Nixie, WireMesh, …). */
     _wlPanel(fb, WLP.WEEKDATE, c.d, { ...st, font: fg }, data, false);
   } else if (kind === CXK.INDOOR) {
     /* _wlPanel(WLP.INDOOR_HT) is the SAME indoor-temp/humidity layout
@@ -5056,7 +5306,7 @@ function _lpLeds(now) {
 
 function lpRender() {
   if (!_lpBuild()) return;
-  const now = new Date();
+  const now = devNow();
   const face = ($('f-theme') && $('f-theme').value) || '';
   if (!face) return;   /* theme list not loaded yet */
   const dm = face === 'DotMatrix';
@@ -5361,6 +5611,262 @@ async function loadThemes(manual) {
   }
 }
 
+/* ── Theme Manager (downloadable theme packs; see themes/README.md) ───────────────────────────────── */
+const TM_BUILTIN = ['WeatherLive', 'WeatherLive Demo', 'DotMatrix', 'Segments', 'Custom'];
+let s_tm = { data: null, busy: false };
+
+/* Progress is drawn inside the row of the theme being installed (a long list scrolls the box under the toolbar out of view);
+ * the catalog refresh has no row, so it uses the box under the toolbar. */
+function tmShowStatus(text, pct) {
+  const el = $('tm-status');
+  if (!el) return;
+  s_tm.status = text == null ? null : { text, pct };
+  document.querySelectorAll('#tm-list .tm-rowprog.on').forEach(r => { r.classList.remove('on'); r.textContent = ''; });
+  el.style.display = 'none'; el.textContent = '';
+  if (text == null) return;
+  const html = esc(text) + (pct != null ? '<div class="tm-prog"><i style="width:' + Math.max(0, Math.min(100, pct)) + '%"></i></div>' : '');
+  const row = s_tm.rowId ? document.querySelector('#tm-list .tm-row[data-row="' + CSS.escape(s_tm.rowId) + '"] .tm-rowprog') : null;
+  if (row) { row.innerHTML = html; row.classList.add('on'); }
+  else { el.style.display = 'block'; el.innerHTML = html; }
+}
+
+function tmSetBusy(on) {
+  s_tm.busy = on;
+  document.querySelectorAll('#theme-manager-card button').forEach(b => { b.disabled = on; });
+}
+
+async function tmPost(path, body) {
+  const r = await secureFetch('/api/' + path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}), signal: abortTimeoutSignal(15000)
+  });
+  if (r && r.status === 409) throw new Error(tr('tm.busy'));
+  if (!r || !r.ok) {
+    let msg = r ? (await r.text()).trim() : 'no response';
+    try { msg = JSON.parse(msg).error || msg; } catch (_) {}   /* the clock answers {"error":"..."} */
+    throw new Error((msg || ('HTTP ' + r.status)).slice(0, 90));
+  }
+  return r.json();
+}
+
+/* Polls /api/themes/status until the running refresh / install ends. */
+async function tmPoll() {
+  let lastMove = Date.now(), lastKey = '';
+  for (;;) {
+    await new Promise(res => setTimeout(res, 600));
+    let s = null;
+    try {
+      const r = await secureFetch('/api/themes/status', { signal: abortTimeoutSignal(5000) });
+      if (r && r.ok) s = await r.json();
+    } catch (e) { if (e?.message === 'unauthorized') throw e; }
+    if (s) {
+      if (s.state === 'done' || s.state === 'error') return s;
+      const label = { catalog: 'tm.phase_catalog', download: 'tm.phase_download', verify: 'tm.phase_verify', extract: 'tm.phase_extract', checking: 'tm.phase_checking' }[s.phase];
+      tmShowStatus(label ? tr(label) : '…', s.op === 'install' ? s.progress : null);
+      const key = s.phase + ':' + s.progress;
+      if (key !== lastKey) { lastKey = key; lastMove = Date.now(); }
+    }
+    if (Date.now() - lastMove > 120000) throw new Error('timed out');
+  }
+}
+
+async function tmLoad() {
+  const d = await api('themes/catalog');
+  if (d) s_tm.data = d;
+  tmRender();
+}
+
+/* Previews are small JPEGs of the theme's digits 0-9 kept next to the packs in the repository. */
+function tmBase() { return 'https://raw.githubusercontent.com/' + (UPDATE_REPO || 'MrToast99/Nextube-Remaster') + '/main/themes/'; }
+
+/* "2026-10-11" -> the viewer's own date format; the date the catalog's theme data last changed. */
+function tmDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString() : '—';
+}
+
+/* Click a theme's thumbnail to see its digits at the real tube size. That image is not kept on the clock: it is fetched from the repository
+ * when asked for, so it needs the browser (not the clock) to be online. */
+function tmOpenFull(url, title) {
+  let lb = $('tm-lb');
+  if (!lb) {
+    lb = document.createElement('div');
+    lb.id = 'tm-lb'; lb.className = 'tm-lb'; lb.hidden = true;
+    lb.innerHTML = '<div class="tm-lb-box"><div class="tm-lb-title" id="tm-lb-title"></div><div class="tm-lb-body" id="tm-lb-body"></div>' +
+      '<button class="btn btn-outline tm-btn" id="tm-lb-close"></button></div>';
+    lb.addEventListener('click', e => { if (e.target === lb) tmCloseFull(); });
+    document.body.appendChild(lb);
+    $('tm-lb-close').addEventListener('click', tmCloseFull);
+  }
+  $('tm-lb-close').textContent = tr('tm.close');
+  $('tm-lb-title').textContent = title;
+  const body = $('tm-lb-body');
+  body.textContent = tr('tm.full_loading');
+  lb.hidden = false;
+  const img = new Image();
+  img.alt = title;
+  img.onload = () => { if (!lb.hidden) { body.textContent = ''; body.appendChild(img); } };
+  img.onerror = () => { body.textContent = tr('tm.full_failed'); };
+  img.src = url;
+}
+function tmCloseFull() { const lb = $('tm-lb'); if (lb) lb.hidden = true; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') tmCloseFull(); });
+document.addEventListener('click', e => {
+  const im = e.target.closest && e.target.closest('#tm-list .tm-zoom');
+  if (im) tmOpenFull(im.getAttribute('data-full'), im.getAttribute('data-title'));
+});
+
+/* A preview that failed to load from the clock is retried once from the repository; if that fails too the image is dropped. */
+function tmImgFail(img) {
+  const alt = img.getAttribute('data-alt');
+  if (alt) { img.setAttribute('data-alt', ''); img.src = alt; } else img.remove();
+}
+
+function tmRender() {
+  const list = $('tm-list'), meta = $('tm-meta');
+  if (!list || !meta) return;
+  const d = s_tm.data;
+  const cat = (d && d.loaded) ? d.themes : [];
+  const updates = cat.filter(t => t.update).length;
+  meta.textContent = (d && d.loaded)
+    ? tr('tm.meta', d.pack_version, cat.length, tmDate(d.updated)) + (updates ? ' · ' + tr('tm.updates', updates) : '')
+    : tr('tm.never');
+
+  const tag = (txt, on) => '<span class="tm-tag' + (on ? ' on' : '') + '">' + esc(txt) + '</span>';
+  const btn = (act, id, name, label, disabled) =>
+    '<button class="btn btn-outline tm-btn" data-tm="' + act + '" data-id="' + escAttr(id) + '" data-name="' + escAttr(name) + '"' +
+    (disabled ? ' disabled' : '') + '>' + esc(label) + '</button>';
+
+  let html = '';
+  if (d && d.loaded && !cat.length) html += '<div class="tm-sub">' + esc(tr('tm.none')) + '</div>';
+  /* One row per theme. A theme that is a variant of another is drawn smaller and indented under its base theme. */
+  const rowHtml = (t, child) => {
+    const tags = [];
+    if (t.active) tags.push(tag(tr('tm.tag_active'), true));
+    if (t.installed) tags.push(tag(t.bundled ? tr('tm.tag_builtin') : tr('tm.tag_installed'), false));
+    if (t.update) tags.push(tag(tr('tm.tag_update'), true));
+    if (t.differs) tags.push(tag(tr('tm.tag_differs'), true));
+    if (!t.compatible) tags.push(tag(tr('tm.tag_fw', t.min_fw), false));
+    const btns = [];
+    if (!t.installed) btns.push(btn('install', t.id, t.name, tr('tm.install'), !t.compatible));
+    else {
+      if (t.update || t.differs) btns.push(btn('install', t.id, t.name, tr('tm.update'), !t.compatible));
+      btns.push(btn('remove', t.id, t.name, tr('tm.remove'), false));
+    }
+    /* The clock keeps a copy of each preview (saved when the catalog was loaded); use it first and fall back to the repository. */
+    const remote = t.preview ? tmBase() + t.preview + '?v=' + t.rev : '';
+    const local = '/theme-previews/' + encodeURIComponent(t.id) + '_r' + t.rev + '.jpg';
+    const full = t.preview_full ? tmBase() + t.preview_full + '?v=' + t.rev : '';
+    const prev = t.preview ? '<img class="tm-prev' + (full ? ' tm-zoom' : '') + '" loading="lazy" alt="" src="' + escAttr(t.preview_local ? local : remote) + '" data-alt="' + escAttr(t.preview_local ? remote : '') + '"' +
+      (full ? ' data-full="' + escAttr(full) + '" data-title="' + escAttr(t.name) + '" title="' + escAttr(tr('tm.view_full')) + '"' : '') + ' onerror="tmImgFail(this)">' : '';
+    return '<div class="tm-row' + (child ? ' tm-child' : '') + '" data-row="' + escAttr(t.id) + '">' + prev + '<div class="tm-grow"><div class="tm-name">' + esc(child ? (t.variant || t.name) : t.name) + '</div>' +
+      '<div class="tm-sub">' + esc(Math.max(1, Math.round(t.size / 1024)) + ' KB') + (t.notes ? ' · ' + esc(t.notes) : '') + '</div><div class="tm-rowprog"></div></div>' +
+      tags.join('') + btns.join('') + '</div>';
+  };
+  const famHtml = list => {
+    const families = [], byFam = {};
+    let out = '';
+    list.forEach(t => { if (!byFam[t.family]) { byFam[t.family] = []; families.push(t.family); } byFam[t.family].push(t); });
+    families.forEach(f => {
+      const items = byFam[f];
+      if (items.length === 1) { out += rowHtml(items[0], false); return; }
+      const base = items.find(t => !t.variant);          /* the family's own theme, if it has one */
+      if (base) out += rowHtml(base, false);
+      out += '<div class="tm-variants"><div class="tm-vlabel">' + esc(tr('tm.variants_of', f)) + '</div>' +
+        '<div class="tm-vlist">' + items.filter(t => t !== base).map(t => rowHtml(t, true)).join('') + '</div></div>';
+    });
+    return out;
+  };
+  html += famHtml(cat.filter(t => t.category !== 'legacy'));
+  const legacy = cat.filter(t => t.category === 'legacy');
+  if (legacy.length) html += '<div class="tm-fam">' + esc(tr('tm.legacy_title')) + '</div>' + famHtml(legacy);
+
+  /* Installed themes that are not in the catalog (the ones shipped with the firmware, or uploaded by hand) can be removed too. */
+  const inCat = new Set(cat.map(t => t.id));
+  const active = d ? d.active : '';
+  const others = (s_themes || []).filter(n => !TM_BUILTIN.includes(n) && !inCat.has(n));
+  if (others.length) {
+    html += '<div class="tm-fam">' + esc(tr('tm.local_title')) + '</div>';
+    others.forEach(n => {
+      html += '<div class="tm-row"><div class="tm-grow"><div class="tm-name">' + esc(n) + '</div></div>' +
+        (n === active ? tag(tr('tm.tag_active'), true) : '') + tag(tr('tm.tag_installed'), false) +
+        btn('remove', n, n, tr('tm.remove'), false) + '</div>';
+    });
+  }
+  list.innerHTML = html;
+  if (s_tm.busy) list.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  if (s_tm.status) tmShowStatus(s_tm.status.text, s_tm.status.pct);   /* a re-render (for example a language switch) must not lose the progress */
+}
+
+async function tmRefresh() {
+  if (s_tm.busy) return;
+  tmSetBusy(true);
+  try {
+    tmShowStatus(tr('tm.phase_catalog'), null);
+    await tmPost('themes/refresh');
+    const s = await tmPoll();
+    if (s.state === 'error') throw new Error(s.error || 'failed');
+    await loadThemes();
+    await tmLoad();
+  } catch (e) { if (e.message !== 'unauthorized') toast(tr('tm.err', e.message), true); }
+  finally { tmShowStatus(null); tmSetBusy(false); tmRender(); }
+}
+
+/* Re-hashes every installed catalog theme against its pack on the clock (no network). A theme that no longer matches shows "Differs". */
+async function tmVerify() {
+  if (s_tm.busy) return;
+  tmSetBusy(true);
+  try {
+    tmShowStatus(tr('tm.phase_checking'), null);
+    await tmPost('themes/verify');
+    const s = await tmPoll();
+    if (s.state === 'error') throw new Error(s.error || 'failed');
+    await tmLoad();
+    toast(s.changed > 0 ? tr('tm.verify_bad', s.changed) : tr('tm.verify_ok'), s.changed > 0);
+  } catch (e) { if (e.message !== 'unauthorized') toast(tr('tm.err', e.message), true); }
+  finally { tmShowStatus(null); tmSetBusy(false); tmRender(); }
+}
+
+async function tmInstall(id, name) {
+  if (s_tm.busy) return;
+  const cur = ((s_tm.data && s_tm.data.themes) || []).find(t => t.id === id);
+  if (cur && cur.differs && !confirm(tr('tm.confirm_replace', name))) return;   /* the folder on the clock was changed: replacing it loses those edits */
+  tmSetBusy(true);
+  s_tm.rowId = id;
+  try {
+    tmShowStatus(tr('tm.phase_download'), 0);
+    await tmPost('themes/install', { id });
+    const s = await tmPoll();
+    if (s.state === 'error') throw new Error(s.error || 'failed');
+    toast(tr('tm.done_install', name));
+    await loadThemes();
+    await tmLoad();
+  } catch (e) { if (e.message !== 'unauthorized') toast(tr('tm.err', e.message), true); }
+  finally { tmShowStatus(null); s_tm.rowId = null; tmSetBusy(false); tmRender(); }
+}
+
+async function tmRemove(id, name) {
+  if (s_tm.busy) return;
+  const wasActive = !!(s_tm.data && s_tm.data.active === id);
+  if (!confirm(tr(wasActive ? 'tm.confirm_remove_active' : 'tm.confirm_remove', name))) return;
+  tmSetBusy(true);
+  try {
+    await tmPost('themes/remove', { id });
+    toast(tr('tm.done_remove', name));
+    await loadThemes();
+    if (wasActive) { $('f-theme').value = 'WeatherLive'; updateClockFaceControls(); }
+    await tmLoad();
+  } catch (e) { if (e.message !== 'unauthorized') toast(tr('tm.err', e.message), true); }
+  finally { tmSetBusy(false); tmRender(); }
+}
+
+document.addEventListener('click', ev => {
+  const b = ev.target.closest && ev.target.closest('#tm-list button[data-tm]');
+  if (!b || b.disabled) return;
+  const id = b.getAttribute('data-id'), name = b.getAttribute('data-name');
+  if (b.getAttribute('data-tm') === 'install') tmInstall(id, name); else tmRemove(id, name);
+});
+
 async function loadFontList(manual) {
   const sels = Array.from(document.querySelectorAll('.ttf-font-select'));
   if (!sels.length) return;
@@ -5413,7 +5919,7 @@ function onFontSelectChange(el) {
  * care that these are now generated. Must run before loadSettings() is
  * ever called — see onAuthSucceeded(). */
 function renderTubeControls() {
-  const gamma = [], profile = [], invert = [], offset = [], brightness = [];
+  const gamma = [], profile = [], invert = [], offset = [], brightness = [], shadow = [], color = [], black = [], curve = [], ped = [];
   for (let t = 0; t < 6; t++) {
     const n = t + 1;
     gamma.push(`<div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube ${n}</span><span style="font-size:.78rem;color:var(--dim)">0.5</span><input type="range" class="f-tube-gamma" data-tube="${t}" min="0.5" max="3.0" step="0.05" value="1.0" style="flex:1" oninput="this.nextElementSibling.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)"><span style="font-size:.78rem;color:var(--dim)">3.0</span><span style="min-width:2.8rem;text-align:right;font-variant-numeric:tabular-nums">1.00</span></div>`);
@@ -5421,12 +5927,53 @@ function renderTubeControls() {
     invert.push(`<label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="f-invert-tube" value="${t}"> Tube ${n}</label>`);
     offset.push(`<tr><td style="padding:4px 6px">Tube ${n}</td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-col-off" data-tube="${t}" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td><td style="text-align:center;padding:4px 4px"><input type="number" class="f-row-off" data-tube="${t}" value="0" min="-8" max="8" style="width:48px;background:var(--bg);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px;text-align:center"></td></tr>`);
     brightness.push(`<div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube ${n}</span><input type="range" class="f-tube-br" data-tube="${t}" min="0" max="100" value="100" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">100</span>%</div>`);
+    color.push(`<div style="display:flex;align-items:center;gap:.4rem .7rem;font-size:.82rem;flex-wrap:wrap"><span style="min-width:44px">Tube ${n}</span>${[['R','#f66'],['G','#6c6'],['B','#6af']].map(([l,c],ch)=>`<span style="display:flex;align-items:center;gap:.3rem;flex:1 1 130px"><span style="color:${c};font-weight:700">${l}</span><input type="range" class="f-tube-gain" data-tube="${t}" data-ch="${ch}" min="50" max="150" value="100" style="flex:1;min-width:70px" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:26px;text-align:right">100</span></span>`).join('')}</div>`);
+    curve.push(`<div style="display:flex;align-items:center;gap:.4rem .7rem;font-size:.82rem;flex-wrap:wrap"><span style="min-width:44px">Tube ${n}</span>${[['R','#f66'],['G','#6c6'],['B','#6af']].map(([l,c],ch)=>`<span style="display:flex;align-items:center;gap:.3rem;flex:1 1 130px"><span style="color:${c};font-weight:700">${l}</span><input type="range" class="f-tube-curve" data-tube="${t}" data-ch="${ch}" min="50" max="200" value="100" style="flex:1;min-width:70px" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:26px;text-align:right">100</span></span>`).join('')}</div>`);
+    ped.push(`<div style="display:flex;align-items:center;gap:.4rem .7rem;font-size:.82rem;flex-wrap:wrap"><span style="min-width:44px">Tube ${n}</span>${[['R','#f66'],['G','#6c6'],['B','#6af']].map(([l,c],ch)=>`<span style="display:flex;align-items:center;gap:.3rem;flex:1 1 130px"><span style="color:${c};font-weight:700">${l}</span><input type="range" class="f-tube-ped" data-tube="${t}" data-ch="${ch}" min="0" max="30" value="0" style="flex:1;min-width:70px" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:26px;text-align:right">0</span></span>`).join('')}</div>`);
+    black.push(`<div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube ${n}</span><input type="range" class="f-tube-black" data-tube="${t}" min="0" max="30" value="0" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">0</span>%</div>`);
+    shadow.push(`<div style="display:flex;align-items:center;gap:.5rem;font-size:.82rem"><span style="min-width:44px">Tube ${n}</span><input type="range" class="f-tube-shadow" data-tube="${t}" min="0" max="100" value="0" style="flex:1" oninput="this.nextElementSibling.textContent=this.value"><span style="min-width:28px;text-align:right">0</span>%</div>`);
   }
   $('tube-gamma-list').innerHTML      = gamma.join('');
   $('tube-profile-body').innerHTML    = profile.join('');
   $('tube-invert-list').innerHTML     = invert.join('');
   $('tube-offset-body').innerHTML     = offset.join('');
   $('tube-brightness-list').innerHTML = brightness.join('');
+  $('tube-shadow-list').innerHTML     = shadow.join('');
+  $('tube-color-list').innerHTML      = color.join('');
+  $('tube-black-list').innerHTML      = black.join('');
+  $('tube-curve-list').innerHTML      = curve.join('');
+  $('tube-ped-list').innerHTML        = ped.join('');
+  addTubeResetButtons();
+}
+
+/* A ↺ button at the right end of every per-tube slider (and each R/G/B slider
+ * in the three-slider rows), added after the rows are generated so the row
+ * templates above stay untouched. Resets that one slider to its neutral value. */
+const TUBE_SLIDER_DEFAULTS = {
+  'f-tube-gamma': '1', 'f-tube-br': '100', 'f-tube-shadow': '0', 'f-tube-gain': '100',
+  'f-tube-curve': '100', 'f-tube-ped': '0', 'f-tube-black': '0'
+};
+function addTubeResetButtons() {
+  for (const [cls, def] of Object.entries(TUBE_SLIDER_DEFAULTS)) {
+    document.querySelectorAll('input[type=range].' + cls).forEach(inp => {
+      inp.dataset.default = def;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tube-reset';
+      b.textContent = '\u21BA';
+      b.title = tr('adv.reset_slider');
+      b.setAttribute('aria-label', b.title);
+      b.setAttribute('data-i18n-title', 'adv.reset_slider');
+      b.onclick = () => resetTubeSlider(b);
+      inp.parentElement.appendChild(b);
+    });
+  }
+}
+function resetTubeSlider(btn) {
+  const inp = btn.parentElement.querySelector('input[type=range]');
+  if (!inp) return;
+  inp.value = inp.dataset.default;
+  inp.dispatchEvent(new Event('input', { bubbles: true }));   /* readout + unsaved-changes marker */
 }
 
 /* ── Declarative settings schema ──────────────────────────────────────
@@ -5457,7 +6004,7 @@ const SETTINGS_SCHEMA = [
   { load(cfg) {
       const a = cfg.apps?.[0] || {};
       window._settingsApp0 = a; // used by other entries + saveSettings()
-      $('f-theme').value = (cfg.clock_face === 'custom') ? 'Custom' : (a.theme || 'NixieOY');
+      $('f-theme').value = (cfg.clock_face === 'custom') ? 'Custom' : (a.theme || 'Nixie');
       if ($('f-custom-bg-fill'))   $('f-custom-bg-fill').value   = cfg.custom_bg_fill || 'solid';
       if ($('f-custom-bg-color1')) $('f-custom-bg-color1').value = hexFromRgb(cfg.custom_bg_color1, [0,0,0]);
       if ($('f-custom-bg-color2')) $('f-custom-bg-color2').value = hexFromRgb(cfg.custom_bg_color2, [0,0,0]);
@@ -5514,7 +6061,7 @@ const SETTINGS_SCHEMA = [
       body.apps = [{
         name: 'app1',
         app: a0.app || 'Clock',
-        theme: isCustom ? (a0.theme || 'NixieOY') : face,
+        theme: isCustom ? (a0.theme || 'Nixie') : face,
         clock_face: isCustom ? 'custom' : '',
         type: $('f-timetype').value,
         clock_tube5: $('f-tube5').value,
@@ -5638,6 +6185,62 @@ const SETTINGS_SCHEMA = [
       });
     },
     save(body) { body.lcd_tube_brightness = Array.from(document.querySelectorAll('.f-tube-br')).map(el => parseInt(el.value)||100); }
+  },
+  { load(cfg) {
+      const lift = cfg.lcd_shadow_lift || [0,0,0,0,0,0];
+      document.querySelectorAll('.f-tube-shadow').forEach(el => {
+        const v = lift[+el.dataset.tube] ?? 0;
+        el.value = v;
+        el.nextElementSibling.textContent = v;
+      });
+    },
+    save(body) { body.lcd_shadow_lift = Array.from(document.querySelectorAll('.f-tube-shadow')).map(el => parseInt(el.value)||0); }
+  },
+  { load(cfg) {
+      const gains = [cfg.lcd_gain_r || [], cfg.lcd_gain_g || [], cfg.lcd_gain_b || []];
+      document.querySelectorAll('.f-tube-gain').forEach(el => {
+        const v = gains[+el.dataset.ch][+el.dataset.tube] ?? 100;
+        el.value = v;
+        el.nextElementSibling.textContent = v;
+      });
+    },
+    save(body) {
+      const g = [[], [], []];
+      document.querySelectorAll('.f-tube-gain').forEach(el => { g[+el.dataset.ch][+el.dataset.tube] = parseInt(el.value) || 100; });
+      body.lcd_gain_r = g[0]; body.lcd_gain_g = g[1]; body.lcd_gain_b = g[2];
+    }
+  },
+  { load(cfg) {
+      const bl = cfg.lcd_black_level || [];
+      document.querySelectorAll('.f-tube-black').forEach(el => {
+        const v = bl[+el.dataset.tube] ?? 0;
+        el.value = v;
+        el.nextElementSibling.textContent = v;
+      });
+    },
+    save(body) { body.lcd_black_level = Array.from(document.querySelectorAll('.f-tube-black')).map(el => parseInt(el.value)||0); }
+  },
+  { load(cfg) {
+      const cv = [cfg.lcd_curve_r || [], cfg.lcd_curve_g || [], cfg.lcd_curve_b || []];
+      document.querySelectorAll('.f-tube-curve').forEach(el => {
+        const v = cv[+el.dataset.ch][+el.dataset.tube] ?? 100;
+        el.value = v;
+        el.nextElementSibling.textContent = v;
+      });
+      const pd = [cfg.lcd_pedestal_r || [], cfg.lcd_pedestal_g || [], cfg.lcd_pedestal_b || []];
+      document.querySelectorAll('.f-tube-ped').forEach(el => {
+        const v = pd[+el.dataset.ch][+el.dataset.tube] ?? 0;
+        el.value = v;
+        el.nextElementSibling.textContent = v;
+      });
+    },
+    save(body) {
+      const cv = [[], [], []], pd = [[], [], []];
+      document.querySelectorAll('.f-tube-curve').forEach(el => { cv[+el.dataset.ch][+el.dataset.tube] = parseInt(el.value) || 100; });
+      document.querySelectorAll('.f-tube-ped').forEach(el => { pd[+el.dataset.ch][+el.dataset.tube] = parseInt(el.value) || 0; });
+      body.lcd_curve_r = cv[0]; body.lcd_curve_g = cv[1]; body.lcd_curve_b = cv[2];
+      body.lcd_pedestal_r = pd[0]; body.lcd_pedestal_g = pd[1]; body.lcd_pedestal_b = pd[2];
+    }
   },
 
   // ── Brightness / LEDs ──
@@ -5867,6 +6470,8 @@ const SETTINGS_SCHEMA = [
       $('f-spec-lcd-color').value = hexFromRgb(cfg.spectrum_lcd_RGB, [30,220,30]);
       $('f-spec-lcd-wled').checked = cfg.spectrum_lcd_wled === true;
       $('f-spec-peak-color').value = hexFromRgb(cfg.spectrum_peak_RGB, [255,255,255]);
+      $('f-spec-style').value = String(cfg.spectrum_style || 0);
+      specStyleChange();
       $('f-spec-led-src').value = String(cfg.spectrum_led_source || 0);
       $('f-spec-beat-react').checked = cfg.spectrum_led_beat_react === true;
       specLedSrcChange();
@@ -5876,10 +6481,17 @@ const SETTINGS_SCHEMA = [
       body.spectrum_lcd_RGB = rgbFromHex(hexVal('f-spec-lcd-color', '#1edc1e'));
       body.spectrum_lcd_wled = $('f-spec-lcd-wled').checked;
       body.spectrum_peak_RGB = rgbFromHex(hexVal('f-spec-peak-color', '#ffffff'));
+      body.spectrum_style = +$('f-spec-style').value;
       body.spectrum_led_source = +$('f-spec-led-src').value;
       body.spectrum_led_beat_react = $('f-spec-beat-react').checked;
     }
   },
+  { key:'mic_top_hz', id:'f-mic-top-hz', type:'int', def:8000, readout:'v-mic-top-hz' },
+  { key:'spectrum_scope_thick', id:'f-spec-thick', type:'int', def:2, readout:'v-spec-thick' },
+  { key:'spectrum_bar_rise', id:'f-spec-rise', type:'int', def:4, readout:'v-spec-rise' },
+  { key:'spectrum_bar_fall', id:'f-spec-fall', type:'int', def:4, readout:'v-spec-fall' },
+  { key:'spectrum_peak_fall', id:'f-spec-pfall', type:'int', def:3, readout:'v-spec-pfall' },
+  { key:'spectrum_peak_hold_ms', id:'f-spec-phold', type:'int', def:350, readout:'v-spec-phold' },
 
   // ── Mode rotation ──
   { load(cfg) {
@@ -6081,6 +6693,7 @@ async function loadSettings() {
     UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
     const gl = $('github-repo-link'); if (gl) gl.href = UPDATE_REPO_URL;
   }
+  tmLoad();   /* Theme Manager: cached catalog + what is installed (no network access); after UPDATE_REPO is set so previews use the override */
   /* Every field's load side runs here, in SETTINGS_SCHEMA's array order —
    * see that array's own doc comment for why order matters. */
   for (const f of SETTINGS_SCHEMA) {
@@ -6535,6 +7148,27 @@ async function biCancel(btn) {
   toast(res?.status === 'ok' ? tr('js.bi_cancelled') : tr('js.failed'), res?.status !== 'ok');
   if (res?.status === 'ok') applyBurninStatus(false);
 }
+/* ── Calibration test screen (Display → Advanced Display) ────────────
+ * Rides the anti burn-in session on the device (same mask/timer), so it stops
+ * by itself and shares the Cancel path; the device reports it separately as
+ * testpat_active so it doesn't show up as a burn-in session. */
+function tpSelect(on) { document.querySelectorAll('.tp-tube').forEach(c => { c.checked = on; }); }
+function applyTestPatStatus(active, remainingS) {
+  const el = $('tp-status'); if (!el) return;
+  el.textContent = active && remainingS > 0 ? tr('adv.test_running', Math.ceil(remainingS / 60)) : '';
+}
+async function tpStart() {
+  let mask = 0;
+  document.querySelectorAll('.tp-tube').forEach(c => { if (c.checked) mask |= 1 << +c.value; });
+  if (!mask) return;
+  const res = await api('debug/burnin', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mask, duration_s: 300, pattern: +$('tp-pattern').value }) });
+  if (res?.status === 'busy') return toast(tr('adv.tp_busy'), true);
+  if (res?.status === 'ok') applyTestPatStatus(true, 300); else toast(tr('js.failed'), true);
+}
+async function tpStop() {
+  const res = await api('debug/burnin', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ stop_all: true }) });
+  if (res?.status === 'ok') applyTestPatStatus(false); else toast(tr('js.failed'), true);
+}
 /* ── Save settings ─────────────────────────────────── */
 /* Brief checkmark micro-state on a Save button, alongside (not instead of)
  * the toast — several buttons across tabs all call saveSettings(), so this
@@ -6627,7 +7261,7 @@ async function saveSettings(btn) {
 
 /* ── Set mode ──────────────────────────────────────── */
 async function setMode(mode) {
-  cfg.apps = [{ name:'app1', app: mode, theme: $('f-theme')?.value || 'NixieOY', type: $('f-timetype')?.value || '24H' }];
+  cfg.apps = [{ name:'app1', app: mode, theme: $('f-theme')?.value || 'Nixie', type: $('f-timetype')?.value || '24H' }];
   const body = { apps: cfg.apps };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(res?.status === 'ok' ? tr('js.mode_prefix') + mode : tr('js.failed'), res?.status !== 'ok');
@@ -7243,6 +7877,7 @@ function dbgShow() {
     $('dbg-adc-ch').value = String(cfg.mic_adc_channel);
   if (cfg && cfg.mic_silence_gate != null)
     dbgSetGate(cfg.mic_silence_gate);
+  dbgMicTuneLoad();
   dbgRefreshUpdateRepo();
 }
 
@@ -7494,10 +8129,147 @@ async function logAllOff() {
 
 function dbgHide() {
   $('debug-panel').style.display = 'none';
+  dbgMonStop();
   dbgAutoToggle(true);   /* stop polling */
 }
 
 function dbgChannelChange() { /* visual only — saved on button press */ }
+
+/* ── Spectrum tuning (live, runtime only) ── */
+const MT_META = {
+  eq:       { c:'SPEC_EQ',            g:'Bar scaling',        step:0.05,   d:2, tip:'0 = every bar vs the loudest band, 1 = each bar vs its own level' },
+  gain:     { c:'REF_GAIN',           g:'Bar scaling',        step:0.1,    d:1, tip:"full scale = this x the band's average level (lower = bigger bars)" },
+  up:       { c:'REF_UP',             g:'Bar scaling',        step:0.001,  d:3, tip:"how fast a band's average level rises, per 16 ms frame" },
+  down:     { c:'REF_DOWN',           g:'Bar scaling',        step:0.0005, d:4, tip:'how fast it falls' },
+  snr:      { c:'REF_SNR',            g:'Bar scaling',        step:0.5,    d:1, tip:"full scale is never below this x the band's noise threshold (higher = quieter idle)" },
+  deadzone: { c:'NOISE_DEADZONE',     g:'Bar scaling',        step:0.25,   d:2, tip:'a band must exceed floor x (1 + this) to count (silence gate)' },
+  gamma:    { c:'SPEC_GAMMA',         g:'Bar scaling',        step:0.05,   d:2, tip:'bar height = (level/scale)^this: lower lifts quiet bands, higher gives louder hits more punch' },
+  burstn:   { c:'BURST_BARS',         g:'Bar scaling',        step:1,      d:0, tip:'a frame that pushes this many of the 20 upper bars to max at once is dropped as noise (0 = off)' },
+  dzdisp:   { c:'DISP_DEADZONE',      g:'Bar scaling',        step:0.05,   d:2, tip:'same, for the bars only (lower = quiet mids/treble move more)' },
+  squelch:  { c:'SPEC_SQUELCH_RATIO', g:'Bar feel',           step:0.005,  d:3, tip:'below this fraction of full scale a bar is blank' },
+  gmode:    { c:'gate mode',          g:'Silence gate',       step:1,      d:0, tip:'0 = sum of power vs the Noise Floor setting, 1 = per band in its own noise units, 2 = like 1 but 2 of 3 frames must pass, 3 = like 1 but a band only counts after GATE_RUN frames above GATE_UMIN' },
+  gsnr:     { c:'GATE_SNR',           g:'Silence gate',       step:0.5,    d:1, tip:'modes 1/2: the summed units needed (scaled by Noise Floor / 30)' },
+  gumin:    { c:'GATE_UMIN',          g:'Silence gate',       step:0.1,    d:1, tip:'mode 3: a band counts once above this many noise units ...' },
+  grun:     { c:'GATE_RUN',           g:'Silence gate',       step:1,      d:0, tip:'mode 3: ... for this many frames in a row (1 frame = 16 ms)' },
+  ghk:      { c:'GATE_HOLD_K',        g:'Silence gate',       step:0.05,   d:2, tip:'mode 3: once open it stays open this fraction of the frames it has been open ...' },
+  ghm:      { c:'GATE_HOLD_MAX',      g:'Silence gate',       step:1,      d:0, tip:'mode 3: ... capped at this many frames (16 = 256 ms)' },
+  gcap:     { c:'GATE_CAP',           g:'Silence gate',       step:0.5,    d:1, tip:'modes 1/2: most one band can add' },
+  gthr:     { c:'GATE_MIN_THR',       g:'Silence gate',       step:0.05,   d:2, tip:"modes 1/2: a band's noise threshold never counts below this (raw power)" },
+  tilt:     { c:'MIC_TILT_EXP',       g:'Spectrum balance',   step:0.05,   d:2, tip:'+ boosts treble per octave (0 = flat); changes idle noise on the top tubes too' },
+  nalpha:   { c:'NOISE_ALPHA',        g:'Noise floor',        step:0.0002, d:4, tip:'how fast the floor adapts (0.002 = about 8 s)' },
+  spike:    { c:'Wi-Fi spike guard',  g:'Wi-Fi spike guard',  bool:true,    tip:'hold a sudden jump for one frame and drop it if it vanishes' },
+  spike_lo: { c:'SPIKE_LO',           g:'Wi-Fi spike guard',  step:10,     d:0, tip:'previous smoothed total must be below this' },
+  spike_hi: { c:'SPIKE_HI',           g:'Wi-Fi spike guard',  step:10,     d:0, tip:'and this frame above this' },
+  spike_ratio:{ c:'SPIKE_RATIO',      g:'Wi-Fi spike guard',  step:0.01,   d:2, tip:'confirmed a spike if the next frame has less than this fraction of the power' },
+  mask:     { c:'LED ripple masking', g:'LED ripple masking', bool:true,    tip:'skip the bands the LED PWM ripple lands in (changing it restarts the 4 s noise learning)' },
+  rip_lo:   { c:'RIPPLE0_LO',         g:'LED ripple masking', step:10,     d:0, tip:'low edge of the main ripple range, Hz' },
+  rip_hi:   { c:'RIPPLE0_HI',         g:'LED ripple masking', step:10,     d:0, tip:'high edge, Hz' },
+};
+let _mtTimer = null, _mtPending = {}, _mtFields = [];
+function dbgMtBuild(fields) {
+  _mtFields = fields;
+  let html = '', grp = '';
+  fields.forEach(f => {
+    const m = MT_META[f.k] || { c:f.k, g:'Other', step:(f.hi - f.lo) / 200, d:3, tip:'' };
+    if (m.g !== grp) { grp = m.g; html += `<div style="margin:.7rem 0 .2rem;font-size:.82rem;font-weight:600;color:#ffa000">${grp}</div>`; }
+    const dtxt = m.bool ? (f.def >= 0.5 ? 'on' : 'off') : (+f.def).toFixed(m.d);
+    html += `<div class="field" style="margin-bottom:.45rem"><label style="margin-bottom:.1rem"><code>${m.c}</code> <span style="font-weight:normal;color:var(--dim);font-size:.78rem">&mdash; ${m.tip} (default ${dtxt})</span></label>`;
+    if (m.bool) {
+      html += `<label style="font-weight:normal;cursor:pointer"><input type="checkbox" id="dbg-mt-${f.k}" ${f.cur >= 0.5 ? 'checked' : ''} onchange="dbgMtInput('${f.k}')"> on</label>`;
+    } else {
+      const smin = +(Math.floor(f.lo / m.step + 1e-9) * m.step).toFixed(6), smax = +(Math.ceil(f.hi / m.step - 1e-9) * m.step).toFixed(6);   /* sliders snap to min + n*step, so align both to the step */
+      html += `<div style="display:flex;gap:8px;align-items:center"><input type="range" id="dbg-mt-${f.k}" min="${smin}" max="${smax}" step="${m.step}" value="${f.cur}" style="flex:1" oninput="dbgMtInput('${f.k}')"><span id="dbg-mt-v-${f.k}" style="font-family:monospace;min-width:4.8em;text-align:right"></span></div>`;
+    }
+    html += '</div>';
+  });
+  $('dbg-mt-rows').innerHTML = html;
+  dbgMtShow();
+}
+function dbgMtVal(f) { const e = $('dbg-mt-' + f.k); return (MT_META[f.k] || {}).bool ? (e.checked ? 1 : 0) : +e.value; }
+function dbgMtShow() {
+  const lines = [];
+  _mtFields.forEach(f => {
+    const m = MT_META[f.k] || { c:f.k, d:3 };
+    const v = dbgMtVal(f);
+    if (!m.bool) { const s = $('dbg-mt-v-' + f.k); if (s) s.textContent = v.toFixed(m.d); }
+    lines.push(m.bool ? `/* ${m.c}: ${v ? 'on' : 'off'} */` : `#define ${m.c.padEnd(18)} ${v.toFixed(Math.max(m.d, 2))}f`);
+  });
+  $('dbg-mt-defs').value = lines.join('\n');
+}
+function dbgMtInput(k) {
+  dbgMtShow();
+  const f = _mtFields.find(x => x.k === k);
+  _mtPending[k] = dbgMtVal(f);
+  clearTimeout(_mtTimer);
+  _mtTimer = setTimeout(async () => {
+    const body = JSON.stringify(_mtPending); _mtPending = {};
+    const res = await secureFetch('/api/debug/mictune', { method:'POST', headers:{'Content-Type':'application/json'}, body }).catch(() => null);
+    $('dbg-mt-msg').textContent = res && res.ok ? 'applied' : 'failed';
+  }, 150);
+}
+async function dbgMicTuneLoad() {
+  try { const j = await api('debug/mictune'); dbgMtBuild(j.fields); }
+  catch (e) { $('dbg-mt-msg').textContent = 'needs firmware with /api/debug/mictune'; }
+}
+async function dbgMicTuneReset() {
+  const res = await secureFetch('/api/debug/mictune', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ reset:true }) }).catch(() => null);
+  if (!res || !res.ok) return toast('Reset failed', true);
+  const j = await res.json(); dbgMtBuild(j.fields);
+  $('dbg-mt-msg').textContent = 'defaults restored';
+}
+
+/* ── Live band monitor ── */
+let _monTimer = null, _monPrev = null;
+function dbgMonStop() { clearTimeout(_monTimer); _monTimer = null; _monPrev = null; if ($('dbg-mon-on')) $('dbg-mon-on').checked = false; }
+function dbgMonToggle() {
+  if (!$('dbg-mon-on').checked) { clearTimeout(_monTimer); _monTimer = null; _monPrev = null; return; }
+  dbgMonTick();
+}
+async function dbgMonTick() {
+  if (!$('dbg-mon-on').checked) return;
+  const hz = +$('dbg-mon-rate').value || 1;
+  try {
+    const j = await api('debug/micbands');
+    dbgMonDraw(j);
+    $('dbg-mon-msg').textContent = '';
+  } catch (e) {
+    $('dbg-mon-msg').textContent = 'no data — the mic only runs in Spectrum mode (or with the mic test mode on)';
+  }
+  _monTimer = setTimeout(dbgMonTick, 1000 / hz);
+}
+function dbgMonDraw(j) {
+  const cv = $('dbg-mon'), g = cv.getContext('2d'), W = cv.width, H = cv.height;
+  const cs = getComputedStyle(document.documentElement);
+  const dim = (cs.getPropertyValue('--dim') || '#888').trim(), fg = (cs.getPropertyValue('--text') || '#ddd').trim();
+  g.clearRect(0, 0, W, H);
+  const L = 30, n = j.bands.length, cw = (W - L - 6) / n;
+  const topY = 8, topH = 100, botY = 138, botH = 92, lg = v => Math.log10(1 + Math.max(0, v)) / Math.log10(4001);
+  g.font = '10px sans-serif'; g.fillStyle = dim; g.strokeStyle = dim;
+  g.fillText('shown', 2, topY + 10); g.fillText('log', 4, botY + 10); g.fillText('raw/', 2, botY + 22); g.fillText('power', 0, botY + 33);
+  j.bands.forEach((b, i) => {
+    const x = L + i * cw;
+    const h = Math.max(0, Math.min(1, b.disp)) * topH;
+    g.fillStyle = b.m ? 'rgba(160,160,160,.55)' : '#ffa000';
+    g.fillRect(x + 2, topY + topH - h, cw - 4, h);
+    const hr = lg(b.raw) * botH, hp = lg(b.power) * botH, hf = lg(b.floor) * botH;
+    g.fillStyle = 'rgba(150,150,170,.55)'; g.fillRect(x + 2, botY + botH - hr, cw - 4, hr);
+    g.fillStyle = '#3ecf8e';               g.fillRect(x + cw * 0.3, botY + botH - hp, cw * 0.4, hp);
+    g.fillStyle = '#4aa3ff';               g.fillRect(x + 1, botY + botH - hf - 1, cw - 2, 2);
+    g.save(); g.translate(x + cw / 2 + 3, H - 2); g.rotate(-Math.PI / 2); g.fillStyle = b.m ? '#c66' : dim; g.fillText(Math.round(b.f) + (b.m ? ' (masked)' : ''), 0, 0); g.restore();
+    if (i % 4 === 0) { g.strokeStyle = 'rgba(255,160,0,.25)'; g.beginPath(); g.moveTo(x, topY); g.lineTo(x, botY + botH); g.stroke(); }
+  });
+  g.fillStyle = dim; g.fillText('orange = what the tube shows (grey = masked band, interpolated)   grey = raw   green = power after floor + dead zone   blue = floor', L, botY + botH + 14);
+  const st = j.stats, now = performance.now();
+  let txt = `ADC ${st.adc}`;
+  if (_monPrev) {
+    const dt = (now - _monPrev.t) / 1000, df = st.frames - _monPrev.frames;
+    if (dt > 0 && df >= 0) {
+      txt = `capture ${(df / dt).toFixed(1)} fps (expect ~62) · read failures +${st.fail - _monPrev.fail} · gated ${df ? Math.round(100 * (st.gated - _monPrev.gated) / df) : 0}% · spike holds +${st.holds - _monPrev.holds} · gate ${st.gv} / ${st.gt} · ADC ${st.adc}`;
+    }
+  }
+  _monPrev = { t: now, frames: st.frames, fail: st.fail, gated: st.gated, holds: st.holds };
+  $('dbg-mon-stats').textContent = txt;
+}
 
 /* Set all gate controls (debug + user-facing Spectrum card) to value v */
 function dbgSetGate(v) {
@@ -7517,6 +8289,14 @@ function dbgGateSync(fromNum) {
   if ($('f-gate-slider')) $('f-gate-slider').value = Math.min(val, 100);
   if ($('f-gate-num'))    $('f-gate-num').value    = val;
 }
+/* Show the oscilloscope's line thickness, or the bar-only speed / peak dot settings. */
+function specStyleChange() {
+  const scope = $('f-spec-style').value === '1';
+  $('spec-thick-row').style.display = scope ? 'flex' : 'none';
+  $('spec-bar-speeds').style.display = scope ? 'none' : '';
+  $('spec-peak-label').style.display = $('f-spec-peak-color').style.display = scope ? 'none' : '';
+}
+
 /* Toggle visibility of the custom LED glow color row based on LED source selection.
  * Source 0 = custom color (show picker); Source 1 = accent mode (hide picker). */
 function specLedSrcChange() {
@@ -7838,6 +8618,7 @@ async function refreshStatus() {
    * on the device's first reply", never "this value is unavailable". */
   document.querySelectorAll('.val.skel').forEach(el => el.classList.remove('skel'));
   $('s-time').textContent = s.time ? s.time.split('T')[1] : '--:--';
+  devClockSet(s.time);
   /* Translate the mode name when a matching mode.* key exists; otherwise show
    * the raw value the device reported (keeps unknown/future modes readable). */
   { const mk = 'mode.' + (s.mode || '').toLowerCase();
@@ -7851,6 +8632,7 @@ async function refreshStatus() {
   if (s.mode && window._settingsApp0) window._settingsApp0.app = s.mode;
   if (typeof s.rotation_pause_remaining_s === 'number') applyRotationPauseUI(s.rotation_pause_remaining_s);
   if (typeof s.burnin_active === 'boolean') applyBurninStatus(s.burnin_active, s.burnin_remaining_s || 0);
+  if (typeof s.testpat_active === 'boolean') applyTestPatStatus(s.testpat_active, s.testpat_remaining_s || 0);
   const _useFahrenheit = (cfg.temperature_format || 'Celsius') === 'Fahrenheit';
   if (s.weather) {
     const _wt = _useFahrenheit ? (s.weather.temp_c * 9 / 5 + 32) : s.weather.temp_c;
@@ -9182,7 +9964,7 @@ async function startAutoUpdate() {
 <div id="stock-exc-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Manage missing built-in files">
   <div class="auth-card" style="max-width:520px;max-height:82vh;display:flex;flex-direction:column">
     <h3 data-i18n="stock.manage_title">Manage missing files</h3>
-    <p data-i18n="stock.manage_desc">Uncheck a file — or a whole folder, like a removed theme — to stop flagging it as missing. Leave checked to keep it flagged for repair.</p>
+    <p data-i18n="stock.manage_desc">Uncheck a file to stop flagging it as missing. Leave checked to keep it flagged for repair.</p>
     <div id="stock-exc-tree" style="overflow-y:auto;flex:1;font-size:.85rem;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.5rem .7rem"></div>
     <p id="stock-exc-truncated" style="display:none;color:var(--dim);font-size:.78rem;margin:.5rem 0 0" data-i18n="stock.truncated_hint">Showing the first files found — save and reopen this to see more after they're excepted.</p>
     <div style="display:flex;gap:.5rem;margin-top:1rem">

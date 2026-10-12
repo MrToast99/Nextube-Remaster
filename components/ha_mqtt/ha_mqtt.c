@@ -12,7 +12,7 @@
  *   nextube/<host>/brightness/state          "75"
  *   nextube/<host>/led_brightness/state      "60"
  *   nextube/<host>/led_mode/state             "Breath"
- *   nextube/<host>/theme/state               "NixieOY"
+ *   nextube/<host>/theme/state               "Nixie"
  *   nextube/<host>/rotation/state            "ON" or "OFF"
  *   nextube/<host>/ticker/state              current ticker text, or "" when cleared
  *   nextube/<host>/ticker_speed/state        ticker scroll speed (px per 200 ms tick)

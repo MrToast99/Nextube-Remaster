@@ -358,6 +358,16 @@ static void led_task(void *arg)
         /* led_brightness is 0=off, 100=full bright — use directly. */
         leds_set_brightness(led_brightness);
 
+        /* Static only re-sends when ITS OWN color/brightness changed, so returning to it from
+         * Breath / Rainbow / Off / WLED / Sun-Moon (or Spectrum's glow) with the same color left
+         * the strip on the old effect's last frame, or dark. A change of what drives the LEDs
+         * is a reason to repaint. */
+        {
+            static int prev_driver = -1;
+            int driver = (current_mode == APP_MODE_SPECTRUM && spectrum_led_source == 0) ? 100 : (int)backlight_mode;
+            if (driver != prev_driver) { prev_driver = driver; s_leds_dirty = true; }
+        }
+
         /* ── Spectrum mode: drive each LED at per-band audio brightness ──
          * spectrum_led_source == 0: amplitude-modulate the custom glow color.
          * spectrum_led_source == 1: fall through to the accent mode switch so
@@ -369,9 +379,17 @@ static void led_task(void *arg)
             /* Average the 4 frequency bands assigned to each tube/LED */
             const int bpl = MIC_BAND_COUNT / LED_COUNT;
             for (int i = 0; i < LED_COUNT; i++) {
-                float v = 0.0f;
-                for (int b = 0; b < bpl; b++) v += bands[i * bpl + b];
+                float v = 0.0f, vmax = 0.0f;
+                for (int b = 0; b < bpl; b++) {
+                    const float e = bands[i * bpl + b];
+                    v += e;
+                    if (e > vmax) vmax = e;
+                }
                 v /= (float)bpl;
+                /* The glow follows the tube's bars: unless at least one bar on this tube shows a lit segment
+                 * (a value of 0.5/13 or more — the display rounds to the nearest of its 13 segments), the LED
+                 * stays dark, so sub-visible leftovers above the noise floor can't make it flicker. */
+                if (vmax < 0.5f / 13.0f) v = 0.0f;
                 leds_set_color(i,
                     (uint8_t)(spectrum_rgb[0] * v),
                     (uint8_t)(spectrum_rgb[1] * v),

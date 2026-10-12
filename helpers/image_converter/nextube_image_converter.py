@@ -1482,8 +1482,17 @@ if __name__ == "__main__":
             if d.is_dir():
                 shutil.rmtree(d, ignore_errors=True)
 
-    port = 5000
-    server = HTTPServer(("0.0.0.0", port), Handler)
+    # Prefer 5000, but fall back to the next ports if it's taken — on Windows another program's
+    # outgoing connection can be holding it, which shows up as WinError 10013 rather than "in use".
+    server = None
+    for port in range(5000, 5011):
+        try:
+            server = HTTPServer(("0.0.0.0", port), Handler)
+            break
+        except OSError as e:
+            print(f"  Port {port} is unavailable ({e.strerror or e}); trying the next one…")
+    if server is None:
+        sys.exit("  Could not open any port from 5000 to 5010 — close whatever is using them and try again.")
     url = f"http://localhost:{port}"
     print(f"\n  Nextube Image Converter v3")
     print(f"  ────────────────────────")

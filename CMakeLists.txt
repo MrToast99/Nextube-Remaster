@@ -63,6 +63,9 @@ file(GLOB_RECURSE _STOCK_FILES RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/data"
 list(REMOVE_ITEM _STOCK_FILES "config.json")
 list(REMOVE_ITEM _STOCK_FILES "web/index.html")
 list(REMOVE_ITEM _STOCK_FILES "images/album/.keep")   # git placeholder, not a real stock asset
+# Themes belong to the Theme Manager (it installs, updates, repairs and removes them, and lists a missing one as a download), so the
+# stock-file check neither flags nor restores anything under images/themes/ -- an updated theme must not be put back to this build's.
+list(FILTER _STOCK_FILES EXCLUDE REGEX "^images/themes/")
 list(SORT _STOCK_FILES)
 
 # Each file's SHA-256 rides alongside its path (STOCK_SHA256[i] matches

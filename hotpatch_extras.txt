@@ -9,7 +9,7 @@
 # config.json is always excluded even if listed here.
 #
 # Example entries:
-#   images/themes/NixieOY/Numbers/5.jpg
+#   images/themes/Nixie/Numbers/5.jpg
 #   images/themes/Formula1/AMPM/colon.jpg
 #   audio/bell.mp3
 #
@@ -20,47 +20,48 @@
 audio/click.wav
 audio/bell.wav
 
-# NixieOY refreshed artwork (new tube glyph art replacing the previous look) — same
-# filenames as before, so existing devices need these re-delivered via hotpatch to
-# actually see the change rather than keeping the old cached images.
-images/themes/NixieOY/AMPM/alarm1.jpg
-images/themes/NixieOY/AMPM/alarm2.jpg
-images/themes/NixieOY/AMPM/alarmoff.jpg
-images/themes/NixieOY/AMPM/am.jpg
-images/themes/NixieOY/AMPM/blank.jpg
-images/themes/NixieOY/AMPM/colon.jpg
-images/themes/NixieOY/AMPM/dot.jpg
-images/themes/NixieOY/AMPM/instagram.jpg
-images/themes/NixieOY/AMPM/k-sub.jpg
-images/themes/NixieOY/AMPM/mastodon.jpg
-images/themes/NixieOY/AMPM/m-sub.jpg
-images/themes/NixieOY/AMPM/pm.jpg
-images/themes/NixieOY/AMPM/sub.jpg
-images/themes/NixieOY/AMPM/tiktok.jpg
-images/themes/NixieOY/AMPM/youtube.jpg
-images/themes/NixieOY/MultiInfo/Humidity/degree.jpg
-images/themes/NixieOY/MultiInfo/Humidity/humidity.jpg
-images/themes/NixieOY/MultiInfo/Temperature/degreec.jpg
-images/themes/NixieOY/MultiInfo/Temperature/degreef.jpg
-images/themes/NixieOY/MultiInfo/Temperature/minus.jpg
-images/themes/NixieOY/MultiInfo/Weather/fewClouds.jpg
-images/themes/NixieOY/MultiInfo/Weather/fog.jpg
-images/themes/NixieOY/MultiInfo/Weather/overcastClouds.jpg
-images/themes/NixieOY/MultiInfo/Weather/rain.jpg
-images/themes/NixieOY/MultiInfo/Weather/sand.jpg
-images/themes/NixieOY/MultiInfo/Weather/snow.jpg
-images/themes/NixieOY/MultiInfo/Weather/squalls.jpg
-images/themes/NixieOY/MultiInfo/Weather/sun.jpg
-images/themes/NixieOY/MultiInfo/Weather/thunderstorm.jpg
-images/themes/NixieOY/MultiInfo/Weather/tornado.jpg
-images/themes/NixieOY/MultiInfo/Weather/volcanicAsh.jpg
-images/themes/NixieOY/Numbers/0.jpg
-images/themes/NixieOY/Numbers/1.jpg
-images/themes/NixieOY/Numbers/2.jpg
-images/themes/NixieOY/Numbers/3.jpg
-images/themes/NixieOY/Numbers/4.jpg
-images/themes/NixieOY/Numbers/5.jpg
-images/themes/NixieOY/Numbers/6.jpg
-images/themes/NixieOY/Numbers/7.jpg
-images/themes/NixieOY/Numbers/8.jpg
-images/themes/NixieOY/Numbers/9.jpg
+# Nixie: the new base theme that replaces NixieOY. Existing devices need these
+# delivered via hotpatch (they keep their old NixieOY folder until it is removed).
+images/themes/Nixie/.pack.json
+images/themes/Nixie/AMPM/alarm1.jpg
+images/themes/Nixie/AMPM/alarm2.jpg
+images/themes/Nixie/AMPM/alarmoff.jpg
+images/themes/Nixie/AMPM/am.jpg
+images/themes/Nixie/AMPM/blank.jpg
+images/themes/Nixie/AMPM/colon.jpg
+images/themes/Nixie/AMPM/dot.jpg
+images/themes/Nixie/AMPM/instagram.jpg
+images/themes/Nixie/AMPM/k-sub.jpg
+images/themes/Nixie/AMPM/m-sub.jpg
+images/themes/Nixie/AMPM/mastodon.jpg
+images/themes/Nixie/AMPM/pm.jpg
+images/themes/Nixie/AMPM/sub.jpg
+images/themes/Nixie/AMPM/tiktok.jpg
+images/themes/Nixie/AMPM/youtube.jpg
+images/themes/Nixie/MultiInfo/Humidity/degree.jpg
+images/themes/Nixie/MultiInfo/Humidity/humidity.jpg
+images/themes/Nixie/MultiInfo/Temperature/degreec.jpg
+images/themes/Nixie/MultiInfo/Temperature/degreef.jpg
+images/themes/Nixie/MultiInfo/Temperature/minus.jpg
+images/themes/Nixie/MultiInfo/Weather/fewClouds.jpg
+images/themes/Nixie/MultiInfo/Weather/fog.jpg
+images/themes/Nixie/MultiInfo/Weather/overcastClouds.jpg
+images/themes/Nixie/MultiInfo/Weather/rain.jpg
+images/themes/Nixie/MultiInfo/Weather/sand.jpg
+images/themes/Nixie/MultiInfo/Weather/snow.jpg
+images/themes/Nixie/MultiInfo/Weather/squalls.jpg
+images/themes/Nixie/MultiInfo/Weather/sun.jpg
+images/themes/Nixie/MultiInfo/Weather/sun_cloud.jpg
+images/themes/Nixie/MultiInfo/Weather/thunderstorm.jpg
+images/themes/Nixie/MultiInfo/Weather/tornado.jpg
+images/themes/Nixie/MultiInfo/Weather/volcanicAsh.jpg
+images/themes/Nixie/Numbers/0.jpg
+images/themes/Nixie/Numbers/1.jpg
+images/themes/Nixie/Numbers/2.jpg
+images/themes/Nixie/Numbers/3.jpg
+images/themes/Nixie/Numbers/4.jpg
+images/themes/Nixie/Numbers/5.jpg
+images/themes/Nixie/Numbers/6.jpg
+images/themes/Nixie/Numbers/7.jpg
+images/themes/Nixie/Numbers/8.jpg
+images/themes/Nixie/Numbers/9.jpg

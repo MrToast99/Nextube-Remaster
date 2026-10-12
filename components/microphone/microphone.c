@@ -8,8 +8,8 @@
  * CAPTURE — adc_continuous (I2S0 DMA, hardware-clocked):
  *   • The SAR is clocked by the I2S0 digital controller at ADC_HW_RATE
  *     (32 kHz — the ESP32 digital controller's minimum is 20 kHz) and DMA
- *     delivers complete frames; mic_task averages ×4 down to the 8 kHz
- *     analysis rate. Exact sample spacing, ~zero CPU per sample — a
+ *     delivers complete frames; mic_task low-passes and decimates ×2 down to the
+ *     16 kHz analysis rate (8 kHz of bandwidth). Exact sample spacing, ~zero CPU per sample — a
  *     software-timed esp_timer + adc_oneshot_read can't sustain uniform
  *     sampling on a loaded RTOS core (see the ADC_HW_RATE comment).
  *   • I2S0 is held for the life of the device once mic_hw_init() claims it,
@@ -39,8 +39,8 @@
 static const char *TAG = "mic";
 
 /* ── Sampling parameters ─────────────────────────────────────────────── */
-#define SAMPLE_RATE     8000
-#define FRAME_SIZE      128             /* samples per Goertzel frame (16 ms) */
+#define SAMPLE_RATE     16000
+#define FRAME_SIZE      256             /* samples per Goertzel frame (16 ms) */
 #define BAND_COUNT      MIC_BAND_COUNT   /* 24 — must equal MIC_BAND_COUNT in microphone.h */
 /* ── Hardware-clocked capture (adc_continuous → I2S0 DMA) ───────────────
  * A software-timed esp_timer + adc_oneshot_read can't hold uniform
@@ -59,18 +59,17 @@ static const char *TAG = "mic";
  * I2S0 is ours exclusively (see s_acq's declaration comment), so the
  * handle is claimed once at boot and held for the life of the device. */
 #define ADC_HW_RATE        32000
-#define DECIM              4                       /* 32 kHz → 8 kHz        */
+#define DECIM              2                       /* 32 kHz → 16 kHz       */
 #define RAW_FRAME_SAMPLES  (FRAME_SIZE * DECIM)    /* 512 raw per frame     */
 #define RAW_FRAME_BYTES    (RAW_FRAME_SAMPLES * SOC_ADC_DIGI_RESULT_BYTES)
 
 /* Per-frame filter constants at the native 62.5 fps frame rate:
- *   DECAY        peak-hold fall per frame (~1 s decay)
+ *   FALL_DECAY[] peak-hold fall per frame (user "Bar fall speed")
  *   PHASE1_*     fast noise-floor convergence: 250 frames ≈ 4 s
  *   NOISE_ALPHA  steady-state floor tracking, τ ≈ 8 s                     */
-#define DECAY           0.85f
 #define PHASE1_FRAMES   250
 #define PHASE1_ALPHA    0.02f
-#define DC_ALPHA        0.999f
+#define DC_ALPHA        0.9995f   /* ~125 ms at the 16 kHz analysis rate */
 
 /* Attack/release smoothing for s_disp_smooth[] (see the temporal-smoothing
  * block in mic_task).  This is the display/peak-hold path ONLY — the gate's
@@ -80,38 +79,27 @@ static const char *TAG = "mic";
  * ~16-24 ms) for snappier response; SMOOTH_RELEASE is slower (tau ~5-6
  * frames, ~90 ms) so it averages out noise-floor fluctuations on the way
  * down instead of tracking every wiggle. */
-#define SMOOTH_ATTACK   0.65f
-#define SMOOTH_RELEASE  0.18f
+/* The user's "Bar rise speed" / "Bar fall speed" settings (1-10, default 5) pick from these: the rise level sets the attack
+ * of the per-band smoothing; the fall level sets both its release and the peak-hold fall per frame. Level 5 = the
+ * original SMOOTH_ATTACK 0.65 / SMOOTH_RELEASE 0.18 / DECAY 0.85. */
+static const float RISE_ATTACK[10]  = { 0.08f, 0.14f, 0.25f, 0.42f, 0.65f, 0.78f, 0.88f, 0.94f, 0.98f, 1.00f };
+static const float FALL_RELEASE[10] = { 0.04f, 0.06f, 0.09f, 0.13f, 0.18f, 0.25f, 0.35f, 0.50f, 0.70f, 0.90f };
+static const float FALL_DECAY[10]   = { 0.97f, 0.95f, 0.93f, 0.89f, 0.85f, 0.80f, 0.74f, 0.66f, 0.55f, 0.40f };
 
 /* ── Sensitivity (compile-time) ──────────────────────────────────────── */
 #define MIC_GAIN        1.0f    /* LMV321 handles hardware gain */
 #define MIC_NOISE_FLOOR 1.0f   /* Goertzel normalisation floor for active frames */
 
 /* ── Frequency bands ─────────────────────────────────────────────────── */
-/* 24 log-spaced bands: 280 Hz → 3800 Hz (Nyquist at 8 kHz sample rate).
- * Ratio ≈ 1.12× per step — grouped 4 per tube for a richer spectrum display.
- * Avoids the 125–250 Hz range (SPI switching noise / mains hum on this hardware).
- *   Tube 0 (bass):     280  315  350  395 Hz
- *   Tube 1 (u.bass):   440  495  555  620 Hz
- *   Tube 2 (lo.mid):   695  780  870  975 Hz
- *   Tube 3 (mid):     1095 1225 1370 1535 Hz
- *   Tube 4 (presence):1720 1925 2160 2420 Hz
- *   Tube 5 (treble):  2710 3030 3395 3800 Hz */
-static const float BAND_FREQS[BAND_COUNT] = {
-    /* Tube 0 — low bass */
-     280.0f,  315.0f,  350.0f,  395.0f,
-    /* Tube 1 — upper bass */
-     440.0f,  495.0f,  555.0f,  620.0f,
-    /* Tube 2 — lower mid */
-     695.0f,  780.0f,  870.0f,  975.0f,
-    /* Tube 3 — midrange */
-    1095.0f, 1225.0f, 1370.0f, 1535.0f,
-    /* Tube 4 — presence */
-    1720.0f, 1925.0f, 2160.0f, 2420.0f,
-    /* Tube 5 — treble */
-    2710.0f, 3030.0f, 3395.0f, 3800.0f,
-};
-
+/* 24 log-spaced bands, grouped 4 per tube (tube 1 = lowest ... tube 6 = highest), running from 280 Hz up
+ * to a user-set top frequency (cfg->mic_top_hz, 1200-8000 Hz, default 8000). On this hardware the mic's
+ * response is weak above ~1.7 kHz, so the default packs the usable range across all six tubes instead of
+ * reserving the top two for 2-4 kHz. Avoids the 125-250 Hz range (SPI switching noise / mains hum).
+ * Rebuilt by mic_build_bands() whenever the setting changes. */
+#define BAND_LOWEST_HZ  280.0f
+static float    BAND_FREQS[BAND_COUNT];          /* band centres in the ACTIVE layout, Hz */
+static uint16_t s_built_top_hz = 0;
+static float    s_built_mask = -1.0f, s_built_rlo = -1.0f, s_built_rhi = -1.0f, s_built_tilt = 1e9f;
 /* ── Bin-summed band energy (continuous spectral coverage) ──────────────
  * A single Goertzel per band has SPECTRAL CRACKS: with 128 samples at 8 kHz
  * each bin only hears ±125 Hz (Hann main lobe), but the log-spaced band
@@ -127,7 +115,7 @@ static const float BAND_FREQS[BAND_COUNT] = {
  * cost of the old 24 — still only a few percent of one core. */
 #define SPEC_BIN_HZ   ((float)SAMPLE_RATE / (float)FRAME_SIZE)   /* 62.5 Hz */
 #define SPEC_BIN_LO   4                       /* 250 Hz                    */
-#define SPEC_BIN_HI   63                      /* 3937 Hz (< 4 kHz Nyquist) */
+#define SPEC_BIN_HI   127                     /* 7937 Hz (< 8 kHz Nyquist) */
 #define SPEC_NBINS    (SPEC_BIN_HI - SPEC_BIN_LO + 1)
 static int8_t s_bin_band[SPEC_NBINS];         /* bin → band index, -1 = skip */
 
@@ -198,6 +186,10 @@ static float s_dbg_power[BAND_COUNT];
 /* ── Shared output ───────────────────────────────────────────────────── */
 static float        s_bands[BAND_COUNT];
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_hold_capture = false;   /* see mic_hold_capture() */
+/* Last three frames of decimated audio for the oscilloscope view. PSRAM, allocated by the task: 1.5 KB of static internal
+ * RAM is too much on this heap. Not locked: a read racing the 16 ms update at worst draws one slightly torn frame. */
+static int16_t *s_scope;
 /* Edge-triggered beat-onset flag — set by the detector below, consumed (and
  * cleared) by mic_get_beat_pulse(). See mic_get_beat_pulse()'s comment. */
 static volatile bool s_beat_pulse = false;
@@ -214,16 +206,18 @@ static volatile bool s_beat_pulse = false;
  *
  * Applied AFTER noise-floor subtraction so the adaptive floor and users'
  * saved calibration baselines (both captured in the unweighted domain)
- * remain valid — the tilt shapes only the displayed power. */
+ * remain valid — the tilt shapes only the displayed power, NOT the silence gate or the
+ * Wi-Fi spike guard: weighting those too let treble noise (x28 at 8 kHz for tilt 1) open the gate
+ * on its own (idle: 63 % of samples lit at tilt 1, against 8 % at tilt 0). */
 /* ── Display gamma (perceptual bar scaling) ─────────────────────────────
  * Published band values are (peak/max)^SPEC_GAMMA instead of the linear
  * power ratio.  Music's loudest band (bass) carries 10–20× the power of
  * the mids; linearly mapped, that pins one tube at full scale and leaves
- * the rest at one or two segments.  γ = 0.45 ≈ square-root-ish loudness
- * compression: a band at 10 % of max displays at ~35 % height — bass still
- * clearly leads, but mids and treble live.  1.0 = linear (old behaviour);
- * lower = flatter/more compressed. */
-#define SPEC_GAMMA  0.45f
+ * the rest at one or two segments.  γ = 0.6: a band at 10 % of max displays at
+ * ~25 % height — bass still clearly leads and its hits reach full height, while
+ * mids and treble live (0.45 lifted the quiet bands more but flattened the
+ * spectrum and softened beats).  1.0 = linear; lower = flatter/more compressed. */
+#define SPEC_GAMMA  0.6f
 
 /* ── Pre-gamma squelch (kills near-zero-ratio noise flicker) ────────────
  * SPEC_GAMMA's whole job is to boost quiet-but-real bands into visibility,
@@ -235,7 +229,19 @@ static volatile bool s_beat_pulse = false;
  * remainder back to [0,1] before applying gamma, so the compression curve
  * is unchanged for anything above the squelch line and there's no visible
  * jump at the boundary (ratio == squelch maps continuously to 0). */
-#define SPEC_SQUELCH_RATIO  0.04f
+#define SPEC_SQUELCH_RATIO  0.01f
+
+/* Per-band scaling. The mic hears a typical track far stronger in the low bands than higher up (measured:
+ * band 0 at power ~300 vs ~4 in the mids), so scaling every bar to the loudest band left tubes 2-6 below the
+ * squelch and dark. Each band is now scaled to REF_GAIN x its own recent average level (fast up, slow down:
+ * a peak envelope was tried first, but rare loud peaks inflated it and kept the mids small), blended with the
+ * loudest band's by SPEC_EQ (1 = every band against its own level, 0 = the old all-against-the-loudest), and
+ * never to less than REF_SNR times the band's own noise threshold so idle noise stays small. */
+#define SPEC_EQ     0.95f
+#define REF_UP      0.01f
+#define REF_DOWN    0.002f
+#define REF_GAIN    2.0f
+#define REF_SNR     4.0f
 
 /* With BIN-SUMMED bands (see s_bin_band) the tilt is now OFF by default:
  * log-spaced bands sum more bins as frequency rises (bandwidth ∝ f), which
@@ -254,13 +260,68 @@ static float s_band_weight[BAND_COUNT];
  * Adapts to the quiet-period baseline within ~8 s of startup. */
 static float s_noise_floor[BAND_COUNT];   /* zero-initialised; adapts automatically */
 #define NOISE_ALPHA  0.002f               /* time constant ≈ 500 frames × 16 ms ≈ 8 s */
+/* The floor is a MEAN, but a quiet room's band energy is bursty (measured: median below the mean, 99th
+ * percentile 5x the mean in the low bands and 20x+ higher up), so bursts ride well above it and, being
+ * normalised to the loudest band, light the bars. Each band therefore needs to exceed floor x (1 + this)
+ * before it counts, which scales with how noisy that band is (the low bands are the noisiest). */
+#define NOISE_DEADZONE  1.0f
+/* The bars use a smaller dead zone than the gate: in a typical room the mids and treble of music sit barely above the
+ * noise, so a 2x-floor cut-off left tubes 3-6 mostly dark. The gate keeps NOISE_DEADZONE, so silence still blanks them. */
+#define DISP_DEADZONE   0.25f
+
+/* Broadband bursts: a frame in which at least BURST_BARS of the bars above the bass jump to (about) their maximum at once is
+ * noise, not music (the silence gate hides them in a quiet room; with music on they flashed tubes 1-4 together). Such a frame
+ * is dropped, but never more than BURST_MAX_RUN in a row, so genuinely loud sound still gets through. BURST_LEVEL is the display height (fraction of full)
+ * that counts as "at max"; the matching smoothed-power threshold follows the gamma setting. */
+#define BURST_BARS      10
+#define BURST_FIRST_BAND 4
+#define BURST_LEVEL     0.85f
+#define BURST_MAX_RUN   2
+
 
 /* Phase 1 frame counter — promoted to file scope so mic_reset_calibration()
  * and mic_apply_calibration() can manipulate it without touching mic_task. */
 static int s_noise_cal = 0;   /* counts frames during Phase 1; PHASE1_FRAMES = steady state */
 
+/* Quiet reference per band: the floor as it stood when Phase 1 ended, or as captured/applied by a baseline.
+ * The adaptive floor may drift up to FLOOR_CAP_RATIO x this and follows a quieter room down, but sustained
+ * LOUD sound can no longer drag it up to the music's own level (measured with a bass-heavy track playing:
+ * the floor rose from 8-9 to 189/74/49 on the lowest bands, so the bars subtracted the music itself and the
+ * dead zone, which scales with the floor, swallowed every beat). A permanently noisier room needs a
+ * new baseline capture. */
+static float s_noise_ref[BAND_COUNT];
+#define FLOOR_CAP_RATIO  2.0f
+#define FLOOR_REF_MIN    0.02f
+
 /* ── Manual baseline calibration state ──────────────────────────────── */
 static volatile bool     s_cal_requested = false;  /* set by mic_calibrate() */
+static volatile bool     s_test_capture  = false;  /* set by mic_set_test_capture() */
+
+/* ── Accent-LED PWM ripple: skipped, not compensated ───────────────────────
+ * The WS2812 chips dim by internal PWM (~1.27 kHz), and its ripple couples into the mic in a few NARROW
+ * frequency ranges whatever the colour or brightness (measured with tools/led_noise_sweep.py: 99 % of it
+ * in 1.19-1.31 kHz, with weaker lines at 2.3-3.2 kHz and 3.6-4 kHz). How much each colour adds is not
+ * predictable (the three channels' ripple adds with phase offsets: white came out 2x below the sum of its
+ * channels, cyan at 50 % 5x above it), and predicting/subtracting it cost the bars their snap. So those
+ * ranges are simply not analysed: a band whose bins all fall inside one is masked and shown as the
+ * average of its neighbours, so the display stays contiguous and the LEDs cannot reach it. */
+#define RIPPLE0_LO  1170.0f   /* the fundamental; editable live from the diagnostics panel */
+#define RIPPLE0_HI  1330.0f
+static float LED_RIPPLE_HZ[][2] = { { RIPPLE0_LO, RIPPLE0_HI }, { 2290.0f, 3210.0f }, { 3640.0f, 3880.0f } };
+#define LED_RIPPLE_RANGES  ((int)(sizeof(LED_RIPPLE_HZ) / sizeof(LED_RIPPLE_HZ[0])))
+static bool  s_mask_on = true;
+static bool s_band_masked[BAND_COUNT];
+
+void mic_get_band_freqs(float out[MIC_BAND_COUNT])
+{
+    for (int b = 0; b < BAND_COUNT; b++) out[b] = BAND_FREQS[b];
+}
+
+void mic_get_band_masked(bool out[MIC_BAND_COUNT])
+{
+    for (int b = 0; b < BAND_COUNT; b++) out[b] = s_band_masked[b];
+}
+static volatile uint32_t s_test_until_ms = 0;      /* esp_timer ms deadline for the above */
 static int               s_cal_frame_cnt = 0;      /* frames accumulated so far */
 static float             s_cal_accum[BAND_COUNT];  /* raw Goertzel accumulator   */
 static SemaphoreHandle_t s_cal_done      = NULL;   /* binary; given when done    */
@@ -364,17 +425,200 @@ static void reconfigure_channel(uint8_t cfg_ch)
     }
 }
 
+/* ── Live tuning (hidden diagnostics panel) ─────────────────────────────────
+ * The #defines in this file are the defaults; this table is the working copy, changed at runtime and read
+ * by mic_task once per frame. Not persisted. */
+#define SPIKE_LO     200.0f   /* Wi-Fi spike guard: previous smoothed total below this ...        */
+#define SPIKE_HI     400.0f   /* ... and this one above this = a suspect jump                      */
+#define SPIKE_RATIO  0.25f    /* ... confirmed a spike if next frame's power is below this x it    */
+static const mic_tune_desc_t s_tune_desc[MT_COUNT] = {
+    [MT_EQ]        = { "eq",        SPEC_EQ,         0.0f,    1.0f   },
+    [MT_GAIN]      = { "gain",      REF_GAIN,        0.25f,   20.0f  },
+    [MT_UP]        = { "up",        REF_UP,          0.0005f, 0.2f   },
+    [MT_DOWN]      = { "down",      REF_DOWN,        0.0001f, 0.05f  },
+    [MT_SNR]       = { "snr",       REF_SNR,         0.0f,    50.0f  },
+    [MT_DEADZONE]  = { "deadzone",  NOISE_DEADZONE,  0.0f,    10.0f  },
+    [MT_SQUELCH]   = { "squelch",   SPEC_SQUELCH_RATIO, 0.0f, 0.5f   },
+    [MT_GMODE]     = { "gmode",     3.0f,            0.0f,    3.0f   },   /* 0 sum of power, 1 per-band SNR units, 2 = 1 + 2-of-3, 3 = units that persist */
+    [MT_GSNR]      = { "gsnr",      2.0f,            0.5f,    100.0f },
+    [MT_GCAP]      = { "gcap",      8.0f,            1.0f,    100.0f },
+    [MT_GTHR]      = { "gthr",      0.5f,            0.05f,   20.0f  },
+    [MT_GUMIN]     = { "gumin",     1.5f,            0.0f,    20.0f  },   /* mode 3: a band counts once above this many units ... */
+    [MT_GRUN]      = { "grun",      5.0f,            1.0f,    60.0f  },   /* ... for this many frames in a row */
+    [MT_GHK]       = { "ghk",       0.15f,           0.0f,    2.0f   },   /* mode 3 hold = ghk x frames open so far ... */
+    [MT_GHM]       = { "ghm",       16.0f,           0.0f,    120.0f },   /* ... capped at this many frames (16 = 256 ms) */
+    [MT_TILT]      = { "tilt",      MIC_TILT_EXP,    -0.5f,   2.0f   },
+    [MT_NALPHA]    = { "nalpha",    NOISE_ALPHA,     0.0002f, 0.05f  },
+    [MT_SPIKE]     = { "spike",     1.0f,            0.0f,    1.0f   },
+    [MT_SPIKE_LO]  = { "spike_lo",  SPIKE_LO,        20.0f,   2000.0f },
+    [MT_SPIKE_HI]  = { "spike_hi",  SPIKE_HI,        50.0f,   5000.0f },
+    [MT_SPIKE_RATIO] = { "spike_ratio", SPIKE_RATIO, 0.02f,   1.0f   },
+    [MT_MASK]      = { "mask",      1.0f,            0.0f,    1.0f   },
+    [MT_RIP_LO]    = { "rip_lo",    RIPPLE0_LO,      250.0f,  7900.0f },
+    [MT_RIP_HI]    = { "rip_hi",    RIPPLE0_HI,      250.0f,  8000.0f },
+    [MT_DZDISP]    = { "dzdisp",    DISP_DEADZONE,   0.0f,    10.0f  },
+    [MT_GAMMA]     = { "gamma",     SPEC_GAMMA,      0.2f,    1.0f   },
+    [MT_BURSTN]    = { "burstn",    (float)BURST_BARS, 0.0f,  24.0f  },
+};
+static float s_tune[MT_COUNT];
+static bool  s_tune_init = false;
+static uint32_t s_st_frames, s_st_fail, s_st_gated, s_st_holds;
+static float    s_st_gate_val, s_st_gate_thr;
+static uint32_t s_st_eval, s_st_open[9];
+
+/* Per-frame raw band-energy trace (see microphone.h). */
+static uint16_t        *s_tr_buf = NULL;
+static int              s_tr_cap = 0;
+static volatile int     s_tr_n = 0;
+static volatile bool    s_tr_active = false;
+static float            s_tr_floor[BAND_COUNT];
+
+
+static void tune_init_once(void)
+{
+    if (s_tune_init) return;
+    for (int i = 0; i < MT_COUNT; i++) s_tune[i] = s_tune_desc[i].def;
+    s_tune_init = true;
+}
+const mic_tune_desc_t *mic_tune_desc(void) { return s_tune_desc; }
+void mic_tune_get(float out[MT_COUNT]) { tune_init_once(); for (int i = 0; i < MT_COUNT; i++) out[i] = s_tune[i]; }
+void mic_tune_set(const float in[MT_COUNT])
+{
+    tune_init_once();
+    for (int i = 0; i < MT_COUNT; i++) {
+        float v = in[i];
+        if (v < s_tune_desc[i].lo) v = s_tune_desc[i].lo;
+        if (v > s_tune_desc[i].hi) v = s_tune_desc[i].hi;
+        s_tune[i] = v;
+    }
+}
+void mic_tune_reset(void) { tune_init_once(); for (int i = 0; i < MT_COUNT; i++) s_tune[i] = s_tune_desc[i].def; }
+void mic_trace_free(void)
+{
+    s_tr_active = false;
+    vTaskDelay(pdMS_TO_TICKS(40));   /* let mic_task finish a frame it may be writing */
+    uint16_t *b = s_tr_buf;
+    s_tr_buf = NULL; s_tr_cap = 0; s_tr_n = 0;
+    if (b) heap_caps_free(b);
+}
+
+bool mic_trace_start(int frames)
+{
+    if (frames < 1) return false;
+    if (frames > 1500) frames = 1500;
+    mic_trace_free();
+    uint16_t *b = heap_caps_malloc((size_t)frames * BAND_COUNT * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!b) return false;
+    s_tr_buf = b; s_tr_cap = frames; s_tr_n = 0;
+    s_tr_active = true;
+    return true;
+}
+
+void mic_trace_info(int *n, int *cap, bool *active)
+{
+    if (n) *n = s_tr_n;
+    if (cap) *cap = s_tr_cap;
+    if (active) *active = s_tr_active;
+}
+
+bool mic_trace_read(int frame, uint16_t out[MIC_BAND_COUNT])
+{
+    if (!s_tr_buf || s_tr_active || frame < 0 || frame >= s_tr_n) return false;
+    memcpy(out, s_tr_buf + (size_t)frame * BAND_COUNT, BAND_COUNT * sizeof(uint16_t));
+    return true;
+}
+
+void mic_trace_floor(float out[MIC_BAND_COUNT])
+{
+    for (int b = 0; b < BAND_COUNT; b++) out[b] = s_tr_floor[b];
+}
+
+void mic_get_stats(mic_stats_t *st)
+{
+    st->frames = s_st_frames; st->read_fail = s_st_fail; st->gated = s_st_gated;
+    st->spike_holds = s_st_holds; st->adc_last = s_last_raw;
+    st->gate_val = s_st_gate_val; st->gate_thr = s_st_gate_thr;
+    st->gate_eval = s_st_eval;
+    for (int i = 0; i < 9; i++) st->gate_open[i] = s_st_open[i];
+}
+
+/* Band edges: geometric midpoints between centres; the bottom edge is wide enough to include the 250 Hz
+ * bin (with a tighter /1.06 edge band 0 owned zero bins and bar 1 could never light). */
+static void band_edges(const float *centres, float edge[BAND_COUNT + 1])
+{
+    edge[0] = centres[0] / 1.15f;
+    for (int b = 1; b < BAND_COUNT; b++)
+        edge[b] = sqrtf(centres[b - 1] * centres[b]);
+    edge[BAND_COUNT] = centres[BAND_COUNT - 1] * 1.06f;
+}
+
+/* (Re)build everything that depends on the band layout: centres, tilt weights, the bin->band map and
+ * which bands sit inside an accent-LED ripple range (see LED_RIPPLE_HZ). */
+static bool in_ripple_range(float hz, float margin)
+{
+    if (!s_mask_on) return false;
+    for (int r = 0; r < LED_RIPPLE_RANGES; r++)
+        if (hz >= LED_RIPPLE_HZ[r][0] - margin && hz <= LED_RIPPLE_HZ[r][1] + margin) return true;
+    return false;
+}
+
+static void mic_build_bands(uint16_t want_hz)
+{
+    s_built_top_hz = want_hz;   /* what was asked for, so an out-of-range value can't retrigger a rebuild */
+    float tv[MT_COUNT];
+    mic_tune_get(tv);
+    s_mask_on = tv[MT_MASK] >= 0.5f;
+    LED_RIPPLE_HZ[0][0] = tv[MT_RIP_LO];
+    LED_RIPPLE_HZ[0][1] = tv[MT_RIP_HI] > tv[MT_RIP_LO] ? tv[MT_RIP_HI] : tv[MT_RIP_LO];
+    s_built_mask = tv[MT_MASK]; s_built_rlo = tv[MT_RIP_LO]; s_built_rhi = tv[MT_RIP_HI]; s_built_tilt = tv[MT_TILT];
+    const uint16_t top_hz = want_hz < 1200 ? 1200 : (want_hz > 8000 ? 8000 : want_hz);
+    const float ratio = (float)top_hz / BAND_LOWEST_HZ;
+    for (int b = 0; b < BAND_COUNT; b++) {
+        BAND_FREQS[b]    = BAND_LOWEST_HZ * powf(ratio, (float)b / (float)(BAND_COUNT - 1));
+        s_band_weight[b] = powf(BAND_FREQS[b] / BAND_FREQS[0], tv[MT_TILT]);
+    }
+
+    float edge[BAND_COUNT + 1];
+    band_edges(BAND_FREQS, edge);
+
+    int n_all[BAND_COUNT] = {0}, n_ok[BAND_COUNT] = {0};
+    for (int k = 0; k < SPEC_NBINS; k++) {
+        const float f = (float)(SPEC_BIN_LO + k) * SPEC_BIN_HZ;
+        s_bin_band[k] = -1;
+        for (int b = 0; b < BAND_COUNT; b++)
+            if (f >= edge[b] && f < edge[b + 1]) {
+                n_all[b]++;
+                if (!in_ripple_range(f, 0.0f)) { s_bin_band[k] = (int8_t)b; n_ok[b]++; }
+                break;
+            }
+    }
+    int centre_only = 0, masked = 0;
+    for (int b = 0; b < BAND_COUNT; b++) {
+        s_band_center_only[b] = (n_all[b] == 0);   /* narrower than one bin: one Goertzel at the centre */
+        centre_only += s_band_center_only[b];
+        /* A centre Goertzel leaks ~1.5 bins either side, so it counts as inside a range from that close. */
+        s_band_masked[b] = s_band_center_only[b] ? in_ripple_range(BAND_FREQS[b], 1.5f * SPEC_BIN_HZ)
+                                                 : (n_ok[b] == 0);
+        masked += s_band_masked[b];
+    }
+
+    ESP_LOGI(TAG, "bands: 280..%u Hz, %d of 24 narrower than one 62.5 Hz bin (centre-only), %d masked (LED ripple)",
+             (unsigned)top_hz, centre_only, masked);
+}
+
 /* ── Mic sampling / analysis task ────────────────────────────────────── */
 static void mic_task(void *arg)
 {
     /* Static buffers — mic_task is single-instance and these would otherwise
      * cost ~3 KB of task stack (rawbuf 1 KB + samples/windowed 1 KB).      */
     static uint8_t rawbuf  [RAW_FRAME_BYTES];   /* 512 × 2 B DMA results    */
-    static float   samples [FRAME_SIZE];        /* DC-removed, unwindowed   */
-    static float   windowed[FRAME_SIZE];        /* Hann-windowed (Goertzel) */
+    static float   samples [FRAME_SIZE];        /* DC-removed; Hann-windowed in place before the Goertzel */
     float   dc   = 2048.0f;
     float   peak[BAND_COUNT];
+    float   ref [BAND_COUNT];   /* per-band running average level (see SPEC_EQ) */
     memset(peak, 0, sizeof(peak));
+    memset(ref,  0, sizeof(ref));
+    bool    smooth_reset = false;   /* set when the band layout changes */
 
     const float norm = (float)(FRAME_SIZE * FRAME_SIZE) / 4.0f;
 
@@ -387,7 +631,11 @@ static void mic_task(void *arg)
         bool    spectrum_en;
         app_mode_t cur_mode;
         float   silence_gate;
+        uint16_t top_hz;
+        uint8_t rise_lv, fall_lv;
+        float   tv[MT_COUNT];   /* live tuning snapshot for this pass */
 
+        mic_tune_get(tv);
         config_lock();
         const nextube_config_t *cfg = config_get();
         want_ch      = cfg->mic_adc_channel < 8 ? cfg->mic_adc_channel : 7;
@@ -395,16 +643,43 @@ static void mic_task(void *arg)
         spectrum_en  = (cfg->enabled_modes & (1u << APP_MODE_SPECTRUM)) != 0;
         cur_mode     = cfg->current_mode;
         silence_gate = cfg->mic_silence_gate;
+        top_hz       = cfg->mic_top_hz;
+        rise_lv      = cfg->spectrum_bar_rise;
+        fall_lv      = cfg->spectrum_bar_fall;
         config_unlock();
+        const float bar_attack  = RISE_ATTACK [(rise_lv < 1 ? 1 : (rise_lv > 10 ? 10 : rise_lv)) - 1];
+        const float bar_release = FALL_RELEASE[(fall_lv < 1 ? 1 : (fall_lv > 10 ? 10 : fall_lv)) - 1];
+        const float bar_decay   = FALL_DECAY  [(fall_lv < 1 ? 1 : (fall_lv > 10 ? 10 : fall_lv)) - 1];
 
         /* ── Capture gate ───────────────────────────────────────────────────
          * Capture only when the mic is enabled AND (Spectrum is on screen OR
          * a calibration is in progress) AND audio playback is not holding the
          * I2S0 peripheral.  Calibration (s_cal_requested) bypasses the mode
          * test so a quiet-room baseline can be captured from any mode. */
+        /* Range setting changed: new band layout, so the learned noise floor no longer lines up with it. */
+        if (tv[MT_TILT] != s_built_tilt) {   /* tilt only changes the band weights */
+            for (int b = 0; b < BAND_COUNT; b++)
+                s_band_weight[b] = powf(BAND_FREQS[b] / BAND_FREQS[0], tv[MT_TILT]);
+            s_built_tilt = tv[MT_TILT];
+        }
+        if (top_hz != s_built_top_hz || tv[MT_MASK] != s_built_mask ||
+            tv[MT_RIP_LO] != s_built_rlo || tv[MT_RIP_HI] != s_built_rhi) {
+            mic_build_bands(top_hz);
+            taskENTER_CRITICAL(&s_mux);
+            memset(s_noise_floor, 0, sizeof(s_noise_floor));
+            s_noise_cal = 0;
+            taskEXIT_CRITICAL(&s_mux);
+            memset(peak, 0, sizeof(peak));
+            memset(ref,  0, sizeof(ref));
+            smooth_reset = true;
+        }
+        if (s_test_capture &&
+            (int32_t)((uint32_t)(esp_timer_get_time() / 1000) - s_test_until_ms) >= 0)
+            s_test_capture = false;   /* test window over */
         bool want_capture =
             mic_enabled &&
-            ((spectrum_en && cur_mode == APP_MODE_SPECTRUM) || s_cal_requested);
+            !s_hold_capture &&
+            ((spectrum_en && cur_mode == APP_MODE_SPECTRUM) || s_cal_requested || s_test_capture);
 
         if (!want_capture) {
             /* Stop converting but KEEP the handle: re-running the ~10 KB
@@ -418,6 +693,7 @@ static void mic_task(void *arg)
              * Spectrum mode starts from a clean state instead of displaying
              * against a stale peak from potentially minutes earlier. */
             memset(peak, 0, sizeof(peak));
+            memset(ref,  0, sizeof(ref));
             vTaskDelay(pdMS_TO_TICKS(100));   /* poll the gates at 10 Hz */
             continue;
         }
@@ -438,8 +714,10 @@ static void mic_task(void *arg)
         uint32_t got = 0;
         if (adc_continuous_read(s_acq, rawbuf, RAW_FRAME_BYTES, &got,
                                 100) != ESP_OK || got < RAW_FRAME_BYTES) {
+            s_st_fail++;
             continue;
         }
+        s_st_frames++;
 
         adc_digi_output_data_t *d = (adc_digi_output_data_t *)rawbuf;
 
@@ -450,17 +728,30 @@ static void mic_task(void *arg)
          * uniform 31.25 µs).  Simulating the full chain with that exact skew
          * changed band energies by <1 % — harmless, no compensation needed. */
 
-        /* ── Decimate ×4 (average) + DC removal + float conversion ──
-         * Averaging four 32 kHz samples to one 8 kHz sample is a crude
-         * anti-alias low-pass and gains ~1 bit of effective resolution. */
-        for (int i = 0; i < FRAME_SIZE; i++) {
-            int acc = 0;
-            for (int j = 0; j < DECIM; j++)
-                acc += (int)d[i * DECIM + j].type1.data;
-            float raw = (float)acc * (1.0f / (float)DECIM);
-            s_last_raw  = (int)raw;
-            dc          = DC_ALPHA * dc + (1.0f - DC_ALPHA) * raw;
-            samples[i]  = raw - dc;
+        /* ── Decimate ×2 (32 → 16 kHz) with a 4-tap [1 3 3 1]/8 low-pass + DC removal ──
+         * The kernel's gain is cos^3(pi f / 32 kHz): -0.5 dB at 2 kHz, -2 dB at 4, -4.8 at 6, -9 at 8 kHz
+         * (the mic is already weak up there), while 9 / 10 / 12 kHz fold back to 7 / 6 / 4 kHz attenuated
+         * by 12 / 15 / 25 dB. Two samples of history carry over from the previous frame. */
+        static int s_hist_a = 2048, s_hist_b = 2048;
+        {
+            int a = s_hist_a, b = s_hist_b;
+            for (int i = 0; i < FRAME_SIZE; i++) {
+                const int c = (int)d[2 * i].type1.data, e = (int)d[2 * i + 1].type1.data;
+                const float raw = (float)(a + 3 * b + 3 * c + e) * 0.125f;
+                a = c; b = e;
+                s_last_raw  = (int)raw;
+                dc          = DC_ALPHA * dc + (1.0f - DC_ALPHA) * raw;
+                samples[i]  = raw - dc;
+            }
+            s_hist_a = a; s_hist_b = b;
+        }
+        if (!s_scope) s_scope = heap_caps_calloc(MIC_SCOPE_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_scope) {
+            memmove(s_scope, s_scope + FRAME_SIZE, (MIC_SCOPE_SAMPLES - FRAME_SIZE) * sizeof(int16_t));
+            for (int i = 0; i < FRAME_SIZE; i++) {
+                const float v = samples[i];
+                s_scope[MIC_SCOPE_SAMPLES - FRAME_SIZE + i] = (int16_t)(v > 32767.0f ? 32767 : (v < -32768.0f ? -32768 : (int)v));
+            }
         }
 
         /* ── Raw + decimated frame export (debug) ──
@@ -481,7 +772,7 @@ static void mic_task(void *arg)
          * Suppresses rectangular-window leakage (−13 dB sidelobes) that lets
          * one loud off-band tone splatter across every band. */
         for (int i = 0; i < FRAME_SIZE; i++)
-            windowed[i] = samples[i] * s_hann[i];
+            samples[i] *= s_hann[i];
 
         /* ── Goertzel energy + adaptive noise floor subtraction ── */
         /* Two-phase noise floor estimator:
@@ -507,17 +798,22 @@ static void mic_task(void *arg)
         for (int k = 0; k < SPEC_NBINS; k++) {
             int b = s_bin_band[k];
             if (b >= 0)
-                bandE[b] += goertzel(windowed, FRAME_SIZE,
+                bandE[b] += goertzel(samples, FRAME_SIZE,
                                      (float)(SPEC_BIN_LO + k) * SPEC_BIN_HZ);
         }
         for (int b = 0; b < BAND_COUNT; b++)
-            if (s_band_center_only[b])
-                bandE[b] = goertzel(windowed, FRAME_SIZE, BAND_FREQS[b]);
+            if (s_band_center_only[b] && !s_band_masked[b])
+                bandE[b] = goertzel(samples, FRAME_SIZE, BAND_FREQS[b]);
 
-        float max_power = MIC_NOISE_FLOOR;
-        float power[BAND_COUNT];
+        float power[BAND_COUNT], pdisp[BAND_COUNT];   /* pdisp: same with the bars' own dead zone */
+        const bool tracing = s_tr_active && s_tr_buf && s_tr_n < s_tr_cap;
+        if (tracing && s_tr_n == 0) memcpy(s_tr_floor, s_noise_floor, sizeof(s_tr_floor));
         for (int b = 0; b < BAND_COUNT; b++) {
-            float raw = bandE[b] / norm * MIC_GAIN;
+            const float raw = bandE[b] / norm * MIC_GAIN;   /* 0 for a masked band */
+            if (tracing) {
+                const float q = sqrtf(raw) * 100.0f + 0.5f;
+                s_tr_buf[(size_t)s_tr_n * BAND_COUNT + b] = (uint16_t)(q > 65535.0f ? 65535.0f : q);
+            }
 
             /* Accumulate raw (pre-floor) energy for manual baseline capture.
              * Critical section guards against a concurrent mic_calibrate()
@@ -534,12 +830,24 @@ static void mic_task(void *arg)
                 s_noise_floor[b] += PHASE1_ALPHA * (raw - s_noise_floor[b]);
             } else if (raw < s_noise_floor[b] * 4.0f) {
                 /* Phase 2: slow guarded tracking */
-                s_noise_floor[b] += NOISE_ALPHA * (raw - s_noise_floor[b]);
+                s_noise_floor[b] += tv[MT_NALPHA] * (raw - s_noise_floor[b]);
             }
-            power[b] = raw - s_noise_floor[b];
+            if (s_noise_cal >= PHASE1_FRAMES) {
+                const float cap = s_noise_ref[b] * FLOOR_CAP_RATIO;
+                if (s_noise_floor[b] > cap) s_noise_floor[b] = cap;
+                if (s_noise_floor[b] < s_noise_ref[b]) s_noise_ref[b] = s_noise_floor[b] > FLOOR_REF_MIN ? s_noise_floor[b] : FLOOR_REF_MIN;
+            }
+            power[b] = raw - s_noise_floor[b] * (1.0f + tv[MT_DEADZONE]);
+            pdisp[b] = raw - s_noise_floor[b] * (1.0f + tv[MT_DZDISP]);
+            if (pdisp[b] < 0.0f) pdisp[b] = 0.0f;
             if (power[b] < 0.0f) power[b] = 0.0f;
-            power[b] *= s_band_weight[b];   /* spectral tilt — see definition */
         }
+        if (tracing) {
+            s_tr_n++;
+            if (s_tr_n >= s_tr_cap) s_tr_active = false;
+        }
+        if (s_noise_cal == PHASE1_FRAMES - 1)
+            memcpy(s_noise_ref, s_noise_floor, sizeof(s_noise_ref));   /* Phase 1 just ended */
         if (s_noise_cal < PHASE1_FRAMES) s_noise_cal++;
 
         /* ── Temporal smoothing — TWO separate EMAs from here on ──
@@ -552,15 +860,23 @@ static void mic_task(void *arg)
          * attack here would make real drum hits trip the same rejection.
          *
          * s_disp_smooth: feeds the peak-hold / displayed bars only (below).
-         * Asymmetric — fast attack, slow release (see SMOOTH_ATTACK/RELEASE)
+         * Asymmetric — fast attack, slow release (see RISE_ATTACK / FALL_RELEASE)
          * — so transients register almost immediately while floor-noise
          * jitter on the way down gets averaged out instead of flickering. */
         static float s_gate_smooth[BAND_COUNT];
         static float s_disp_smooth[BAND_COUNT];
+        static float s_prev_disp[BAND_COUNT];   /* s_disp_smooth before this frame, to undo a burst frame */
+        if (smooth_reset) {
+            memset(s_gate_smooth, 0, sizeof(s_gate_smooth));
+            memset(s_disp_smooth, 0, sizeof(s_disp_smooth));
+            smooth_reset = false;
+        }
+        memcpy(s_prev_disp, s_disp_smooth, sizeof(s_prev_disp));
         for (int b = 0; b < BAND_COUNT; b++) {
             s_gate_smooth[b] += 0.35f * (power[b] - s_gate_smooth[b]);
-            float a = (power[b] > s_disp_smooth[b]) ? SMOOTH_ATTACK : SMOOTH_RELEASE;
-            s_disp_smooth[b] += a * (power[b] - s_disp_smooth[b]);
+            const float pw = pdisp[b] * s_band_weight[b];   /* spectral tilt: display only */
+            float a = (pw > s_disp_smooth[b]) ? bar_attack : bar_release;
+            s_disp_smooth[b] += a * (pw - s_disp_smooth[b]);
         }
 
         /* ── SPECTRAL silence gate (runtime tuneable via the noise-floor
@@ -582,23 +898,111 @@ static void mic_task(void *arg)
          * 400-3800 total_power). Detection: previous frame moderate-or-lower
          * (<200) AND current frame jumps to >400 — thresholds calibrated
          * from field recordings (max legitimate peak ~190, min spike ~533).
-         * Runs on total_power/s_gate_smooth (slow α=0.35 EMA, so real audio
-         * can't make that jump in one frame), not the fast-attack
-         * s_disp_smooth. On trigger, resets both smoothed arrays so the
-         * spike doesn't contaminate future EMA state; the silence gate
-         * below then suppresses output. */
-        static float s_prev_total = 0.0f;
-        if (s_prev_total < 200.0f && total_power > 400.0f) {
-            for (int b = 0; b < BAND_COUNT; b++) {
-                s_gate_smooth[b] = 0.0f;
-                s_disp_smooth[b] = 0.0f;
+         * Runs on total_power/s_gate_smooth (slow α=0.35 EMA), not the
+         * fast-attack s_disp_smooth.
+         *
+         * A jump like that is also what a loud, close drum hit looks like, and
+         * discarding it on sight dropped every such beat. So the jump frame is
+         * only HELD (outputs unchanged for 16 ms) and judged on the next frame:
+         * an RF burst has vanished by then (frame power < 25 % of the jump
+         * frame's), a drum hit is still ringing. A confirmed spike resets both
+         * smoothed arrays so it doesn't contaminate future EMA state; the
+         * silence gate below then suppresses output. */
+        static float s_prev_total  = 0.0f;
+        static bool  s_spike_pend  = false;
+        static float s_spike_psum  = 0.0f;
+        float        frame_power   = 0.0f;
+        for (int b = 0; b < BAND_COUNT; b++) frame_power += power[b];
+        if (s_spike_pend) {
+            s_spike_pend = false;
+            if (frame_power < tv[MT_SPIKE_RATIO] * s_spike_psum) {
+                for (int b = 0; b < BAND_COUNT; b++) {
+                    s_gate_smooth[b] = 0.0f;
+                    s_disp_smooth[b] = 0.0f;
+                }
+                total_power = 0.0f;
             }
-            total_power = 0.0f;
+        } else if (tv[MT_SPIKE] >= 0.5f && s_prev_total < tv[MT_SPIKE_LO] && total_power > tv[MT_SPIKE_HI]) {
+            s_st_holds++;
+            s_spike_pend = true;
+            s_spike_psum = frame_power;
+            s_prev_total = total_power;
+            continue;   /* hold the previous output for this one frame */
         }
         s_prev_total = total_power;
 
-        if (silence_gate > 0.0f && total_power < silence_gate && !s_cal_requested) {
-            for (int b = 0; b < BAND_COUNT; b++) peak[b] *= DECAY;
+        /* Gate decision. Mode 0 (the original): the SUM of smoothed post-floor power must reach the Noise Floor setting.
+         * Modes 1-3: each band's smoothed power is first expressed in units of its own noise threshold
+         * (floor x (1 + dead zone), never below GTHR) and capped at GCAP, so a quiet treble tone counts as much as
+         * the same SNR in the bass; the sum must reach GSNR x (Noise Floor / 30). Mode 2 also needs 2 of the last 3
+         * frames to pass. Mode 3 (default) only counts a band once it has stayed above GUMIN units for GRUN frames
+         * in a row, which drops the one-to-three-frame noise bursts that a sum over 24 bands is otherwise open to.
+         * Once open it stays open for ghk x (frames it has been open), at most ghm frames, after the last pass, so the
+         * gaps between beats of real music (21 closures of up to 192 ms in a 23 s trace without it) don't blank the bars
+         * while a brief noise-triggered opening only lingers a frame or two.
+         * (Chosen by replaying recorded idle, polled-idle and tone traces: it opens for every tone, even quiet 1-5 kHz
+         * ones the original gate misses, and opens less at idle.) */
+        bool gate_closed = false;
+        {
+            static uint8_t s_hist_active = 0;      /* last 3 pass/fail results of the active gate (mode 2)  */
+            static uint8_t s_hist_shadow[4];       /* same, for each shadow GATE_SNR below (mode 1 shadows)  */
+            static uint8_t s_run[BAND_COUNT];      /* frames in a row each band has been above GUMIN units  */
+            static bool    s_g3_open = false;      /* mode 3 hold state                                     */
+            static int     s_g3_since = 0, s_g3_openrun = 0;
+            static const float SHADOW_SNR[4]  = { 4.0f, 6.0f, 10.0f, 16.0f };
+            static const float SHADOW3_SNR[4] = { 2.0f, 3.0f, 4.0f, 6.0f };
+            float units = 0.0f, units3 = 0.0f;
+            for (int b = 0; b < BAND_COUNT; b++) {
+                float thr = s_noise_floor[b] * (1.0f + tv[MT_DEADZONE]);
+                if (thr < tv[MT_GTHR]) thr = tv[MT_GTHR];
+                const float u = s_gate_smooth[b] / thr;
+                const float uc = u > tv[MT_GCAP] ? tv[MT_GCAP] : u;
+                units += uc;
+                if (u >= tv[MT_GUMIN]) { if (s_run[b] < 255) s_run[b]++; } else s_run[b] = 0;
+                if (s_run[b] >= (int)tv[MT_GRUN]) units3 += uc;
+            }
+            const float gscale = silence_gate / 30.0f;
+            float gv = total_power, gt = silence_gate;
+            if (silence_gate > 0.0f) {
+                bool pass;
+                if (tv[MT_GMODE] < 0.5f) {
+                    pass = total_power >= silence_gate;
+                } else if (tv[MT_GMODE] >= 2.5f) {
+                    gv = units3;
+                    gt = tv[MT_GSNR] * gscale;
+                    if (units3 >= gt) {
+                        s_g3_open = true; s_g3_since = 0;
+                    } else if (s_g3_open) {
+                        float hold = (float)s_g3_openrun * tv[MT_GHK];
+                        if (hold > tv[MT_GHM]) hold = tv[MT_GHM];
+                        if ((float)(++s_g3_since) > hold) s_g3_open = false;
+                    }
+                    s_g3_openrun = s_g3_open ? (s_g3_openrun < 100000 ? s_g3_openrun + 1 : s_g3_openrun) : 0;
+                    pass = s_g3_open;
+                } else {
+                    gv = units;
+                    gt = tv[MT_GSNR] * gscale;
+                    pass = units >= gt;
+                    s_hist_active = (uint8_t)(((s_hist_active << 1) | (pass ? 1 : 0)) & 7);
+                    if (tv[MT_GMODE] >= 1.5f) pass = __builtin_popcount(s_hist_active) >= 2;
+                }
+                gate_closed = !pass;
+                /* Shadow counters: what every candidate gate would have done on this very frame. */
+                s_st_eval++;
+                if (total_power >= silence_gate) s_st_open[0]++;
+                for (int k = 0; k < 4; k++) {
+                    const bool pk = units >= SHADOW_SNR[k] * gscale;
+                    if (pk) s_st_open[1 + k]++;
+                    if (units3 >= SHADOW3_SNR[k] * gscale) s_st_open[5 + k]++;
+                    (void)s_hist_shadow[k];
+                }
+            }
+            s_st_gate_val = gv; s_st_gate_thr = gt;
+        }
+        if (gate_closed && !s_cal_requested) {
+            s_st_gated++;
+            for (int b = 0; b < BAND_COUNT; b++) peak[b] *= bar_decay;
+            if (s_scope) memset(s_scope, 0, MIC_SCOPE_SAMPLES * sizeof(int16_t));
             taskENTER_CRITICAL(&s_mux);
             memset(s_bands, 0, sizeof(s_bands));
             for (int b = 0; b < BAND_COUNT; b++) {
@@ -616,8 +1020,10 @@ static void mic_task(void *arg)
             if (s_cal_frame_cnt >= MIC_CAL_FRAMES) {
                 /* Average the accumulated raw energy into the noise floor */
                 taskENTER_CRITICAL(&s_mux);
-                for (int b = 0; b < BAND_COUNT; b++)
+                for (int b = 0; b < BAND_COUNT; b++) {
                     s_noise_floor[b] = s_cal_accum[b] / (float)MIC_CAL_FRAMES;
+                    s_noise_ref[b]   = s_noise_floor[b];
+                }
                 s_noise_cal = PHASE1_FRAMES;   /* skip Phase 1 — floor is now precisely set */
                 taskEXIT_CRITICAL(&s_mux);
                 s_cal_requested = false;
@@ -625,9 +1031,33 @@ static void mic_task(void *arg)
             }
         }
 
+        /* ── Burst rejection (see BURST_BARS): count the bars this frame would push to about max, using last frame's scale ── */
+        static int   s_burst_run = 0;
+        static float s_gref_prev = MIC_NOISE_FLOOR;
+        if (tv[MT_BURSTN] >= 1.0f && s_burst_run < BURST_MAX_RUN) {
+            int sat = 0;
+            const float burst_ratio = tv[MT_SQUELCH] + (1.0f - tv[MT_SQUELCH]) * powf(BURST_LEVEL, 1.0f / tv[MT_GAMMA]);
+            for (int b = BURST_FIRST_BAND; b < BAND_COUNT; b++) {
+                if (s_band_masked[b]) continue;
+                float ru = tv[MT_GAIN] * ref[b];
+                const float mr = tv[MT_SNR] * s_noise_floor[b] * (1.0f + tv[MT_DZDISP]) * s_band_weight[b];
+                if (ru < mr) ru = mr;
+                if (ru < MIC_NOISE_FLOOR) ru = MIC_NOISE_FLOOR;
+                if (s_disp_smooth[b] >= burst_ratio * powf(ru, tv[MT_EQ]) * powf(s_gref_prev, 1.0f - tv[MT_EQ])) sat++;
+            }
+            if ((float)sat >= tv[MT_BURSTN]) {
+                memcpy(s_disp_smooth, s_prev_disp, sizeof(s_disp_smooth));   /* drop this frame's attack */
+                s_burst_run++;
+            } else {
+                s_burst_run = 0;
+            }
+        } else {
+            s_burst_run = 0;
+        }
+
         /* ── Beat-onset detector (issue #43: Breath/Rainbow beat-reactive nudge
          * when spectrum_led_source == "follow accent mode") ──
-         * Feeds off s_disp_smooth (fast attack, ~16-24 ms, SMOOTH_ATTACK above)
+         * Feeds off s_disp_smooth (fast attack, ~16-24 ms, RISE_ATTACK above)
          * — deliberately NOT s_gate_smooth/total_power, which is the slow-
          * attack signal the silence gate and WiFi-spike rejection above rely
          * on specifically staying blind to single-frame transients. This runs
@@ -661,12 +1091,18 @@ static void mic_task(void *arg)
             s_beat_baseline += 0.3f * (beat_energy - s_beat_baseline);
         }
 
-        /* ── Peak-hold ── */
+        /* ── Peak-hold, plus each band's running average level ── */
+        float ref_use[BAND_COUNT], gref = MIC_NOISE_FLOOR;
         for (int b = 0; b < BAND_COUNT; b++) {
             if (s_disp_smooth[b] > peak[b]) peak[b]  = s_disp_smooth[b];
-            else                            peak[b] *= DECAY;
-            if (peak[b] > max_power) max_power = peak[b];
+            else                            peak[b] *= bar_decay;
+            ref[b] += (s_disp_smooth[b] > ref[b] ? tv[MT_UP] : tv[MT_DOWN]) * (s_disp_smooth[b] - ref[b]);
+            const float min_ref = tv[MT_SNR] * s_noise_floor[b] * (1.0f + tv[MT_DZDISP]) * s_band_weight[b];
+            ref_use[b] = tv[MT_GAIN] * ref[b] > min_ref ? tv[MT_GAIN] * ref[b] : min_ref;
+            if (ref_use[b] < MIC_NOISE_FLOOR) ref_use[b] = MIC_NOISE_FLOOR;
+            if (ref_use[b] > gref) gref = ref_use[b];
         }
+        s_gref_prev = gref;
 
         /* ── Publish normalised 0.0–1.0 values + debug snapshot ──
          * Perceptual gamma applied at publish (see SPEC_GAMMA), with the
@@ -676,10 +1112,20 @@ static void mic_task(void *arg)
          * outside the critical section (ints stay enabled). */
         float disp_out[BAND_COUNT];
         for (int b = 0; b < BAND_COUNT; b++) {
-            float ratio = peak[b] / max_power;
-            ratio = (ratio - SPEC_SQUELCH_RATIO) / (1.0f - SPEC_SQUELCH_RATIO);
+            const float ref_eff = powf(ref_use[b], tv[MT_EQ]) * powf(gref, 1.0f - tv[MT_EQ]);
+            float ratio = peak[b] / ref_eff;
+            if (ratio > 1.0f) ratio = 1.0f;
+            ratio = (ratio - tv[MT_SQUELCH]) / (1.0f - tv[MT_SQUELCH]);
             if (ratio < 0.0f) ratio = 0.0f;
-            disp_out[b] = powf(ratio, SPEC_GAMMA);
+            disp_out[b] = powf(ratio, tv[MT_GAMMA]);
+        }
+        for (int b = 0; b < BAND_COUNT; b++) {
+            if (!s_band_masked[b]) continue;
+            int lo = b - 1, hi = b + 1;
+            while (lo >= 0 && s_band_masked[lo]) lo--;
+            while (hi < BAND_COUNT && s_band_masked[hi]) hi++;
+            const float vl = lo >= 0 ? disp_out[lo] : -1.0f, vh = hi < BAND_COUNT ? disp_out[hi] : -1.0f;
+            disp_out[b] = (vl >= 0.0f && vh >= 0.0f) ? 0.5f * (vl + vh) : (vl >= 0.0f ? vl : (vh >= 0.0f ? vh : 0.0f));
         }
         taskENTER_CRITICAL(&s_mux);
         for (int b = 0; b < BAND_COUNT; b++) {
@@ -786,42 +1232,16 @@ bool mic_init(void)
     if (cfg_ch != s_active_ch)
         reconfigure_channel(cfg_ch);
 
-    /* Precompute the spectral-tilt weights (see MIC_TILT_EXP). */
-    for (int b = 0; b < BAND_COUNT; b++)
-        s_band_weight[b] = powf(BAND_FREQS[b] / BAND_FREQS[0], MIC_TILT_EXP);
-
     /* Precompute the Hann window (see s_hann). */
     for (int i = 0; i < FRAME_SIZE; i++)
         s_hann[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * (float)i
                                         / (float)(FRAME_SIZE - 1)));
 
-    /* Map DFT bins → bands by geometric band edges (see s_bin_band). */
-    {
-        float edge[BAND_COUNT + 1];
-        /* Bottom edge wide enough to include the 250 Hz bin: with the
-         * tighter /1.06 edge (264 Hz) band 0 owned ZERO bins and bar 1
-         * could never light (tone-sweep: 276 Hz showed on bar 2 only). */
-        edge[0] = BAND_FREQS[0] / 1.15f;
-        for (int b = 1; b < BAND_COUNT; b++)
-            edge[b] = sqrtf(BAND_FREQS[b - 1] * BAND_FREQS[b]);
-        edge[BAND_COUNT] = BAND_FREQS[BAND_COUNT - 1] * 1.06f;
-        for (int k = 0; k < SPEC_NBINS; k++) {
-            float f = (float)(SPEC_BIN_LO + k) * SPEC_BIN_HZ;
-            s_bin_band[k] = -1;
-            for (int b = 0; b < BAND_COUNT; b++)
-                if (f >= edge[b] && f < edge[b + 1]) { s_bin_band[k] = (int8_t)b; break; }
-        }
-        /* Bands that ended up with zero bins fall back to a centre Goertzel. */
-        int bincnt[BAND_COUNT] = {0};
-        for (int k = 0; k < SPEC_NBINS; k++)
-            if (s_bin_band[k] >= 0) bincnt[s_bin_band[k]]++;
-        for (int b = 0; b < BAND_COUNT; b++) {
-            s_band_center_only[b] = (bincnt[b] == 0);
-            if (s_band_center_only[b])
-                ESP_LOGI(TAG, "band %d (%.0f Hz): no bins in range — using centre Goertzel",
-                         b, (double)BAND_FREQS[b]);
-        }
-    }
+    /* Band layout (centres, tilt, bin map, LED-noise weights) from the configured top frequency. */
+    config_lock();
+    uint16_t top_hz_cfg = config_get()->mic_top_hz;
+    config_unlock();
+    mic_build_bands(top_hz_cfg);
 
     ESP_LOGI(TAG, "mic_init: CH%u (GPIO%d), ADC hardware already allocated by mic_hw_init()",
              cfg_ch, ADC1_GPIO_MAP[cfg_ch]);
@@ -886,6 +1306,17 @@ void mic_get_bands(float out[MIC_BAND_COUNT])
     taskENTER_CRITICAL(&s_mux);
     memcpy(out, s_bands, BAND_COUNT * sizeof(float));
     taskEXIT_CRITICAL(&s_mux);
+}
+
+void mic_hold_capture(bool hold)
+{
+    s_hold_capture = hold;
+}
+
+void mic_get_scope(int16_t out[MIC_SCOPE_SAMPLES])
+{
+    if (s_scope) memcpy(out, s_scope, MIC_SCOPE_SAMPLES * sizeof(int16_t));
+    else         memset(out, 0, MIC_SCOPE_SAMPLES * sizeof(int16_t));
 }
 
 /* Consume-and-clear: returns true at most once per detected beat onset (see
@@ -991,10 +1422,27 @@ void mic_reset_calibration(void)
     ESP_LOGI(TAG, "mic_reset_calibration: noise floor cleared, Phase 1 restarted");
 }
 
+void mic_set_test_capture(bool on, uint32_t duration_s)
+{
+    if (on) {
+        if (duration_s == 0)    duration_s = 1200;
+        if (duration_s > 3600)  duration_s = 3600;
+        s_test_until_ms = (uint32_t)(esp_timer_get_time() / 1000) + duration_s * 1000u;
+    }
+    s_test_capture = on;
+    ESP_LOGI(TAG, "test capture %s%s", on ? "ON" : "OFF", on ? " (display idles blank)" : "");
+}
+
+bool mic_test_capture_active(void)
+{
+    return s_test_capture;
+}
+
 void mic_apply_calibration(const float floor[MIC_BAND_COUNT])
 {
     taskENTER_CRITICAL(&s_mux);
     memcpy(s_noise_floor, floor, BAND_COUNT * sizeof(float));
+    memcpy(s_noise_ref,   floor, BAND_COUNT * sizeof(float));
     s_noise_cal = PHASE1_FRAMES;   /* skip Phase 1 — saved floor is already accurate */
     taskEXIT_CRITICAL(&s_mux);
     ESP_LOGI(TAG, "mic_apply_calibration: saved baseline applied, Phase 1 skipped");

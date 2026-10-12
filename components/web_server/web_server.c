@@ -6,6 +6,7 @@
 #include "wifi_manager.h"
 #include "ntp_time.h"
 #include "weather.h"
+#include "periodic_net_poll.h"   /* the Theme Manager runs as a job on the shared network task */
 #include "subscribers.h"
 #include "ha_mqtt.h"
 #include "display.h"
@@ -38,6 +39,8 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <time.h>
 #include "esp_heap_caps.h"
 #include "lwip/sockets.h"
 #include "auth.h"
@@ -89,7 +92,7 @@ static volatile bool s_ota_active = false;
 
 /* ── Stock-file integrity check ────────────────────────────────────────
  * STOCK_FILES (generated, see stock_files.h) is every file shipped in data/
- * at build time. Detects one actually missing from LittleFS — a skipped
+ * at build time, except images/themes/ (the Theme Manager owns those). Detects one actually missing from LittleFS — a skipped
  * hotpatch, a manual delete, a corrupted write. Complements the
  * version-string mismatch banner (that catches "wrong overall version";
  * this catches "right version, something specific is gone"). Points the
@@ -274,7 +277,7 @@ static void stock_files_check(void)
 /* Task-creation params for the deferred stock_files_check() call, shared by
  * every spawn site below (defined up here, ahead of stock_files_check_task()
  * itself further down, so all of them can use it as one source of truth). */
-#define STOCK_CHECK_STACK_SIZE 3072
+#define STOCK_CHECK_STACK_SIZE 4096   /* 3072 overflowed again (stat() into LittleFS plus vpath[320]/example[128]) */
 static void stock_files_check_task(void *arg);
 
 /* True while a stock_files_check_task is running. stock_files_check() reads
@@ -292,6 +295,12 @@ static void stock_files_check_task(void *arg);
  * concurrent instance. */
 static bool s_stock_check_task_running = false;
 
+/* A Theme Manager job (catalog refresh / pack install) and a stock-file scan must never overlap: both pause the display and read or
+ * write flash. s_tm_busy is set from the moment a job is queued until it ends; a scan asked for in that time is remembered and run
+ * right after (see tm_job), and a job is refused while a scan is running (see tm_start). */
+static volatile bool s_tm_busy = false;
+static volatile bool s_stock_spawn_deferred = false;
+
 /* Spawns stock_files_check_task unless one is already running, in which
  * case this is a no-op — not a failure, since that scan's result will be
  * fresh again shortly regardless and a second instance would corrupt the
@@ -301,6 +310,7 @@ static bool s_stock_check_task_running = false;
  * in this file should go through this, not a raw xTaskCreate(). */
 static bool stock_files_check_spawn(void)
 {
+    if (s_tm_busy) { s_stock_spawn_deferred = true; return true; }   /* run after the theme job */
     if (s_stock_check_task_running) return true;
     if (xTaskCreate(stock_files_check_task, "stock_chk", STOCK_CHECK_STACK_SIZE, NULL, 2, NULL) != pdPASS)
         return false;
@@ -753,6 +763,9 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     float   old_gamma[6];
     int8_t  old_col_offset[6], old_row_offset[6];
     uint8_t old_tube_brightness[6];
+    uint8_t old_shadow_lift[6];
+    uint8_t old_gain_r[6], old_gain_g[6], old_gain_b[6], old_black[6];
+    uint8_t old_curve[3][6], old_ped[3][6];
     uint8_t old_stock_exc_count;
     config_lock();
     const nextube_config_t *old_cfg = config_get();
@@ -774,6 +787,14 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     memcpy(old_col_offset,      old_cfg->lcd_col_offset,      sizeof(old_col_offset));
     memcpy(old_row_offset,      old_cfg->lcd_row_offset,      sizeof(old_row_offset));
     memcpy(old_tube_brightness, old_cfg->lcd_tube_brightness, sizeof(old_tube_brightness));
+    memcpy(old_shadow_lift,     old_cfg->lcd_shadow_lift,     sizeof(old_shadow_lift));
+    memcpy(old_gain_r,          old_cfg->lcd_gain_r,          sizeof(old_gain_r));
+    memcpy(old_gain_g,          old_cfg->lcd_gain_g,          sizeof(old_gain_g));
+    memcpy(old_gain_b,          old_cfg->lcd_gain_b,          sizeof(old_gain_b));
+    memcpy(old_black,           old_cfg->lcd_black_level,     sizeof(old_black));
+    memcpy(old_curve[0], old_cfg->lcd_curve_r,    6); memcpy(old_curve[1], old_cfg->lcd_curve_g,    6);
+    memcpy(old_curve[2], old_cfg->lcd_curve_b,    6); memcpy(old_ped[0],   old_cfg->lcd_pedestal_r, 6);
+    memcpy(old_ped[1],   old_cfg->lcd_pedestal_g, 6); memcpy(old_ped[2],   old_cfg->lcd_pedestal_b, 6);
     config_unlock();
 
     bool ok = config_set_json(buf, len);
@@ -795,6 +816,9 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     float   new_gamma[6];
     int8_t  new_col_offset[6], new_row_offset[6];
     uint8_t new_tube_brightness[6];
+    uint8_t new_shadow_lift[6];
+    uint8_t new_gain_r[6], new_gain_g[6], new_gain_b[6], new_black[6];
+    uint8_t new_curve[3][6], new_ped[3][6];
     config_lock();
     const nextube_config_t *new_cfg = config_get();
     new_brightness    = new_cfg->led_brightness;
@@ -817,6 +841,14 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     memcpy(new_col_offset,      new_cfg->lcd_col_offset,      sizeof(new_col_offset));
     memcpy(new_row_offset,      new_cfg->lcd_row_offset,      sizeof(new_row_offset));
     memcpy(new_tube_brightness, new_cfg->lcd_tube_brightness, sizeof(new_tube_brightness));
+    memcpy(new_shadow_lift,     new_cfg->lcd_shadow_lift,     sizeof(new_shadow_lift));
+    memcpy(new_gain_r,          new_cfg->lcd_gain_r,          sizeof(new_gain_r));
+    memcpy(new_gain_g,          new_cfg->lcd_gain_g,          sizeof(new_gain_g));
+    memcpy(new_gain_b,          new_cfg->lcd_gain_b,          sizeof(new_gain_b));
+    memcpy(new_black,           new_cfg->lcd_black_level,     sizeof(new_black));
+    memcpy(new_curve[0], new_cfg->lcd_curve_r,    6); memcpy(new_curve[1], new_cfg->lcd_curve_g,    6);
+    memcpy(new_curve[2], new_cfg->lcd_curve_b,    6); memcpy(new_ped[0],   new_cfg->lcd_pedestal_r, 6);
+    memcpy(new_ped[1],   new_cfg->lcd_pedestal_g, 6); memcpy(new_ped[2],   new_cfg->lcd_pedestal_b, 6);
     config_unlock();
 
     leds_set_brightness(new_brightness);
@@ -854,6 +886,17 @@ static esp_err_t api_post_settings(httpd_req_t *r)
         display_apply_tube_offsets(new_col_offset, new_row_offset);
     if (memcmp(new_tube_brightness, old_tube_brightness, sizeof(new_tube_brightness)) != 0)
         display_apply_tube_brightness(new_tube_brightness);
+    if (memcmp(new_shadow_lift, old_shadow_lift, sizeof(new_shadow_lift)) != 0)
+        display_apply_tube_shadow_lift(new_shadow_lift);
+    if (memcmp(new_gain_r, old_gain_r, sizeof(new_gain_r)) != 0 ||
+        memcmp(new_gain_g, old_gain_g, sizeof(new_gain_g)) != 0 ||
+        memcmp(new_gain_b, old_gain_b, sizeof(new_gain_b)) != 0 ||
+        memcmp(new_black,  old_black,  sizeof(new_black))  != 0)
+        display_apply_tube_color(new_gain_r, new_gain_g, new_gain_b, new_black);
+    if (memcmp(new_curve, old_curve, sizeof(new_curve)) != 0 ||
+        memcmp(new_ped,   old_ped,   sizeof(new_ped))   != 0)
+        display_apply_tube_channel_curves(new_curve[0], new_curve[1], new_curve[2],
+                                          new_ped[0], new_ped[1], new_ped[2]);
 
     /* Boot-time feature flags or hostname changed — reboot required.
      * Hostname is baked into LWIP netif, DHCP option 12, and mDNS at start-up;
@@ -1459,7 +1502,7 @@ static esp_err_t api_status(httpd_req_t *r)
     config_lock();
     const nextube_config_t *scfg = config_get();
     status_mode    = scfg->current_mode;
-    status_mic_cal = scfg->mic_calibration_saved;
+    status_mic_cal = scfg->mic_calibration_saved && scfg->mic_floor_top_hz == (uint16_t)(scfg->mic_top_hz | MIC_FLOOR_CHAIN_FLAG);
     config_unlock();
     int64_t t_config = esp_timer_get_time();
     cJSON_AddStringToObject(root, "mode", app_mode_name(status_mode));
@@ -1467,8 +1510,11 @@ static esp_err_t api_status(httpd_req_t *r)
     {   /* anti burn-in session: drives the Display tab's running note + Cancel */
         uint32_t bi_left;
         bool bi_on = display_burnin_status(&bi_left);
-        cJSON_AddBoolToObject(root, "burnin_active", bi_on);
-        if (bi_on) cJSON_AddNumberToObject(root, "burnin_remaining_s", bi_left);
+        bool tp_on = bi_on && display_test_pattern_active();
+        cJSON_AddBoolToObject(root, "burnin_active", bi_on && !tp_on);
+        if (bi_on && !tp_on) cJSON_AddNumberToObject(root, "burnin_remaining_s", bi_left);
+        cJSON_AddBoolToObject(root, "testpat_active", tp_on);
+        if (tp_on) cJSON_AddNumberToObject(root, "testpat_remaining_s", bi_left);
     }
     /* —— auth state.  The web UI gates its first-boot setup flow on these.
      * admin_set is the only auth-related field exposed unauthenticated; the
@@ -1620,7 +1666,7 @@ static void ota_suspend_tasks(void)
 
     for (int i = 0; k_paused_task_names[i]; i++) {
         TaskHandle_t h = xTaskGetHandle(k_paused_task_names[i]);
-        if (h) {
+        if (h && h != xTaskGetCurrentTaskHandle()) {   /* a job running on net_poll must not suspend itself */
             vTaskSuspend(h);
             ESP_LOGI(TAG, "OTA: suspended '%s'", k_paused_task_names[i]);
         }
@@ -2230,7 +2276,9 @@ static void hp_drop_stale_marked(void)
  * — no central-directory dependency, STORE-only — writing each entry to
  * "/spiffs/<name>", creating parent dirs as needed.  Rejects path traversal
  * and protects config.json from ever being overwritten by a patch, exactly
- * as both call sites did before this was factored out.
+ * as both call sites did before this was factored out. Paths on the stock-
+ * file exception list (files the user removed on purpose) are skipped too, so
+ * a patch can't re-create part of a deleted theme.
  *
  * zip/zip_len    : the fully-buffered ZIP (caller has already verified the
  *                   leading ZIP_LFH_SIG and owns/frees the buffer).
@@ -2248,6 +2296,9 @@ static void hp_drop_stale_marked(void)
  *                   string.  Used by api_fs_hotpatch to report the file list
  *                   back over HTTP; webui_pull_task has no HTTP response to
  *                   build for this and passes NULL.
+ * only_prefix   : NULL for patches; a theme-pack install passes "images/themes/<id>/" and every entry outside it is
+ *                   rejected (counted as failed) instead of written.
+ * honor_exceptions: false for a theme-pack install, where the user asked for the files; patches pass true.
  * out_ok/out_skipped/out_failed/out_unchanged: caller-owned counters,
  *                   incremented (not reset) by this call — caller
  *                   zero-initializes them. out_unchanged counts entries
@@ -2264,10 +2315,23 @@ static void extract_zip_to_littlefs(const uint8_t *zip, size_t zip_len,
                                      const char *log_prefix, bool success_at_info,
                                      cJSON *files_written,
                                      int *out_ok, int *out_skipped, int *out_failed,
-                                     int *out_unchanged)
+                                     int *out_unchanged, const char *only_prefix, bool honor_exceptions)
 {
     const uint8_t *p   = zip;
     const uint8_t *end = zip + zip_len;
+
+    /* PSRAM snapshot (3 KB — too big for this task's stack), freed after the loop.
+     * If the allocation fails nothing is excepted, i.e. the old behavior. */
+    char (*exc)[STOCK_EXCEPTION_PATH_LEN] =
+        heap_caps_malloc(STOCK_EXCEPTION_MAX * sizeof(*exc), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t exc_count = 0;
+    if (exc) {
+        config_lock();
+        const nextube_config_t *cfg = config_get();
+        exc_count = cfg->stock_exception_count;
+        memcpy(exc, cfg->stock_exception_paths, STOCK_EXCEPTION_MAX * sizeof(*exc));
+        config_unlock();
+    }
 
     while (p + (int)sizeof(zip_lfh_t) <= end) {
         uint32_t sig = (uint32_t)(p[0] | p[1]<<8 | p[2]<<16 | p[3]<<24);
@@ -2307,9 +2371,25 @@ static void extract_zip_to_littlefs(const uint8_t *zip, size_t zip_len,
             continue;
         }
 
+        if (only_prefix && strncmp(fname, only_prefix, strlen(only_prefix)) != 0) {
+            ESP_LOGW(TAG, "%s rejected '%s' (outside %s)", log_prefix, fname, only_prefix);
+            (*out_failed)++;
+            continue;
+        }
+
         /* Protect user config — it must never be overwritten by a patch. */
         if (strcmp(fname, "config.json") == 0) {
             ESP_LOGI(TAG, "%s skipped protected file config.json", log_prefix);
+            (*out_skipped)++;
+            continue;
+        }
+
+        /* Files the user removed on purpose stay removed. */
+        if (honor_exceptions && exc && stock_path_excepted(exc, exc_count, fname)) {
+            if (success_at_info)
+                ESP_LOGI(TAG, "%s skipped '%s' (on the stock-file exception list)", log_prefix, fname);
+            else
+                ESP_LOGD(TAG, "%s skipped '%s' (on the stock-file exception list)", log_prefix, fname);
             (*out_skipped)++;
             continue;
         }
@@ -2359,6 +2439,7 @@ static void extract_zip_to_littlefs(const uint8_t *zip, size_t zip_len,
         }
         vTaskDelay(1);   /* yield between writes — flash HAL disables IRQs, starves IDLE */
     }
+    free(exc);
 }
 
 /* Guard wrapper — same s_ota_active reject-concurrent-OTA pattern as
@@ -2454,7 +2535,7 @@ static esp_err_t api_fs_hotpatch_impl(httpd_req_t *r)
      * overhead on this LittleFS partition. */
     int64_t extract_t0 = esp_timer_get_time();
     extract_zip_to_littlefs(zip, (size_t)rx, "hotpatch:", /*success_at_info=*/true,
-                             files_arr, &ok, &skipped, &failed, &unchanged);
+                             files_arr, &ok, &skipped, &failed, &unchanged, NULL, true);
     int64_t extraction_ms = (esp_timer_get_time() - extract_t0) / 1000;
 
     free(zip);
@@ -3407,7 +3488,7 @@ static void webui_pull_task(void *arg)
          * around its own call to this same function for why. */
         int64_t extract_t0 = esp_timer_get_time();
         extract_zip_to_littlefs(zip, (size_t)received, "[webui] ", /*success_at_info=*/false,
-                                 files_arr, &ok, &skipped, &failed, &unchanged);
+                                 files_arr, &ok, &skipped, &failed, &unchanged, NULL, true);
         int64_t extraction_ms = (esp_timer_get_time() - extract_t0) / 1000;
 
         /* Flatten into the same bounded, comma-joined shape
@@ -3510,6 +3591,858 @@ static esp_err_t api_webui_pull_status(httpd_req_t *r)
     char buf[1024];
     snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"error\":\"%s\",\"written_files\":\"%s\"}",
              names[s_webui.state], s_webui.error, s_webui.written_files);
+    return send_json(r, buf);
+}
+
+/* ── Theme Manager (downloadable theme packs) ───────────────────────────────
+ * themes/catalog.json in the repo lists every theme pack (see themes/README.md); a pack is one STORE-only ZIP of
+ * images/themes/<id>/. The catalog is fetched on request. A pack is installed the way webui_pull_task applies a WebUI update
+ * (wait screen, TLS lock, background tasks suspended, ZIP buffered in PSRAM, extracted straight into LittleFS): the old folder
+ * is moved aside first and restored if anything fails. An installed pack carries .pack.json (id, rev, content_sha256), so a higher
+ * rev in the catalog reads as "update available". Removing a theme deletes its folder. */
+#define TM_BRANCH          "main"
+#define TM_CATALOG_SCHEMA  1
+#define TM_MAX_CATALOG     16384
+#define TM_MAX_PACK        (1024 * 1024)
+#define TM_ID_MAX          31        /* config theme[32] */
+#define TM_THEMES_DIR      "/spiffs/images/themes"
+
+static int fs_remove_recursive(const char *path);   /* defined with the file-browser handlers below */
+static esp_http_client_handle_t hp_stock_client_init(const char *user_agent, int timeout_ms);   /* defined with the stock repair */
+
+typedef enum { TM_IDLE = 0, TM_RUNNING, TM_DONE, TM_ERROR } tm_state_t;
+static struct {
+    volatile tm_state_t state;
+    bool         install;              /* false = refresh the catalog (or, with check, only verify what is installed) */
+    bool         check;                /* verify the installed themes against their packs; no network access */
+    int          changed;              /* themes that failed that check */
+    char         id[TM_ID_MAX + 1];
+    char         phase[16];
+    volatile int progress;             /* 0-100 */
+    char         error[96];
+} s_tm;
+#define TM_PREV_DIR     "/spiffs/web/theme-previews"   /* served as /theme-previews/<id>_r<rev>.jpg by the static handler */
+#define TM_PREV_MAX     16384
+#define TM_PREV_THEMES  32
+static volatile bool s_tm_pending;      /* a job is queued for the shared network task */
+static uint32_t s_tm_prev_mask;       /* bit i: catalog theme i has its preview cached on the clock */
+static char    *s_tm_catalog;          /* raw catalog.json (PSRAM) from the last good refresh; only replaced by tm_job */
+static time_t   s_tm_fetched;          /* when that refresh happened (epoch s), 0 = unknown */
+static bool     s_tm_restored;         /* the saved copy was looked for once this boot */
+#define TM_CATALOG_FILE "/spiffs/theme-catalog.json"   /* kept across reboots and updates: first line = fetch time, then the raw catalog */
+
+static bool tm_id_valid(const char *id)
+{
+    size_t n = id ? strlen(id) : 0;
+    if (n == 0 || n > TM_ID_MAX) return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = id[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '-')) return false;
+    }
+    return true;
+}
+
+/* "1.20.0" style: true when this firmware is at least `req` (empty = no requirement). */
+static bool tm_fw_ok(const char *req)
+{
+    if (!req || !req[0]) return true;
+    int a[3] = {0, 0, 0}, b[3] = {0, 0, 0};
+    sscanf(FW_VERSION_STR, "%d.%d.%d", &a[0], &a[1], &a[2]);
+    sscanf(req, "%d.%d.%d", &b[0], &b[1], &b[2]);
+    for (int i = 0; i < 3; i++)
+        if (a[i] != b[i]) return a[i] > b[i];
+    return true;
+}
+
+/* Installed = folder exists. *rev_out is the revision from its .pack.json, or 0 for a folder that did not come from a pack. */
+static bool tm_installed(const char *id, int *rev_out)
+{
+    char path[96], mp[112];
+    struct stat st;
+    snprintf(path, sizeof(path), TM_THEMES_DIR "/%s", id);
+    *rev_out = 0;
+    if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) return false;
+    snprintf(mp, sizeof(mp), "%s/.pack.json", path);
+    FILE *f = fopen(mp, "rb");
+    if (f) {
+        char buf[256];
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = '\0';
+        cJSON *j = cJSON_Parse(buf);
+        if (j) {
+            cJSON *rv = cJSON_GetObjectItem(j, "rev");
+            if (cJSON_IsNumber(rv)) *rev_out = rv->valueint;
+            cJSON_Delete(j);
+        }
+    }
+    return true;
+}
+
+static void tm_progress_cb(int received, int total)
+{
+    s_tm.progress = (received * 80) / total;   /* the rest is verifying and extracting */
+}
+
+/* ── Recognising themes that are already on the clock ─────────────────────────
+ * A theme folder that came with the firmware has no .pack.json. After the catalog loads, each folder whose catalog entry has no marker
+ * yet is fingerprinted and compared with the entry's content_sha256 (the value pack_theme.py computes: SHA-256 over, for every file in
+ * sorted relative-path order, "<path>\0" + the size as 4 little-endian bytes + the file's own SHA-256; dot files are skipped). A match
+ * gets the same .pack.json the pack would have written, so updates work from then on; a folder that differs stays unmarked and the
+ * UI offers to replace it with the catalog version. A missing folder is simply a download option. */
+#define TM_VERIFY_MAX_FILES 128
+#define TM_REL_MAX          72
+
+typedef struct { char rel[TM_REL_MAX]; } tm_rel_t;
+
+static bool tm_collect(const char *dir, const char *rel_prefix, tm_rel_t *out, int *n)
+{
+    DIR *dp = opendir(dir);
+    if (!dp) return false;
+    bool ok = true;
+    struct dirent *e;
+    while (ok && (e = readdir(dp)) != NULL) {
+        if (e->d_name[0] == '.' || strcmp(e->d_name, "Thumbs.db") == 0) continue;
+        char path[192], rel[TM_REL_MAX];
+        int pl = snprintf(path, sizeof(path), "%s/%.80s", dir, e->d_name);
+        int rl = snprintf(rel, sizeof(rel), "%s%s%.60s", rel_prefix, rel_prefix[0] ? "/" : "", e->d_name);
+        if (pl < 0 || pl >= (int)sizeof(path) || rl < 0 || rl >= (int)sizeof(rel)) { ok = false; break; }
+        if (e->d_type == DT_DIR) {
+            ok = tm_collect(path, rel, out, n);
+        } else if (*n < TM_VERIFY_MAX_FILES) {
+            memcpy(out[*n].rel, rel, sizeof(rel));
+            (*n)++;
+        } else {
+            ok = false;
+        }
+    }
+    closedir(dp);
+    return ok;
+}
+
+static int tm_rel_cmp(const void *a, const void *b)
+{
+    return strcmp(((const tm_rel_t *)a)->rel, ((const tm_rel_t *)b)->rel);
+}
+
+/* Fingerprint of the theme folder `dir`; *nfiles gets the number of files hashed. */
+static bool tm_content_hash(const char *dir, char hex[65], int *nfiles)
+{
+    tm_rel_t *list = heap_caps_malloc(TM_VERIFY_MAX_FILES * sizeof(tm_rel_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t  *buf  = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bool ok = list && buf;
+    int n = 0;
+    if (ok) ok = tm_collect(dir, "", list, &n);
+    if (ok) qsort(list, (size_t)n, sizeof(tm_rel_t), tm_rel_cmp);
+    mbedtls_sha256_context outer;
+    mbedtls_sha256_init(&outer);
+    mbedtls_sha256_starts(&outer, 0);
+    for (int i = 0; ok && i < n; i++) {
+        char path[192];
+        if (snprintf(path, sizeof(path), "%s/%.71s", dir, list[i].rel) >= (int)sizeof(path)) { ok = false; break; }
+        FILE *f = fopen(path, "rb");
+        if (!f) { ok = false; break; }
+        mbedtls_sha256_context inner;
+        mbedtls_sha256_init(&inner);
+        mbedtls_sha256_starts(&inner, 0);
+        uint32_t total = 0;
+        size_t got;
+        while ((got = fread(buf, 1, 2048, f)) > 0) {
+            mbedtls_sha256_update(&inner, buf, got);
+            total += (uint32_t)got;
+        }
+        fclose(f);
+        uint8_t digest[32], le[4] = { (uint8_t)total, (uint8_t)(total >> 8), (uint8_t)(total >> 16), (uint8_t)(total >> 24) };
+        mbedtls_sha256_finish(&inner, digest);
+        mbedtls_sha256_free(&inner);
+        mbedtls_sha256_update(&outer, (const uint8_t *)list[i].rel, strlen(list[i].rel));
+        mbedtls_sha256_update(&outer, (const uint8_t *)"", 1);
+        mbedtls_sha256_update(&outer, le, 4);
+        mbedtls_sha256_update(&outer, digest, 32);
+        vTaskDelay(1);
+    }
+    uint8_t d[32];
+    mbedtls_sha256_finish(&outer, d);
+    mbedtls_sha256_free(&outer);
+    for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", d[i]);
+    *nfiles = n;
+    free(list);
+    free(buf);
+    return ok;
+}
+
+/* The content hash recorded in a theme folder's .pack.json (what the pack contained when it was installed). */
+static bool tm_marker_hash(const char *dir, char hex[65])
+{
+    char mp[112], buf[256];
+    snprintf(mp, sizeof(mp), "%s/.pack.json", dir);
+    FILE *f = fopen(mp, "rb");
+    if (!f) return false;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = ' ';
+    cJSON *j = cJSON_Parse(buf);
+    const char *h = j ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "content_sha256")) : NULL;
+    bool ok = h && strlen(h) == 64;
+    if (ok) strlcpy(hex, h, 65);
+    cJSON_Delete(j);
+    return ok;
+}
+
+/* For every catalog theme that is on the clock: fingerprint the folder. Without a marker, a match with the catalog writes its
+ * .pack.json. With a marker, a folder that no longer matches what was installed (a file changed, deleted or added) loses the marker,
+ * so it shows as "Differs from catalog" and can be replaced. One theme at a time with the display paused around the flash reads,
+ * the way the stock-file scan does it. Folders with a marker are only re-hashed when `recheck` is set (the Verify installed button).
+ * Returns how many themes were found to differ. */
+static int tm_verify_installed(bool recheck)
+{
+    int differ = 0;
+    cJSON *cat = s_tm_catalog ? cJSON_Parse(s_tm_catalog) : NULL;
+    cJSON *themes = cat ? cJSON_GetObjectItem(cat, "themes") : NULL;
+    cJSON *it;
+    cJSON_ArrayForEach(it, themes) {
+        const char *id  = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
+        const char *csh = cJSON_GetStringValue(cJSON_GetObjectItem(it, "content_sha256"));
+        cJSON *rv = cJSON_GetObjectItem(it, "rev"), *fl = cJSON_GetObjectItem(it, "files");
+        int inst_rev = 0;
+        if (!tm_id_valid(id) || !csh || strlen(csh) != 64 || !cJSON_IsNumber(rv)) continue;
+        if (!tm_installed(id, &inst_rev)) continue;
+        if (inst_rev > 0 && !recheck) continue;   /* already marked: only the Verify installed button re-hashes it */
+        if (!display_pause_for_spi(5000)) { ESP_LOGW(TAG, "[themes] display did not pause - skipping the check of installed themes"); break; }
+        char dir[96], hex[65] = "";
+        int nfiles = 0;
+        snprintf(dir, sizeof(dir), TM_THEMES_DIR "/%s", id);
+        bool hashed = tm_content_hash(dir, hex, &nfiles);
+        if (inst_rev > 0) {
+            char want[65] = "", mp[112];
+            if (hashed && tm_marker_hash(dir, want) && strcmp(hex, want) != 0) {
+                snprintf(mp, sizeof(mp), "%s/.pack.json", dir);
+                remove(mp);
+                differ++;
+                ESP_LOGW(TAG, "[themes] installed '%s' no longer matches its pack", id);
+            }
+        } else {
+            bool match = hashed && strcmp(hex, csh) == 0 && (!cJSON_IsNumber(fl) || fl->valueint == nfiles);
+            if (match) {
+                char mp[112], js[160];
+                snprintf(mp, sizeof(mp), "%s/.pack.json", dir);
+                snprintf(js, sizeof(js), "{\"content_sha256\":\"%s\",\"files\":%d,\"id\":\"%s\",\"rev\":%d}", csh, nfiles, id, rv->valueint);
+                FILE *f = fopen(mp, "wb");
+                if (f) { fwrite(js, 1, strlen(js), f); fclose(f); }
+            }
+            if (!match) differ++;
+            ESP_LOGI(TAG, "[themes] installed '%s' %s the catalog", id, match ? "matches" : "differs from");
+        }
+        display_unpause();
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
+    cJSON_Delete(cat);
+    return differ;
+}
+
+/* ── Local copies of the theme previews ───────────────────────────────────────
+ * The page shows each theme's digit strip. Right after a catalog refresh the clock downloads the strips it doesn't have yet into
+ * /web/theme-previews/<id>_r<rev>.jpg (a new revision gets a new name, so the browser never shows a stale one) and deletes the ones no
+ * catalog entry points at any more. The page then loads them from the clock, with the repository only as a fallback. */
+typedef struct { char id[TM_ID_MAX + 1]; int rev; int pos; char rel[64]; char name[56]; uint8_t *data; int len; bool have; } tm_prev_t;   /* pos: index in the catalog */
+
+static bool tm_fetch_small(esp_http_client_handle_t c, const char *url, uint8_t **out, int *len)
+{
+    if (esp_http_client_set_url(c, url) != ESP_OK || esp_http_client_open(c, 0) != ESP_OK) return false;
+    int cl = esp_http_client_fetch_headers(c);
+    int st = esp_http_client_get_status_code(c);
+    if (st != 200 || cl <= 0 || cl > TM_PREV_MAX) { esp_http_client_close(c); return false; }
+    uint8_t *b = heap_caps_malloc((size_t)cl, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!b) { esp_http_client_close(c); return false; }
+    int got = 0;
+    while (got < cl) {
+        int n = esp_http_client_read(c, (char *)b + got, cl - got);
+        if (n <= 0) break;
+        got += n;
+    }
+    if (got != cl || b[0] != 0xFF || b[1] != 0xD8) { free(b); esp_http_client_close(c); return false; }   /* short read, or not a JPEG */
+    *out = b;
+    *len = cl;
+    return true;
+}
+
+static void tm_cache_previews(const char *base, const char *ua)
+{
+    cJSON *cat = s_tm_catalog ? cJSON_Parse(s_tm_catalog) : NULL;
+    cJSON *themes = cat ? cJSON_GetObjectItem(cat, "themes") : NULL;
+    tm_prev_t *pv = heap_caps_calloc(TM_PREV_THEMES, sizeof(tm_prev_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!pv) { cJSON_Delete(cat); return; }
+    int n = 0, idx = 0, missing = 0;
+    uint32_t mask = 0;
+    cJSON *it;
+    cJSON_ArrayForEach(it, themes) {
+        const int at = idx++;
+        const char *id  = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
+        const char *rel = cJSON_GetStringValue(cJSON_GetObjectItem(it, "preview"));
+        cJSON *rv = cJSON_GetObjectItem(it, "rev");
+        if (at >= TM_PREV_THEMES || !tm_id_valid(id) || !rel || !cJSON_IsNumber(rv)) continue;
+        size_t rl = strlen(rel);
+        if (strncmp(rel, "previews/", 9) != 0 || rl < 14 || rl >= sizeof(pv[0].rel) || strcmp(rel + rl - 4, ".jpg") != 0 ||
+            strstr(rel, "..") || strstr(rel, "//")) continue;
+        tm_prev_t *e = &pv[n];
+        strlcpy(e->id, id, sizeof(e->id));
+        strlcpy(e->rel, rel, sizeof(e->rel));
+        e->rev = rv->valueint;
+        snprintf(e->name, sizeof(e->name), "%.31s_r%d.jpg", e->id, e->rev);
+        e->pos = at;
+        n++;
+    }
+    cJSON_Delete(cat);
+
+    /* Which are already on the clock? */
+    if (display_pause_for_spi(5000)) {
+        for (int i = 0; i < n; i++) {
+            char path[128];
+            struct stat st;
+            snprintf(path, sizeof(path), TM_PREV_DIR "/%s", pv[i].name);
+            pv[i].have = (stat(path, &st) == 0 && st.st_size > 0);
+            if (!pv[i].have) missing++;
+        }
+        display_unpause();
+    } else {
+        missing = 0;    /* could not pause the display; try again at the next refresh */
+    }
+
+    /* Download what is missing over one connection. */
+    char *url = missing > 0 ? heap_caps_malloc(256, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : NULL;
+    if (missing > 0 && url) {
+        tls_sem_take();
+        esp_http_client_handle_t c = hp_stock_client_init(ua, 30000);
+        if (c) {
+            for (int i = 0; i < n; i++) {
+                if (pv[i].have) continue;
+                if (snprintf(url, 256, "%s%s", base, pv[i].rel) >= 256) continue;
+                int len = 0;
+                if (tm_fetch_small(c, url, &pv[i].data, &len)) pv[i].len = len;
+            }
+            esp_http_client_cleanup(c);
+        }
+        tls_sem_give();
+    }
+    free(url);
+
+    /* Write the new ones and remove every cached file that no catalog entry names. */
+    if (display_pause_for_spi(5000)) {
+        hp_mkdir_p(TM_PREV_DIR "/x");
+        DIR *dp = opendir(TM_PREV_DIR);
+        if (dp) {
+            struct dirent *de;
+            while ((de = readdir(dp)) != NULL) {
+                bool wanted = false;
+                for (int i = 0; i < n && !wanted; i++) wanted = (strcmp(de->d_name, pv[i].name) == 0);
+                if (!wanted && de->d_name[0] != '.') {
+                    char path[160];
+                    if (snprintf(path, sizeof(path), TM_PREV_DIR "/%.80s", de->d_name) < (int)sizeof(path)) remove(path);
+                }
+            }
+            closedir(dp);
+        }
+        for (int i = 0; i < n; i++) {
+            if (!pv[i].have && pv[i].data) {
+                char path[128];
+                snprintf(path, sizeof(path), TM_PREV_DIR "/%s", pv[i].name);
+                FILE *f = fopen(path, "wb");
+                if (f) {
+                    pv[i].have = (fwrite(pv[i].data, 1, (size_t)pv[i].len, f) == (size_t)pv[i].len);
+                    fclose(f);
+                    if (!pv[i].have) remove(path);
+                }
+            }
+        }
+        display_unpause();
+    }
+    for (int i = 0; i < n; i++) {
+        if (pv[i].have) mask |= (1u << pv[i].pos);
+        free(pv[i].data);
+    }
+    s_tm_prev_mask = mask;
+    free(pv);
+}
+
+/* Which catalog themes already have their preview file on the clock (the files outlive a reboot, the mask does not). */
+static void tm_prev_scan(void)
+{
+    cJSON *cat = s_tm_catalog ? cJSON_Parse(s_tm_catalog) : NULL;
+    uint32_t mask = 0;
+    if (cat && display_pause_for_spi(5000)) {
+        int idx = 0;
+        cJSON *it;
+        cJSON_ArrayForEach(it, cJSON_GetObjectItem(cat, "themes")) {
+            const int at = idx++;
+            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
+            cJSON *rv = cJSON_GetObjectItem(it, "rev");
+            char path[128];
+            struct stat st;
+            if (at >= TM_PREV_THEMES || !tm_id_valid(id) || !cJSON_IsNumber(rv)) continue;
+            snprintf(path, sizeof(path), TM_PREV_DIR "/%.31s_r%d.jpg", id, rv->valueint);
+            if (stat(path, &st) == 0 && st.st_size > 0) mask |= (1u << at);
+        }
+        display_unpause();
+    }
+    cJSON_Delete(cat);
+    s_tm_prev_mask = mask;
+}
+
+/* After a good refresh: keep the catalog on flash so a reboot or firmware update does not lose it. */
+static void tm_save_catalog(void)
+{
+    if (!s_tm_catalog || !display_pause_for_spi(5000)) return;
+    const char *tmp = TM_CATALOG_FILE ".tmp";
+    size_t len = strlen(s_tm_catalog);
+    bool ok = false;
+    FILE *f = fopen(tmp, "wb");
+    if (f) {
+        ok = fprintf(f, "%lld\n", (long long)s_tm_fetched) > 0 && fwrite(s_tm_catalog, 1, len, f) == len;
+        if (fclose(f) != 0) ok = false;
+    }
+    if (!ok || rename(tmp, TM_CATALOG_FILE) != 0) {
+        remove(tmp);
+        ESP_LOGW(TAG, "[themes] could not save the catalog");
+    }
+    display_unpause();
+}
+
+/* First use after boot: bring the saved catalog back (only if no refresh has loaded one) and re-check the cached previews. */
+static void tm_restore_catalog(void)
+{
+    if (s_tm_restored || s_tm_catalog || s_tm.state == TM_RUNNING) return;
+    s_tm_restored = true;
+    if (!display_pause_for_spi(5000)) { s_tm_restored = false; return; }
+    char *buf = NULL;
+    FILE *f = fopen(TM_CATALOG_FILE, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (sz > 2 && sz <= TM_MAX_CATALOG + 32 && (buf = heap_caps_malloc((size_t)sz + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) != NULL) {
+            if (fread(buf, 1, (size_t)sz, f) == (size_t)sz) buf[sz] = '\0';
+            else { free(buf); buf = NULL; }
+        }
+        fclose(f);
+    }
+    display_unpause();
+    if (!buf) return;
+    char *body = strchr(buf, '\n');
+    cJSON *cat = body ? cJSON_Parse(body + 1) : NULL;
+    cJSON *sc = cat ? cJSON_GetObjectItem(cat, "schema") : NULL;
+    if (!cat || !cJSON_IsArray(cJSON_GetObjectItem(cat, "themes")) || (cJSON_IsNumber(sc) && sc->valueint > TM_CATALOG_SCHEMA)) {
+        cJSON_Delete(cat);
+        free(buf);
+        return;
+    }
+    cJSON_Delete(cat);
+    s_tm_fetched = (time_t)atoll(buf);
+    memmove(buf, body + 1, strlen(body + 1) + 1);
+    s_tm_catalog = buf;
+    tm_prev_scan();
+    ESP_LOGI(TAG, "[themes] restored the saved catalog");
+}
+
+/* One task for both operations: refresh the catalog, or download + install one pack (s_tm.install / s_tm.id). */
+/* Runs on the shared network task (see tm_tick), whose stack is allocated once at boot: the internal heap is far too fragmented
+ * to create a new task of this size mid-uptime. The long strings live in one PSRAM block to keep this frame small. */
+typedef struct { char repo[64], ua[128], base[160], url[256], zip_rel[96], sha[65]; } tm_strs_t;
+
+static void tm_job(void)
+{
+    const bool install = s_tm.install;
+    const bool check = s_tm.check;
+    bool parked = false, suspended = false, have_tls = false, ok = false, was_spectrum = false;
+    uint8_t *buf = NULL;
+    tm_strs_t *ts = heap_caps_calloc(1, sizeof(*ts), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int want_size = 0, timeout_ms = install ? OTA_PULL_TIMEOUT_MS : 30000;
+    esp_http_client_handle_t client = NULL;
+    int clen = 0, got = 0;
+
+    s_tm.state = TM_RUNNING;
+    s_tm.progress = 0;
+    s_tm.error[0] = '\0';
+    s_tm.changed = 0;
+    strlcpy(s_tm.phase, install ? "download" : check ? "checking" : "catalog", sizeof(s_tm.phase));
+
+    if (!ts) {
+        snprintf(s_tm.error, sizeof(s_tm.error), "Out of memory");
+        goto done;
+    }
+    if (s_stock_check_task_running) {      /* cannot normally happen (tm_start refuses, spawns wait), but never overlap */
+        snprintf(s_tm.error, sizeof(s_tm.error), "A stock-file check is running - try again in a moment");
+        goto done;
+    }
+    if (check) {                           /* local only: no network, no clock time needed */
+        s_tm.changed = tm_verify_installed(true);
+        ok = true;
+        goto done;
+    }
+    if (!ntp_has_valid_time()) {
+        snprintf(s_tm.error, sizeof(s_tm.error), "Clock time not synced yet");
+        goto done;
+    }
+    resolve_update_repo(ts->repo, sizeof(ts->repo));
+    snprintf(ts->ua, sizeof(ts->ua), HTTP_UA_BASE "%s", ts->repo);
+    snprintf(ts->base, sizeof(ts->base), "https://raw.githubusercontent.com/%s/" TM_BRANCH "/themes/", ts->repo);
+
+    if (install) {
+        cJSON *cat = s_tm_catalog ? cJSON_Parse(s_tm_catalog) : NULL;
+        cJSON *themes = cat ? cJSON_GetObjectItem(cat, "themes") : NULL;
+        cJSON *it;
+        cJSON_ArrayForEach(it, themes) {
+            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
+            if (!id || strcmp(id, s_tm.id) != 0) continue;
+            const char *z = cJSON_GetStringValue(cJSON_GetObjectItem(it, "zip"));
+            const char *h = cJSON_GetStringValue(cJSON_GetObjectItem(it, "sha256"));
+            cJSON *sz = cJSON_GetObjectItem(it, "size");
+            if (z) strlcpy(ts->zip_rel, z, sizeof(ts->zip_rel));
+            if (h) strlcpy(ts->sha, h, sizeof(ts->sha));
+            if (cJSON_IsNumber(sz)) want_size = sz->valueint;
+            break;
+        }
+        cJSON_Delete(cat);
+        if (strncmp(ts->zip_rel, "packs/", 6) != 0 || strstr(ts->zip_rel, "..") || strstr(ts->zip_rel, "//") || strlen(ts->sha) != 64) {
+            snprintf(s_tm.error, sizeof(s_tm.error), "Catalog entry for '%.31s' is incomplete", s_tm.id);
+            goto done;
+        }
+        display_show_wait();
+        parked = true;
+    }
+    snprintf(ts->url, sizeof(ts->url), "%s%s", ts->base, install ? ts->zip_rel : "catalog.json");
+
+    tls_sem_take();
+    have_tls = true;
+    if (install) {
+        /* A catalog refresh is one small fetch under the TLS lock, like the update check. An install writes flash, so it
+         * suspends the background tasks (which also switches Spectrum to Clock; put it back afterwards). */
+        config_lock();
+        was_spectrum = (config_get()->current_mode == APP_MODE_SPECTRUM);
+        config_unlock();
+        ota_suspend_tasks();
+        suspended = true;
+    }
+
+    if (!hp_https_open(ts->url, ts->ua, timeout_ms, install ? TM_MAX_PACK : TM_MAX_CATALOG, &client, &clen,
+                       s_tm.error, sizeof(s_tm.error), "themes"))
+        goto done;
+    if (install && want_size > 0 && clen != want_size) {
+        esp_http_client_close(client); esp_http_client_cleanup(client);
+        snprintf(s_tm.error, sizeof(s_tm.error), "Download size differs from the catalog");
+        goto done;
+    }
+    buf = heap_caps_malloc((size_t)clen + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        esp_http_client_close(client); esp_http_client_cleanup(client);
+        snprintf(s_tm.error, sizeof(s_tm.error), "Out of memory for %d B", clen);
+        goto done;
+    }
+    got = hp_https_read_body(client, buf, clen, install ? tm_progress_cb : NULL, "themes", timeout_ms);
+    tls_sem_give();
+    have_tls = false;
+    if (got != clen) {
+        snprintf(s_tm.error, sizeof(s_tm.error), "Short download: %d/%d B", got, clen);
+        goto done;
+    }
+    buf[clen] = '\0';
+
+    if (!install) {
+        cJSON *cat = cJSON_Parse((const char *)buf);
+        cJSON *sc = cat ? cJSON_GetObjectItem(cat, "schema") : NULL;
+        if (!cat || !cJSON_IsArray(cJSON_GetObjectItem(cat, "themes"))) {
+            snprintf(s_tm.error, sizeof(s_tm.error), "Catalog is not valid JSON");
+        } else if (cJSON_IsNumber(sc) && sc->valueint > TM_CATALOG_SCHEMA) {
+            snprintf(s_tm.error, sizeof(s_tm.error), "Catalog needs a newer firmware");
+        } else {
+            char *old = s_tm_catalog;
+            s_tm_catalog = (char *)buf;
+            buf = NULL;
+            s_tm_fetched = time(NULL);
+            free(old);
+            ok = true;
+        }
+        cJSON_Delete(cat);
+        if (ok) {
+            strlcpy(s_tm.phase, "checking", sizeof(s_tm.phase));
+            tm_verify_installed(false);
+            strlcpy(s_tm.phase, "catalog", sizeof(s_tm.phase));   /* the previews belong to the catalog update */
+            tm_cache_previews(ts->base, ts->ua);
+            tm_save_catalog();
+        }
+        goto done;
+    }
+
+    strlcpy(s_tm.phase, "verify", sizeof(s_tm.phase));
+    s_tm.progress = 82;
+    if (!sha256_verify(buf, (size_t)clen, ts->sha)) {
+        snprintf(s_tm.error, sizeof(s_tm.error), "SHA-256 mismatch");
+        goto done;
+    }
+    if (clen < 4 || (uint32_t)(buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24) != ZIP_LFH_SIG) {
+        snprintf(s_tm.error, sizeof(s_tm.error), "Not a valid ZIP");
+        goto done;
+    }
+
+    strlcpy(s_tm.phase, "extract", sizeof(s_tm.phase));
+    s_tm.progress = 85;
+    {
+        char dst[96], old[96], marker[112], prefix[TM_ID_MAX + 20];
+        struct stat st;
+        snprintf(dst, sizeof(dst), TM_THEMES_DIR "/%s", s_tm.id);
+        snprintf(old, sizeof(old), TM_THEMES_DIR "/.old_%s", s_tm.id);
+        snprintf(marker, sizeof(marker), "%s/.pack.json", dst);
+        snprintf(prefix, sizeof(prefix), "images/themes/%s/", s_tm.id);
+
+        fs_remove_recursive(old);   /* leftover from an interrupted install */
+        bool had_old = (stat(dst, &st) == 0);
+        if (had_old && rename(dst, old) != 0) {
+            snprintf(s_tm.error, sizeof(s_tm.error), "Could not move the current theme aside");
+            goto done;
+        }
+        shell_cache_flush();
+        int n_ok = 0, n_skip = 0, n_fail = 0, n_same = 0;
+        extract_zip_to_littlefs(buf, (size_t)clen, "[themes] ", /*success_at_info=*/false, NULL,
+                                &n_ok, &n_skip, &n_fail, &n_same, prefix, /*honor_exceptions=*/false);
+        if (n_fail == 0 && n_ok > 0 && stat(marker, &st) == 0) {
+            if (had_old) fs_remove_recursive(old);
+            ok = true;
+            ESP_LOGI(TAG, "[themes] installed '%s': %d files", s_tm.id, n_ok);
+        } else {
+            fs_remove_recursive(dst);
+            if (had_old) rename(old, dst);
+            if (n_fail) snprintf(s_tm.error, sizeof(s_tm.error), "%d file(s) failed to write", n_fail);
+            else        snprintf(s_tm.error, sizeof(s_tm.error), "Pack has no files");
+        }
+        free(buf);
+        buf = NULL;
+        display_theme_cache_flush();
+        fs_usage_invalidate();
+        display_invalidate();
+    }
+
+done:
+    free(buf);
+    if (have_tls) tls_sem_give();
+    if (suspended) webui_resume_tasks();
+    if (parked) display_resume_after_wait();
+    if (was_spectrum) config_set_mode(APP_MODE_SPECTRUM);
+    if (!ok && !s_tm.error[0]) snprintf(s_tm.error, sizeof(s_tm.error), "Failed");
+    if (!ok) ESP_LOGE(TAG, "[themes] %s failed: %s", install ? "install" : "refresh", s_tm.error);
+    s_tm.progress = ok ? 100 : s_tm.progress;
+    s_tm.state = ok ? TM_DONE : TM_ERROR;
+    s_ota_active = false;
+    s_tm_busy = false;
+    if (s_stock_spawn_deferred) { s_stock_spawn_deferred = false; stock_files_check_spawn(); }   /* a scan asked for meanwhile */
+    free(ts);
+    ESP_LOGI(TAG, "[themes] net_poll stack high-water mark: %u B unused", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+}
+
+/* The job's entry on the shared network task: runs the queued refresh / install, then sleeps until woken again. */
+static uint32_t tm_tick(void)
+{
+    if (s_tm_pending) {
+        s_tm_pending = false;
+        tm_job();
+    }
+    return 3600U * 1000U;
+}
+
+
+static esp_err_t tm_start(httpd_req_t *r, bool install, bool check, const char *id)
+{
+    if (s_ota_active || s_tm.state == TM_RUNNING) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"busy\"}");
+    }
+    if (!check && !wifi_manager_is_connected()) {
+        httpd_resp_set_status(r, "503 Service Unavailable");
+        return send_json(r, "{\"error\":\"no network\"}");
+    }
+    s_tm_busy = true;                      /* from here on no stock scan can start ... */
+    if (s_stock_check_task_running) {      /* ... and one that already runs blocks this job */
+        s_tm_busy = false;
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"busy\"}");
+    }
+    s_tm.install = install;
+    s_tm.check = check;
+    strlcpy(s_tm.id, id ? id : "", sizeof(s_tm.id));
+    s_tm.state = TM_RUNNING;
+    s_tm.progress = 0;
+    s_tm.error[0] = '\0';
+    s_ota_active = true;
+    strlcpy(s_tm.phase, "queued", sizeof(s_tm.phase));
+    s_tm_pending = true;
+    periodic_net_poll_force("themes");   /* wakes the shared network task, which runs tm_tick() */
+    return send_json(r, "{\"status\":\"started\"}");
+}
+
+/* GET /api/themes/catalog — the cached catalog merged with what is installed on this clock (no network access). */
+static esp_err_t api_themes_catalog(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    cJSON *out = cJSON_CreateObject();
+    char active[32];
+    config_lock();
+    strlcpy(active, config_get()->theme, sizeof(active));
+    config_unlock();
+    cJSON_AddStringToObject(out, "active", active);
+    cJSON_AddStringToObject(out, "firmware", FW_VERSION_STR);
+    cJSON *list = cJSON_AddArrayToObject(out, "themes");
+    tm_restore_catalog();
+    /* While a refresh runs the cached string is about to be replaced, so don't read it. */
+    bool busy = (s_tm.state == TM_RUNNING && !s_tm.install && !s_tm.check);
+    cJSON *cat = (!busy && s_tm_catalog) ? cJSON_Parse(s_tm_catalog) : NULL;
+    cJSON_AddBoolToObject(out, "busy", busy);
+    cJSON_AddBoolToObject(out, "loaded", cat != NULL);
+    if (cat) {
+        cJSON *pv = cJSON_GetObjectItem(cat, "pack_version");
+        cJSON_AddNumberToObject(out, "pack_version", cJSON_IsNumber(pv) ? pv->valueint : 0);
+        const char *upd = cJSON_GetStringValue(cJSON_GetObjectItem(cat, "updated"));
+        cJSON_AddStringToObject(out, "updated", upd ? upd : "");
+        const time_t now = time(NULL);
+        cJSON_AddNumberToObject(out, "age_s", (s_tm_fetched > 0 && ntp_has_valid_time() && now >= s_tm_fetched) ? (double)(now - s_tm_fetched) : -1.0);
+        cJSON *it;
+        int pos = -1;
+        cJSON_ArrayForEach(it, cJSON_GetObjectItem(cat, "themes")) {
+            pos++;
+            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
+            if (!tm_id_valid(id)) continue;
+            int inst_rev = 0;
+            bool inst = tm_installed(id, &inst_rev);
+            cJSON *rv = cJSON_GetObjectItem(it, "rev");
+            int rev = cJSON_IsNumber(rv) ? rv->valueint : 1;
+            const char *min_fw = cJSON_GetStringValue(cJSON_GetObjectItem(it, "min_fw"));
+            cJSON *e = cJSON_CreateObject();
+            static const char *const k_str[] = { "id", "name", "family", "variant", "notes", "min_fw", "preview", "preview_full", "category" };
+            for (size_t k = 0; k < sizeof(k_str) / sizeof(k_str[0]); k++) {
+                const char *v = cJSON_GetStringValue(cJSON_GetObjectItem(it, k_str[k]));
+                cJSON_AddStringToObject(e, k_str[k], v ? v : "");
+            }
+            cJSON *sz = cJSON_GetObjectItem(it, "size");
+            cJSON_AddNumberToObject(e, "size", cJSON_IsNumber(sz) ? sz->valueint : 0);
+            cJSON_AddNumberToObject(e, "rev", rev);
+            cJSON_AddBoolToObject(e, "bundled", cJSON_IsTrue(cJSON_GetObjectItem(it, "bundled")));
+            cJSON_AddBoolToObject(e, "installed", inst);
+            cJSON_AddNumberToObject(e, "installed_rev", inst_rev);
+            cJSON_AddBoolToObject(e, "update", inst && inst_rev > 0 && rev > inst_rev);
+            cJSON_AddBoolToObject(e, "differs", inst && inst_rev == 0);   /* on the clock, but not the catalog's version */
+            cJSON_AddBoolToObject(e, "compatible", tm_fw_ok(min_fw));
+            cJSON_AddBoolToObject(e, "active", strcmp(active, id) == 0);
+            cJSON_AddBoolToObject(e, "preview_local", pos < TM_PREV_THEMES && ((s_tm_prev_mask >> pos) & 1u));
+            cJSON_AddItemToArray(list, e);
+        }
+        cJSON_Delete(cat);
+    }
+    char *js = cJSON_PrintUnformatted(out);
+    cJSON_Delete(out);
+    if (!js) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    esp_err_t e = send_json(r, js);
+    free(js);
+    return e;
+}
+
+/* POST /api/themes/refresh — fetch themes/catalog.json from the repo (async; poll /api/themes/status). */
+static esp_err_t api_themes_refresh(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    return tm_start(r, false, false, NULL);
+}
+
+/* POST /api/themes/verify — re-hash the installed catalog themes against their packs (local only; async, poll /api/themes/status). */
+static esp_err_t api_themes_verify(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    tm_restore_catalog();
+    if (!s_tm_catalog)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Load the catalog first"), ESP_FAIL;
+    return tm_start(r, false, true, NULL);
+}
+
+/* POST /api/themes/install {"id":"Nixie"} — download and install that catalog entry (async; poll /api/themes/status). */
+static esp_err_t api_themes_install(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char body[96];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
+    char id[TM_ID_MAX + 1] = "";
+    const char *v = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+    if (v) strlcpy(id, v, sizeof(id));
+    cJSON_Delete(root);
+    tm_restore_catalog();
+    if (!tm_id_valid(id) || !s_tm_catalog)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, s_tm_catalog ? "Bad theme id" : "Load the catalog first"), ESP_FAIL;
+    cJSON *cat = cJSON_Parse(s_tm_catalog);
+    cJSON *themes = cat ? cJSON_GetObjectItem(cat, "themes") : NULL;
+    cJSON *found = NULL, *it;
+    cJSON_ArrayForEach(it, themes) {
+        const char *cid = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
+        if (cid && strcmp(cid, id) == 0) { found = it; break; }
+    }
+    bool compatible = found && tm_fw_ok(cJSON_GetStringValue(cJSON_GetObjectItem(found, "min_fw")));
+    cJSON_Delete(cat);
+    if (!found) return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not in the catalog"), ESP_FAIL;
+    if (!compatible) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Needs a newer firmware"), ESP_FAIL;
+    return tm_start(r, true, false, id);
+}
+
+/* POST /api/themes/remove {"id":"Nixie"} — delete an installed theme's folder. If it is the active theme, switch to
+ * WeatherLive first (it needs no files). */
+static esp_err_t api_themes_remove(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    if (s_ota_active || s_tm.state == TM_RUNNING || s_stock_check_task_running) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"busy\"}");
+    }
+    char body[96];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
+    char id[TM_ID_MAX + 1] = "";
+    const char *v = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+    if (v) strlcpy(id, v, sizeof(id));
+    cJSON_Delete(root);
+    int rev;
+    if (!tm_id_valid(id) || !tm_installed(id, &rev))
+        return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Theme not installed"), ESP_FAIL;
+
+    s_ota_active = true;                  /* keep an install, update or stock scan out until the files are gone */
+    s_tm_busy = true;
+    bool switched = false;
+    char active[32];
+    config_lock();
+    strlcpy(active, config_get()->theme, sizeof(active));
+    config_unlock();
+    if (strcmp(active, id) == 0) {
+        const char *fallback = "{\"apps\":[{\"theme\":\"WeatherLive\"}]}";
+        config_set_json(fallback, strlen(fallback));
+        display_config_changed();
+        vTaskDelay(pdMS_TO_TICKS(600));   /* let the display task leave the folder before it is deleted */
+        switched = true;
+    }
+    char path[96];
+    snprintf(path, sizeof(path), TM_THEMES_DIR "/%s", id);
+    int rc = fs_remove_recursive(path);
+    s_ota_active = false;
+    s_tm_busy = false;
+    if (s_stock_spawn_deferred) { s_stock_spawn_deferred = false; stock_files_check_spawn(); }
+    fs_usage_invalidate();
+    display_theme_cache_flush();
+    if (rc != 0)
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed"), ESP_FAIL;
+    return send_json(r, switched ? "{\"status\":\"removed\",\"switched_to\":\"WeatherLive\"}" : "{\"status\":\"removed\"}");
+}
+
+/* GET /api/themes/status — progress of the running (or last) refresh / install. */
+static esp_err_t api_themes_status(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    static const char *const names[] = { "idle", "running", "done", "error" };
+    char buf[400];
+    snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"op\":\"%s\",\"id\":\"%.31s\",\"phase\":\"%.15s\",\"progress\":%d,\"changed\":%d,\"error\":\"%.95s\"}",
+             names[s_tm.state], s_tm.install ? "install" : s_tm.check ? "verify" : "refresh", s_tm.id, s_tm.phase, (int)s_tm.progress,
+             s_tm.changed, s_tm.error);
     return send_json(r, buf);
 }
 
@@ -4422,6 +5355,12 @@ static void fs_mkdir_parents(const char *file_path)
     }
 }
 
+/* True for paths whose images the display caches (theme art, system icons). */
+static bool is_theme_asset_path(const char *p)
+{
+    return strncmp(p, "/images/themes/", 15) == 0 || strncmp(p, "/images/system/", 15) == 0;
+}
+
 static esp_err_t api_file_upload(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
@@ -4534,6 +5473,7 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     if (strncmp(p, "/images/album/", 14) == 0)
         display_album_invalidate();
     stock_missing_mark_present(p + 1);   /* p has a leading '/'; cached entries don't */
+    if (is_theme_asset_path(p)) display_theme_cache_flush();
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
@@ -4623,6 +5563,7 @@ static esp_err_t api_file_rename(httpd_req_t *r)
     if (strncmp(from, "/images/album/", 14) == 0 ||
         strncmp(to,   "/images/album/", 14) == 0)
         display_album_invalidate();
+    if (is_theme_asset_path(from) || is_theme_asset_path(to)) display_theme_cache_flush();
 
     return send_json(r, "{\"status\":\"ok\"}");
 }
@@ -4648,6 +5589,7 @@ static esp_err_t api_file_delete(httpd_req_t *r)
     ESP_LOGI(TAG, "Deleted: %s", spiffs_path);
     if (strncmp(p, "/images/album/", 14) == 0)
         display_album_invalidate();
+    if (is_theme_asset_path(p)) display_theme_cache_flush();
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
@@ -4675,6 +5617,10 @@ static esp_err_t api_mic_calibrate(httpd_req_t *r)
     for (int i = 0; i < MIC_BAND_COUNT; i++)
         cJSON_AddItemToArray(arr, cJSON_CreateNumber((double)floor_vals[i]));
     cJSON_AddBoolToObject(patch, "mic_calibration_saved", true);
+    config_lock();
+    uint16_t cal_top_hz = config_get()->mic_top_hz;
+    config_unlock();
+    cJSON_AddNumberToObject(patch, "mic_floor_top_hz", cal_top_hz | MIC_FLOOR_CHAIN_FLAG);   /* the layout this baseline belongs to */
     char *js = cJSON_PrintUnformatted(patch);
     cJSON_Delete(patch);
     if (js) { config_set_json(js, strlen(js)); free(js); }
@@ -4729,6 +5675,9 @@ static esp_err_t api_social_refresh(httpd_req_t *r)
  *     session (responds {"status":"busy"} instead) — used by Quick Refresh.
  *   stop_all: true = stop any running color-cycle AND snow session (the
  *     Display tab's Cancel button); mask/duration_s are ignored.
+ *   pattern: 1-4 = show that calibration test pattern on the masked tubes
+ *     instead of the color cycle ({"status":"busy"} if a burn-in or snow
+ *     session is running); see display_start_test_pattern().
  * Masked tubes run the color cycle (see display_set_burnin_mask()). */
 static esp_err_t api_debug_burnin(httpd_req_t *r)
 {
@@ -4742,9 +5691,14 @@ static esp_err_t api_debug_burnin(httpd_req_t *r)
     uint32_t duration_s = cJSON_IsNumber(jd) ? (uint32_t)jd->valueint : 0;
     bool     only_idle  = cJSON_IsTrue(cJSON_GetObjectItem(root, "only_if_idle"));
     bool     stop_all   = cJSON_IsTrue(cJSON_GetObjectItem(root, "stop_all"));
+    cJSON   *jp         = cJSON_GetObjectItem(root, "pattern");
+    uint8_t  pattern    = cJSON_IsNumber(jp) ? (uint8_t)(jp->valueint & 0x07) : 0;
     cJSON_Delete(root);
     if (stop_all) {
         display_stop_burnin();
+    } else if (pattern) {
+        if (!display_start_test_pattern(mask, duration_s, pattern))
+            return send_json(r, "{\"status\":\"busy\"}");
     } else if (only_idle) {
         if (!display_start_burnin_if_idle(mask, duration_s))
             return send_json(r, "{\"status\":\"busy\"}");
@@ -5079,16 +6033,28 @@ static esp_err_t api_debug_micbands(httpd_req_t *r)
     float raw[MIC_BAND_COUNT], floor_[MIC_BAND_COUNT];
     float power[MIC_BAND_COUNT], bands[MIC_BAND_COUNT];
     mic_get_band_debug(raw, floor_, power, bands);
+    float band_f[MIC_BAND_COUNT];
+    bool  band_m[MIC_BAND_COUNT];
+    mic_get_band_freqs(band_f);
+    mic_get_band_masked(band_m);
 
-    size_t cap = MIC_BAND_COUNT * 96 + 96;
+    size_t cap = MIC_BAND_COUNT * 112 + 420;
+    mic_stats_t st;
+    mic_get_stats(&st);
     char  *out = malloc(cap);
     if (!out) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
 
-    size_t off = (size_t)snprintf(out, cap, "{\"bands\":[");
+    size_t off = (size_t)snprintf(out, cap, "{\"stats\":{\"frames\":%lu,\"fail\":%lu,\"gated\":%lu,\"holds\":%lu,\"adc\":%d,\"gv\":%.1f,\"gt\":%.1f,\"ge\":%lu,\"go\":[%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu]},\"bands\":[",
+                                  (unsigned long)st.frames, (unsigned long)st.read_fail, (unsigned long)st.gated,
+                                  (unsigned long)st.spike_holds, st.adc_last, (double)st.gate_val, (double)st.gate_thr,
+                                  (unsigned long)st.gate_eval,
+                                  (unsigned long)st.gate_open[0], (unsigned long)st.gate_open[1], (unsigned long)st.gate_open[2],
+                                  (unsigned long)st.gate_open[3], (unsigned long)st.gate_open[4], (unsigned long)st.gate_open[5],
+                                  (unsigned long)st.gate_open[6], (unsigned long)st.gate_open[7], (unsigned long)st.gate_open[8]);
     for (int b = 0; b < MIC_BAND_COUNT; b++)
         off += (size_t)snprintf(out + off, cap - off,
-            "%s{\"i\":%d,\"raw\":%.3f,\"floor\":%.3f,\"power\":%.3f,\"disp\":%.3f}",
-            b ? "," : "", b, raw[b], floor_[b], power[b], bands[b]);
+            "%s{\"i\":%d,\"f\":%.0f,\"m\":%d,\"raw\":%.3f,\"floor\":%.3f,\"power\":%.3f,\"disp\":%.3f}",
+            b ? "," : "", b, (double)band_f[b], band_m[b] ? 1 : 0, raw[b], floor_[b], power[b], bands[b]);
     off += (size_t)snprintf(out + off, cap - off, "]}");
 
     httpd_resp_set_type(r, "application/json");
@@ -5131,7 +6097,7 @@ static esp_err_t api_debug_micframe(httpd_req_t *r)
     /* Decimated/DC-removed values from the SAME frame — the exact Goertzel
      * input (pre-window).  Lets offline analysis compare both views of one
      * frame and isolate the decimation stage. */
-    off += (size_t)snprintf(out + off, cap - off, "],\"dec_rate_hz\":8000,\"dec\":[");
+    off += (size_t)snprintf(out + off, cap - off, "],\"dec_rate_hz\":16000,\"dec\":[");
     for (int i = 0; i < MIC_FRAME_SAMPLES && off < cap - 8; i++)
         off += (size_t)snprintf(out + off, cap - off, "%s%.2f", i ? "," : "",
                                 (double)dec[i]);
@@ -5142,6 +6108,115 @@ static esp_err_t api_debug_micframe(httpd_req_t *r)
     esp_err_t err = httpd_resp_send(r, out, (ssize_t)off);
     free(out);
     return err;
+}
+
+/* POST /api/debug/mictest — body {"on":true,"duration_s":1200}
+ * Keeps the mic capture + analysis running in any mode while the display idles
+ * blank. In Spectrum mode the 20 Hz drawing keeps the CPU busy enough that this
+ * web server takes seconds per reply, which makes long mic measurements unusable;
+ * this removes the drawing but keeps the mic. Auto-stops (default 20 min, max 1 h).
+ * Used by tools/led_noise_sweep.py. */
+static esp_err_t api_debug_mictest(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char body[64];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
+    bool     on  = cJSON_IsTrue(cJSON_GetObjectItem(root, "on"));
+    cJSON   *jd  = cJSON_GetObjectItem(root, "duration_s");
+    uint32_t dur = cJSON_IsNumber(jd) && jd->valueint > 0 ? (uint32_t)jd->valueint : 0;
+    cJSON_Delete(root);
+    mic_set_test_capture(on, dur);
+    return send_json(r, on ? "{\"status\":\"on\"}" : "{\"status\":\"off\"}");
+}
+
+/* GET/POST /api/debug/mictune — Spectrum / mic constants, live (runtime only, reset on reboot).
+ * GET  → {"fields":[{"k":"eq","cur":0.6,"def":0.6,"lo":0,"hi":1}, ...]}
+ * POST → {"eq":0.8, ...} sets any subset by key (clamped); {"reset":true} restores the compiled defaults.
+ * Used by the hidden diagnostics panel. */
+static esp_err_t api_debug_mictune(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    const mic_tune_desc_t *dsc = mic_tune_desc();
+    float cur[MT_COUNT];
+    mic_tune_get(cur);
+    if (r->method == HTTP_POST) {
+        char body[512];
+        cJSON *root = read_json_body_small(r, body, sizeof(body));
+        if (!root) return ESP_FAIL;
+        if (cJSON_IsTrue(cJSON_GetObjectItem(root, "reset"))) {
+            mic_tune_reset();
+        } else {
+            for (int i = 0; i < MT_COUNT; i++) {
+                cJSON *j = cJSON_GetObjectItem(root, dsc[i].key);
+                if (cJSON_IsNumber(j)) cur[i] = (float)j->valuedouble;
+            }
+            mic_tune_set(cur);
+        }
+        cJSON_Delete(root);
+        mic_tune_get(cur);
+    }
+    const size_t cap = 160 + MT_COUNT * 112;
+    char *out = malloc(cap);
+    if (!out) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    size_t off = (size_t)snprintf(out, cap, "{\"fields\":[");
+    for (int i = 0; i < MT_COUNT && off < cap; i++)
+        off += (size_t)snprintf(out + off, cap - off, "%s{\"k\":\"%s\",\"cur\":%.5g,\"def\":%.5g,\"lo\":%.5g,\"hi\":%.5g}",
+                                i ? "," : "", dsc[i].key, (double)cur[i], (double)dsc[i].def, (double)dsc[i].lo, (double)dsc[i].hi);
+    if (off < cap) snprintf(out + off, cap - off, "]}");
+    esp_err_t e = send_json(r, out);
+    free(out);
+    return e;
+}
+
+/* POST /api/debug/mictrace {"frames":625} — record the raw energy of all 24 bands for the next N mic frames (16 ms each).
+ * GET  /api/debug/mictrace — {"active":true,...} while recording; once done, streams
+ *   {"n":N,"floor":[24],"frames":[[24 sqrt-companded values: raw=(v/100)^2], ...]} and frees the buffer.
+ * For offline replay of gate / threshold designs on real data. Needs capture running (Spectrum mode). */
+static esp_err_t api_debug_mictrace(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    if (r->method == HTTP_POST) {
+        char body[64];
+        cJSON *root = read_json_body_small(r, body, sizeof(body));
+        if (!root) return ESP_FAIL;
+        cJSON *jf = cJSON_GetObjectItem(root, "frames");
+        int fr = cJSON_IsNumber(jf) ? jf->valueint : 625;
+        cJSON_Delete(root);
+        return send_json(r, mic_trace_start(fr) ? "{\"status\":\"recording\"}" : "{\"status\":\"no memory\"}");
+    }
+    int n, cap; bool active;
+    mic_trace_info(&n, &cap, &active);
+    if (active || n <= 0) {
+        char o[96];
+        snprintf(o, sizeof(o), "{\"active\":%s,\"n\":%d,\"cap\":%d}", active ? "true" : "false", n, cap);
+        return send_json(r, o);
+    }
+    const size_t BUF = 1600;
+    char *buf = malloc(BUF);
+    if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    float fl[MIC_BAND_COUNT];
+    mic_trace_floor(fl);
+    httpd_resp_set_type(r, "application/json");
+    size_t len = (size_t)snprintf(buf, BUF, "{\"active\":false,\"n\":%d,\"floor\":[", n);
+    for (int b = 0; b < MIC_BAND_COUNT; b++)
+        len += (size_t)snprintf(buf + len, BUF - len, "%s%.4f", b ? "," : "", (double)fl[b]);
+    len += (size_t)snprintf(buf + len, BUF - len, "],\"frames\":[");
+    esp_err_t e = ESP_OK;
+    for (int i = 0; i < n && e == ESP_OK; i++) {
+        uint16_t row[MIC_BAND_COUNT];
+        if (!mic_trace_read(i, row)) break;
+        if (len + 200 > BUF) { e = httpd_resp_send_chunk(r, buf, (ssize_t)len); len = 0; }
+        len += (size_t)snprintf(buf + len, BUF - len, "%s[", i ? "," : "");
+        for (int b = 0; b < MIC_BAND_COUNT; b++)
+            len += (size_t)snprintf(buf + len, BUF - len, "%s%u", b ? "," : "", (unsigned)row[b]);
+        len += (size_t)snprintf(buf + len, BUF - len, "]");
+    }
+    if (e == ESP_OK) { len += (size_t)snprintf(buf + len, BUF - len, "]}"); e = httpd_resp_send_chunk(r, buf, (ssize_t)len); }
+    if (e == ESP_OK) httpd_resp_send_chunk(r, NULL, 0);
+    free(buf);
+    mic_trace_free();
+    return e;
 }
 
 /* GET /api/debug/tasks — per-task CPU accounting (FreeRTOS runtime stats).
@@ -5707,6 +6782,11 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/debug/tasks_result", api_debug_tasks_result),
     R(HTTP_GET,  "/api/debug/micframe",  api_debug_micframe),
     R(HTTP_GET,  "/api/debug/micbands",  api_debug_micbands),
+    R(HTTP_GET,  "/api/debug/mictrace",  api_debug_mictrace),
+    R(HTTP_POST, "/api/debug/mictrace",  api_debug_mictrace),
+    R(HTTP_POST, "/api/debug/mictest",   api_debug_mictest),
+    R(HTTP_GET,  "/api/debug/mictune",   api_debug_mictune),
+    R(HTTP_POST, "/api/debug/mictune",   api_debug_mictune),
     R(HTTP_POST, "/api/mic/calibrate",          api_mic_calibrate),
     R(HTTP_POST, "/api/mic/reset_calibration",  api_mic_reset_calibration),
     R(HTTP_POST, "/api/update_notify",          api_update_notify),
@@ -5717,6 +6797,12 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/webui_pull_status",     api_webui_pull_status),
     R(HTTP_POST, "/api/webui_pull_reboot",     api_webui_pull_reboot),
     R(HTTP_POST, "/api/stock_repair",          api_stock_repair),
+    R(HTTP_GET,  "/api/themes/catalog",        api_themes_catalog),
+    R(HTTP_POST, "/api/themes/refresh",        api_themes_refresh),
+    R(HTTP_POST, "/api/themes/install",        api_themes_install),
+    R(HTTP_POST, "/api/themes/remove",         api_themes_remove),
+    R(HTTP_POST, "/api/themes/verify",         api_themes_verify),
+    R(HTTP_GET,  "/api/themes/status",         api_themes_status),
     R(HTTP_GET,  "/api/stock_repair_status",   api_stock_repair_status),
     R(HTTP_GET,  "/api/stock_missing_list",    api_stock_missing_list),
     R(HTTP_POST, "/api/social/refresh",         api_social_refresh),
@@ -5985,6 +7071,7 @@ void web_server_start(void)
      * subsequent calls (after a WiFi reconnect) skip straight to httpd_start. */
     if (!s_log_mutex) {
         s_log_mutex = xSemaphoreCreateMutex();
+        periodic_net_poll_register(tm_tick, 3600U * 1000U, "themes");   /* Theme Manager jobs run on the shared network task */
         esp_log_set_vprintf(log_vprintf_hook);
         /* Restart the HTTP server whenever STA obtains a (new) IP address,
          * so the listening socket is always fresh after a credential change. */
@@ -6064,7 +7151,7 @@ void web_server_start(void)
      * registrations fail and, since the wildcard registers last, every web
      * UI page 404s while the APIs still work. The loop below logs any
      * failure loudly. */
-    cfg.max_uri_handlers = 70;
+    cfg.max_uri_handlers = 84;
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     cfg.stack_size       = 8192;
     /* Bump the open-socket cap so concurrent OTA + page reload + status polls

@@ -9,3 +9,4 @@ __pycache__/
 *.swo
 managed_components/
 dependencies.lock
+"components/config_mgr/include/stock_files.h" 

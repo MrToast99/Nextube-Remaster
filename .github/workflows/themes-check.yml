@@ -1,0 +1,36 @@
+name: Check theme packs
+
+# Runs helpers/theme_pack/pack_theme.py check: every pack in themes/catalog.json must exist, match its size and SHA-256,
+# contain only stored (uncompressed) entries under images/themes/<id>/, carry the revision the catalog lists, and have
+# its preview; nothing may be left unreferenced. Bundled themes must also match their copy in data/images/themes/.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'themes/**'
+      - 'helpers/theme_pack/**'
+      - 'data/images/themes/**'
+      - '.github/workflows/themes-check.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'themes/**'
+      - 'helpers/theme_pack/**'
+      - 'data/images/themes/**'
+      - '.github/workflows/themes-check.yml'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check the catalog against the packs
+        run: python helpers/theme_pack/pack_theme.py check

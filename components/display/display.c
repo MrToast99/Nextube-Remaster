@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <sys/stat.h>      /* stat - saved-theme folder check */
 #include <time.h>
 
 static const char *TAG = "display";
@@ -461,6 +462,35 @@ static inline void rotation_pause_set_until_us(int64_t v)
  * render every pixel black.  Updated by display_apply_tube_brightness(). */
 static uint8_t s_tube_brightness[LCD_COUNT];
 
+/* Per-tube shadow lift (0-100, 0 = off). Zero-init is the correct default.
+ * Updated by display_apply_tube_shadow_lift(). */
+static uint8_t s_shadow_lift[LCD_COUNT];
+
+/* Per-tube color balance (50-150 %, 100 = neutral) and black level (0-30).
+ * Gains must start at 100 (display_init) — zero would blank the channel. */
+static uint8_t s_gain_r[LCD_COUNT];
+static uint8_t s_gain_g[LCD_COUNT];
+static uint8_t s_gain_b[LCD_COUNT];
+static uint8_t s_black_level[LCD_COUNT];
+
+/* Per-channel gamma multiplier (50-200 %, 100 = neutral) and black pedestal
+ * (0-30 %). The curve multipliers must start at 100 (display_init). */
+static uint8_t s_curve_r[LCD_COUNT];
+static uint8_t s_curve_g[LCD_COUNT];
+static uint8_t s_curve_b[LCD_COUNT];
+static uint8_t s_ped_r[LCD_COUNT];
+static uint8_t s_ped_g[LCD_COUNT];
+static uint8_t s_ped_b[LCD_COUNT];
+
+/* Bumped on every LUT rebuild so the calibration test screen repaints the
+ * moment a setting is applied instead of on its 2 s safety refresh. */
+static volatile uint32_t s_lut_gen;
+
+/* Calibration test screen pattern (0 = none). The test screen rides the
+ * burn-in mask/timer, so every render path that already skips burn-in
+ * tubes skips these too; this only selects what the display task paints. */
+static volatile uint8_t s_testpat_id;
+
 /* Per-tube VMCTR1 VCOM value (0x00–0x3F).  Must be initialised to 0x0E in
  * display_init().  Decoupled from the panel profile so users can fine-tune
  * contrast for their specific replacement panel batch without changing the
@@ -473,38 +503,80 @@ static uint8_t s_tube_vcom[LCD_COUNT];
  * so the per-pixel hot path is one LUT lookup, not a divide (Xtensa has no
  * hardware integer divider) plus a LUT lookup — brightness/gamma only
  * change on a settings apply, so rebuilding the table then is cheap.
- * Gamma > 1.0 darkens midtones for washed/low-contrast panels;
- * s_gamma_lut_active short-circuits the table when br=100/gamma=1.0 (no-op).
+ * Gamma > 1.0 darkens midtones for washed/low-contrast panels; shadow lift
+ * then brightens dark pixels only (see shadow_lift()).
+ * s_gamma_lut_active short-circuits the table when br=100/gamma=1.0/lift=0 (no-op).
  * Rebuilt by rebuild_gamma_lut() on change, with the display task suspended
  * to avoid reading a partially-updated table. */
 static float   s_gamma[LCD_COUNT];                  /* per-tube exponent; 1.0 = identity */
 static bool    s_gamma_lut_active[LCD_COUNT];        /* false = LUT skipped (identity)    */
-static uint8_t s_gamma_lut_5bit[LCD_COUNT][32];      /* R and B channels (5-bit, 0–31)    */
+static uint8_t s_gamma_lut_5bit[LCD_COUNT][32];      /* R channel (5-bit, 0–31)           */
+static uint8_t s_gamma_lut_5bit_b[LCD_COUNT][32];    /* B channel (5-bit, 0–31)           */
 static uint8_t s_gamma_lut_6bit[LCD_COUNT][64];      /* G channel        (6-bit, 0–63)    */
+
+/* Multiplicative boost that fades to nothing toward white: black stays black,
+ * ratios between channels of a dim pixel are preserved (the orange glow stays
+ * orange), and the curve stays monotonic up to the max gain of 4x at 100. */
+static float shadow_lift(float y, float lift)
+{
+    float k = 1.0f - y;
+    float v = y * (1.0f + 3.0f * lift * k * k * k);
+    return v > 1.0f ? 1.0f : v;
+}
+
+/* One channel's table: brightness trim and gain scale the input, then gamma,
+ * black level and shadow lift. Gain 100 keeps the original integer brightness
+ * scaling so existing calibrations render exactly as before. */
+static void build_channel_lut(uint8_t *out, int n, float g,
+                              uint8_t br, uint8_t gain, float black, float lift, float pedestal)
+{
+    const int   mx = n - 1;
+    const float fm = (float)mx;
+    const bool  identity_gamma = fabsf(g - 1.0f) < 0.005f;
+    for (int i = 0; i < n; i++) {
+        float y;
+        if (gain == 100) {
+            uint32_t scaled = (br >= 100) ? (uint32_t)i : ((uint32_t)i * br) / 100u;
+            y = (float)scaled / fm;
+        } else {
+            y = (float)i * (float)br * (float)gain / 10000.0f / fm;
+            if (y > 1.0f) y = 1.0f;
+        }
+        if (!identity_gamma) y = powf(y, g);
+        if (black > 0.0f) {
+            y = (y - black) / (1.0f - black);
+            if (y < 0.0f) y = 0.0f;
+        }
+        if (lift > 0.0f) y = shadow_lift(y, lift);
+        if (pedestal > 0.0f) y = pedestal + (1.0f - pedestal) * y;   /* raises pure black too */
+        float v = y * fm + 0.5f;
+        out[i] = (v >= fm) ? (uint8_t)mx : (uint8_t)v;
+    }
+}
 
 static void rebuild_gamma_lut(int tube)
 {
     float   g  = s_gamma[tube];
     uint8_t br = s_tube_brightness[tube];
+    float   lift  = (float)s_shadow_lift[tube] / 100.0f;
+    float   black = (float)s_black_level[tube] / 100.0f;
     bool identity_gamma = fabsf(g - 1.0f) < 0.005f;
-    bool identity_br    = (br >= 100);
-    if (identity_gamma && identity_br) {
+    bool identity = identity_gamma && br >= 100 && s_shadow_lift[tube] == 0 &&
+                    s_black_level[tube] == 0 && s_gain_r[tube] == 100 &&
+                    s_gain_g[tube] == 100 && s_gain_b[tube] == 100 &&
+                    s_curve_r[tube] == 100 && s_curve_g[tube] == 100 && s_curve_b[tube] == 100 &&
+                    s_ped_r[tube] == 0 && s_ped_g[tube] == 0 && s_ped_b[tube] == 0;
+    s_lut_gen++;
+    if (identity) {
         /* Identity — fill with pass-through values and disable the LUT path. */
-        for (int i = 0; i < 32; i++) s_gamma_lut_5bit[tube][i] = (uint8_t)i;
+        for (int i = 0; i < 32; i++) s_gamma_lut_5bit[tube][i] = s_gamma_lut_5bit_b[tube][i] = (uint8_t)i;
         for (int i = 0; i < 64; i++) s_gamma_lut_6bit[tube][i] = (uint8_t)i;
         s_gamma_lut_active[tube] = false;
         return;
     }
-    for (int i = 0; i < 32; i++) {
-        uint32_t scaled = identity_br ? (uint32_t)i : ((uint32_t)i * br) / 100u;
-        float v = identity_gamma ? (float)scaled : (powf((float)scaled / 31.0f, g) * 31.0f + 0.5f);
-        s_gamma_lut_5bit[tube][i] = (v >= 31.0f) ? 31u : (uint8_t)v;
-    }
-    for (int i = 0; i < 64; i++) {
-        uint32_t scaled = identity_br ? (uint32_t)i : ((uint32_t)i * br) / 100u;
-        float v = identity_gamma ? (float)scaled : (powf((float)scaled / 63.0f, g) * 63.0f + 0.5f);
-        s_gamma_lut_6bit[tube][i] = (v >= 63.0f) ? 63u : (uint8_t)v;
-    }
+    build_channel_lut(s_gamma_lut_5bit[tube],   32, g * (float)s_curve_r[tube] / 100.0f, br, s_gain_r[tube], black, lift, (float)s_ped_r[tube] / 100.0f);
+    build_channel_lut(s_gamma_lut_6bit[tube],   64, g * (float)s_curve_g[tube] / 100.0f, br, s_gain_g[tube], black, lift, (float)s_ped_g[tube] / 100.0f);
+    build_channel_lut(s_gamma_lut_5bit_b[tube], 32, g * (float)s_curve_b[tube] / 100.0f, br, s_gain_b[tube], black, lift, (float)s_ped_b[tube] / 100.0f);
     s_gamma_lut_active[tube] = true;
 }
 
@@ -643,6 +715,8 @@ void display_init(void)
     /* Initialise per-tube brightness to 100 (full) — static arrays are
      * zero-initialised by the linker, which would otherwise make every tube black. */
     for (int i = 0; i < LCD_COUNT; i++) s_tube_brightness[i] = 100;
+    for (int i = 0; i < LCD_COUNT; i++) s_gain_r[i] = s_gain_g[i] = s_gain_b[i] = 100;
+    for (int i = 0; i < LCD_COUNT; i++) s_curve_r[i] = s_curve_g[i] = s_curve_b[i] = 100;
     /* Initialise per-tube VCOM to 0x0E (Standard / original panel value).
      * display_apply_tube_vcom() will override before the task starts if the
      * saved config has different values. */
@@ -772,6 +846,111 @@ void display_apply_tube_brightness(const uint8_t br[6])
     ESP_LOGI(TAG, "tube brightness [%u,%u,%u,%u,%u,%u]",
              s_tube_brightness[0], s_tube_brightness[1], s_tube_brightness[2],
              s_tube_brightness[3], s_tube_brightness[4], s_tube_brightness[5]);
+}
+
+void display_apply_tube_shadow_lift(const uint8_t lift[6])
+{
+    bool tube_changed[LCD_COUNT] = {false};
+    bool any = false;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        uint8_t v = (lift[i] > 100) ? 100 : lift[i];
+        if (s_shadow_lift[i] != v) {
+            s_shadow_lift[i] = v;
+            tube_changed[i]  = true;
+            any              = true;
+        }
+    }
+    if (!any) return;
+
+    if (s_display_task_handle) {
+        vTaskSuspend(s_display_task_handle);
+    }
+    for (int i = 0; i < LCD_COUNT; i++) {
+        if (tube_changed[i]) rebuild_gamma_lut(i);
+    }
+    if (s_display_task_handle) {
+        vTaskResume(s_display_task_handle);
+    }
+    ESP_LOGI(TAG, "tube shadow lift [%u,%u,%u,%u,%u,%u]",
+             s_shadow_lift[0], s_shadow_lift[1], s_shadow_lift[2],
+             s_shadow_lift[3], s_shadow_lift[4], s_shadow_lift[5]);
+}
+
+void display_apply_tube_color(const uint8_t gain_r[6], const uint8_t gain_g[6],
+                              const uint8_t gain_b[6], const uint8_t black[6])
+{
+    bool tube_changed[LCD_COUNT] = {false};
+    bool any = false;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        uint8_t r = gain_r[i] < 50 ? 50 : (gain_r[i] > 150 ? 150 : gain_r[i]);
+        uint8_t g = gain_g[i] < 50 ? 50 : (gain_g[i] > 150 ? 150 : gain_g[i]);
+        uint8_t b = gain_b[i] < 50 ? 50 : (gain_b[i] > 150 ? 150 : gain_b[i]);
+        uint8_t k = black[i] > 30 ? 30 : black[i];
+        if (s_gain_r[i] != r || s_gain_g[i] != g || s_gain_b[i] != b || s_black_level[i] != k) {
+            s_gain_r[i] = r; s_gain_g[i] = g; s_gain_b[i] = b; s_black_level[i] = k;
+            tube_changed[i] = true;
+            any             = true;
+        }
+    }
+    if (!any) return;
+
+    if (s_display_task_handle) {
+        vTaskSuspend(s_display_task_handle);
+    }
+    for (int i = 0; i < LCD_COUNT; i++) {
+        if (tube_changed[i]) rebuild_gamma_lut(i);
+    }
+    if (s_display_task_handle) {
+        vTaskResume(s_display_task_handle);
+    }
+    ESP_LOGI(TAG, "tube color gain R[%u,%u,%u,%u,%u,%u] G[%u,%u,%u,%u,%u,%u] B[%u,%u,%u,%u,%u,%u] black[%u,%u,%u,%u,%u,%u]",
+             s_gain_r[0], s_gain_r[1], s_gain_r[2], s_gain_r[3], s_gain_r[4], s_gain_r[5],
+             s_gain_g[0], s_gain_g[1], s_gain_g[2], s_gain_g[3], s_gain_g[4], s_gain_g[5],
+             s_gain_b[0], s_gain_b[1], s_gain_b[2], s_gain_b[3], s_gain_b[4], s_gain_b[5],
+             s_black_level[0], s_black_level[1], s_black_level[2],
+             s_black_level[3], s_black_level[4], s_black_level[5]);
+}
+
+void display_apply_tube_channel_curves(const uint8_t curve_r[6], const uint8_t curve_g[6],
+                                       const uint8_t curve_b[6], const uint8_t ped_r[6],
+                                       const uint8_t ped_g[6], const uint8_t ped_b[6])
+{
+    bool tube_changed[LCD_COUNT] = {false};
+    bool any = false;
+    for (int i = 0; i < LCD_COUNT; i++) {
+        uint8_t cr = curve_r[i] < 50 ? 50 : (curve_r[i] > 200 ? 200 : curve_r[i]);
+        uint8_t cg = curve_g[i] < 50 ? 50 : (curve_g[i] > 200 ? 200 : curve_g[i]);
+        uint8_t cb = curve_b[i] < 50 ? 50 : (curve_b[i] > 200 ? 200 : curve_b[i]);
+        uint8_t pr = ped_r[i] > 30 ? 30 : ped_r[i];
+        uint8_t pg = ped_g[i] > 30 ? 30 : ped_g[i];
+        uint8_t pb = ped_b[i] > 30 ? 30 : ped_b[i];
+        if (s_curve_r[i] != cr || s_curve_g[i] != cg || s_curve_b[i] != cb ||
+            s_ped_r[i] != pr || s_ped_g[i] != pg || s_ped_b[i] != pb) {
+            s_curve_r[i] = cr; s_curve_g[i] = cg; s_curve_b[i] = cb;
+            s_ped_r[i] = pr;   s_ped_g[i] = pg;   s_ped_b[i] = pb;
+            tube_changed[i] = true;
+            any             = true;
+        }
+    }
+    if (!any) return;
+
+    if (s_display_task_handle) {
+        vTaskSuspend(s_display_task_handle);
+    }
+    for (int i = 0; i < LCD_COUNT; i++) {
+        if (tube_changed[i]) rebuild_gamma_lut(i);
+    }
+    if (s_display_task_handle) {
+        vTaskResume(s_display_task_handle);
+    }
+    ESP_LOGI(TAG, "tube channel curves R[%u,%u,%u,%u,%u,%u] G[%u,%u,%u,%u,%u,%u] B[%u,%u,%u,%u,%u,%u] "
+                  "pedestal R[%u,%u,%u,%u,%u,%u] G[%u,%u,%u,%u,%u,%u] B[%u,%u,%u,%u,%u,%u]",
+             s_curve_r[0], s_curve_r[1], s_curve_r[2], s_curve_r[3], s_curve_r[4], s_curve_r[5],
+             s_curve_g[0], s_curve_g[1], s_curve_g[2], s_curve_g[3], s_curve_g[4], s_curve_g[5],
+             s_curve_b[0], s_curve_b[1], s_curve_b[2], s_curve_b[3], s_curve_b[4], s_curve_b[5],
+             s_ped_r[0], s_ped_r[1], s_ped_r[2], s_ped_r[3], s_ped_r[4], s_ped_r[5],
+             s_ped_g[0], s_ped_g[1], s_ped_g[2], s_ped_g[3], s_ped_g[4], s_ped_g[5],
+             s_ped_b[0], s_ped_b[1], s_ped_b[2], s_ped_b[3], s_ped_b[4], s_ped_b[5]);
 }
 
 void display_apply_tube_vcom(const uint8_t vcom[6])
@@ -1022,7 +1201,7 @@ static inline __attribute__((always_inline)) uint16_t wl_apply_px(uint16_t px, i
     uint32_t b =  px        & 0x1Fu;
     r = s_gamma_lut_5bit[tube][r];
     g = s_gamma_lut_6bit[tube][g];
-    b = s_gamma_lut_5bit[tube][b];
+    b = s_gamma_lut_5bit_b[tube][b];
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
@@ -1236,6 +1415,7 @@ void display_set_burnin_mask(uint8_t mask, uint32_t duration_s)
      * by the display task's expiry check running on the other core. */
     if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
     s_burnin_mask   = mask & 0x3F;
+    s_testpat_id    = 0;
     s_burnin_end_us = (mask && duration_s)
                     ? esp_timer_get_time() + (int64_t)duration_s * 1000000LL : 0;
     if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
@@ -1252,6 +1432,7 @@ bool display_start_burnin_if_idle(uint8_t mask, uint32_t duration_s)
     if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
     if (!s_burnin_mask && !s_snow_mask && (mask & 0x3F)) {
         s_burnin_mask   = mask & 0x3F;
+        s_testpat_id    = 0;
         s_burnin_end_us = duration_s
                         ? esp_timer_get_time() + (int64_t)duration_s * 1000000LL : 0;
         started = true;
@@ -1290,6 +1471,7 @@ void display_stop_burnin(void)
     if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
     s_burnin_mask = 0;  s_burnin_end_us = 0;
     s_snow_mask   = 0;  s_snow_end_us   = 0;
+    s_testpat_id  = 0;
     if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
     ESP_LOGI(TAG, "burn-in/snow stopped by request");
 }
@@ -1362,6 +1544,88 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 /* Allocate decode buffer from PSRAM so we don't exhaust DRAM. */
 #define PSRAM_MALLOC(sz)  heap_caps_malloc((sz), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 
+/* ── Calibration test screen ─────────────────────────────────────────────
+ * Patterns are built as a full 80x160 frame and pushed with display_show_digit()
+ * so they pass through the tube's whole correction chain (gamma, trim, gain,
+ * black level, shadow lift) — that's the point: judge the settings by eye. */
+static uint8_t *s_testpat_fb = NULL;   /* lazy PSRAM: only exists once the screen is used */
+
+static void testpat_rows(uint8_t *fb, int y0, int y1, uint8_t r, uint8_t g, uint8_t b)
+{
+    uint16_t px = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    for (int y = y0; y < y1 && y < LCD_HEIGHT; y++) {
+        uint8_t *row = fb + (size_t)y * LCD_WIDTH * 2;
+        for (int x = 0; x < LCD_WIDTH; x++) {
+            row[x * 2]     = (uint8_t)(px >> 8);
+            row[x * 2 + 1] = (uint8_t)(px & 0xFF);
+        }
+    }
+}
+
+static void testpat_paint(int tube, uint8_t id)
+{
+    if (!s_testpat_fb) s_testpat_fb = PSRAM_MALLOC((size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+    uint8_t *fb = s_testpat_fb;
+    if (!fb) return;
+    memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+
+    switch (id) {
+    case 1:   /* grey ramp: 16 bands, black -> white */
+        for (int i = 0; i < 16; i++) {
+            uint8_t v = (uint8_t)(i * 255 / 15);
+            testpat_rows(fb, i * 10, i * 10 + 10, v, v, v);
+        }
+        break;
+    case 2: { /* orange "digit" color, then the same orange at falling levels, then black */
+        const uint8_t oc_r = 255, oc_g = 128, oc_b = 16;
+        static const uint8_t pct[5] = { 40, 25, 15, 8, 4 };
+        testpat_rows(fb, 0, 40, oc_r, oc_g, oc_b);
+        for (int i = 0; i < 5; i++) {
+            int y = 40 + i * 20;
+            testpat_rows(fb, y, y + 20,
+                         (uint8_t)(oc_r * pct[i] / 100), (uint8_t)(oc_g * pct[i] / 100),
+                         (uint8_t)(oc_b * pct[i] / 100));
+        }
+        break;   /* last 20 rows stay black for reference */
+    }
+    case 3: { /* white, R, G, B, Y, C, M, 50 % grey */
+        static const uint8_t bars[8][3] = {
+            {255,255,255}, {255,0,0}, {0,255,0}, {0,0,255},
+            {255,255,0}, {0,255,255}, {255,0,255}, {128,128,128} };
+        for (int i = 0; i < 8; i++)
+            testpat_rows(fb, i * 20, i * 20 + 20, bars[i][0], bars[i][1], bars[i][2]);
+        break;
+    }
+    default:  /* 4: full white */
+        testpat_rows(fb, 0, LCD_HEIGHT, 255, 255, 255);
+        break;
+    }
+    display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+}
+
+bool display_start_test_pattern(uint8_t mask, uint32_t duration_s, uint8_t pattern)
+{
+    bool ok = true;
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    if (!(mask & 0x3F) || pattern == 0) {
+        if (s_testpat_id) { s_burnin_mask = 0; s_burnin_end_us = 0; }
+        s_testpat_id = 0;
+    } else if ((s_burnin_mask && !s_testpat_id) || s_snow_mask) {
+        ok = false;   /* a real burn-in/snow session is running — don't clobber it */
+    } else {
+        s_testpat_id    = pattern > 4 ? 4 : pattern;   /* before the mask, so no tick sees the mask without it */
+        s_burnin_end_us = duration_s ? esp_timer_get_time() + (int64_t)duration_s * 1000000LL : 0;
+        s_burnin_mask   = mask & 0x3F;
+    }
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
+    return ok;
+}
+
+bool display_test_pattern_active(void)
+{
+    return s_testpat_id != 0 && s_burnin_mask != 0;
+}
+
 /* TJpgDec workspace: ~3100 bytes for JD_FASTDECODE=0 – round up with margin. */
 #define JPEG_WORK_BUF_SIZE   3200
 
@@ -1370,7 +1634,8 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 #define MAX_JPEG_FILE_SIZE  200000
 
 /* Display task tick periods and stack size. */
-#define DISPLAY_TICK_MS_FAST    50   /* spectrum mode — 20 Hz to match LED task */
+#define DISPLAY_TICK_MS_FAST    50   /* fast animated modes — 20 Hz */
+#define DISPLAY_TICK_MS_SPECTRUM 20  /* spectrum mode — 50 Hz: only the bar segments that changed are redrawn (see render_spectrum) */
 #define DISPLAY_TICK_MS_MED    100   /* WeatherLive sky w/o precip — 10 Hz */
 #define DISPLAY_TICK_MS_SLOW   200   /* all other modes — 5 Hz */
 
@@ -2148,20 +2413,28 @@ static bool theme_ampm_has_png(const char *theme, const char *name)
     return has;
 }
 
+/* Set (to a nonzero ms timestamp) whenever theme art may have changed on disk;
+ * the display task acts on it once writes have been quiet for
+ * THEME_STALE_QUIET_MS, so a many-file upload refreshes once, not per file. */
+#define THEME_STALE_QUIET_MS 1500u
+static volatile uint32_t s_theme_stale_ms = 0;
+
 void display_theme_cache_flush(void)
 {
     s_ampm_cache_n = 0;
     s_ampm_cache_theme[0] = '\0';
     s_multiinfo_cache_n = 0;
     s_multiinfo_cache_theme[0] = '\0';
+    s_theme_stale_ms = (uint32_t)(esp_timer_get_time() / 1000) | 1u;
 }
+
+/* Whether the active theme provides PNG digits: probed once per theme (checks
+ * 0.png), which removes ~30 fopen/s in clock mode. File scope so
+ * theme_derived_caches_reset() can force a re-probe. */
+static char s_num_theme[64] = {0};
 
 void display_show_number(int tube, int digit, const char *theme)
 {
-    /* Cache whether the active theme provides PNG digits.
-     * Probes once on first call for each theme (checks 0.png);
-     * holds until the next theme switch — eliminates ~30 fopen/s in clock mode. */
-    static char s_num_theme[64] = {0};
     static bool s_num_has_png   = false;
     if (strcmp(s_num_theme, theme) != 0) {
         strlcpy(s_num_theme, theme, sizeof(s_num_theme));
@@ -2278,6 +2551,17 @@ void display_show_ampm(int tube, const char *name, const char *theme)
 static char s_colon_box_theme[32] = {0};
 static int  s_colon_box_state = 0;   /* 0=unknown, 1=valid, -1=unavailable */
 static int  s_colon_bx0, s_colon_by0, s_colon_bw, s_colon_bh;
+
+/* Everything derived from theme files on disk, apart from the decoded-image
+ * cache (img_cache_flush). Display task only. */
+static void theme_derived_caches_reset(void)
+{
+    s_ampm_cache_n = 0;         s_ampm_cache_theme[0] = '\0';
+    s_multiinfo_cache_n = 0;    s_multiinfo_cache_theme[0] = '\0';
+    s_sys_icon_n = 0;
+    s_num_theme[0] = '\0';
+    s_colon_box_state = 0;
+}
 
 static void colon_box_compute(const char *theme)
 {
@@ -2890,6 +3174,7 @@ static const char *weekday_abbrev(const char *lang, int wday)
     static const char *const no[7] = { "Søn","Man","Tir","Ons","Tor","Fre","Lør" };
     static const char *const da[7] = { "Søn","Man","Tir","Ons","Tor","Fre","Lør" };
     static const char *const fi[7] = { "Su","Ma","Ti","Ke","To","Pe","La" };
+    static const char *const pl[7] = { "Nd","Pn","Wt","Sr","Cz","Pt","So" };   /* Sr = Śr: only Latin-1 glyphs exist in this font */
 
     if (lang && lang[0]) {
         if      (!strcmp(lang, "de")) return de[wday];
@@ -2902,6 +3187,7 @@ static const char *weekday_abbrev(const char *lang, int wday)
         else if (!strcmp(lang, "no")) return no[wday];
         else if (!strcmp(lang, "da")) return da[wday];
         else if (!strcmp(lang, "fi")) return fi[wday];
+        else if (!strcmp(lang, "pl")) return pl[wday];
     }
     return en[wday];
 }
@@ -2926,6 +3212,7 @@ static const char *month_abbrev(const char *lang, int mon)
     static const char *const no[12] = { "Jan","Feb","Mar","Apr","Mai","Jun","Jul","Aug","Sep","Okt","Nov","Des" };
     static const char *const da[12] = { "Jan","Feb","Mar","Apr","Maj","Jun","Jul","Aug","Sep","Okt","Nov","Dec" };
     static const char *const fi[12] = { "Tam","Hel","Maa","Huh","Tou","Kes","Hei","Elo","Syy","Lok","Mar","Jou" };
+    static const char *const pl[12] = { "Sty","Lut","Mar","Kwi","Maj","Cze","Lip","Sie","Wrz","Paz","Lis","Gru" };   /* Paz = Paź (no Latin Extended glyphs) */
 
     if (lang && lang[0]) {
         if      (!strcmp(lang, "de")) return de[mon];
@@ -2938,6 +3225,7 @@ static const char *month_abbrev(const char *lang, int mon)
         else if (!strcmp(lang, "no")) return no[mon];
         else if (!strcmp(lang, "da")) return da[mon];
         else if (!strcmp(lang, "fi")) return fi[mon];
+        else if (!strcmp(lang, "pl")) return pl[mon];
     }
     return en[mon];
 }
@@ -2961,6 +3249,7 @@ static const char *inout_label(const char *lang, bool indoor)
         else if (!strcmp(lang, "no")) return indoor ? "Inne" : "Ute";
         else if (!strcmp(lang, "da")) return indoor ? "Inde" : "Ude";
         else if (!strcmp(lang, "fi")) return indoor ? "Sisä" : "Ulko";
+        else if (!strcmp(lang, "pl")) return indoor ? "Wew"  : "Zew";
     }
     return indoor ? "In" : "Out";
 }
@@ -8030,6 +8319,9 @@ _Static_assert(LCD_COUNT * SPEC_BARS_PER_TUBE == MIC_BAND_COUNT,
                "SPEC_BARS_PER_TUBE x LCD_COUNT must equal MIC_BAND_COUNT");
 
 static float s_spec_peak[LCD_COUNT * SPEC_BARS_PER_TUBE];   /* visual peak hold per band */
+static uint8_t s_spec_peak_hold[LCD_COUNT * SPEC_BARS_PER_TUBE];   /* display ticks the dot still waits before falling */
+/* "Peak dot fall speed" 1..10 (default 3): seconds for the dot to fall from the top to the bottom. */
+static const float SPEC_PEAK_FALL_S[10] = { 3.0f, 2.4f, 1.8f, 1.4f, 1.0f, 0.8f, 0.6f, 0.45f, 0.3f, 0.15f };
 
 /* Segment color: user base color with brightness ramp, or ghost at ~6%. */
 static void spec_seg_color(int s, bool lit,
@@ -8047,6 +8339,151 @@ static void spec_seg_color(int s, bool lit,
         *r = br >> 4;
         *g = bg >> 4;
         *b = bb >> 4;
+    }
+}
+
+/* RGB565 of one segment (lit ramp / ghost / peak dot). */
+static inline uint16_t spec_seg_565(int s, bool lit, bool is_dot,
+                                    uint8_t br, uint8_t bg, uint8_t bb, uint8_t pr, uint8_t pg, uint8_t pb)
+{
+    uint8_t r, g, b;
+    if (is_dot) { r = pr; g = pg; b = pb; }
+    else        spec_seg_color(s, lit, br, bg, bb, &r, &g, &b);
+    return (uint16_t)(((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3));
+}
+
+/* What each tube currently shows, so most frames only repaint the segments that changed (a full tube repaint is
+ * 160 blocking SPI row writes; all six took ~29 ms, 58 % of a core, and capped the visualizer at 20 fps). A tube is
+ * repainted in full on mode entry, after it was masked by a burn-in / snow / test-pattern session, when its pixel
+ * offsets or the bar/peak colours change, and every SPEC_FULL_REFRESH_MS as a self-heal. */
+#define SPEC_FULL_REFRESH_MS 5000
+static uint8_t  s_spec_drawn_lit[LCD_COUNT * SPEC_BARS_PER_TUBE];
+static int8_t   s_spec_drawn_dot[LCD_COUNT * SPEC_BARS_PER_TUBE];
+static bool     s_spec_tube_valid[LCD_COUNT];
+static uint8_t  s_spec_ox[LCD_COUNT], s_spec_oy[LCD_COUNT];
+static uint32_t s_spec_color_sig;
+static int64_t  s_spec_last_full_us;
+static uint8_t  s_spec_seg_buf[SPEC_BAR_W * SPEC_SEG_H * 2];   /* one segment of one colour (360 B, internal RAM for DMA) */
+
+/* Black-fill the burn-in edge bands on both sides of the (shifted) tube window; the tube must already be selected. */
+static void spec_black_margins(int tube, uint8_t oy)
+{
+    int base = (int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube];
+    int s    = (int)s_burnin_shift_x;
+    const struct { int x0, w; } band[2] = {
+        { base - BURNIN_SHIFT_MAX, s + BURNIN_SHIFT_MAX },   /* left  */
+        { base + s + LCD_WIDTH,    BURNIN_SHIFT_MAX - s },   /* right */
+    };
+    uint8_t black[(2 * BURNIN_SHIFT_MAX) * 2] = {0};   /* \u2264 4 px wide */
+    for (int b = 0; b < 2; b++) {
+        if (band[b].w <= 0 || band[b].x0 < 0) continue;
+        open_lcd_window((uint8_t)band[b].x0, oy, (uint8_t)band[b].w, LCD_HEIGHT);
+        for (int y = 0; y < LCD_HEIGHT; y++) {
+            spi_tx_sync(black, (size_t)(band[b].w * 2));
+        }
+    }
+}
+
+/* Oscilloscope style: one trace across all six tubes (480 columns, one 16 kHz sample per column = 30 ms), triggered on a
+ * rising zero crossing so periodic sound holds still, scaled by a slowly falling peak envelope that never drops below
+ * SCOPE_MIN_ENV (so noise stays small). Each tube repaints only the rows between the old and new trace extent. */
+#define SCOPE_COLS      (LCD_COUNT * LCD_WIDTH)
+#define SCOPE_MID       (LCD_HEIGHT / 2)
+#define SCOPE_HALF_AMP  68      /* px of swing at the envelope peak (leaves room for the thickest line) */
+#define SCOPE_MIN_ENV   80.0f   /* sample counts */
+/* Sample copy and per-column trace extents: one 2.5 KB PSRAM block, allocated on first use (static internal RAM is scarce). */
+static int16_t *s_scope_samp;
+static uint8_t *s_scope_ymin, *s_scope_ymax;
+static uint8_t  s_scope_row_lo[LCD_COUNT], s_scope_row_hi[LCD_COUNT];   /* rows holding trace pixels on each tube */
+static bool     s_scope_valid[LCD_COUNT];
+static uint8_t  s_scope_ox[LCD_COUNT], s_scope_oy[LCD_COUNT];
+static uint32_t s_scope_color_sig;
+static int64_t  s_scope_last_full_us;
+static float    s_scope_env = SCOPE_MIN_ENV;
+
+static void render_scope(uint8_t br, uint8_t bg, uint8_t bb, int thick, bool force)
+{
+    if (!s_scope_samp) {
+        uint8_t *mem = heap_caps_malloc(MIC_SCOPE_SAMPLES * sizeof(int16_t) + 2 * SCOPE_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!mem) return;
+        s_scope_ymin = mem + MIC_SCOPE_SAMPLES * sizeof(int16_t);
+        s_scope_ymax = s_scope_ymin + SCOPE_COLS;
+        s_scope_samp = (int16_t *)mem;
+    }
+    mic_get_scope(s_scope_samp);
+
+    float pk = 0.0f;
+    for (int i = 0; i < MIC_SCOPE_SAMPLES; i++) {
+        const float a = (float)(s_scope_samp[i] < 0 ? -s_scope_samp[i] : s_scope_samp[i]);
+        if (a > pk) pk = a;
+    }
+    if (pk > s_scope_env) s_scope_env = pk; else s_scope_env += 0.02f * (pk - s_scope_env);
+    if (s_scope_env < SCOPE_MIN_ENV) s_scope_env = SCOPE_MIN_ENV;
+
+    int start = 0;
+    const int thr = (int)(s_scope_env * 0.05f);
+    for (int i = 4; i < MIC_SCOPE_SAMPLES - SCOPE_COLS; i++) {
+        if (s_scope_samp[i - 1] < 0 && s_scope_samp[i] >= 0 && s_scope_samp[i - 4] < -thr) { start = i; break; }
+    }
+
+    const float scale = (float)SCOPE_HALF_AMP / s_scope_env;
+    int yprev = SCOPE_MID;
+    for (int x = 0; x < SCOPE_COLS; x++) {
+        int y = SCOPE_MID - (int)((float)s_scope_samp[start + x] * scale);
+        if (y < 0) y = 0; else if (y > LCD_HEIGHT - 2) y = LCD_HEIGHT - 2;
+        if (x == 0) yprev = y;
+        int lo = y < yprev ? y : yprev, hi = y < yprev ? yprev : y;
+        const int grow = thick - 1 - (hi - lo);   /* widen short steps to the chosen line thickness */
+        if (grow > 0) { lo -= grow / 2; hi += grow - grow / 2; }
+        if (lo < 0) { hi -= lo; lo = 0; }
+        if (hi > LCD_HEIGHT - 1) hi = LCD_HEIGHT - 1;
+        s_scope_ymin[x] = (uint8_t)lo; s_scope_ymax[x] = (uint8_t)hi;
+        yprev = y;
+    }
+
+    const uint16_t trace = (uint16_t)(((uint16_t)(br & 0xF8) << 8) | ((uint16_t)(bg & 0xFC) << 3) | (bb >> 3));
+    const uint16_t axis  = (uint16_t)(((uint16_t)((br >> 2) & 0xF8) << 8) | ((uint16_t)((bg >> 2) & 0xFC) << 3) | ((bb >> 2) >> 3));
+    const uint32_t color_sig = ((uint32_t)br << 16) ^ ((uint32_t)bg << 8) ^ (uint32_t)bb;
+    const int64_t now_us = esp_timer_get_time();
+    const bool heal = color_sig != s_scope_color_sig || (now_us - s_scope_last_full_us) > (int64_t)SPEC_FULL_REFRESH_MS * 1000;
+    if (heal) { s_scope_color_sig = color_sig; s_scope_last_full_us = now_us; }
+
+    uint8_t line[LCD_WIDTH * 2];
+    for (int tube = 0; tube < LCD_COUNT; tube++) {
+        if ((s_burnin_mask | s_snow_mask) & (1u << tube)) { s_scope_valid[tube] = false; continue; }
+
+        const uint8_t dox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+        const uint8_t doy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
+        const bool new_layout = force || !s_scope_valid[tube] || dox != s_scope_ox[tube] || doy != s_scope_oy[tube];
+
+        int lo = SCOPE_MID, hi = SCOPE_MID;
+        for (int x = 0; x < LCD_WIDTH; x++) {
+            const int c = tube * LCD_WIDTH + x;
+            if (s_scope_ymin[c] < lo) lo = s_scope_ymin[c];
+            if (s_scope_ymax[c] > hi) hi = s_scope_ymax[c];
+        }
+        int r0 = lo, r1 = hi;
+        if (new_layout || heal) { r0 = 0; r1 = LCD_HEIGHT - 1; }
+        else {
+            if (s_scope_row_lo[tube] < r0) r0 = s_scope_row_lo[tube];
+            if (s_scope_row_hi[tube] > r1) r1 = s_scope_row_hi[tube];
+        }
+
+        select_tube(tube);
+        if (new_layout) spec_black_margins(tube, doy);
+        open_lcd_window(dox, (uint8_t)(doy + r0), LCD_WIDTH, (uint8_t)(r1 - r0 + 1));
+        for (int y = r0; y <= r1; y++) {
+            uint8_t *px = line;
+            for (int x = 0; x < LCD_WIDTH; x++) {
+                const int c = tube * LCD_WIDTH + x;
+                const uint16_t v = (y >= s_scope_ymin[c] && y <= s_scope_ymax[c]) ? trace : (y == SCOPE_MID ? axis : 0);
+                *px++ = (uint8_t)(v >> 8); *px++ = (uint8_t)v;
+            }
+            spi_tx_sync(line, sizeof(line));
+        }
+        deselect_all();
+        s_scope_row_lo[tube] = (uint8_t)lo; s_scope_row_hi[tube] = (uint8_t)hi;
+        s_scope_ox[tube] = dox; s_scope_oy[tube] = doy; s_scope_valid[tube] = true;
     }
 }
 
@@ -8076,6 +8513,12 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
         }
     }
 
+    static uint8_t s_prev_style = 0xFF;
+    const bool style_changed = cfg->spectrum_style != s_prev_style;
+    s_prev_style = cfg->spectrum_style;
+    if (cfg->spectrum_style == 1) { render_scope(br, bg, bb, cfg->spectrum_scope_thick < 1 ? 1 : cfg->spectrum_scope_thick, force_margin_repaint || style_changed); return; }
+    if (style_changed) force_margin_repaint = true;   /* the other style left its own pixels on the tubes */
+
     /* Update peak-hold and precompute lit segment count + peak dot for every band.
      * When mic_task has gated all bands to zero, decay the peak dots 5× faster
      * than normal so any "echo" (lingering peak dots from a suppressed noise blip)
@@ -8083,7 +8526,10 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
     bool bands_all_zero = true;
     for (int i = 0; i < LCD_COUNT * SPEC_BARS_PER_TUBE; i++)
         if (bands[i] > 0.0f) { bands_all_zero = false; break; }
-    float peak_decay_step = bands_all_zero ? 0.25f : 0.05f;
+    int   peak_fall_lv = cfg->spectrum_peak_fall < 1 ? 1 : (cfg->spectrum_peak_fall > 10 ? 10 : cfg->spectrum_peak_fall);
+    float peak_decay_step = ((float)DISPLAY_TICK_MS_SPECTRUM / 1000.0f) / SPEC_PEAK_FALL_S[peak_fall_lv - 1];   /* default 1.8 s top to bottom */
+    if (bands_all_zero) peak_decay_step *= 5.0f;
+    const int peak_hold_ticks = ((int)cfg->spectrum_peak_hold_ms + DISPLAY_TICK_MS_SPECTRUM / 2) / DISPLAY_TICK_MS_SPECTRUM;
 
     int  lit_count[LCD_COUNT * SPEC_BARS_PER_TUBE];
     int  peak_dot [LCD_COUNT * SPEC_BARS_PER_TUBE];
@@ -8093,6 +8539,9 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
         if (e < 0.0f) e = 0.0f; else if (e > 1.0f) e = 1.0f;
         if (e >= s_spec_peak[i]) {
             s_spec_peak[i] = e;
+            s_spec_peak_hold[i] = (uint8_t)(peak_hold_ticks > 255 ? 255 : peak_hold_ticks);
+        } else if (s_spec_peak_hold[i] > 0) {
+            s_spec_peak_hold[i]--;   /* hold the dot at its peak */
         } else {
             s_spec_peak[i] -= peak_decay_step;
             if (s_spec_peak[i] < 0.0f) s_spec_peak[i] = 0.0f;
@@ -8134,12 +8583,58 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
         s_spec_margin_shift = s_burnin_shift_x;
     }
 
+    /* Differential rendering: repaint everything on a forced repaint, a colour change, or the periodic self-heal. */
+    const uint32_t color_sig = ((uint32_t)br << 24) ^ ((uint32_t)bg << 16) ^ ((uint32_t)bb << 8) ^
+                               ((uint32_t)pr * 2654435761u) ^ ((uint32_t)pg * 40503u) ^ ((uint32_t)pb * 69069u);
+    const int64_t now_us = esp_timer_get_time();
+    const bool full_all = force_margin_repaint || color_sig != s_spec_color_sig ||
+                          (now_us - s_spec_last_full_us) > (int64_t)SPEC_FULL_REFRESH_MS * 1000;
+    if (full_all) { s_spec_color_sig = color_sig; s_spec_last_full_us = now_us; }
+
     for (int tube = 0; tube < LCD_COUNT; tube++) {
 
         /* Skip masked tubes — burn-in or snow will overwrite them immediately
          * after render_spectrum returns, so generating the spectrum frame and
-         * pushing it over SPI would produce no visible output. */
-        if ((s_burnin_mask | s_snow_mask) & (1u << tube)) continue;
+         * pushing it over SPI would produce no visible output. They must be repainted in full afterwards. */
+        if ((s_burnin_mask | s_snow_mask) & (1u << tube)) { s_spec_tube_valid[tube] = false; continue; }
+
+        const uint8_t dox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
+        const uint8_t doy = (uint8_t)((int)LCD_OFFSET_Y                          + (int)s_row_offsets[tube] + (int)s_profile_row_off[tube]);
+        if (!full_all && s_spec_tube_valid[tube] && dox == s_spec_ox[tube] && doy == s_spec_oy[tube]) {
+            /* ── Differential path: repaint only the segments whose state changed ── */
+            bool selected = false;
+            for (int bar = 0; bar < SPEC_BARS_PER_TUBE; bar++) {
+                const int bidx = tube * SPEC_BARS_PER_TUBE + bar;
+                const int L0 = s_spec_drawn_lit[bidx], L1 = lit_count[bidx];
+                const int D0 = s_spec_drawn_dot[bidx], D1 = peak_vis[bidx] ? peak_dot[bidx] : -1;
+                uint32_t mask = 0;
+                if (L0 != L1) {
+                    const int lo = L0 < L1 ? L0 : L1, hi = L0 < L1 ? L1 : L0;
+                    for (int sg = lo; sg < hi; sg++) mask |= 1u << sg;
+                }
+                if (D0 != D1) {
+                    if (D0 >= 0) mask |= 1u << D0;
+                    if (D1 >= 0) mask |= 1u << D1;
+                }
+                if (!mask) continue;
+                if (!selected) { select_tube(tube); selected = true; }
+                const uint8_t x0 = (uint8_t)(dox + SPEC_BAR_PAD + bar * (SPEC_BAR_W + SPEC_BAR_GAP));
+                for (int sg = 0; sg < SPEC_SEGS; sg++) {
+                    if (!(mask & (1u << sg))) continue;
+                    const uint16_t c = spec_seg_565(sg, sg < L1, peak_vis[bidx] && sg == peak_dot[bidx], br, bg, bb, pr, pg, pb);
+                    const uint8_t hi = (uint8_t)(c >> 8), lo8 = (uint8_t)c;
+                    for (int i = 0; i < SPEC_BAR_W * SPEC_SEG_H; i++) { s_spec_seg_buf[2 * i] = hi; s_spec_seg_buf[2 * i + 1] = lo8; }
+                    /* segment sg covers rows (SPEC_PAD_TOP + (SPEC_SEGS-1-sg)*12) .. +9, i.e. its bottom pixel is dist = sg*12 */
+                    const int y_top = (LCD_HEIGHT - SPEC_PAD_BOT - 1) - (sg * (SPEC_SEG_H + SPEC_GAP_H) + SPEC_SEG_H - 1);
+                    open_lcd_window(x0, (uint8_t)(doy + y_top), SPEC_BAR_W, SPEC_SEG_H);
+                    spi_tx_sync(s_spec_seg_buf, sizeof(s_spec_seg_buf));
+                }
+                s_spec_drawn_lit[bidx] = (uint8_t)L1;
+                s_spec_drawn_dot[bidx] = (int8_t)D1;
+            }
+            if (selected) deselect_all();
+            continue;
+        }
 
         /* Precompute RGB565 color for every (bar, segment) on this tube.
          * 52 spec_seg_color() calls here replace 640 calls inside the row loop. */
@@ -8209,23 +8704,16 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
          * Only needed once per shift value per tube — see s_spec_margin_done
          * above; black doesn't go stale like an animated sky would. */
         if (!s_spec_margin_done[tube]) {
-            int base = (int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube];
-            int s    = (int)s_burnin_shift_x;
-            const struct { int x0, w; } band[2] = {
-                { base - BURNIN_SHIFT_MAX, s + BURNIN_SHIFT_MAX },   /* left  */
-                { base + s + LCD_WIDTH,    BURNIN_SHIFT_MAX - s },   /* right */
-            };
-            uint8_t black[(2 * BURNIN_SHIFT_MAX) * 2] = {0};   /* ≤ 4 px wide */
-            for (int b = 0; b < 2; b++) {
-                if (band[b].w <= 0 || band[b].x0 < 0) continue;
-                open_lcd_window((uint8_t)band[b].x0, oy, (uint8_t)band[b].w, LCD_HEIGHT);
-                for (int y = 0; y < LCD_HEIGHT; y++) {
-                    spi_tx_sync(black, (size_t)(band[b].w * 2));
-                }
-            }
+            spec_black_margins(tube, oy);
             s_spec_margin_done[tube] = true;
         }
         deselect_all();
+        for (int bar = 0; bar < SPEC_BARS_PER_TUBE; bar++) {
+            const int bidx = tube * SPEC_BARS_PER_TUBE + bar;
+            s_spec_drawn_lit[bidx] = (uint8_t)lit_count[bidx];
+            s_spec_drawn_dot[bidx] = (int8_t)(peak_vis[bidx] ? peak_dot[bidx] : -1);
+        }
+        s_spec_ox[tube] = dox; s_spec_oy[tube] = doy; s_spec_tube_valid[tube] = true;
     }
 }
 
@@ -10017,6 +10505,11 @@ static void display_task(void *arg)
     bool          last_cx_dual  = false;       /* 24H_CX dual-panel toggle change detection */
     bool          last_bl_on    = true;        /* backlight on/off tracking */
     uint8_t       last_bl_brt   = 255;         /* sentinel: force-apply on first tick */
+    uint8_t       last_lcd_brightness   = 0;   /* previous cfg->lcd_brightness/night_brightness,
+                                                 * to tell a deliberate value edit (WebUI/HA) apart
+                                                 * from an automatic night/day boundary crossing —
+                                                 * see brt_setting_changed below */
+    uint8_t       last_night_brightness = 0;
     /* Backlight brightness ramp state (boot power-on glow + Night Mode
      * boundary glide) — see the ramp block below. */
     uint8_t       brt_ramp_from   = 255;
@@ -10034,6 +10527,7 @@ static void display_task(void *arg)
     TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
     int           hilo_phase        = 0;       /* 0 = show HI, 1 = show LO (panel 4 only) */
     bool          first              = true;
+    bool          mic_test_blanked   = false;  /* tubes blanked for the mic test mode */
     int           last_hour             = -1;  /* for hourly burn-in shift update */
     int32_t       burnin_note_key       = -1;  /* schedule slot a skip/wait was last logged for */
     int64_t       burnin_sched_start_us = 0;   /* running scheduled session's start; 0 = none */
@@ -10136,6 +10630,10 @@ static void display_task(void *arg)
         if (!boot_ready) {
             bool needs_weather = (mode == APP_MODE_WEATHER) || cx_is_wl_sky(cfg);
             bool weather_ok    = !needs_weather || weather_get()->valid;
+            /* Spectrum runs the mic analysis and redraws at 50 Hz, which would fight Wi-Fi / NTP start-up for the CPU
+             * and lag until boot finishes, so it waits for the network like the weather modes wait for data. */
+            bool net_ok        = (mode != APP_MODE_SPECTRUM) || (wifi_manager_is_connected() && ntp_time_synced());
+            mic_hold_capture(mode == APP_MODE_SPECTRUM);
 
             bool social_ok = true;
             switch (mode) {
@@ -10155,23 +10653,25 @@ static void display_task(void *arg)
                 default: break;
             }
 
-            if ((!weather_ok || !social_ok) &&
+            if ((!weather_ok || !social_ok || !net_ok) &&
                 esp_timer_get_time() - boot_wait_start_us >= (int64_t)BOOT_DATA_TIMEOUT_MS * 1000) {
                 if (!boot_data_timeout_logged) {
                     boot_data_timeout_logged = true;
-                    ESP_LOGW(TAG, "boot-wait: %d s elapsed with weather_ok=%d social_ok=%d — "
+                    ESP_LOGW(TAG, "boot-wait: %d s elapsed with weather_ok=%d social_ok=%d net_ok=%d — "
                                   "giving up and rendering with whatever data is available",
-                             BOOT_DATA_TIMEOUT_MS / 1000, (int)weather_ok, (int)social_ok);
+                             BOOT_DATA_TIMEOUT_MS / 1000, (int)weather_ok, (int)social_ok, (int)net_ok);
                 }
                 weather_ok = true;
                 social_ok  = true;
+                net_ok     = true;
             }
 
             bool time_ok      = ntp_has_valid_time();
             bool setup_active = wifi_manager_ap_pin_visible();
 
-            if (setup_active || (time_ok && weather_ok && social_ok)) {
+            if (setup_active || (time_ok && weather_ok && social_ok && net_ok)) {
                 boot_ready             = true;   /* fall through — this tick renders real content */
+                mic_hold_capture(false);
                 s_boot_wait_active     = false;
                 s_boot_settle_until_us = esp_timer_get_time() + (int64_t)BOOT_SETTLE_MS * 1000;
             } else {
@@ -10215,6 +10715,39 @@ static void display_task(void *arg)
                                                    * nothing else needs the SPI
                                                    * bus during this window */
                 continue;
+            }
+        }
+
+        /* Mic test mode (diagnostics): idle with the tubes blank so the CPU and SPI
+         * bus stay free and the web server stays responsive while the mic is measured.
+         * Normal rendering resumes with a full repaint when it ends. */
+        if (mic_test_capture_active()) {
+            if (!mic_test_blanked) {
+                mic_test_blanked = true;
+                for (int _t = 0; _t < LCD_COUNT; _t++) display_fill(_t, 0x0000);
+                display_set_brightness(0);
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        if (mic_test_blanked) {
+            mic_test_blanked = false;
+            s_full_repaint_request = true;
+            last_bl_on = !cfg->backlight_on;   /* the backlight block below re-applies it at once */
+        }
+
+        /* A theme pack can be removed (Theme Manager) or missing after a full flash (e.g. the retired NixieOY): switch to the
+         * default Nixie theme if it is there, else to WeatherLive, which needs no files, instead of rendering from a missing folder. */
+        if ((first || strcmp(cfg->theme, last_theme) != 0) && strcmp(cfg->clock_face, "custom") != 0 &&
+            strncmp(cfg->theme, "WeatherLive", 11) != 0 && strcmp(cfg->theme, "DotMatrix") != 0 &&
+            strcmp(cfg->theme, "Segments") != 0) {
+            char tp[96];
+            struct stat tst;
+            snprintf(tp, sizeof(tp), "/spiffs/images/themes/%.31s", cfg->theme);   /* theme[32]; the precision lets GCC prove it fits */
+            if (stat(tp, &tst) != 0) {
+                const bool have_nixie = strcmp(cfg->theme, "Nixie") != 0 && stat("/spiffs/images/themes/Nixie", &tst) == 0;
+                ESP_LOGW(TAG, "theme '%s' is not installed - using %s", cfg->theme, have_nixie ? "Nixie" : "WeatherLive");
+                config_set_theme(have_nixie ? "Nixie" : "WeatherLive");
             }
         }
 
@@ -10280,6 +10813,19 @@ static void display_task(void *arg)
             s_settings_saved = false;
             mode_changed  = true;
             ESP_LOGD(TAG, "settings save consumed: forcing mode_changed this tick");
+        }
+        /* Theme art replaced on disk (hotpatch, update, file-browser upload/delete):
+         * the decoded copies are stale until the theme changes — drop them and
+         * repaint, once the writes have settled. */
+        {
+            uint32_t stale = s_theme_stale_ms;
+            if (stale && (uint32_t)((uint32_t)(esp_timer_get_time() / 1000) - stale) >= THEME_STALE_QUIET_MS) {
+                if (s_theme_stale_ms == stale) s_theme_stale_ms = 0;
+                img_cache_flush();
+                theme_derived_caches_reset();
+                s_theme_error[0] = '\0';
+                mode_changed = true;
+            }
         }
 
         /* ── Mode rotation ───────────────────────────────────────────
@@ -10372,6 +10918,18 @@ static void display_task(void *arg)
             ntp_is_night_window(cfg->night_start_hour, cfg->night_end_hour))
             target_brt = cfg->night_brightness;
 
+        /* A deliberate edit to the brightness VALUE itself (WebUI slider,
+         * HA number) must snap immediately — only the automatic night/day
+         * boundary crossing (same lcd_brightness/night_brightness values,
+         * just a different one now in effect) should glide. Without this,
+         * target_brt != last_bl_brt below can't tell the two apart, and a
+         * manual change takes the full 45 s glide meant for the boundary. */
+        bool brt_setting_changed = !first &&
+            (cfg->lcd_brightness != last_lcd_brightness ||
+             cfg->night_brightness != last_night_brightness);
+        last_lcd_brightness   = cfg->lcd_brightness;
+        last_night_brightness = cfg->night_brightness;
+
         /* Backlight brightness ramp — two distinct triggers share the same
          * glide mechanism (brt_ramp_*), just with different durations:
          *   - Boot (first tick): a brief power-on glow from off up to the
@@ -10406,6 +10964,11 @@ static void display_task(void *arg)
         } else if (cfg->backlight_on != last_bl_on) {
             display_set_brightness(cfg->backlight_on ? target_brt : 0);
             last_bl_on      = cfg->backlight_on;
+            last_bl_brt     = target_brt;
+            brt_ramp_cur    = target_brt;
+            brt_ramp_active = false;
+        } else if (target_brt != last_bl_brt && brt_setting_changed) {
+            display_set_brightness(target_brt);
             last_bl_brt     = target_brt;
             brt_ramp_cur    = target_brt;
             brt_ramp_active = false;
@@ -10620,6 +11183,7 @@ static void display_task(void *arg)
             if (s_burnin_mask && s_burnin_end_us != 0 &&
                     _exp_now >= s_burnin_end_us) {
                 s_burnin_mask   = 0;
+                s_testpat_id    = 0;
                 s_burnin_end_us = 0;
                 burnin_expired  = true;
                 ESP_LOGI(TAG, "burn-in timer expired — restoring normal display");
@@ -11412,11 +11976,17 @@ static void display_task(void *arg)
             uint16_t col = s_burnin_colors[
                 (size_t)(now_us / (BURNIN_COLOR_SECS * 1000000LL)) % (size_t)BURNIN_COLOR_COUNT];
             uint8_t mask = s_burnin_mask;
+            uint8_t tp   = s_testpat_id;
+            /* Test screen: key on pattern + LUT generation so a settings apply
+             * repaints immediately; the color cycle keys on its color. */
+            if (tp) col = (uint16_t)(0x8000u | ((uint16_t)tp << 8) | (s_lut_gen & 0xFFu));
             if (mask != burnin_painted_mask || col != burnin_painted_col ||
                     now_us - burnin_painted_us >= BURNIN_REPAINT_US) {
                 for (int _t = 0; _t < LCD_COUNT; _t++) {
-                    if (mask & (1u << _t))
-                        display_fill(_t, col);
+                    if (mask & (1u << _t)) {
+                        if (tp) testpat_paint(_t, tp);
+                        else    display_fill(_t, col);
+                    }
                 }
                 burnin_painted_mask = mask;
                 burnin_painted_col  = col;
@@ -11482,7 +12052,7 @@ static void display_task(void *arg)
         int debug_tick_ms = s_debug_wl_fps ? (1000 / s_debug_wl_fps) : 0;
         TickType_t tick_ms;
         if (mode == APP_MODE_SPECTRUM)
-            tick_ms = pdMS_TO_TICKS(DISPLAY_TICK_MS_FAST);   /* fixed — LED task / WS2812 noise-floor sync, not overridden */
+            tick_ms = pdMS_TO_TICKS(DISPLAY_TICK_MS_SPECTRUM);   /* fixed, not overridden by the debug wl_fps */
         else if (sun_anim || weather_needs_fast || wl_precip_active || wl_colon_needs_fast)
             tick_ms = pdMS_TO_TICKS(debug_tick_ms ? debug_tick_ms : DISPLAY_TICK_MS_FAST);
         else if (weatherlive_anim)

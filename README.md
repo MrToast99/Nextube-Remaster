@@ -34,6 +34,8 @@ Like the work? Help keep me Caffeinated! <br>
   - [Web UI Language](#web-ui-language)
   - [Static IP & Network Diagnostics](#static-ip--network-diagnostics)
   - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
+    - [Calibration walkthrough](#calibration-walkthrough)
+    - [Calibration Test Screen](#calibration-test-screen)
   - [Admin Authentication (optional)](#admin-authentication-optional)
 - [Modes](#modes)
   - [Mode Rotation](#mode-rotation)
@@ -143,8 +145,9 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | Home Assistant MQTT integration (sensor + mode + display + brightness) | ✅ Working |
 | WLED Sync — receive UDP Notifier broadcasts; accent LEDs follow WLED color | ✅ Working |
 | Weather Panel 3 — animated sunrise/sunset (20 Hz rising/setting sun + mountains) | ✅ Working |
-| Multilingual web UI — 11 languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI) with per-browser preference | ✅ Working |
-| Tube display localisation — day-of-week abbreviation in 11 languages on clock/date panels | ✅ Working |
+| Multilingual web UI — 12 languages (EN/DE/FR/ES/IT/PT/NL/SV/NO/DA/FI/PL) with per-browser preference | ✅ Working |
+| Tube display localisation — day-of-week abbreviation in 12 languages on clock/date panels | ✅ Working |
+| Replacement-panel calibration — per-tube gamma, VCOM, color balance, black level, shadow lift, with an on-device test screen | ✅ Working |
 | Custom TrueType fonts for clock digits and panel text (stb_truetype, PSRAM-cached glyph renderer, configurable drop shadow) | ✅ Working |
 | Follow Sun/Moon LED mode — accent LEDs track the sun by day, moon by night | ✅ Working |
 | Static IP configuration (optional, DHCP remains default) | ✅ Working |
@@ -302,15 +305,15 @@ After a firmware-only OTA, the web UI shows a warning banner if the LittleFS web
 
 The version-mismatch banner above only catches a *version number* disagreement — it can't tell you that one specific built-in file (a sound, a font, an icon) is actually missing from the device while everything else reports the correct version. That gap is real: a device that skipped over an update where a particular file changed, or had one removed by hand through the LittleFS file browser, can end up on a "matching" version with a genuine hole in it.
 
-The device checks every stock file it shipped with — once at boot (a few seconds in, and only while **Enable auto boot-up scan** under **System → Verify & Repair Stock Files** is on, which it is by default), and again in the background right after any Web UI Update, Online Updater pull, or Verify & Repair completes — and shows a **"Missing built-in files"** banner if anything expected is actually gone, naming one example and the total count. That check only looks at whether each file exists (a cheap check, safe to run automatically); it can't tell a *stale* file (present, but wrong content — e.g. left over from a version that predates a later change) from a healthy one. The scan itself is paced in small batches so it never freezes the display, and it always runs in the background — applying an update or running Verify & Repair finishes immediately, without waiting for this scan to catch up first.
+The device checks every stock file it shipped with (themes excluded: those are the [Theme Manager](#downloadable-theme-packs)'s job, which installs, updates, repairs and re-downloads them) — once at boot (a few seconds in, and only while **Enable auto boot-up scan** under **System → Verify & Repair Stock Files** is on, which it is by default), and again in the background right after any Web UI Update, Online Updater pull, or Verify & Repair completes — and shows a **"Missing built-in files"** banner if anything expected is actually gone, naming one example and the total count. That check only looks at whether each file exists (a cheap check, safe to run automatically); it can't tell a *stale* file (present, but wrong content — e.g. left over from a version that predates a later change) from a healthy one. The scan itself is paced in small batches so it never freezes the display, and it always runs in the background — applying an update or running Verify & Repair finishes immediately, without waiting for this scan to catch up first.
 
 Turning **Enable auto boot-up scan** off only skips that automatic run at boot; the manual **Verify & Repair** button and the exception picker below keep working anytime regardless.
 
-**Deliberately removed a stock theme or file to save space?** Click **Manage exceptions** on the missing-files banner to pick exactly which of the currently-missing files or folders to stop flagging — grouped by folder, so excluding an entire theme you don't use is one click. Excepted files are remembered across every future scan and never counted as missing again, while anything genuinely new going missing later still shows up normally. The full saved list is also viewable and editable anytime — even when nothing is currently missing — via the separate **Manage exceptions** button under **System → Verify & Repair Stock Files**, with a **Remove** option per entry. Saving or removing an exception updates the banner immediately rather than waiting for the next scan.
+**Deliberately removed a stock file to save space?** (Themes need no exception: the check ignores them.) Click **Manage exceptions** on the missing-files banner to pick exactly which of the currently-missing files or folders to stop flagging — grouped by folder. Excepted files are remembered across every future scan and never counted as missing again, while anything genuinely new going missing later still shows up normally. The full saved list is also viewable and editable anytime — even when nothing is currently missing — via the separate **Manage exceptions** button under **System → Verify & Repair Stock Files**, with a **Remove** option per entry. Saving or removing an exception updates the banner immediately rather than waiting for the next scan. Web UI updates and hotpatches also leave excepted files alone, so an update never re-creates part of a folder you removed (a full LittleFS flash still restores everything).
 
 **Manually restoring a missing file instead?** Uploading it back through **System → LittleFS Files** — a single file, or a whole folder at once (see [Adding a Custom Theme](#adding-a-custom-theme) for the folder-upload workflow) — checks it off the missing list the moment the upload finishes, no need to wait for the next scan or run Verify & Repair afterward.
 
-**Repair without a full reflash — "Verify & Repair Stock Files"** (**System** tab, and a **Repair now** button on the missing-files banner itself): a heavier, explicitly user-triggered check that verifies every stock file's actual *content* against what this exact firmware build shipped, then re-downloads only the files found missing or stale — reusing one connection for the whole run — directly from the public GitHub repo at the git tag matching the device's own installed version (never a newer tag than what's actually installed). Nothing is ever bundled ahead of time for this: the device's own firmware image already carries the expected checksum for every stock file, so the only network activity is fetching bytes for something already known, locally, to be wrong. One pass repairs however many files actually need it; past 25 files it shows a note that a full LittleFS Recovery reflash may finish faster, but keeps repairing automatically either way. The result tells you exactly which files were repaired, not just a count. LittleFS Recovery remains the guaranteed-complete fallback for anything this can't handle — no internet reachable, a very old device whose version predates this mechanism, or a repair that partially fails.
+**Repair without a full reflash — "Verify & Repair Stock Files"** (**System** tab, and a **Repair now** button on the missing-files banner itself): a heavier, explicitly user-triggered check that verifies every stock file's actual *content* (again not the themes, so a theme updated through the Theme Manager is never put back to the version this firmware shipped) against what this exact firmware build shipped, then re-downloads only the files found missing or stale — reusing one connection for the whole run — directly from the public GitHub repo at the git tag matching the device's own installed version (never a newer tag than what's actually installed). Nothing is ever bundled ahead of time for this: the device's own firmware image already carries the expected checksum for every stock file, so the only network activity is fetching bytes for something already known, locally, to be wrong. One pass repairs however many files actually need it; past 25 files it shows a note that a full LittleFS Recovery reflash may finish faster, but keeps repairing automatically either way. The result tells you exactly which files were repaired, not just a count. LittleFS Recovery remains the guaranteed-complete fallback for anything this can't handle — no internet reachable, a very old device whose version predates this mechanism, or a repair that partially fails.
 
 #### Automatic Update Checks
 
@@ -404,7 +407,7 @@ The web UI provides:
 
 ### Web UI Language
 
-The web interface is available in **11 languages**:
+The web interface is available in **12 languages**:
 
 | Code | Language |
 |---|---|
@@ -419,6 +422,7 @@ The web interface is available in **11 languages**:
 | `no` | Norwegian |
 | `da` | Danish |
 | `fi` | Finnish |
+| `pl` | Polish |
 
 On first load the UI auto-detects your **browser's preferred language**. If a matching translation is available it is fetched from `/lang/<code>.json` on the device and applied; otherwise the UI falls back to English. Your selection is saved in `localStorage` and persists across reloads and browser restarts.
 
@@ -443,15 +447,68 @@ Below the WiFi Configuration card, a collapsible **Network Info** panel shows re
 
 ### Advanced Display (LCD Calibration)
 
-**Display → Advanced Display** contains per-tube hardware calibration controls for mixed panel sets (original + replacement tubes, or batches of replacement panels that differ slightly from each other). All changes take effect after **Save** and are applied immediately without a reboot.
+**Display → Advanced Display** contains per-tube hardware calibration controls for mixed panel sets (original + replacement tubes, or batches of replacement panels that differ slightly from each other). Every per-tube slider has a **↺** button at its right that puts that one slider back to its neutral value (it still needs a **Save**). All changes take effect after **Save** and are applied immediately without a reboot.
+
+#### Calibration walkthrough
+
+How to match a replacement tube to a stock one, using the **Calibration Test Screen** (described below) to judge each step by eye. You need the web UI open and, ideally, one original tube beside the replacement to compare against. Work in the lighting the clock will actually live in.
+
+**Setup.** Open **Display → Advanced Display**. In the **Calibration Test Screen** card tick the replacement tube (and a stock tube to compare), pick a pattern and press **Show on tubes**. Slider and dropdown changes only take effect when you press **Save**; the pattern then repaints on its own within a second or so, so the loop is: change → Save → look.
+
+1. **Get the basics right — pattern: Full white.**
+   - White should look white. If a tube looks like a photo negative, tick **Color Inversion** for it.
+   - Look at the right and bottom edges for a 1 px stray line. If you see one, set **Column Offset +2** and **Row Offset +1** for that tube.
+2. **Set contrast — pattern: Grey ramp.** The 16 bands run from black to white. You want every band distinguishable and the steps roughly even.
+   - Washed out (black looks grey, white looks dull): set **Panel Profile → Vivid** and raise **VCOM** (start at 40; up toward 60 if still flat, down toward 25 if over-saturated).
+   - The darkest bands merge into black: lower **Gamma** toward 1.0, or raise **Shadow Lift**.
+   - The brightest bands merge into white: lower **VCOM** a little.
+3. **Fix any tint — patterns: Color bars, then Full white.** The white bar and the full-white screen should look neutral, and the red / green / blue / yellow / cyan / magenta bars should match the stock tube. Use **Color Balance** to pull down the channel that is too strong:
+   - orange or white looks **pink / magenta** → lower **B** (or **R**)
+   - looks **yellow** → lower **G** (or raise **B**)
+   - looks **green** → lower **G**
+   - looks **blue / cold** → lower **B**
+
+   Change one channel by 5–10 points at a time. Gains above 100 can clip that channel's brightest values, so prefer lowering the strong channel over raising the weak ones.
+4. **Keep the glow — pattern: Orange + dim glow.** The top swatch is the digit color; below it the same orange steps down through 40 / 25 / 15 / 8 / 4 %, with a black strip at the bottom. The dimmest swatches stand in for the tube-fill glow behind the digits.
+   - Swatches disappear into black too early: raise **Shadow Lift** (try 30–50 %). If you are using a high Gamma (above about 1.5) that is usually the cause — bring Gamma down first.
+   - The black strip looks grey instead of black: raise **Black Level** a few points (2–5 %). Keep it small — it also swallows the faintest glow.
+   - Check the swatches still look *orange* and not red or brown. Shadow Lift preserves color ratios, but heavy Gamma doesn't.
+   - Dim steps drift purple or blue instead of brown-orange (common on replacement panels): use **Channel Curves** — lower **R** and **G** to lift their dark ends, or raise **B** to deepen blue's.
+   - Black itself looks blue or tinted next to a stock tube: add a little **Black Pedestal** to **R** and **G** (start at 3–6 %). Keep it small — it lightens every black pixel on that tube.
+5. **Match brightness last — pattern: Full white on both tubes.** Lower the brighter tube's **Individual Brightness Trim** until the two match. Do this last because every earlier step changes the overall level.
+6. **Check on the real clock face.** Press **Stop** (or let the 5 minutes run out) and look at an actual theme. Fine-tune from there; the test patterns are a guide, not the final word.
+
+**Quick reference — symptom → control**
+
+| What you see | Try |
+|---|---|
+| Photo-negative colors | Color Inversion |
+| 1 px line on the right / bottom edge | Column Offset +2, Row Offset +1 |
+| Everything looks washed out | Panel Profile → Vivid, VCOM 40–60 |
+| Dark detail or the dim glow is gone | Lower Gamma toward 1.0; raise Shadow Lift |
+| Faint grey haze where it should be black | Black Level 2–5 % |
+| Dim steps look purple / blue instead of brown-orange | Channel Curves — lower R and G, or raise B |
+| Black looks blue next to a stock tube | Black Pedestal on R and G (3–6 %) |
+| Whites look pink / yellow / green / blue | Color Balance — lower the strong channel |
+| One tube brighter than its neighbours | Individual Brightness Trim |
+
+#### Calibration Test Screen
+
+| Setting | Description |
+|---|---|
+| **Tubes / Pattern** | Paints a fixed pattern on the chosen tubes so the settings below can be judged by eye, ideally next to a stock tube. Patterns: **Orange + dim glow** (a full orange swatch, then the same orange at 40 / 25 / 15 / 8 / 4 %, then black — shows whether the tube-fill glow survives), **Grey ramp** (16 steps, black to white — shows crushed shadows or blown highlights), **Color bars** (white, R, G, B, yellow, cyan, magenta, 50 % grey — shows tint) and **Full white** (uniformity and tint). |
+
+**Using it:** tick the tubes (All / None are there for convenience), choose a pattern, press **Show on tubes**; **Stop** returns the tubes to normal. The screen cannot start while an anti burn-in or snow session is running — you get a "cancel it first" message. See the walkthrough above for which pattern to use when.
+
+The pattern goes through each tube's full correction chain, so it shows exactly what the clock face will get. Press **Save** after a change — the pattern repaints immediately. It stops by itself after 5 minutes, or press **Stop**. It shares the anti burn-in session, so it can't start while a burn-in or snow session is running.
 
 #### Gamma Correction
 
 | Setting | Per-tube | Range | Default | Description |
 |---|---|---|---|---|
-| **Gamma** | ✅ Yes (6 sliders) | 0.5–3.0 | 1.0 | Software midtone correction applied in the pixel render loop. `1.0` = identity (zero overhead). Values above 1.0 darken midtones — try **1.8–2.2** for washed ST7735S replacement panels. Values below 1.0 brighten midtones. |
+| **Gamma** | ✅ Yes (6 sliders) | 0.5–3.0 | 1.0 | Software midtone correction applied in the pixel render loop. `1.0` = identity (zero overhead). Values above 1.0 darken midtones — try **1.3–1.8** for washed ST7735S replacement panels; above about 1.5 the dim tube-fill glow starts to fade (see **Shadow Lift** and the walkthrough above). Values below 1.0 brighten midtones. |
 
-Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, one table for R/B 5-bit and one for G 6-bit per tube). There is no floating-point math per pixel at render time — the overhead is negligible even at 5 Hz.
+Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, separate tables for the R and B 5-bit channels and the G 6-bit channel per tube, so Color Balance can scale each independently). There is no floating-point math per pixel at render time — the overhead is negligible even at 5 Hz.
 
 #### Panel Profile
 
@@ -467,6 +524,38 @@ Gamma is implemented as a pre-computed integer lookup table (`out = in ^ γ`, on
 | Setting | Per-tube | Range | Default | Description |
 |---|---|---|---|---|
 | **Brightness** | ✅ Yes | 0–100 % | 100 % | Scales RGB565 pixel components (R5, G6, B5) by `value / 100` in the render loop. Use when a replacement panel is noticeably brighter than the originals. Applied in the same integer-only pixel pass as gamma — no additional overhead. |
+
+#### Shadow Lift
+
+| Setting | Per-tube | Range | Default | Description |
+|---|---|---|---|---|
+| **Shadow Lift** | ✅ Yes | 0–100 % | 0 % (off) | Brightens dark pixels only: black stays black, bright pixels are untouched, and a dim pixel's color ratios are kept (a faint orange glow stays orange). Use when tuning gamma/VCOM on a replacement panel crushes the dim tube-fill glow. Gain is up to 4× on the darkest non-black values at 100 %, fading to none toward white. Folded into the same lookup table as gamma and brightness trim, so there is no extra per-pixel cost. |
+
+Gamma is applied first, so a high gamma leaves less to lift — if the glow only returns at high Shadow Lift, try lowering Gamma toward 1.0–1.3 first.
+
+#### Color Balance
+
+| Setting | Per-tube | Range | Default | Description |
+|---|---|---|---|---|
+| **R / G / B gain** | ✅ Yes (3 sliders per tube) | 50–150 % | 100 % | Scales each color channel independently before gamma. Use when a replacement panel has a tint next to a stock tube — orange looking pink (lower **B**) or yellow (lower **G**), for example. Gains above 100 % can clip that channel's brightest values. Folded into the same lookup table as gamma, so no extra per-pixel cost. |
+
+#### Channel Curves
+
+| Setting | Per-tube | Range | Default | Description |
+|---|---|---|---|---|
+| **R / G / B curve** | ✅ Yes (3 sliders per tube) | 50–200 % | 100 % | Multiplies the gamma exponent for that one color channel (on top of the tube's main **Gamma**). Below 100 % lifts that channel's dark end, above 100 % deepens it, and 100 % leaves it alone. Use it to fix the *hue* of the dim steps independently of the bright ones — e.g. dim oranges turning purple because blue stays too strong in the darks (lower **R** and **G**, or raise **B**). Where **Color Balance** scales a channel evenly, this reshapes it; the two combine. Folded into the same lookup table, so no extra per-pixel cost. |
+
+#### Black Pedestal
+
+| Setting | Per-tube | Range | Default | Description |
+|---|---|---|---|---|
+| **R / G / B pedestal** | ✅ Yes (3 sliders per tube) | 0–30 % | 0 % (off) | Raises the level that pure black is drawn at, for that one color channel. Use it when a replacement panel's black has a color cast — a blue-leaking backlight can be neutralized by adding a little red and green. Applied last (after Black Level and Shadow Lift), and it lightens every black pixel on that tube, so keep it small (3–6 % is usually plenty). The opposite of **Black Level**, which pushes dark values down to black. |
+
+#### Black Level
+
+| Setting | Per-tube | Range | Default | Description |
+|---|---|---|---|---|
+| **Black level** | ✅ Yes | 0–30 % | 0 % (off) | Pushes values at or below this fraction of full scale to pure black, removing faint haze in the dark areas of a replacement panel. Keep it low — high values also swallow the dim tube-fill glow (raise **Shadow Lift** to bring that back). Applied after gamma, before Shadow Lift. |
 
 #### Color Inversion
 
@@ -520,7 +609,7 @@ Sessions are **RAM-only** and lost on reboot — you will be asked to log in onc
 | **Mastodon** | Live follower count. Fetched directly from the configured Mastodon instance API — no relay required. |
 | **Weather** | Up to three panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon; **Panel 3** — animated sunrise/sunset (rising/setting sun + mountain silhouettes at 20 Hz, solar times in HH:MM). Any combination of panels can be enabled; at least one must remain on. Temperatures rounded to whole degrees; leading zeros suppressed; minus sign shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
-| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280–3800 Hz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard electret capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring color**, **LCD bar color**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
+| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280 Hz up to an adjustable top frequency, default 8 kHz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard electret capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring color**, **LCD bar color**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
 
 ### Mode Rotation
 
@@ -1080,19 +1169,18 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 
 ### Built-in Themes
 
-Nine themes ship pre-loaded in LittleFS with every firmware image. Select them from **Display → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
+Six image themes ship pre-loaded in LittleFS with every firmware image (plus the built-in WeatherLive, DotMatrix and Segments themes, which are drawn by the firmware). More can be downloaded from the [Theme Manager](#downloadable-theme-packs). Select them from **Display → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
 
 | Theme | Style |
 |---|---|
-| **NixieOY** *(default)* | Warm amber Nixie-tube glyphs on a dark background — replicates classic neon vacuum tubes |
+| **Nixie** *(default)* | Warm amber Nixie-tube glyphs on a dark background — replicates classic neon vacuum tubes |
 | **DarkSlate** | Cool slate-blue digits on near-black — modern minimalist |
 | **FlipClock** | Split-flap flip animation — simulates the mechanical split-flap display |
-| **Formula1** | High-contrast racing-style segmented digits |
-| **GlitchGR** | Green-on-dark with glitch-art distortion |
-| **LightFuture** | Light background, dark digits — inverted minimal look |
 | **NotionRain** | Dark rain-effect styling |
 | **RetroPaper** | Off-white paper tone — old VFD or e-ink feel |
 | **WireMesh** | Wireframe outlined glyphs — technical circuit-board aesthetic |
+
+Available as optional downloads in the Theme Manager (not built into the firmware): **Formula1** (high-contrast racing-style segmented digits), **GlitchGR** (green-on-dark with glitch-art distortion), **LightFuture** (light background, dark digits — inverted minimal look), the **Nixie** colour variants, and **NixieOY** under Legacy.
 
 All built-in themes include the complete required asset set: digits, AMPM indicators, weather icons, WeekDate images, and info-panel assets. See [Adding a Custom Theme](#adding-a-custom-theme) to install your own.
 
@@ -1179,7 +1267,7 @@ The background is rendered once and shared identically across every tube, the sa
 
 **How it interacts with themes:**
 
-- **Any asset theme (NixieOY, FlipClock, etc.)** — the TTF font renders digits; all other panel assets (weather icons, social media logos, WeekDate images) continue loading from the theme.
+- **Any asset theme (Nixie, FlipClock, etc.)** — the TTF font renders digits; all other panel assets (weather icons, social media logos, WeekDate images) continue loading from the theme.
 - **WeatherLive** — the TTF font renders all panel text: temperature, Hi/Lo, sunrise/sunset, date, and humidity. The shadow setting also controls the graphical range track, temperature marker, and humidity teardrop. The procedural sky background is unaffected.
 
 **Shadow without a custom font:** the shadow checkbox and color operate independently of the font selection — on WeatherLive the shadow applies to the procedural graphical elements even when **Digit font → **Logisoso (built-in)** is selected.
@@ -1210,6 +1298,12 @@ The background is rendered once and shared identically across every tube, the sa
 **Dual-panel mode** (`cx_dual_panel`): drops the colon tube so the layout becomes `H H  M M [tube 5] [tube 6]`. Tubes 5 and 6 each have an independent enabled-panel set and cycle through it on the shared rotation interval.
 
 See [Custom TTF Fonts](#custom-ttf-fonts) for font upload instructions and `pyftsubset` subsetting to reduce font file size.
+
+### Downloadable Theme Packs
+
+Use **Display → Theme Manager**: press **Check for themes** to load the catalog, then **Install**, **Update** or **Remove** next to a theme. **Verify installed** re-checks the files of every installed catalog theme against its pack (no internet needed); a theme with a changed or missing file is tagged **Differs from catalog** and can be repaired with **Update**. The catalog and the previews are kept on the clock, so they are still there after a reboot or a firmware update. Each row shows a strip of the theme's digits 0–9 (click it to see all ten digits at their real tube size, fetched from the repository on demand), its size and what changed (the clock saves these small previews in its own storage when the catalog is loaded and the page uses those first, falling back to the repository only for one it doesn't have yet); the clock's own themes that are not in the catalog are listed under *Other installed themes* so they can be removed as well.
+
+Themes that are not shipped inside the firmware (colour variants, community themes) live in the repository's [`themes/`](themes/) folder as one ZIP per theme, listed in `themes/catalog.json`. The clock fetches that catalog from `raw.githubusercontent.com` (the repository set under **Update repository**, `main` branch) and installs a pack the same way a Web UI update is applied: the tubes show the wait screen, the ZIP is downloaded into PSRAM, its SHA-256 is checked against the catalog, and it is extracted into `/images/themes/<id>/`. The old folder is moved aside first and restored if anything fails. Each installed pack keeps a small `.pack.json` (`id`, `rev`) so a higher `rev` in the catalog shows as an update. Right after the catalog loads the clock fingerprints every catalog theme that is on the clock. A folder with no marker (for example one that shipped with the firmware) is compared with the catalog entry: an exact match gets its `.pack.json` written and is tracked from then on, while a folder that differs (an older or hand-edited copy) is tagged **Differs from catalog** and can be replaced with the catalog version. A folder that already has a marker is not re-read on a normal catalog check; the **Verify installed** button re-hashes every installed catalog theme against what its pack contained (no internet needed), and if a file was changed, added or lost since, the marker is dropped and the theme is tagged **Differs from catalog** the same way, so a damaged theme can be repaired from the Theme Manager. A theme whose folder is missing is assumed to have been removed on purpose and is listed as a download. Older designs such as NixieOY are listed in a separate **Legacy** section below the main list. Removing a theme deletes its folder; if it was the active theme the clock switches to **WeatherLive**, which is drawn by the firmware and needs no files. The stock-file check and Verify & Repair do not look at theme folders, so removing or updating a theme here never raises a missing-files banner or gets undone. A saved theme whose folder is missing at startup (for example NixieOY after a full LittleFS flash) falls back to **Nixie**, or to WeatherLive if that is missing too. See [`themes/README.md`](themes/README.md) for how packs and versions are built.
 
 ### Adding a Custom Theme
 
@@ -1298,7 +1392,7 @@ All tube images must be exactly **80 × 160 pixels** (portrait), saved as JPEG. 
 python helpers/image_converter/nextube_image_converter.py
 ```
 
-A browser UI opens at **http://localhost:5000**. Features:
+A browser UI opens at **http://localhost:5000** (or the next free port up to 5010 — the console prints the address it picked). Features:
 
 **Regular image conversion:**
 - Drag-and-drop individual images **or** click **📁 Browse Folder** to upload a whole directory at once
@@ -1440,7 +1534,8 @@ POST /api/wifi/regen_pin     → generate and persist a new AP PIN → {"pin":"�
 # Status (open)
 GET  /api/ping               → {"status":"ok"}
 GET  /api/status             → live status: time, wifi, weather, heap, firmware, admin_set, auth_enabled, ap_active,
-                               burnin_active (+ burnin_remaining_s while one runs; 0 = no time limit)
+                               burnin_active (+ burnin_remaining_s while one runs; 0 = no time limit),
+                               testpat_active (+ testpat_remaining_s while a calibration test pattern is showing)
 GET  /api/network_info       → WiFi diagnostics: disconnect_count, last_disconnect_reason, connected_duration_s, mac, bssid, channel, rssi, netmask, gateway, dns1, dns2, phy_11n
 
 # Display (requires auth)
@@ -1464,6 +1559,12 @@ POST /api/update_firmware    → OTA firmware upload (binary body, nextube-fw-ot
 POST /api/update_fs          → OTA LittleFS upload (binary body, nextube-littlefs-*.bin)
 POST /api/update_spiffs      → alias for /api/update_fs (backward-compatible)
 GET  /api/themes             → {"themes":["ThemeA","ThemeB",...]} — scanned from LittleFS at runtime
+GET  /api/themes/catalog     → the cached theme-pack catalog merged with what is installed ({"loaded","pack_version","age_s","themes":[{id,name,family,variant,category,rev,size,notes,preview,preview_local,bundled,installed,installed_rev,update,differs,compatible,active}]}); no network access. Cached previews are served as /theme-previews/<id>_r<rev>.jpg. The catalog itself is kept in /theme-catalog.json on the clock's flash, so it (and the previews) survive reboots and firmware updates; a LittleFS flash erases both and the next refresh restores them
+POST /api/themes/refresh     → fetch themes/catalog.json from the repository, check installed themes against it and save the previews (async)
+POST /api/themes/install     → download and install one catalog theme (JSON: {"id":"Nixie"}; async; the SHA-256 in the catalog is checked first)
+POST /api/themes/verify      → re-hash every installed catalog theme against its pack, no network (async); a theme that no longer matches loses its marker and shows as differing
+POST /api/themes/remove      → delete an installed theme folder (JSON: {"id":"Nixie"}); the active theme falls back to WeatherLive
+GET  /api/themes/status      → {"state":"idle|running|done|error","op","id","phase","progress","changed","error"} for refresh / install / verify
 GET  /api/file/ls?dir=/      → LittleFS directory listing
 POST /api/file/rename        → rename a file or folder (JSON: {"from":"/path","to":"/newpath"})
 POST /api/wifi/scan          → trigger WiFi scan
@@ -1495,13 +1596,16 @@ POST /api/debug/pwm          → override backlight PWM: {"freq_hz":10000,"brigh
 POST /api/debug/loglevel     → runtime per-tag log verbosity: {"tag":"ntp","level":4}
                                (0=none … 5=verbose) or {"tag":"…","enabled":false}; resets on reboot
 POST /api/debug/burnin       → trigger the burn-in / color-cycle routine (see Advanced Display);
-                               {"stop_all":true} stops any running color-cycle or snow session
+                               {"stop_all":true} stops any running color-cycle or snow session (and a test pattern);
+                               {"mask":63,"duration_s":300,"pattern":2} instead shows a calibration test pattern
+                               on the masked tubes (1 grey ramp, 2 orange + dim glow, 3 color bars, 4 full white) —
+                               responds {"status":"busy"} if a burn-in or snow session is already running
 POST /api/debug/snow         → trigger the static-snow routine (see Advanced Display)
 GET  /api/debug/micframe     → atomic snapshot of one DMA capture: {"samples":[512 raw ADC values],
-                               "dec":[128 decimated values]} — both arrays come from the same frame
+                               "dec":[256 decimated values]} — both arrays come from the same frame
 GET  /api/debug/micbands     → per-band spectrum state for all 24 Goertzel bands:
-                               raw energy, noise floor, post-floor power, and display value;
-                               updated even on silence-gated frames
+                               raw energy (before noise-floor subtraction), noise floor, post-floor
+                               power and display value; updated even on silence-gated frames
 ```
 
 ## Troubleshooting
@@ -1724,7 +1828,7 @@ The capsule on PCB Rev 1.31 (near the top edge of the board) carries **no markin
 
 #### Sampling driver — `adc_continuous` (I²S0 DMA, hardware-clocked)
 
-Capture is driven by the ESP32's **digital ADC controller via I²S0 DMA** (`adc_continuous`): the SAR is clocked in hardware at **32 kHz** (the digital controller's minimum is 20 kHz) and DMA delivers complete frames; the mic task averages every 4 samples down to the **8 kHz** analysis rate (the averaging doubles as an anti-alias filter and adds ~1 bit of effective resolution). Exact sample spacing, near-zero CPU per sample.
+Capture is driven by the ESP32's **digital ADC controller via I²S0 DMA** (`adc_continuous`): the SAR is clocked in hardware at **32 kHz** (the digital controller's minimum is 20 kHz) and DMA delivers complete frames; the mic task low-passes and decimates by 2 down to the **16 kHz** analysis rate (8 kHz of bandwidth) with a 4-tap `[1 3 3 1]/8` filter, which doubles as the anti-alias filter: its gain is −0.5 dB at 2 kHz, −2 dB at 4, −4.8 dB at 6 and −9 dB at 8 kHz, and 9 / 10 / 12 kHz fold back to 7 / 6 / 4 kHz attenuated by 12 / 15 / 25 dB. Exact sample spacing, near-zero CPU per sample.
 
 **Why hardware clocking is non-negotiable** (every software-timed approach was tried and failed):
 - `esp_timer` + `adc_oneshot_read()` at 125 µs: each read costs **300–600 µs** (driver mutex, per-read reconfiguration), so the timer ran in permanent catch-up — the *real* sample rate was ~1.7 kHz, making every band above the true ~850 Hz Nyquist **aliased noise** (measured ~78 % of Core 0 for the privilege).
@@ -1734,26 +1838,26 @@ Capture is driven by the ESP32's **digital ADC controller via I²S0 DMA** (`adc_
 
 | Parameter | Value |
 |---|---|
-| Hardware rate | 32 000 Hz (I²S0-clocked, DMA) ÷ 4 → 8 000 Hz effective |
-| Frame size | 128 samples (16 ms per Goertzel frame, ~62 fps) |
+| Hardware rate | 32 000 Hz (I²S0-clocked, DMA) ÷ 2 → 16 000 Hz effective (8 kHz bandwidth) |
+| Frame size | 256 samples (16 ms per Goertzel frame, ~62 fps, 62.5 Hz bins) |
 | Bit depth | 12-bit, ADC_ATTEN_DB_12 |
 | Window | Hann (suppresses off-band leakage — a loud bass note no longer splatters across all bands) |
 | CPU cost | Near-zero acquisition (DMA); ~4–5 % of Core 0 for Goertzel analysis.  Capture is gated to Spectrum mode (all other modes pay zero) and httpd is pinned to Core 1 (task-WDT history).  **Note:** noise baselines captured on firmware ≤ v1.13.x were measured under the old aliased sampling — re-capture (or Reset to Auto) after updating. |
 
 #### Frequency bands
 
-**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Each band is the **sum of all 62.5 Hz analysis bins inside its frequency range** (~60 bins across 250–3937 Hz, mapped to bands by geometric band edges), not a single bin at the band centre — a single bin only hears ±125 Hz, and the log-spaced centres above ~1 kHz sit 200–400 Hz apart, so tones between centres would fall into spectral cracks and vanish (a tone-sweep test measured literal zero at 3.2 kHz before this fix). Bands are logarithmically spaced across 280 Hz–3800 Hz (safely below the 4 kHz Nyquist limit), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. The table below lists the band centres. This layout avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
+**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Each band is the **sum of all 62.5 Hz analysis bins inside its frequency range** (up to ~123 bins across 250–7937 Hz, mapped to bands by geometric band edges; only the bins the current top frequency needs are computed), not a single bin at the band centre — a single bin only hears ±125 Hz, and the log-spaced centres above ~1 kHz sit 200–400 Hz apart, so tones between centres would fall into spectral cracks and vanish (a tone-sweep test measured literal zero at 3.2 kHz before this fix). Bands are logarithmically spaced from 280 Hz up to the **Spectrum top frequency** (Display → Spectrum Mode; 1200–8000 Hz, default **8000 Hz**), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. The default spreads the six tubes over the whole analysable range so the upper tubes follow hi-hats and cymbals; the microphone hears less above ~2.5 kHz, so those tubes work from a weaker signal. Lower the setting (for example to 2000 Hz) to give each tube a narrower slice of the range the microphone hears best. Changing it restarts the noise learning, and a saved baseline made for another range is ignored until you capture a new one. The table below lists the band centres at the default of 8000 Hz. This layout avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
 
 | Tube | Bar 0 | Bar 1 | Bar 2 | Bar 3 | Range |
 |---|---|---|---|---|---|
-| 0 | 280 Hz | 315 Hz | 350 Hz | 395 Hz | Low bass |
-| 1 | 440 Hz | 495 Hz | 555 Hz | 620 Hz | Upper bass |
-| 2 | 695 Hz | 780 Hz | 870 Hz | 975 Hz | Lower mid |
-| 3 | 1095 Hz | 1225 Hz | 1370 Hz | 1535 Hz | Midrange |
-| 4 | 1720 Hz | 1925 Hz | 2160 Hz | 2420 Hz | Presence |
-| 5 | 2710 Hz | 3030 Hz | 3395 Hz | 3800 Hz | Treble |
+| 0 | 280 Hz | 324 Hz | 375 Hz | 434 Hz | Bass |
+| 1 | 502 Hz | 580 Hz | 671 Hz | 777 Hz | Upper bass / lower mid |
+| 2 | 899 Hz | 1040 Hz | 1203 Hz | 1391 Hz | Midrange |
+| 3 | 1610 Hz | 1862 Hz | 2155 Hz | 2493 Hz | Upper mid |
+| 4 | 2884 Hz | 3336 Hz | 3860 Hz | 4466 Hz | Presence |
+| 5 | 5166 Hz | 5977 Hz | 6915 Hz | 8000 Hz | Treble |
 
-Ratio between adjacent bands ≈ 1.12× per step. The display reads left-to-right from bass (tube 0) to treble (tube 5).
+Ratio between adjacent bands ≈ 1.16× per step at the default (1.09× at 2000 Hz, 1.12× in the old 280–3800 Hz layout). Below ~500 Hz the bands are narrower than the 62.5 Hz analysis bins, so each owns at most one bin (a few own none and are measured at their centre), and neighbouring low bars overlap. The display reads left-to-right from bass (tube 0) to treble (tube 5).
 
 #### Noise floor and peak-hold
 
@@ -1762,9 +1866,36 @@ Because the LMV321 preamp amplifies broadband electrical noise alongside audio, 
 - **Phase 1 (first ~4 s, 250 frames):** fast convergence (α = 0.02, no signal guard) locks the per-band noise floor from zero.
 - **Phase 2 (steady state):** slow drift tracking (α = 0.002) only when the current bin is below 4× the estimated floor — prevents audio signals from biasing the floor upward.
 
-Each band's noise floor is subtracted before the peak-hold. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** threshold (`mic_silence_gate` in config, adjustable under **Display → Spectrum Mode → Noise Floor**) blanks all bands when the **sum of post-floor band power** falls below the set value — a *spectral* gate, self-calibrating because the adaptive floor has already absorbed electrical noise. Silence sums to <10; even quiet real audio exceeds 50. **Default 25; 0 disables.** *(Semantics changed: the old gate compared time-domain RMS² with a default of 250 — it was volume-calibrated rather than correctness-calibrated, blanking clearly-detected mid-frequency tones at listening level while letting loud sub-bass open the display onto nothing but speaker-distortion hash. Users upgrading should re-tune the slider, starting at 25.)*
+Each band's noise floor is subtracted before the peak-hold, and the floor itself is kept within **2× the quiet reference** (the floor when Phase 1 ended, or the saved baseline): sustained loud sound can no longer drag it up to the music's own level — measured with a bass-heavy track, the lowest bands' floor had climbed from ~8 to ~190, so the bars subtracted the music itself. (A permanently noisier room needs a new **Capture Baseline**.) A band must also exceed **2× its floor** (the floor plus a dead zone of 1× the floor) before it counts towards the silence gate; the bars themselves use a smaller dead zone of 0.25× the floor so that quiet mids and treble, which sit only just above the noise in a typical room, still move the middle and right tubes (the gate still blanks everything in a quiet room): measured in a quiet room, band energy is bursty — the median sits below the mean and the 99th percentile is 5× (low bands) to 20×+ (higher bands) above it — so the mean alone let bursts light the bars, mostly on the noisy low bands. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** setting (`mic_silence_gate` in config, adjustable under **Display → Spectrum Mode → Noise Floor**) is the sensitivity of a *spectral* gate that blanks all bars when nothing audible is playing. Each band's power above its own noise threshold is counted in units of that threshold, and a band only counts once it has stayed clearly above its threshold for about 80 ms; the gate opens when the counted units add up to enough (2 at a setting of 30, scaling in proportion with the slider). Measuring against each band's own noise level means a quiet tone at 1–5 kHz opens the gate just as a bass note does — an earlier version summed raw power across all bands, so the bass dominated it and quiet treble-only sounds were ignored — and requiring a band to persist keeps one-to-three-frame noise bursts from opening it. Once open, the gate stays open for a short while (up to about a quarter of a second, in proportion to how long it has been open) after the sound dips, so the gaps between beats don't blank the bars. **Default 25; 0 disables** (the bars then show whatever is above each band's threshold). *(Semantics changed: the old gate compared time-domain RMS² with a default of 250 — it was volume-calibrated rather than correctness-calibrated, blanking clearly-detected mid-frequency tones at listening level while letting loud sub-bass open the display onto nothing but speaker-distortion hash. Users upgrading should re-tune the slider, starting at 25.)*
 
-Display dynamics: band power is smoothed with a short EMA (τ ≈ 45 ms) so tones near a band boundary hold a steady bar instead of flickering between neighbours, then peak-hold applies instant attack with exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display decays at 0.05/frame × 20 Hz ≈ 1 s hold). The Spectrum display task runs at **20 Hz** (50 ms tick) for snappy bar response; all other modes run at 5 Hz.
+**Per-band scaling.** The microphone typically hears bass far stronger than the mids and treble (measured with a bass-heavy track: band 0 at ~300 vs ~4 in the mids), so scaling every bar to the loudest band left tubes 2–6 dark. Each bar is now scaled almost entirely (95 %) to 2× its *own* recent average level (rising quickly, falling over ~8 s) and slightly (5 %) to the loudest band's (which keeps a little of the bass-heavy shape), and never to less than 4× its own noise threshold so a quiet room stays quiet. Bar height follows the band's level to the power 0.6 (`SPEC_GAMMA`; lower lifts quiet bands, higher gives loud hits more punch). These values were tuned against recorded music so that the bass hits reach full height while the mids and treble move at about the level a software analyser shows, instead of everything sitting at the same middle height. Constants `SPEC_EQ`, `REF_GAIN`, `REF_UP`, `REF_DOWN` and `REF_SNR` in `microphone.c`; `SPEC_EQ` 0 gives the old all-against-the-loudest behaviour.
+
+**Burst rejection.** The microphone also picks up brief broadband noise bursts (about one every 3–4 s, mostly a single 16 ms frame, at the same rate with music or without). The silence gate hides them in a quiet room, but with music on they used to flash most of the upper bars to full at once. A frame in which at least 10 of the 20 bars above the bass would jump to about their maximum is dropped (the bars keep the previous frame's state); at most two frames in a row are dropped, so a genuinely loud, sustained sound still gets through.
+
+Display dynamics: band power is smoothed with a short EMA (τ ≈ 45 ms) so tones near a band boundary hold a steady bar instead of flickering between neighbours, then peak-hold applies instant attack with exponential decay (`peak × 0.85` per frame in the mic task; a second cosmetic peak-dot layer in the display falls from top to bottom in about 1 s at the default speed). The Spectrum display task runs at **50 Hz** (20 ms tick): it keeps a record of what each tube shows and sends only the bar segments (or, in the oscilloscope style, the rows) that changed, with a full repaint on mode entry, colour or offset changes and every 5 s as a self-heal; all other modes run at 5 Hz.
+
+#### Accent-LED ripple (skipped bands)
+
+The WS2812 accent LEDs dim themselves by internal PWM (about 1.27 kHz on the unit it was measured on), and that ripple couples
+into the microphone. Measured in a quiet room, 99 % of it lands in a few narrow ranges —
+1.19–1.31 kHz (the fundamental), with weaker lines near 2.5 kHz and 3.75 kHz (its harmonics) and nothing meaningful from 4 to 8 kHz — and it is zero at 0 % and 100 % brightness and strongest near
+50 %. How much a given color adds is not predictable (the three channels' ripple adds with phase offsets: white came out about
+2× below the sum of its channels, cyan at 50 % about 5× above it), and an earlier version that predicted and subtracted it
+cost the bars their responsiveness. So those frequency ranges are simply **not analysed**: any band that sits inside one is
+shown as the average of its neighbours, which keeps the display contiguous and makes the bars independent of the LED color,
+brightness and mode. At the default 8 kHz top frequency the ripple bins are simply left out of the bands that contain them, and the two bands that sit entirely inside the upper range (about 2.5 and 2.9 kHz — bar 3 of the fourth tube and bar 0 of the fifth) are shown as the average of their neighbours; at a 2 kHz top frequency the masked bands are instead the two near 1.2 and 1.3 kHz. In a tone test the microphone itself hears about 10 dB less above ~2.5 kHz and about 25 dB less at 7–10 kHz than at 1 kHz (with ±10 dB of room scatter), though it still registered 8 kHz tones; the default 8 kHz top frequency gives the upper tubes treble content (hi-hats, cymbals) but at lower signal-to-noise, so lower the setting if those tubes stay dark.
+
+| Setting | Range | Default | Description |
+|---|---|---|---|
+| **Display style** (Spectrum card) | Bars / Oscilloscope | Bars | **Oscilloscope** draws the microphone waveform as a single trace across all six tubes (480 columns, about 30 ms of audio) in the LCD bar color with a dim center line. It triggers on a rising zero crossing so steady tones hold still, scales to a slowly falling peak envelope (never amplifying room noise) and goes flat while the silence gate is closed. The LED glow still follows the bands. Only the tube rows between the old and new trace are redrawn each frame. |
+| **Oscilloscope line thickness** (Spectrum card) | 1–8 px | 2 | Width of the oscilloscope trace. |
+| **Bar rise speed** (Spectrum card) | 1–10 | 4 | How fast a bar jumps up when a band gets louder (1 = slow and smooth, 10 = instant). |
+| **Bar fall speed** (Spectrum card) | 1–10 | 4 | How fast a bar drops back (1 = lingers, 10 = drops at once). |
+| **Peak dot fall speed** (Spectrum card) | 1–10 | 3 | How fast the white peak dot falls after its peak (3 = about 1.8 s from top to bottom, 5 = about 1 s). |
+| **Peak dot hold** (Spectrum card) | 0–2000 ms | 350 ms | How long the peak dot waits at its peak before it starts to fall. |
+| **Spectrum top frequency** (Spectrum card) | 1200–8000 Hz | 8000 Hz | Centre of the highest band; the 24 bands are spread from 280 Hz up to it. Takes effect after Save (the noise floor relearns for a few seconds). |
+
+The ripple ranges are chosen for the reference unit (`LED_RIPPLE_HZ` in `microphone.c`); LED chip batches can differ.
 
 #### Spectrum LED Control
 
@@ -1772,7 +1903,7 @@ The LED ring behaviour in Spectrum mode is independently configurable under **Di
 
 | Source | Behaviour |
 |---|---|
-| **Custom glow color** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. The color is set by the **LED Glow Color** picker and is the same for all LEDs. |
+| **Custom glow color** (default) | Each LED is driven by the amplitude of its corresponding frequency band — loud = bright, silent = off. An LED only lights while at least one bar on its own tube is showing (a lit segment), so levels below what the tube displays never make it flicker. The color is set by the **LED Glow Color** picker and is the same for all LEDs. |
 | **Follow accent mode** | The LEDs animate in whatever accent mode is configured (**Static**, **Breath**, **Rainbow**, or **Off**), using the per-tube colors from the LED settings, ignoring the audio by default. The LCD bars still respond to the microphone normally. |
 
 The **LCD Bar Color** picker is separate from the LED source and always applies — it controls the color of the frequency bars drawn on the LCDs regardless of which LED source is selected. The **Peak Dot Color** picker controls the peak-hold dot that tops each bar (see "Display dynamics" above) independently of the bar color itself; defaults to white.
@@ -1819,10 +1950,14 @@ ST7735S panels are electrically identical to the original ST7735 but have a diff
 2. Go to **Display → Advanced Display → Panel Profile**
 3. For each replaced tube set **Profile → Vivid** and **VCOM → 40** as a starting point
 4. Click **Save** and evaluate — if colors are still washed raise VCOM toward 50–60; if they look over-saturated or too dark lower it toward 25–30
-5. If colors remain washed even at high VCOM, raise **Gamma Correction** for that tube to **1.8–2.2**
+5. If colors remain washed even at high VCOM, raise **Gamma Correction** for that tube (try **1.3–1.8**; higher values crush the dim tube-fill glow, which **Shadow Lift** can bring back)
 6. If colors are inverted (white background appears black), tick **Color Inversion** for that tube
+   - If the dim tube-fill glow disappears while the digits look right, raise **Shadow Lift** for that tube until it returns (high Gamma is the usual cause; keep it near 1.0–1.3 if you can)
+   - Use the **Calibration Test Screen** (Orange + dim glow pattern) next to a stock tube to compare, and **Color Balance** to correct a pink or yellow cast
 7. If there is a 1-pixel static border on the right or bottom edge, set **Column Offset → +2** and **Row Offset → +1** for that tube
 8. Click **Save** — changes take effect immediately without a reboot
+
+For fine-tuning against a stock tube — contrast, tint, the dim tube-fill glow and brightness matching — follow the [Calibration walkthrough](#calibration-walkthrough) under Advanced Display, which uses the built-in test patterns.
 
 > **Note on window offsets:** The LH096NT-IF09W ST7735S variant uses a frame-buffer that is 2 px wider than the visible area. Without the +2 column offset, the rightmost column of uninitialized frame-buffer appears as a thin static line. Row offset of +1 corrects the same issue at the bottom edge.
 
