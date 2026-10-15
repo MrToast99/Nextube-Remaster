@@ -46,6 +46,7 @@
 #include <strings.h>
 #include <errno.h>           /* fopen failure reporting in audio_play_task */
 #include "esp_heap_caps.h"   /* PSRAM stream alloc; DMA-pool failure reporting */
+#include "config_mgr.h"     /* heap_watch() */
 #include <math.h>
 
 static const char *TAG = "audio";
@@ -666,7 +667,7 @@ void audio_play_file(const char *path)
     if (!ext || strcasecmp(ext, ".wav") != 0) return;
 
     if (!s_play_mutex) return;
-
+    heap_watch("audio press");
 
     if (xSemaphoreTake(s_play_mutex, 0) != pdTRUE) {
         /* A previous clip is still playing or draining its tail.  Interrupt

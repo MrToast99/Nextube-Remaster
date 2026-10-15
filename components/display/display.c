@@ -7540,43 +7540,12 @@ static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, b
     return n;
 }
 
-/* WeatherLive clock render: animated time-of-day sky panorama — sun/moon arc,
- * drifting clouds, and condition-driven rain/snow — with HH:MM on tubes 0–4 and
- * a rotating tube-6 panel (weekday+DD+MM ↔ current temp over today's high/low).
- * Runs at the fast (20 Hz) display tick. */
-static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, bool demo)
+/* Loads the WeatherLive style (day/night blended digit, font and shadow colours, shadow sizes, font face, and the Custom face
+ * background) from the config into the s_wl_* render state. The weather panels draw with that same state, so they call it too: it used to be set only by
+ * render_weatherlive(), which meant a colour changed while a weather panel was on screen was drawn with the old one until the
+ * clock face next rendered. */
+static void wl_load_style(const nextube_config_t *cfg)
 {
-    /* This path only ever runs for clock_face=="custom" or theme starting
-     * "WeatherLive" — never "DotMatrix" — so wl_text()'s dot-matrix branch
-     * must be off here regardless of whatever render_cx_panel() last set it
-     * to (render_cx_panel() isn't called on the same tick as this function,
-     * so nothing else would reset it back). */
-    s_wl_dm_active = false;
-
-    /* Safe loop exit for OTA / WebUI updaters: WeatherLive's realtime animation
-     * keeps the display task hot every tick.  If a cooperative park has been
-     * requested (display_show_wait → s_park_req), skip the whole heavy frame so
-     * the task reaches its loop boundary and parks immediately, freeing the SPI
-     * bus and CPU for the flash/serve path.  Mid-frame checks below bail out of
-     * a frame already in progress.
-     *
-     * The same early-out also honours a short-lived busy hint (display_busy_hint)
-     * raised around CPU/flash-bound web operations such as a config save, so the
-     * httpd task on the same core isn't starved by this every-tick render. */
-    if (s_park_req || esp_timer_get_time() < busy_until_us()) {
-        /* Diagnostic for the "static custom face doesn't repaint until the
-         * next minute" report: this early-return is the one place a forced
-         * post-save redraw could be silently swallowed. Enable "display" at
-         * DEBUG level (System → hidden debug panel → Logging) and reproduce
-         * to see whether/how often this fires right after a settings save. */
-        ESP_LOGD(TAG, "render_weatherlive: early-return (park=%d, busy_remaining_us=%lld)",
-                 s_park_req, (long long)(busy_until_us() - esp_timer_get_time()));
-        return;
-    }
-
-    /* Configure per-frame render state from cfg. Both WeatherLive and Custom
-     * faces use the user's color/shadow prefs; only Custom can override the
-     * background (WeatherLive always uses the animated sky). */
     s_wl_is_custom = (strcmp(cfg->clock_face, "custom") == 0);
     /* Night color set (issue #73): crossfade day→night colors by the scene's
      * twilight-aware darkness (wl_scene_t.night, 0..255, driven by the real
@@ -7656,6 +7625,47 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     s_wl_bg_fill[sizeof(s_wl_bg_fill) - 1] = '\0';
     s_wl_bg_color1_r = cfg->custom_bg_color1[0]; s_wl_bg_color1_g = cfg->custom_bg_color1[1]; s_wl_bg_color1_b = cfg->custom_bg_color1[2];
     s_wl_bg_color2_r = cfg->custom_bg_color2[0]; s_wl_bg_color2_g = cfg->custom_bg_color2[1]; s_wl_bg_color2_b = cfg->custom_bg_color2[2];
+}
+
+/* WeatherLive clock render: animated time-of-day sky panorama — sun/moon arc,
+ * drifting clouds, and condition-driven rain/snow — with HH:MM on tubes 0–4 and
+ * a rotating tube-6 panel (weekday+DD+MM ↔ current temp over today's high/low).
+ * Runs at the fast (20 Hz) display tick. */
+static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, bool demo)
+{
+    /* This path only ever runs for clock_face=="custom" or theme starting
+     * "WeatherLive" — never "DotMatrix" — so wl_text()'s dot-matrix branch
+     * must be off here regardless of whatever render_cx_panel() last set it
+     * to (render_cx_panel() isn't called on the same tick as this function,
+     * so nothing else would reset it back). */
+    s_wl_dm_active = false;
+
+    /* Safe loop exit for OTA / WebUI updaters: WeatherLive's realtime animation
+     * keeps the display task hot every tick.  If a cooperative park has been
+     * requested (display_show_wait → s_park_req), skip the whole heavy frame so
+     * the task reaches its loop boundary and parks immediately, freeing the SPI
+     * bus and CPU for the flash/serve path.  Mid-frame checks below bail out of
+     * a frame already in progress.
+     *
+     * The same early-out also honours a short-lived busy hint (display_busy_hint)
+     * raised around CPU/flash-bound web operations such as a config save, so the
+     * httpd task on the same core isn't starved by this every-tick render. */
+    if (s_park_req || esp_timer_get_time() < busy_until_us()) {
+        /* Diagnostic for the "static custom face doesn't repaint until the
+         * next minute" report: this early-return is the one place a forced
+         * post-save redraw could be silently swallowed. Enable "display" at
+         * DEBUG level (System → hidden debug panel → Logging) and reproduce
+         * to see whether/how often this fires right after a settings save. */
+        ESP_LOGD(TAG, "render_weatherlive: early-return (park=%d, busy_remaining_us=%lld)",
+                 s_park_req, (long long)(busy_until_us() - esp_timer_get_time()));
+        return;
+    }
+
+    /* Configure per-frame render state from cfg. Both WeatherLive and Custom
+     * faces use the user's color/shadow prefs; only Custom can override the
+     * background (WeatherLive always uses the animated sky). */
+    s_wl_is_custom = (strcmp(cfg->clock_face, "custom") == 0);
+    wl_load_style(cfg);
 
     int64_t now_us = esp_timer_get_time();
     int mins = t->tm_hour * 60 + t->tm_min;
@@ -7973,6 +7983,7 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
  * No-op if a valid scene is already cached. */
 static void wl_ensure_scene(const nextube_config_t *cfg)
 {
+    wl_load_style(cfg);   /* the date / social / weather renderers draw with the user's colors, not whatever the clock face last loaded */
     if (s_wl_scene_valid) {
         /* Always advance anim_t so cloud/star animation stays smooth at full
          * frame rate regardless of how often the scene is rebuilt below. */
@@ -8027,16 +8038,6 @@ static void wl_ensure_scene(const nextube_config_t *cfg)
     wl_scene_clouds_from_icon(ic, &sc);
     sc.flash = 0.0f;
     wl_apply_live_weather(&sc, wdat);
-
-    s_wl_font_r = 255; s_wl_font_g = 255; s_wl_font_b = 255;
-    s_wl_shadow = true;
-    s_wl_shadow_r = 0; s_wl_shadow_g = 0; s_wl_shadow_b = 0;
-    s_wl_shadow_size = 2;
-    s_wl_glyph_shadow = true;
-    s_wl_glyph_shadow_r = 0; s_wl_glyph_shadow_g = 0; s_wl_glyph_shadow_b = 0;
-    s_wl_glyph_shadow_size = 2;
-    s_wl_bg_theme[0] = '\0';
-    wl_refresh_ft_face(cfg->custom_font);
 
     s_wl_last_scene  = sc;
     s_wl_scene_valid = true;
@@ -8401,7 +8402,65 @@ static uint32_t s_scope_color_sig;
 static int64_t  s_scope_last_full_us;
 static float    s_scope_env = SCOPE_MIN_ENV;
 
-static void render_scope(uint8_t br, uint8_t bg, uint8_t bb, int thick, bool force)
+/* Split scope: each tube draws its own band-pass output (see mic_get_split_scope()), with its own time base (the low tubes show a
+ * longer slice so a few cycles fit in 80 columns), its own trigger and its own envelope. A tube whose bands are gated off fades to a
+ * flat line, so LED ripple and room noise stay quiet. */
+_Static_assert(LCD_COUNT == MIC_SPLIT_TUBES, "one split-scope filter per tube");
+#define SCOPE_SPLIT_MIN_ENV 25.0f   /* the band-pass outputs are smaller than the raw signal */
+static const uint16_t SCOPE_SPLIT_WIN[LCD_COUNT] = { 288, 192, 128, 80, 56, 40 };   /* samples at 16 kHz shown per tube */
+static int16_t *s_scope_split;
+static float    s_split_env[LCD_COUNT], s_split_act[LCD_COUNT];
+
+static void scope_fill_split(int thick)
+{
+    float bands[MIC_BAND_COUNT];
+    mic_get_split_scope(s_scope_split);
+    mic_get_bands(bands);
+    for (int tube = 0; tube < LCD_COUNT; tube++) {
+        const int16_t *x = s_scope_split + tube * MIC_SCOPE_SAMPLES;
+        const int win = SCOPE_SPLIT_WIN[tube];
+        float lvl = 0.0f;
+        for (int b = 0; b < SPEC_BARS_PER_TUBE; b++)
+            if (bands[tube * SPEC_BARS_PER_TUBE + b] > lvl) lvl = bands[tube * SPEC_BARS_PER_TUBE + b];
+        s_split_act[tube] += ((lvl > 0.02f ? 1.0f : 0.0f) - s_split_act[tube]) * 0.3f;
+
+        float pk = 0.0f;
+        for (int i = 0; i < MIC_SCOPE_SAMPLES; i++) {
+            const float a = (float)(x[i] < 0 ? -x[i] : x[i]);
+            if (a > pk) pk = a;
+        }
+        float *env = &s_split_env[tube];
+        if (*env < SCOPE_SPLIT_MIN_ENV) *env = SCOPE_SPLIT_MIN_ENV;
+        if (pk > *env) *env = pk; else *env += 0.02f * (pk - *env);
+
+        int start = 0;
+        const int thr = (int)(*env * 0.05f);
+        for (int i = 4; i < MIC_SCOPE_SAMPLES - win - 2; i++) {
+            if (x[i - 1] < 0 && x[i] >= 0 && x[i - 4] < -thr) { start = i; break; }
+        }
+        const float scale = (float)SCOPE_HALF_AMP * s_split_act[tube] / *env;
+        const float step = (float)win / (float)LCD_WIDTH;
+        int yprev = SCOPE_MID;
+        for (int c = 0; c < LCD_WIDTH; c++) {
+            const float pos = (float)start + (float)c * step;
+            const int i0 = (int)pos;
+            const float v = (float)x[i0] + ((float)x[i0 + 1] - (float)x[i0]) * (pos - (float)i0);
+            int y = SCOPE_MID - (int)(v * scale);
+            if (y < 0) y = 0; else if (y > LCD_HEIGHT - 2) y = LCD_HEIGHT - 2;
+            if (c == 0) yprev = y;
+            int lo = y < yprev ? y : yprev, hi = y < yprev ? yprev : y;
+            const int grow = thick - 1 - (hi - lo);
+            if (grow > 0) { lo -= grow / 2; hi += grow - grow / 2; }
+            if (lo < 0) { hi -= lo; lo = 0; }
+            if (hi > LCD_HEIGHT - 1) hi = LCD_HEIGHT - 1;
+            s_scope_ymin[tube * LCD_WIDTH + c] = (uint8_t)lo;
+            s_scope_ymax[tube * LCD_WIDTH + c] = (uint8_t)hi;
+            yprev = y;
+        }
+    }
+}
+
+static void render_scope(uint8_t br, uint8_t bg, uint8_t bb, int thick, bool split, bool force)
 {
     if (!s_scope_samp) {
         uint8_t *mem = heap_caps_malloc(MIC_SCOPE_SAMPLES * sizeof(int16_t) + 2 * SCOPE_COLS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -8410,35 +8469,43 @@ static void render_scope(uint8_t br, uint8_t bg, uint8_t bb, int thick, bool for
         s_scope_ymax = s_scope_ymin + SCOPE_COLS;
         s_scope_samp = (int16_t *)mem;
     }
-    mic_get_scope(s_scope_samp);
+    if (split) {
+        if (!s_scope_split) {
+            s_scope_split = heap_caps_calloc(LCD_COUNT * MIC_SCOPE_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!s_scope_split) return;
+        }
+        scope_fill_split(thick);
+    } else {
+        mic_get_scope(s_scope_samp);
 
-    float pk = 0.0f;
-    for (int i = 0; i < MIC_SCOPE_SAMPLES; i++) {
-        const float a = (float)(s_scope_samp[i] < 0 ? -s_scope_samp[i] : s_scope_samp[i]);
-        if (a > pk) pk = a;
-    }
-    if (pk > s_scope_env) s_scope_env = pk; else s_scope_env += 0.02f * (pk - s_scope_env);
-    if (s_scope_env < SCOPE_MIN_ENV) s_scope_env = SCOPE_MIN_ENV;
+        float pk = 0.0f;
+        for (int i = 0; i < MIC_SCOPE_SAMPLES; i++) {
+            const float a = (float)(s_scope_samp[i] < 0 ? -s_scope_samp[i] : s_scope_samp[i]);
+            if (a > pk) pk = a;
+        }
+        if (pk > s_scope_env) s_scope_env = pk; else s_scope_env += 0.02f * (pk - s_scope_env);
+        if (s_scope_env < SCOPE_MIN_ENV) s_scope_env = SCOPE_MIN_ENV;
 
-    int start = 0;
-    const int thr = (int)(s_scope_env * 0.05f);
-    for (int i = 4; i < MIC_SCOPE_SAMPLES - SCOPE_COLS; i++) {
-        if (s_scope_samp[i - 1] < 0 && s_scope_samp[i] >= 0 && s_scope_samp[i - 4] < -thr) { start = i; break; }
-    }
+        int start = 0;
+        const int thr = (int)(s_scope_env * 0.05f);
+        for (int i = 4; i < MIC_SCOPE_SAMPLES - SCOPE_COLS; i++) {
+            if (s_scope_samp[i - 1] < 0 && s_scope_samp[i] >= 0 && s_scope_samp[i - 4] < -thr) { start = i; break; }
+        }
 
-    const float scale = (float)SCOPE_HALF_AMP / s_scope_env;
-    int yprev = SCOPE_MID;
-    for (int x = 0; x < SCOPE_COLS; x++) {
-        int y = SCOPE_MID - (int)((float)s_scope_samp[start + x] * scale);
-        if (y < 0) y = 0; else if (y > LCD_HEIGHT - 2) y = LCD_HEIGHT - 2;
-        if (x == 0) yprev = y;
-        int lo = y < yprev ? y : yprev, hi = y < yprev ? yprev : y;
-        const int grow = thick - 1 - (hi - lo);   /* widen short steps to the chosen line thickness */
-        if (grow > 0) { lo -= grow / 2; hi += grow - grow / 2; }
-        if (lo < 0) { hi -= lo; lo = 0; }
-        if (hi > LCD_HEIGHT - 1) hi = LCD_HEIGHT - 1;
-        s_scope_ymin[x] = (uint8_t)lo; s_scope_ymax[x] = (uint8_t)hi;
-        yprev = y;
+        const float scale = (float)SCOPE_HALF_AMP / s_scope_env;
+        int yprev = SCOPE_MID;
+        for (int x = 0; x < SCOPE_COLS; x++) {
+            int y = SCOPE_MID - (int)((float)s_scope_samp[start + x] * scale);
+            if (y < 0) y = 0; else if (y > LCD_HEIGHT - 2) y = LCD_HEIGHT - 2;
+            if (x == 0) yprev = y;
+            int lo = y < yprev ? y : yprev, hi = y < yprev ? yprev : y;
+            const int grow = thick - 1 - (hi - lo);   /* widen short steps to the chosen line thickness */
+            if (grow > 0) { lo -= grow / 2; hi += grow - grow / 2; }
+            if (lo < 0) { hi -= lo; lo = 0; }
+            if (hi > LCD_HEIGHT - 1) hi = LCD_HEIGHT - 1;
+            s_scope_ymin[x] = (uint8_t)lo; s_scope_ymax[x] = (uint8_t)hi;
+            yprev = y;
+        }
     }
 
     const uint16_t trace = (uint16_t)(((uint16_t)(br & 0xF8) << 8) | ((uint16_t)(bg & 0xFC) << 3) | (bb >> 3));
@@ -8516,7 +8583,10 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
     static uint8_t s_prev_style = 0xFF;
     const bool style_changed = cfg->spectrum_style != s_prev_style;
     s_prev_style = cfg->spectrum_style;
-    if (cfg->spectrum_style == 1) { render_scope(br, bg, bb, cfg->spectrum_scope_thick < 1 ? 1 : cfg->spectrum_scope_thick, force_margin_repaint || style_changed); return; }
+    if (cfg->spectrum_style >= 1) {
+        render_scope(br, bg, bb, cfg->spectrum_scope_thick < 1 ? 1 : cfg->spectrum_scope_thick, cfg->spectrum_style == 2, force_margin_repaint || style_changed);
+        return;
+    }
     if (style_changed) force_margin_repaint = true;   /* the other style left its own pixels on the tubes */
 
     /* Update peak-hold and precompute lit segment count + peak dot for every band.
@@ -10240,6 +10310,7 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
      * before the outdoor weather_get() validity check below: indoor
      * readings are independent of the outdoor fetch, so an outdoor-fetch
      * failure shouldn't blank an otherwise-valid indoor panel. */
+    wl_load_style(cfg);
     if (panel == WEATHER_PANEL_INTMP) { render_weather_indoor_temp(cfg); return; }
     if (panel == WEATHER_PANEL_INHUM) { render_weather_indoor_hum(cfg);  return; }
 
@@ -11679,7 +11750,7 @@ static void display_task(void *arg)
             bool day_changed = (t.tm_mday != last_t.tm_mday ||
                                 t.tm_mon  != last_t.tm_mon  ||
                                 t.tm_year != last_t.tm_year);
-            if (first || mode_changed || theme_changed || day_changed || burnin_force_render) {
+            if (first || mode_changed || theme_changed || custom_changed || day_changed || burnin_force_render) {
                 if (!wl_anim_tick || first || mode_changed)
                     render_date(cfg, &t);
                 last_t = t;
@@ -11691,7 +11762,7 @@ static void display_task(void *arg)
             const sub_count_t *sub = subscribers_get();
             bool uncfg = (cfg->youtube_id[0] == '\0');
             uint32_t count = (!uncfg && sub->valid) ? (uint32_t)sub->subscriber_count : 0;
-            if (first || mode_changed || theme_changed || count != last_subs ||
+            if (first || mode_changed || theme_changed || custom_changed || count != last_subs ||
                     burnin_force_render) {
                 if (!wl_anim_tick || first || mode_changed) {
                     if (uncfg) render_followers_blank(cfg, "youtube");
@@ -11706,7 +11777,7 @@ static void display_task(void *arg)
             const sub_count_t *s = instagram_get();
             bool uncfg = (cfg->instagram_user[0] == '\0');
             uint32_t count = (!uncfg && s->valid) ? (uint32_t)s->subscriber_count : 0;
-            if (first || mode_changed || theme_changed || count != last_insta ||
+            if (first || mode_changed || theme_changed || custom_changed || count != last_insta ||
                     burnin_force_render) {
                 if (!wl_anim_tick || first || mode_changed) {
                     if (uncfg) render_followers_blank(cfg, "instagram");
@@ -11721,7 +11792,7 @@ static void display_task(void *arg)
             const sub_count_t *s = tiktok_get();
             bool uncfg = (cfg->tiktok_user[0] == '\0');
             uint32_t count = (!uncfg && s->valid) ? (uint32_t)s->subscriber_count : 0;
-            if (first || mode_changed || theme_changed || count != last_tiktok ||
+            if (first || mode_changed || theme_changed || custom_changed || count != last_tiktok ||
                     burnin_force_render) {
                 if (!wl_anim_tick || first || mode_changed) {
                     if (uncfg) render_followers_blank(cfg, "tiktok");
@@ -11737,7 +11808,7 @@ static void display_task(void *arg)
             bool uncfg = (cfg->mastodon_user[0] == '\0' ||
                           cfg->mastodon_instance[0] == '\0');
             uint32_t count = (!uncfg && s->valid) ? (uint32_t)s->subscriber_count : 0;
-            if (first || mode_changed || theme_changed || count != last_mastodon ||
+            if (first || mode_changed || theme_changed || custom_changed || count != last_mastodon ||
                     burnin_force_render) {
                 if (!wl_anim_tick || first || mode_changed) {
                     if (uncfg) render_followers_blank(cfg, "mastodon");
@@ -11883,7 +11954,7 @@ static void display_task(void *arg)
             }
             bool indoor_valid_changed = (indoor_now_valid != last_indoor_valid);
 
-            bool full_redraw   = (first || mode_changed || theme_changed || wx_changed ||
+            bool full_redraw   = (first || mode_changed || theme_changed || custom_changed || wx_changed ||
                                   valid_changed || indoor_changed || indoor_valid_changed ||
                                   panel_flipped || burnin_force_render);
             if (full_redraw || (sun_anim && !wl_anim_tick)) {

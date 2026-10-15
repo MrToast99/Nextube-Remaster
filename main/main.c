@@ -39,6 +39,9 @@
 
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
+#include "mbedtls/sha1.h"     /* sha_prewarm() */
+#include "mbedtls/sha256.h"
+#include "mbedtls/sha512.h"
 #include "esp_timer.h"   /* esp_timer_get_time — uptime in heap telemetry */
 #include "cJSON.h"       /* cJSON_InitHooks — see install_cjson_psram_hooks() */
 
@@ -125,8 +128,19 @@ static void heap_telemetry_task(void *arg)
 {
     (void)arg;
     /* Wait one cycle before the first log so boot-time peaks settle. */
+#ifdef NX_HEAP_DIAG
+    int64_t last_full_us = esp_timer_get_time();
+#endif
     while (1) {
+#ifdef NX_HEAP_DIAG
+        /* every 5 s for the first two minutes (where the heap layout is decided), then every 30 s */
+        vTaskDelay(pdMS_TO_TICKS(esp_timer_get_time() < 120LL * 1000000 ? 5 * 1000 : 30 * 1000));
+        heap_watch("heap tick");
+        if (esp_timer_get_time() - last_full_us < 300LL * 1000000) continue;   /* the full line below every 5 minutes */
+        last_full_us = esp_timer_get_time();
+#else
         vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
+#endif
         /* Uptime in minutes from the monotonic µs timer.  With log timestamps
          * on wall-clock time (CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM) this is the
          * one periodic line that still anchors "how long has it been up" —
@@ -364,6 +378,238 @@ static void cjson_psram_free(void *ptr)
                    * free() correctly routes to whichever region ptr is in. */
 }
 
+/* ── OTA health gate ──────────────────────────────────────────────────────
+ * CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE leaves a freshly flashed image in PENDING_VERIFY; if the clock resets before it is marked
+ * valid, the bootloader reverts to the previous firmware. The image used to be confirmed at the end of app_main, so a build that
+ * started fine and then crashed or hung a minute later was never rolled back. It is now confirmed after OTA_VALID_AFTER_S of
+ * uptime, or when the clock is restarted on purpose (esp_restart() runs the shutdown handler; a panic or watchdog reset does
+ * not). A crash loop, or a power cut inside the window, therefore returns to the last firmware that stayed up. */
+#define OTA_VALID_AFTER_S 180
+
+static void ota_mark_valid_if_pending(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (!running || esp_ota_get_state_partition(running, &st) != ESP_OK || st != ESP_OTA_IMG_PENDING_VERIFY) return;
+    ESP_LOGI(TAG, "OTA image confirmed (%s)", esp_err_to_name(esp_ota_mark_app_valid_cancel_rollback()));
+}
+
+static void ota_valid_timer_cb(void *arg)
+{
+    (void)arg;
+    ota_mark_valid_if_pending();
+}
+
+/* ── Update probation ─────────────────────────────────────────────────────
+ * The OTA health gate above only catches a build that fails within its first minutes. For a fault that shows up hours later, the
+ * first day of every freshly installed (OTA) firmware is a probation: bad resets (panic, interrupt / task / other watchdog; power
+ * cuts, brown-outs and deliberate restarts do not count) are counted in NVS, and healthy uptime is added up in PB_STEP_S steps. Two
+ * bad resets less than an hour of healthy uptime apart, or PB_BAD_MAX in total, roll the clock back to the previous firmware (still
+ * in the other slot) with esp_ota_mark_app_invalid_rollback_and_reboot(). PB_END_S of healthy uptime ends the probation. */
+#define PB_NS         "nextube_diag"
+#define PB_BAD_MAX    3
+#define PB_BAD_GAP_S  3600
+#define PB_END_S      (24 * 3600)
+#define PB_STEP_S     600
+
+typedef struct { uint8_t active, bad; uint32_t up_s, last_bad_up; char ver[16]; } pb_state_t;
+
+static void pb_load(pb_state_t *pb)
+{
+    memset(pb, 0, sizeof(*pb));
+    nvs_handle_t h;
+    if (nvs_open(PB_NS, NVS_READONLY, &h) != ESP_OK) return;
+    nvs_get_u8(h, "pb_active", &pb->active);
+    nvs_get_u8(h, "pb_bad", &pb->bad);
+    nvs_get_u32(h, "pb_up", &pb->up_s);
+    nvs_get_u32(h, "pb_lastbad", &pb->last_bad_up);
+    size_t n = sizeof(pb->ver);
+    if (nvs_get_str(h, "pb_ver", pb->ver, &n) != ESP_OK) pb->ver[0] = '\0';
+    nvs_close(h);
+}
+
+static void pb_save(const pb_state_t *pb)
+{
+    nvs_handle_t h;
+    if (nvs_open(PB_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "pb_active", pb->active);
+    nvs_set_u8(h, "pb_bad", pb->bad);
+    nvs_set_u32(h, "pb_up", pb->up_s);
+    nvs_set_u32(h, "pb_lastbad", pb->last_bad_up);
+    nvs_set_str(h, "pb_ver", pb->ver);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void pb_timer_cb(void *arg)
+{
+    (void)arg;
+    pb_state_t pb;
+    pb_load(&pb);
+    if (!pb.active) return;
+    pb.up_s += PB_STEP_S;
+    if (pb.up_s >= PB_END_S) {
+        pb.active = 0;
+        ESP_LOGI(TAG, "update probation passed (%u bad resets)", (unsigned)pb.bad);
+    }
+    pb_save(&pb);
+}
+
+static void pb_rollback(pb_state_t *pb)
+{
+    ESP_LOGE(TAG, "update probation failed (%u bad resets) - rolling back to the previous firmware", (unsigned)pb->bad);
+    pb->active = 0;
+    pb_save(pb);
+    nvs_handle_t h;
+    if (nvs_open(PB_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "pb_failed", FW_VERSION_STR);   /* a later auto-update must not install this version again */
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    const esp_err_t e = esp_ota_mark_app_invalid_rollback_and_reboot();   /* only returns on failure */
+    ESP_LOGE(TAG, "rollback not possible (%s) - staying on this firmware", esp_err_to_name(e));
+}
+
+static void ota_probation_start(void)
+{
+    pb_state_t pb;
+    pb_load(&pb);
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    const bool fresh = running && esp_ota_get_state_partition(running, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY;
+    if (fresh) {                           /* first boot of a newly installed OTA image */
+        memset(&pb, 0, sizeof(pb));
+        pb.active = 1;
+        strlcpy(pb.ver, FW_VERSION_STR, sizeof(pb.ver));
+        pb_save(&pb);
+        ESP_LOGI(TAG, "update probation started for v%s (%d h of uptime, rollback after %d bad resets)", FW_VERSION_STR, PB_END_S / 3600, PB_BAD_MAX);
+    } else if (pb.active && strcmp(pb.ver, FW_VERSION_STR) != 0) {   /* another firmware is running now: rolled back or re-flashed */
+        pb.active = 0;
+        pb_save(&pb);
+        return;
+    } else if (pb.active) {
+        const esp_reset_reason_t rr = esp_reset_reason();
+        if (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT) {
+            const bool soon = pb.bad >= 1 && (pb.up_s - pb.last_bad_up) < PB_BAD_GAP_S;
+            pb.bad++;
+            pb.last_bad_up = pb.up_s;
+            pb_save(&pb);
+            ESP_LOGW(TAG, "bad reset %u during the update probation (reason %d, %u s of healthy uptime so far)", (unsigned)pb.bad, (int)rr, (unsigned)pb.up_s);
+            if (soon || pb.bad >= PB_BAD_MAX) pb_rollback(&pb);
+        }
+    }
+    if (pb.active) {
+        static esp_timer_handle_t s_pb_timer;
+        const esp_timer_create_args_t targs = { .callback = pb_timer_cb, .name = "ota_probation" };
+        if (esp_timer_create(&targs, &s_pb_timer) == ESP_OK)
+            esp_timer_start_periodic(s_pb_timer, (uint64_t)PB_STEP_S * 1000000ULL);
+    }
+}
+
+/* ── Heap-tracing debug build ─────────────────────────────────────────────
+ * Only compiled in when sdkconfig.heaptrace is layered on (CI: Build workflow, manual run, "heap_trace" ticked). From the end of boot
+ * it records every allocation; HT_WINDOW_S later it stops and dumps the ones that are still alive, which are the long-lived
+ * allocations that fragment internal RAM. The dump lands in the serial log between "===== HEAP TRACE" and "===== END HEAP TRACE";
+ * decode it with decode_heap_trace.py (dev tools) and the build's ELF.
+ *
+ * The record buffer matters: a 96-record buffer overflowed (the clock makes about 480 allocations a second, and over a hundred are
+ * alive at once during a TLS fetch), and a trace that overflows silently misses allocations. So it is tried in PSRAM first, with
+ * room for HT_RECORDS_PSRAM records. Internal heap RAM is too tight for a static buffer (a 5 KB one crashed an earlier attempt), so
+ * if ESP-IDF refuses a PSRAM buffer the fallback is a small one in RTC slow memory, which is not part of the heap, and the dump's
+ * header will say it overflowed. */
+#ifdef CONFIG_HEAP_TRACING_STANDALONE
+#include "esp_heap_trace.h"
+#include "esp_memory_utils.h"   /* esp_ptr_external_ram() */
+#define HT_RECORDS_PSRAM 6144   /* a JSON parse alone holds thousands of live PSRAM allocations; 1536 overflowed */
+#define HT_RECORDS_RTC   64
+#define HT_WINDOW_S      75
+static RTC_NOINIT_ATTR heap_trace_record_t s_ht_rtc[HT_RECORDS_RTC];
+_Static_assert(sizeof(s_ht_rtc) <= 7168, "the fallback trace records must fit in the 8 KB of RTC slow memory");
+
+/* heap_trace_dump() prints every record with interrupts disabled; with hundreds of records at 115200 baud that is seconds, and the
+ * interrupt watchdog killed the first run that had room for them all. So the records are read one at a time with heap_trace_get() and
+ * logged normally, in the same line format the decoder reads. Only internal-RAM allocations are listed (PSRAM ones are summed). */
+static void ht_stop_cb(void *arg)
+{
+    (void)arg;
+    heap_trace_stop();
+    heap_trace_summary_t sm = {0};
+    heap_trace_summary(&sm);
+    ESP_LOGW(TAG, "===== HEAP TRACE (allocations made since boot finished and still alive after %d s; internal free %u, largest %u) =====",
+             HT_WINDOW_S, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    ESP_LOGW(TAG, "records: %u of %u (high water %u), total allocations %u, total frees %u%s", (unsigned)sm.count, (unsigned)sm.capacity,
+             (unsigned)sm.high_water_mark, (unsigned)sm.total_allocations, (unsigned)sm.total_frees,
+             sm.has_overflowed ? "  (NB: Internal Buffer has overflowed, so trace data is incomplete.)" : "");
+    size_t ext_n = 0, ext_bytes = 0, int_n = 0, int_bytes = 0;
+    const size_t count = heap_trace_get_count();
+    for (size_t i = 0; i < count; i++) {
+        heap_trace_record_t r;
+        if (heap_trace_get(i, &r) != ESP_OK || !r.address) continue;
+        if (esp_ptr_external_ram(r.address)) { ext_n++; ext_bytes += r.size; continue; }
+        char chain[CONFIG_HEAP_TRACING_STACK_DEPTH * 12 + 1];
+        int len = 0;
+        for (int k = 0; k < CONFIG_HEAP_TRACING_STACK_DEPTH && r.alloced_by[k]; k++)
+            len += snprintf(chain + len, sizeof(chain) - (size_t)len, "%p:", r.alloced_by[k]);
+        chain[len] = '\0';
+        ESP_LOGW(TAG, "%6u bytes (@ %p) allocated CPU %u ccount 0x%08x caller %s", (unsigned)r.size, r.address, (unsigned)(r.ccount & 1),
+                 (unsigned)(r.ccount & ~1u), chain);
+        int_n++;
+        int_bytes += r.size;
+        if ((int_n & 15) == 0) vTaskDelay(1);   /* let the UART drain */
+    }
+    ESP_LOGW(TAG, "internal: %u live allocations, %u bytes; PSRAM: %u live allocations, %u bytes", (unsigned)int_n, (unsigned)int_bytes,
+             (unsigned)ext_n, (unsigned)ext_bytes);
+    ESP_LOGW(TAG, "===== END HEAP TRACE =====");
+}
+
+static void heaptrace_debug_start(void)
+{
+    static esp_timer_handle_t s_ht_timer;
+    const esp_timer_create_args_t targs = { .callback = ht_stop_cb, .name = "heap_trace_stop" };
+    heap_trace_record_t *rec = heap_caps_calloc(HT_RECORDS_PSRAM, sizeof(heap_trace_record_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t n = HT_RECORDS_PSRAM;
+    if (!rec || heap_trace_init_standalone(rec, n) != ESP_OK) {
+        ESP_LOGW(TAG, "heap trace: a PSRAM record buffer was refused, using the %d-record RTC buffer (the dump will overflow)", HT_RECORDS_RTC);
+        free(rec);
+        rec = s_ht_rtc;
+        n = HT_RECORDS_RTC;
+        if (heap_trace_init_standalone(rec, n) != ESP_OK) {
+            ESP_LOGE(TAG, "heap tracing could not initialise");
+            return;
+        }
+    }
+    if (heap_trace_start(HEAP_TRACE_LEAKS) != ESP_OK) {
+        ESP_LOGE(TAG, "heap tracing could not start");
+        return;
+    }
+    if (esp_timer_create(&targs, &s_ht_timer) == ESP_OK)
+        esp_timer_start_once(s_ht_timer, (uint64_t)HT_WINDOW_S * 1000000ULL);
+    ESP_LOGW(TAG, "HEAP TRACE BUILD: tracing allocations for %d s with room for %u records (%s), the dump follows", HT_WINDOW_S,
+             (unsigned)n, esp_ptr_external_ram(rec) ? "PSRAM" : "RTC memory");
+}
+#else
+static inline void heaptrace_debug_start(void) {}
+#endif
+
+/* The hardware SHA engines each create a small lock the first time they are used, which for this firmware is in the middle of the first TLS
+ * handshake. Hashing a byte with each of them at boot puts those three allocations next to the other boot-time ones. */
+static void sha_prewarm(void)
+{
+    unsigned char h[64];
+    static const unsigned char x[1] = { 'x' };
+#if defined(MBEDTLS_SHA1_C)
+    mbedtls_sha1(x, sizeof(x), h);
+#endif
+#if defined(MBEDTLS_SHA256_C)
+    mbedtls_sha256(x, sizeof(x), h, 0);
+#endif
+#if defined(MBEDTLS_SHA512_C)
+    mbedtls_sha512(x, sizeof(x), h, 0);
+#endif
+    (void)h;
+}
+
 static void install_cjson_psram_hooks(void)
 {
     cJSON_Hooks hooks = { .malloc_fn = cjson_psram_malloc, .free_fn = cjson_psram_free };
@@ -436,7 +682,10 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(200));
 
     /* Core initialisations */
+    heap_checkpoint("boot: start");
     init_nvs();
+    sha_prewarm();
+    ota_probation_start();   /* may roll back to the previous firmware before anything else starts */
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     init_littlefs();
@@ -507,6 +756,7 @@ void app_main(void)
     pcf8563_init();        /* must come before ntp_seed_rtc_early — initialises the I²C driver */
     ntp_seed_rtc_early();  /* seed system clock from RTC before the display task starts so the
                             * first render sees a valid wall-clock time instead of a stopwatch */
+    heap_checkpoint("boot: display init");
     display_task_start();          /* launch 5 Hz FreeRTOS display task */
 
     /* Allocate the mic's ADC hardware NOW, before WiFi/MQTT/audio get a
@@ -578,6 +828,7 @@ void app_main(void)
             ESP_LOGE(TAG, "audio_defer_timer create failed — audio will not start");
     }
 
+    heap_checkpoint("boot: display and mic tasks started");
     leds_init();
     leds_task_start();
     touch_input_init();
@@ -588,7 +839,9 @@ void app_main(void)
     sht30_init();               /* probe optional sensor; safe no-op if absent */
     sht30_set_offset(boot_sht30_temp_offset); /* apply saved calibration offset */
 
+    heap_checkpoint("boot: before wifi");
     wifi_manager_start();
+    heap_checkpoint("boot: wifi started");
 
     /* web_server_start() runs right after WiFi starts, same as stock — this
      * is what makes the web UI reachable in ~8s instead of waiting on
@@ -598,6 +851,7 @@ void app_main(void)
      * though this call happens before them; nothing below blocks waiting
      * for the web server. */
     web_server_start();
+    heap_checkpoint("boot: web server started");
 
     /* Background services */
     ntp_time_start();
@@ -638,6 +892,8 @@ void app_main(void)
         ESP_LOGI(TAG, "WLED sync disabled — task not started");
     }
     sht30_task_start();    /* no-op task if sensor absent */
+    heap_checkpoint("boot: all services started");
+    heaptrace_debug_start();   /* no-op unless this is the heap-tracing debug build */
 
     /* Detect OTA rollback: if the inactive OTA slot is in ABORTED state it means
      * the previous boot attempt failed (the new firmware crashed or watchdogged
@@ -651,7 +907,7 @@ void app_main(void)
         if (inactive && inactive != running) {
             esp_ota_img_states_t st;
             if (esp_ota_get_state_partition(inactive, &st) == ESP_OK &&
-                    st == ESP_OTA_IMG_ABORTED) {
+                    (st == ESP_OTA_IMG_ABORTED || st == ESP_OTA_IMG_INVALID)) {
                 esp_app_desc_t desc;
                 if (esp_ota_get_partition_description(inactive, &desc) == ESP_OK)
                     ESP_LOGW(TAG, "OTA ROLLBACK — firmware v%s failed to start; "
@@ -672,14 +928,24 @@ void app_main(void)
         }
     }
 
-    /* Mark this OTA image as valid so the bootloader does not roll back to
-     * the previous firmware on the next reboot.  CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
-     * leaves a freshly-flashed image in ESP_OTA_IMG_PENDING_VERIFY state; if the
-     * app never calls this, the bootloader treats the next reboot as a failed
-     * boot and silently reverts to the previous slot.
-     * Calling here — after all hardware and services initialised without panic —
-     * is the correct point to declare the image healthy. */
-    esp_ota_mark_app_valid_cancel_rollback();
+    /* Confirm this image only after it has stayed up for OTA_VALID_AFTER_S (see the OTA health gate above), or on a deliberate restart. */
+    {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        esp_ota_img_states_t st;
+        if (running && esp_ota_get_state_partition(running, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) {
+            static esp_timer_handle_t s_valid_timer;
+            const esp_timer_create_args_t targs = { .callback = ota_valid_timer_cb, .name = "ota_valid" };
+            esp_register_shutdown_handler(ota_mark_valid_if_pending);
+            if (esp_timer_create(&targs, &s_valid_timer) == ESP_OK &&
+                esp_timer_start_once(s_valid_timer, (uint64_t)OTA_VALID_AFTER_S * 1000000ULL) == ESP_OK) {
+                ESP_LOGI(TAG, "New OTA image pending: confirmed after %d s of uptime or on a deliberate restart; a crash before then rolls back",
+                         OTA_VALID_AFTER_S);
+            } else {
+                ESP_LOGW(TAG, "OTA confirm timer failed - confirming now");
+                ota_mark_valid_if_pending();
+            }
+        }
+    }
 
     ESP_LOGI(TAG, "All tasks launched – heap free: %u bytes",
              (unsigned)esp_get_free_heap_size());

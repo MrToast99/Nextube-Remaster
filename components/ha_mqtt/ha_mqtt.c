@@ -973,6 +973,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     switch ((esp_mqtt_event_id_t)event_id) {
 
     case MQTT_EVENT_CONNECTED:
+        heap_watch("mqtt connected");
         ESP_LOGI(TAG, "Connected to mqtt://%s:%u", s_broker, s_port);
         s_connected = true;
 
@@ -1084,6 +1085,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         break;
 
     case MQTT_EVENT_DISCONNECTED:
+        heap_watch("mqtt disconnected");
         ESP_LOGI(TAG, "Disconnected from broker — will reconnect automatically");
         s_connected = false;
         break;

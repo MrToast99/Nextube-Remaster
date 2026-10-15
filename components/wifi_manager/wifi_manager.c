@@ -350,6 +350,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             break;
         case WIFI_EVENT_STA_DISCONNECTED: {
             wifi_event_sta_disconnected_t *dev = data;
+            heap_watch("wifi disconnected");
             s_disconnect_count++;
             s_last_disconnect_reason = (uint8_t)dev->reason;
             portENTER_CRITICAL(&s_net_mux);
@@ -406,6 +407,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = data;
+        heap_checkpoint("wifi got ip");
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         portENTER_CRITICAL(&s_net_mux);
         s_connected_since_us = esp_timer_get_time();

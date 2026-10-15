@@ -190,6 +190,54 @@ static volatile bool s_hold_capture = false;   /* see mic_hold_capture() */
 /* Last three frames of decimated audio for the oscilloscope view. PSRAM, allocated by the task: 1.5 KB of static internal
  * RAM is too much on this heap. Not locked: a read racing the 16 ms update at worst draws one slightly torn frame. */
 static int16_t *s_scope;
+
+/* ── Split scope (Spectrum style 2) ────────────────────────────────────────
+ * One band-pass per tube, covering that tube's four bands: a 4th-order Butterworth high-pass at the tube's low edge followed by a
+ * 4th-order low-pass at its high edge (four biquads, 24 dB/octave on both sides), run on the same 16 kHz samples as the analysis.
+ * Only while the display keeps asking (mic_get_split_scope()), so the other styles pay nothing. */
+typedef struct { float b0, b1, b2, a1, a2, z1, z2; } biquad_t;
+#define SPLIT_SECTIONS 4
+static int16_t        *s_split;                 /* MIC_SPLIT_TUBES x MIC_SCOPE_SAMPLES, PSRAM, allocated on the first request */
+static volatile int64_t s_split_req_us;         /* when the display last asked */
+static bool            s_split_running;
+static bool            s_split_dirty = true;    /* the band layout changed: redesign the filters */
+static float           s_tube_edge[MIC_SPLIT_TUBES + 1];   /* Hz: low edge of each tube's first band ... high edge of its last */
+static biquad_t        s_split_bq[MIC_SPLIT_TUBES][SPLIT_SECTIONS];
+
+static void bq_design(biquad_t *q, bool highpass, float hz, float qf)
+{
+    const float w0 = 2.0f * 3.14159265f * hz / (float)SAMPLE_RATE;
+    const float c = cosf(w0), al = sinf(w0) / (2.0f * qf), a0 = 1.0f + al;
+    const float b = (highpass ? (1.0f + c) : (1.0f - c)) * 0.5f;
+    q->b0 = b / a0;
+    q->b1 = (highpass ? -2.0f * b : 2.0f * b) / a0;
+    q->b2 = b / a0;
+    q->a1 = -2.0f * c / a0;
+    q->a2 = (1.0f - al) / a0;
+}
+
+static void split_design(void)
+{
+    static const float Q4[2] = { 0.5412f, 1.3066f };   /* 4th-order Butterworth = two biquads with these Qs */
+    for (int t = 0; t < MIC_SPLIT_TUBES; t++) {
+        const float lo = s_tube_edge[t];
+        float hi = s_tube_edge[t + 1];
+        if (hi > 7000.0f) hi = 7000.0f;                 /* stay clear of the 8 kHz Nyquist limit */
+        if (hi < lo * 1.25f) hi = lo * 1.25f;
+        for (int k = 0; k < 2; k++) {
+            bq_design(&s_split_bq[t][k],     true,  lo, Q4[k]);
+            bq_design(&s_split_bq[t][2 + k], false, hi, Q4[k]);
+        }
+    }
+}
+
+static inline float bq_step(biquad_t *q, float x)
+{
+    const float y = q->b0 * x + q->z1;
+    q->z1 = q->b1 * x - q->a1 * y + q->z2;
+    q->z2 = q->b2 * x - q->a2 * y;
+    return y;
+}
 /* Edge-triggered beat-onset flag — set by the detector below, consumed (and
  * cleared) by mic_get_beat_pulse(). See mic_get_beat_pulse()'s comment. */
 static volatile bool s_beat_pulse = false;
@@ -580,6 +628,8 @@ static void mic_build_bands(uint16_t want_hz)
 
     float edge[BAND_COUNT + 1];
     band_edges(BAND_FREQS, edge);
+    for (int t = 0; t <= MIC_SPLIT_TUBES; t++) s_tube_edge[t] = edge[t * (BAND_COUNT / MIC_SPLIT_TUBES)];
+    s_split_dirty = true;
 
     int n_all[BAND_COUNT] = {0}, n_ok[BAND_COUNT] = {0};
     for (int k = 0; k < SPEC_NBINS; k++) {
@@ -752,6 +802,36 @@ static void mic_task(void *arg)
                 const float v = samples[i];
                 s_scope[MIC_SCOPE_SAMPLES - FRAME_SIZE + i] = (int16_t)(v > 32767.0f ? 32767 : (v < -32768.0f ? -32768 : (int)v));
             }
+        }
+        {   /* split scope: six band-pass outputs, only while the display keeps asking for them */
+            const bool want = (esp_timer_get_time() - s_split_req_us) < 1000000;
+            bool running = false;
+            if (want) {
+                if (!s_split) s_split = heap_caps_calloc(MIC_SPLIT_TUBES * MIC_SCOPE_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (s_split && s_split_dirty && s_tube_edge[MIC_SPLIT_TUBES] > 0.0f) { split_design(); s_split_dirty = false; }
+                if (s_split && !s_split_dirty) {
+                    if (!s_split_running) {
+                        memset(s_split, 0, MIC_SPLIT_TUBES * MIC_SCOPE_SAMPLES * sizeof(int16_t));
+                        for (int t = 0; t < MIC_SPLIT_TUBES; t++)
+                            for (int k = 0; k < SPLIT_SECTIONS; k++) s_split_bq[t][k].z1 = s_split_bq[t][k].z2 = 0.0f;
+                    }
+                    for (int t = 0; t < MIC_SPLIT_TUBES; t++) {
+                        int16_t *o = s_split + t * MIC_SCOPE_SAMPLES;
+                        memmove(o, o + FRAME_SIZE, (MIC_SCOPE_SAMPLES - FRAME_SIZE) * sizeof(int16_t));
+                        for (int i = 0; i < FRAME_SIZE; i++) {
+                            float x = samples[i];
+                            for (int k = 0; k < SPLIT_SECTIONS; k++) x = bq_step(&s_split_bq[t][k], x);
+                            if (x != x) {   /* NaN: never let a bad value live in the filter state */
+                                x = 0.0f;
+                                for (int k = 0; k < SPLIT_SECTIONS; k++) s_split_bq[t][k].z1 = s_split_bq[t][k].z2 = 0.0f;
+                            }
+                            o[MIC_SCOPE_SAMPLES - FRAME_SIZE + i] = (int16_t)(x > 32767.0f ? 32767 : (x < -32768.0f ? -32768 : (int)x));
+                        }
+                    }
+                    running = true;
+                }
+            }
+            s_split_running = running;
         }
 
         /* ── Raw + decimated frame export (debug) ──
@@ -1003,6 +1083,8 @@ static void mic_task(void *arg)
             s_st_gated++;
             for (int b = 0; b < BAND_COUNT; b++) peak[b] *= bar_decay;
             if (s_scope) memset(s_scope, 0, MIC_SCOPE_SAMPLES * sizeof(int16_t));
+            if (s_split) memset(s_split, 0, MIC_SPLIT_TUBES * MIC_SCOPE_SAMPLES * sizeof(int16_t));
+            s_split_running = false;
             taskENTER_CRITICAL(&s_mux);
             memset(s_bands, 0, sizeof(s_bands));
             for (int b = 0; b < BAND_COUNT; b++) {
@@ -1311,6 +1393,13 @@ void mic_get_bands(float out[MIC_BAND_COUNT])
 void mic_hold_capture(bool hold)
 {
     s_hold_capture = hold;
+}
+
+void mic_get_split_scope(int16_t out[MIC_SPLIT_TUBES * MIC_SCOPE_SAMPLES])
+{
+    s_split_req_us = esp_timer_get_time();
+    if (s_split && s_split_running) memcpy(out, s_split, MIC_SPLIT_TUBES * MIC_SCOPE_SAMPLES * sizeof(int16_t));
+    else                            memset(out, 0, MIC_SPLIT_TUBES * MIC_SCOPE_SAMPLES * sizeof(int16_t));
 }
 
 void mic_get_scope(int16_t out[MIC_SCOPE_SAMPLES])

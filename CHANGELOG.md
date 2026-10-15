@@ -1,6 +1,24 @@
 # Changelog
 
 
+## [1.20.1] - 2026-10-15
+
+### Added
+- **Split scope** Spectrum display style (Spectrum settings → Display style): six band-pass filters split the microphone signal by frequency and each tube draws the waveform of its own band, lowest tube on the left. A tube goes flat when its band is quiet, and the line thickness setting applies to it too.
+- Removing a theme in the **Theme Manager** now shows a progress bar on its row, like installing does.
+- A green mint **Nixie Cage** variant (hex mesh cage with a mint glow) in the **Theme Manager**.
+- The Theme Manager now checks the catalog by itself once a day (while automatic update checks are on), and opening the web UI shows a toast with an **Open** button when an installed theme has an update.
+- The Theme Manager catalog can now list about 110 themes (it was limited to about 28); the clock saves previews for the first 64.
+
+### Changed
+- A new firmware is now only kept once it has stayed up for 3 minutes (or after you restart the clock yourself); if it crashes or the clock is reset before that, it automatically returns to the previous firmware. Before, a build that started fine and failed a minute later was never rolled back.
+- The first 24 hours of uptime after an update are now a probation: if the new firmware crashes or is reset by the watchdog twice within an hour of uptime, or three times in all, the clock goes back to the previous firmware by itself. Power cuts, brown-outs and restarts you trigger do not count.
+- The **OTA rollback** banner now explains that the new firmware was reset before it was confirmed (a crash, a watchdog reset or a power cut within 3 minutes of the update) or crashed repeatedly during its first day, and is translated into all 12 languages.
+
+### Fixed
+- Changing the WeatherLive font, digit or shadow color (or the font), or the Custom face background, while the clock was showing a weather panel, the date or a social counter (YouTube, Instagram, TikTok, Mastodon) did not show until the clock face next redrew, for example after a mode rotation, and these modes could show plain white text or the plain sky after a restart. They now use the current settings right away.
+- Firmware updates (Update Now), Web UI updates and Verify & Repair Stock Files could fail to start with "Task create failed" once the clock had been running a while and its free memory was fragmented (rebooting first was the workaround). They now run on a task that is set up once at startup, so starting one no longer needs any free memory.
+
 ## [1.20.0] - 2026-10-11
 
 ### Added
@@ -1035,7 +1053,7 @@ Changes this Release:
 
 - Update notification toast (bottom-right) with See what's new ↗ (GitHub release link), Dismiss once (suppresses for 24 h), and Dismiss version (permanent per-version dismiss)
 
-- Added Noise Floor threshold slider to Display → Spectrum Mode — previously only accessible in the debug panel
+- Added Noise Floor threshold slider to Display → Spectrum Mode
 
 - Aligned LED Glow Color and LCD Bar Color pickers using CSS grid for consistent layout
 

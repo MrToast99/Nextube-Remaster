@@ -22,6 +22,11 @@
 #pragma once
 #include <stdint.h>
 
+/* Stack of the shared task, in bytes. It also runs the firmware / Web UI / stock-repair updates and the Theme Manager jobs (see
+ * web_server.c), so it must hold the deepest of them: measured peaks are ota_pull ~4.1 KB, webui_pull ~4.3 KB, stock_repair
+ * ~4.5 KB, plus a few hundred bytes of dispatch frames. */
+#define PERIODIC_NET_POLL_STACK_SIZE 8192
+
 #ifdef __cplusplus
 extern "C" {
 #endif

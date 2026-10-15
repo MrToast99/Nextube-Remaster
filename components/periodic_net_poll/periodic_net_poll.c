@@ -1,5 +1,6 @@
 #include "periodic_net_poll.h"
 #include "wifi_manager.h"
+#include "config_mgr.h"   /* heap_watch() */
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -11,16 +12,11 @@
 
 static const char *TAG = "net_poll";
 
-/* See periodic_net_poll.h's file doc for why these three merged into one
- * task. Sizing: was 3 separate 6144 B stacks (18432 B total; measured
- * peaks weather 4384 B / subscribers 4112 B / update_check ~3820 B); this
- * task only ever runs one subsystem's tick_fn at a time, so its own peak
- * is bounded by whichever ONE is deepest, not their sum. 7168 leaves ~39%
- * margin over that single deepest peak — inherited reasoning from the
- * pre-merge tasks, not yet a real measurement of this task itself.
- * Revisit with this task's own high-water-mark log (logged at the bottom
- * of periodic_net_poll_task()) once it's run a full cycle of all three. */
-#define NET_POLL_STACK_SIZE 7168
+/* See periodic_net_poll.h's file doc for why these three merged into one task. The stack size (PERIODIC_NET_POLL_STACK_SIZE) is set
+ * for the deepest job that runs here, now the update tasks and Theme Manager as well as the three pollers: this task is allocated
+ * once at boot, so none of those has to find a free internal-RAM block for a stack later. Its high-water mark is logged after
+ * every web_server job. */
+#define NET_POLL_STACK_SIZE PERIODIC_NET_POLL_STACK_SIZE
 
 #define NET_POLL_MAX_ENTRIES 4
 
@@ -116,6 +112,7 @@ static void periodic_net_poll_task(void *arg)
         for (int i = 0; i < s_entry_count; i++) {
             if (now < s_entries[i].next_due_us) continue;
             uint32_t next_ms = s_entries[i].tick_fn();
+            heap_watch(s_entries[i].name);
             s_entries[i].next_due_us = esp_timer_get_time() + (int64_t)next_ms * 1000;
         }
 

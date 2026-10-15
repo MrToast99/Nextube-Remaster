@@ -90,6 +90,19 @@ static void fs_usage_invalidate(void) { s_fs_cache_valid = false; }
  * exists to prevent. */
 static volatile bool s_ota_active = false;
 
+/* ── Scope guards ─────────────────────────────────────────────────────────────
+ * Paired acquire / release calls (the TLS lock, the display pause) have leaked on an early return more than once. These release at
+ * the end of their scope on every way out, with GCC's cleanup attribute. TLS_LOCK(g) takes the lock. DISPLAY_PAUSE(g, ms) tries to
+ * pause the display and records whether it did: check g.paused, the pause can time out. Keep the guard in a block that ends where
+ * the lock or pause should end. */
+typedef struct { bool held; } tls_guard_t;
+static inline void tls_guard_release(tls_guard_t *g) { if (g->held) tls_sem_give(); }
+#define TLS_LOCK(g) tls_guard_t g __attribute__((cleanup(tls_guard_release))) = { false }; tls_sem_take(); g.held = true
+
+typedef struct { bool paused; } disp_guard_t;
+static inline void disp_guard_release(disp_guard_t *g) { if (g->paused) display_unpause(); }
+#define DISPLAY_PAUSE(g, ms) disp_guard_t g __attribute__((cleanup(disp_guard_release))) = { display_pause_for_spi(ms) }
+
 /* ── Stock-file integrity check ────────────────────────────────────────
  * STOCK_FILES (generated, see stock_files.h) is every file shipped in data/
  * at build time, except images/themes/ (the Theme Manager owns those). Detects one actually missing from LittleFS — a skipped
@@ -274,26 +287,12 @@ static void stock_files_check(void)
         ESP_LOGI(TAG, "stock-file count check: all %u present", (unsigned)(STOCK_FILES_COUNT + 1));
 }
 
-/* Task-creation params for the deferred stock_files_check() call, shared by
- * every spawn site below (defined up here, ahead of stock_files_check_task()
- * itself further down, so all of them can use it as one source of truth). */
-#define STOCK_CHECK_STACK_SIZE 4096   /* 3072 overflowed again (stat() into LittleFS plus vpath[320]/example[128]) */
-static void stock_files_check_task(void *arg);
-
-/* True while a stock_files_check_task is running. stock_files_check() reads
- * and writes several shared statics (s_stock_missing_paths/count/list_count,
- * the lazily-allocated exception-snapshot buffer) on the explicit assumption
- * that it's never reentered concurrently with itself — see its own doc
- * comment. That held for free as long as every caller ran it synchronously
- * while holding tls_sem (hotpatch/webui-pull/stock_repair all serialize on
- * that semaphore) — but those call sites now spawn it asynchronously
- * instead (see their own comments for why: a direct call blocked their
- * task-resume/display-resume for the whole ~13-15s+ scan), and a spawned
- * task keeps running after its caller releases tls_sem. Without this flag,
- * a second hotpatch/webui-pull/stock_repair/manual-check starting while the
- * first's scan is still finishing would spawn a second, genuinely
- * concurrent instance. */
-static bool s_stock_check_task_running = false;
+/* True from the moment a stock-file scan is queued until it has finished (it runs on the shared network task, see np_job_tick()).
+ * stock_files_check() writes shared statics (s_stock_missing_*, the exception-snapshot buffer) and must never run twice at once;
+ * every caller goes through stock_files_check_spawn(), which refuses while this is set. */
+static bool s_stock_scan_active = false;
+static volatile bool s_stock_scan_pending = false;   /* queued for the shared network task */
+static int64_t       s_stock_scan_due_us;            /* earliest start: the 5 s grace after the trigger */
 
 /* A Theme Manager job (catalog refresh / pack install) and a stock-file scan must never overlap: both pause the display and read or
  * write flash. s_tm_busy is set from the moment a job is queued until it ends; a scan asked for in that time is remembered and run
@@ -301,20 +300,20 @@ static bool s_stock_check_task_running = false;
 static volatile bool s_tm_busy = false;
 static volatile bool s_stock_spawn_deferred = false;
 
-/* Spawns stock_files_check_task unless one is already running, in which
- * case this is a no-op — not a failure, since that scan's result will be
- * fresh again shortly regardless and a second instance would corrupt the
- * shared state above. Returns true if a task is now running (just spawned,
- * or already was); false only on a genuine xTaskCreate failure, which
- * callers may still want to retry/log. Every stock_files_check_task spawn
- * in this file should go through this, not a raw xTaskCreate(). */
+/* Queues a stock-file scan unless one is already queued or running (a no-op then: its result will be fresh shortly anyway, and a
+ * second instance would corrupt the shared state above). The scan runs on the shared network task, whose stack is allocated once at
+ * boot, instead of in a task of its own: that task's 4 KB stack was carved out of the largest free internal block every time and
+ * left the heap more fragmented afterwards. It starts 5 s after the trigger, so a post-update resume is not chopped up by the scan's
+ * first batch pauses. Always returns true; every scan in this file should be requested through this. */
 static bool stock_files_check_spawn(void)
 {
     if (s_tm_busy) { s_stock_spawn_deferred = true; return true; }   /* run after the theme job */
-    if (s_stock_check_task_running) return true;
-    if (xTaskCreate(stock_files_check_task, "stock_chk", STOCK_CHECK_STACK_SIZE, NULL, 2, NULL) != pdPASS)
-        return false;
-    s_stock_check_task_running = true;
+    if (s_stock_scan_active) return true;
+    heap_watch("stock scan start");
+    s_stock_scan_active = true;
+    s_stock_scan_due_us = esp_timer_get_time() + 5LL * 1000000;
+    s_stock_scan_pending = true;
+    periodic_net_poll_force("jobs");   /* wakes the shared network task, which runs np_job_tick() */
     return true;
 }
 
@@ -344,7 +343,7 @@ static bool stock_files_check_spawn(void)
  * problem if the cache was truncated (more than STOCK_MISSING_LIST_MAX
  * missing) — it doesn't hold every missing file to filter in the first
  * place. Both of those fall back to a real background rescan (the same
- * task the boot-time auto-check uses); the banner catches up once it
+ * one the boot-time auto-check queues); the banner catches up once it
  * finishes. */
 static void stock_missing_recompute_after_exception_change(uint8_t old_exc_count)
 {
@@ -1532,7 +1531,7 @@ static esp_err_t api_status(httpd_req_t *r)
         if (inactive && inactive != running) {
             esp_ota_img_states_t st;
             if (esp_ota_get_state_partition(inactive, &st) == ESP_OK &&
-                    st == ESP_OTA_IMG_ABORTED) {
+                    (st == ESP_OTA_IMG_ABORTED || st == ESP_OTA_IMG_INVALID)) {   /* aborted: bootloader rollback; invalid: probation rollback */
                 rollback = true;
                 esp_app_desc_t desc;
                 if (esp_ota_get_partition_description(inactive, &desc) == ESP_OK)
@@ -2861,12 +2860,6 @@ static int hp_https_read_body(esp_http_client_handle_t client, uint8_t *buf, int
     return received;
 }
 
-/* 6144 — same root cause as STOCK_REPAIR_STACK_SIZE's comment (below,
- * ~1100 lines down): this was a bare, never-measured 8192 that failed to
- * allocate on a real device 2+ hours into uptime, in a genuine "Update Now"
- * attempt. Now measured for real, high-water-mark logged at both exit
- * points below. */
-#define OTA_PULL_STACK_SIZE 6144
 
 /* hp_https_read_body()'s progress_cb for ota_pull_task specifically — drives
  * the live download-percentage the web UI polls via /api/ota_pull_status.
@@ -3119,7 +3112,7 @@ static void ota_pull_task(void *arg)
     }
     ESP_LOGI(TAG, "[ota] complete — rebooting in 1.5 s");
     ESP_LOGI(TAG, "[ota] stack high-water mark: %u B unused (of %u allocated)",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)OTA_PULL_STACK_SIZE);
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)PERIODIC_NET_POLL_STACK_SIZE);
     vTaskDelay(pdMS_TO_TICKS(1500));
     esp_restart();
     return;
@@ -3129,40 +3122,25 @@ pull_err_notls:
 pull_err:
     ESP_LOGE(TAG, "[ota] FAILED: %s", s_pull.error);
     ESP_LOGI(TAG, "[ota] stack high-water mark: %u B unused (of %u allocated)",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)OTA_PULL_STACK_SIZE);
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)PERIODIC_NET_POLL_STACK_SIZE);
     s_pull.state = OTA_PULL_ERROR;
     s_ota_active = false;
-    vTaskDelete(NULL);
 }
 
-/* Retries a pinned-core task create a few times with a short delay, for the
- * flash/network-affecting tasks below (ota_pull, webui_pull, stock_repair)
- * whose stack request can transiently exceed the largest contiguous
- * internal-RAM block during a concurrent TLS/mDNS/WiFi burst rather than
- * from genuine sustained exhaustion — several subsystems here do
- * concurrent HTTPS work, so a short-lived TLS or mDNS buffer freeing a few
- * hundred ms later is often enough to ride out. Does NOT fix genuine
- * sustained exhaustion — MAX_ATTEMPTS still gives up and returns the same
- * 500 either way. */
-static bool create_task_with_retry(TaskFunction_t fn, const char *name, uint32_t stack,
-                                    void *arg, UBaseType_t prio, BaseType_t core)
-{
-    const int        MAX_ATTEMPTS = 4;
-    const TickType_t RETRY_DELAY  = pdMS_TO_TICKS(300);
+/* Network jobs (firmware pull, Web UI pull, stock repair) run on the shared net_poll task. They used to get a fresh task each time,
+ * which failed with "Task create failed" once the internal heap was fragmented enough that no free block was as big as their
+ * stack. net_poll's stack is allocated once at boot, so starting an update allocates nothing. The job runs at the priority the
+ * old tasks had; only one runs at a time (s_np_job stays set until it returns), and a job needs the network to be up. Their stack
+ * need is measured at the end of every job (high-water mark logs): ota_pull ~4.1 KB, webui_pull ~4.3 KB, stock_repair ~4.5 KB. */
+#define NP_JOB_PRIORITY 5
+static void (*volatile s_np_job)(void *);
 
-    for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        if (xTaskCreatePinnedToCore(fn, name, stack, arg, prio, NULL, core) == pdPASS) {
-            if (attempt > 1)
-                ESP_LOGI(TAG, "%s: task create succeeded on retry %d/%d", name, attempt, MAX_ATTEMPTS);
-            return true;
-        }
-        ESP_LOGW(TAG, "%s: task create failed (attempt %d/%d, internal largest=%u B) — %s",
-                 name, attempt, MAX_ATTEMPTS,
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                 attempt < MAX_ATTEMPTS ? "retrying" : "giving up");
-        if (attempt < MAX_ATTEMPTS) vTaskDelay(RETRY_DELAY);
-    }
-    return false;
+static bool np_job_start(void (*fn)(void *))
+{
+    if (s_np_job || !wifi_manager_is_connected()) return false;
+    s_np_job = fn;
+    periodic_net_poll_force("jobs");   /* wakes the shared network task, which runs np_job_tick() */
+    return true;
 }
 
 /* Appends `item` to the bounded, comma-joined list at buf (current length
@@ -3337,9 +3315,9 @@ static esp_err_t api_ota_pull(httpd_req_t *r)
     s_pull.error[0]       = '\0';
     s_ota_active          = true;
 
-    if (!create_task_with_retry(ota_pull_task, "ota_pull", OTA_PULL_STACK_SIZE, NULL, 5, 0)) {
+    if (!np_job_start(ota_pull_task)) {
         s_ota_active = false;
-        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Task create failed"), ESP_FAIL;
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not start (busy or no network)"), ESP_FAIL;
     }
     return send_json(r, "{\"status\":\"started\"}");
 }
@@ -3357,11 +3335,6 @@ static struct {
                                  * actually wrote — see append_bounded_list() */
 } s_webui;
 
-/* 6144 — same root cause as STOCK_REPAIR_STACK_SIZE's comment (below).
- * Measured peak (uxTaskGetStackHighWaterMark, logged at every exit point
- * below) is ~4.3 KB extracting a 24-file/620 KB release zip — comfortable
- * margin at 6144, was previously an unmeasured 16384 then 8192. */
-#define WEBUI_PULL_STACK_SIZE 6144
 
 static void webui_pull_task(void *arg)
 {
@@ -3544,8 +3517,7 @@ static void webui_pull_task(void *arg)
     s_ota_active  = false;
     ESP_LOGI(TAG, "[webui] state → DONE");
     ESP_LOGI(TAG, "[webui] stack high-water mark: %u B unused (of %u allocated)",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)WEBUI_PULL_STACK_SIZE);
-    vTaskDelete(NULL);
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)PERIODIC_NET_POLL_STACK_SIZE);
     return;
 
 webui_err_notls:
@@ -3560,24 +3532,14 @@ webui_err:
     s_webui.state = WEBUI_ERROR;
     s_ota_active  = false;
     ESP_LOGI(TAG, "[webui] stack high-water mark: %u B unused (of %u allocated)",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)WEBUI_PULL_STACK_SIZE);
-    vTaskDelete(NULL);
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)PERIODIC_NET_POLL_STACK_SIZE);
 }
 
-/* webui_pull_task writes to LittleFS (flash), and ESP32 flash writes briefly
- * disable the cache — which PSRAM access also depends on. Its stack must
- * stay in internal RAM (a PSRAM-backed stack was tried and crashed exactly
- * this way: esp_task_stack_is_sane_cache_disabled()), so this is the plain
- * dynamic allocation, same as every other flash-writing task here. */
+/* webui_pull_task writes to LittleFS (flash), so its stack must stay in internal RAM: it runs on the net_poll task, whose stack is
+ * allocated once at boot. */
 static bool start_webui_pull_task(void)
 {
-    /* largest uses CAP_8BIT too — it's what decides whether the stack below
-     * will actually fit; CAP_INTERNAL alone also counts reclaimed IRAM,
-     * which can't hold a task stack (see main.c's heap-log note). */
-    ESP_LOGI(TAG, "webui_pull: internal free=%u largest=%u before create",
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    return create_task_with_retry(webui_pull_task, "webui_pull", WEBUI_PULL_STACK_SIZE, NULL, 5, 0);
+    return np_job_start(webui_pull_task);
 }
 
 static esp_err_t api_webui_pull_status(httpd_req_t *r)
@@ -3602,7 +3564,7 @@ static esp_err_t api_webui_pull_status(httpd_req_t *r)
  * rev in the catalog reads as "update available". Removing a theme deletes its folder. */
 #define TM_BRANCH          "main"
 #define TM_CATALOG_SCHEMA  1
-#define TM_MAX_CATALOG     16384
+#define TM_MAX_CATALOG     65536     /* sanity cap on the download (the buffer is PSRAM): about 110 themes; guards against a wrong URL */
 #define TM_MAX_PACK        (1024 * 1024)
 #define TM_ID_MAX          31        /* config theme[32] */
 #define TM_THEMES_DIR      "/spiffs/images/themes"
@@ -3615,6 +3577,7 @@ static struct {
     volatile tm_state_t state;
     bool         install;              /* false = refresh the catalog (or, with check, only verify what is installed) */
     bool         check;                /* verify the installed themes against their packs; no network access */
+    bool         uninstall;            /* delete the theme folder s_tm.id (no network access); changed = 1 if the clock switched theme */
     int          changed;              /* themes that failed that check */
     char         id[TM_ID_MAX + 1];
     char         phase[16];
@@ -3623,9 +3586,9 @@ static struct {
 } s_tm;
 #define TM_PREV_DIR     "/spiffs/web/theme-previews"   /* served as /theme-previews/<id>_r<rev>.jpg by the static handler */
 #define TM_PREV_MAX     16384
-#define TM_PREV_THEMES  32
+#define TM_PREV_THEMES  64
 static volatile bool s_tm_pending;      /* a job is queued for the shared network task */
-static uint32_t s_tm_prev_mask;       /* bit i: catalog theme i has its preview cached on the clock */
+static uint64_t s_tm_prev_mask;       /* bit i: catalog theme i has its preview cached on the clock */
 static char    *s_tm_catalog;          /* raw catalog.json (PSRAM) from the last good refresh; only replaced by tm_job */
 static time_t   s_tm_fetched;          /* when that refresh happened (epoch s), 0 = unknown */
 static bool     s_tm_restored;         /* the saved copy was looked for once this boot */
@@ -3780,7 +3743,7 @@ static bool tm_marker_hash(const char *dir, char hex[65])
     if (!f) return false;
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
-    buf[n] = ' ';
+    buf[n] = '\0';
     cJSON *j = cJSON_Parse(buf);
     const char *h = j ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "content_sha256")) : NULL;
     bool ok = h && strlen(h) == 64;
@@ -3808,32 +3771,39 @@ static int tm_verify_installed(bool recheck)
         if (!tm_id_valid(id) || !csh || strlen(csh) != 64 || !cJSON_IsNumber(rv)) continue;
         if (!tm_installed(id, &inst_rev)) continue;
         if (inst_rev > 0 && !recheck) continue;   /* already marked: only the Verify installed button re-hashes it */
-        if (!display_pause_for_spi(5000)) { ESP_LOGW(TAG, "[themes] display did not pause - skipping the check of installed themes"); break; }
-        char dir[96], hex[65] = "";
-        int nfiles = 0;
-        snprintf(dir, sizeof(dir), TM_THEMES_DIR "/%s", id);
-        bool hashed = tm_content_hash(dir, hex, &nfiles);
-        if (inst_rev > 0) {
-            char want[65] = "", mp[112];
-            if (hashed && tm_marker_hash(dir, want) && strcmp(hex, want) != 0) {
-                snprintf(mp, sizeof(mp), "%s/.pack.json", dir);
-                remove(mp);
-                differ++;
-                ESP_LOGW(TAG, "[themes] installed '%s' no longer matches its pack", id);
+        bool pause_failed = false;
+        {
+            DISPLAY_PAUSE(pz, 5000);
+            if (!pz.paused) {
+                pause_failed = true;
+            } else {
+                char dir[96], hex[65] = "";
+                int nfiles = 0;
+                snprintf(dir, sizeof(dir), TM_THEMES_DIR "/%s", id);
+                bool hashed = tm_content_hash(dir, hex, &nfiles);
+                if (inst_rev > 0) {
+                    char want[65] = "", mp[112];
+                    if (hashed && tm_marker_hash(dir, want) && strcmp(hex, want) != 0) {
+                        snprintf(mp, sizeof(mp), "%s/.pack.json", dir);
+                        remove(mp);
+                        differ++;
+                        ESP_LOGW(TAG, "[themes] installed '%s' no longer matches its pack", id);
+                    }
+                } else {
+                    bool match = hashed && strcmp(hex, csh) == 0 && (!cJSON_IsNumber(fl) || fl->valueint == nfiles);
+                    if (match) {
+                        char mp[112], js[160];
+                        snprintf(mp, sizeof(mp), "%s/.pack.json", dir);
+                        snprintf(js, sizeof(js), "{\"content_sha256\":\"%s\",\"files\":%d,\"id\":\"%s\",\"rev\":%d}", csh, nfiles, id, rv->valueint);
+                        FILE *f = fopen(mp, "wb");
+                        if (f) { fwrite(js, 1, strlen(js), f); fclose(f); }
+                    }
+                    if (!match) differ++;
+                    ESP_LOGI(TAG, "[themes] installed '%s' %s the catalog", id, match ? "matches" : "differs from");
+                }
             }
-        } else {
-            bool match = hashed && strcmp(hex, csh) == 0 && (!cJSON_IsNumber(fl) || fl->valueint == nfiles);
-            if (match) {
-                char mp[112], js[160];
-                snprintf(mp, sizeof(mp), "%s/.pack.json", dir);
-                snprintf(js, sizeof(js), "{\"content_sha256\":\"%s\",\"files\":%d,\"id\":\"%s\",\"rev\":%d}", csh, nfiles, id, rv->valueint);
-                FILE *f = fopen(mp, "wb");
-                if (f) { fwrite(js, 1, strlen(js), f); fclose(f); }
-            }
-            if (!match) differ++;
-            ESP_LOGI(TAG, "[themes] installed '%s' %s the catalog", id, match ? "matches" : "differs from");
         }
-        display_unpause();
+        if (pause_failed) { ESP_LOGW(TAG, "[themes] display did not pause - skipping the check of installed themes"); break; }
         vTaskDelay(pdMS_TO_TICKS(150));
     }
     cJSON_Delete(cat);
@@ -3873,7 +3843,7 @@ static void tm_cache_previews(const char *base, const char *ua)
     tm_prev_t *pv = heap_caps_calloc(TM_PREV_THEMES, sizeof(tm_prev_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!pv) { cJSON_Delete(cat); return; }
     int n = 0, idx = 0, missing = 0;
-    uint32_t mask = 0;
+    uint64_t mask = 0;
     cJSON *it;
     cJSON_ArrayForEach(it, themes) {
         const int at = idx++;
@@ -3957,7 +3927,7 @@ static void tm_cache_previews(const char *base, const char *ua)
         display_unpause();
     }
     for (int i = 0; i < n; i++) {
-        if (pv[i].have) mask |= (1u << pv[i].pos);
+        if (pv[i].have) mask |= ((uint64_t)1 << pv[i].pos);
         free(pv[i].data);
     }
     s_tm_prev_mask = mask;
@@ -3968,21 +3938,23 @@ static void tm_cache_previews(const char *base, const char *ua)
 static void tm_prev_scan(void)
 {
     cJSON *cat = s_tm_catalog ? cJSON_Parse(s_tm_catalog) : NULL;
-    uint32_t mask = 0;
-    if (cat && display_pause_for_spi(5000)) {
-        int idx = 0;
-        cJSON *it;
-        cJSON_ArrayForEach(it, cJSON_GetObjectItem(cat, "themes")) {
-            const int at = idx++;
-            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
-            cJSON *rv = cJSON_GetObjectItem(it, "rev");
-            char path[128];
-            struct stat st;
-            if (at >= TM_PREV_THEMES || !tm_id_valid(id) || !cJSON_IsNumber(rv)) continue;
-            snprintf(path, sizeof(path), TM_PREV_DIR "/%.31s_r%d.jpg", id, rv->valueint);
-            if (stat(path, &st) == 0 && st.st_size > 0) mask |= (1u << at);
+    uint64_t mask = 0;
+    if (cat) {
+        DISPLAY_PAUSE(pz, 5000);
+        if (pz.paused) {
+            int idx = 0;
+            cJSON *it;
+            cJSON_ArrayForEach(it, cJSON_GetObjectItem(cat, "themes")) {
+                const int at = idx++;
+                const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
+                cJSON *rv = cJSON_GetObjectItem(it, "rev");
+                char path[128];
+                struct stat st;
+                if (at >= TM_PREV_THEMES || !tm_id_valid(id) || !cJSON_IsNumber(rv)) continue;
+                snprintf(path, sizeof(path), TM_PREV_DIR "/%.31s_r%d.jpg", id, rv->valueint);
+                if (stat(path, &st) == 0 && st.st_size > 0) mask |= ((uint64_t)1 << at);
+            }
         }
-        display_unpause();
     }
     cJSON_Delete(cat);
     s_tm_prev_mask = mask;
@@ -3991,7 +3963,9 @@ static void tm_prev_scan(void)
 /* After a good refresh: keep the catalog on flash so a reboot or firmware update does not lose it. */
 static void tm_save_catalog(void)
 {
-    if (!s_tm_catalog || !display_pause_for_spi(5000)) return;
+    if (!s_tm_catalog) return;
+    DISPLAY_PAUSE(pz, 5000);
+    if (!pz.paused) return;
     const char *tmp = TM_CATALOG_FILE ".tmp";
     size_t len = strlen(s_tm_catalog);
     bool ok = false;
@@ -4004,7 +3978,6 @@ static void tm_save_catalog(void)
         remove(tmp);
         ESP_LOGW(TAG, "[themes] could not save the catalog");
     }
-    display_unpause();
 }
 
 /* First use after boot: bring the saved catalog back (only if no refresh has loaded one) and re-check the cached previews. */
@@ -4012,20 +3985,22 @@ static void tm_restore_catalog(void)
 {
     if (s_tm_restored || s_tm_catalog || s_tm.state == TM_RUNNING) return;
     s_tm_restored = true;
-    if (!display_pause_for_spi(5000)) { s_tm_restored = false; return; }
     char *buf = NULL;
-    FILE *f = fopen(TM_CATALOG_FILE, "rb");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        if (sz > 2 && sz <= TM_MAX_CATALOG + 32 && (buf = heap_caps_malloc((size_t)sz + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) != NULL) {
-            if (fread(buf, 1, (size_t)sz, f) == (size_t)sz) buf[sz] = '\0';
-            else { free(buf); buf = NULL; }
+    {
+        DISPLAY_PAUSE(pz, 5000);
+        if (!pz.paused) { s_tm_restored = false; return; }
+        FILE *f = fopen(TM_CATALOG_FILE, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (sz > 2 && sz <= TM_MAX_CATALOG + 32 && (buf = heap_caps_malloc((size_t)sz + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) != NULL) {
+                if (fread(buf, 1, (size_t)sz, f) == (size_t)sz) buf[sz] = '\0';
+                else { free(buf); buf = NULL; }
+            }
+            fclose(f);
         }
-        fclose(f);
     }
-    display_unpause();
     if (!buf) return;
     char *body = strchr(buf, '\n');
     cJSON *cat = body ? cJSON_Parse(body + 1) : NULL;
@@ -4043,8 +4018,49 @@ static void tm_restore_catalog(void)
     ESP_LOGI(TAG, "[themes] restored the saved catalog");
 }
 
+/* Removes the theme folder s_tm.id one file at a time so the page can show a progress bar. If it is the active theme the clock first
+ * switches to WeatherLive (drawn by the firmware, needs no files) and waits a moment for the display task to leave the folder. The
+ * display is paused around batches of deletes, as around every other flash write here. */
+static void tm_do_remove(void)
+{
+    char active[32], dir[96];
+    config_lock();
+    strlcpy(active, config_get()->theme, sizeof(active));
+    config_unlock();
+    if (strcmp(active, s_tm.id) == 0) {
+        const char *fallback = "{\"apps\":[{\"theme\":\"WeatherLive\"}]}";
+        config_set_json(fallback, strlen(fallback));
+        display_config_changed();
+        vTaskDelay(pdMS_TO_TICKS(600));
+        s_tm.changed = 1;
+    }
+    snprintf(dir, sizeof(dir), TM_THEMES_DIR "/%s", s_tm.id);
+    tm_rel_t *list = heap_caps_malloc(TM_VERIFY_MAX_FILES * sizeof(tm_rel_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int n = 0;
+    if (!list || !tm_collect(dir, "", list, &n)) n = 0;   /* too many files or no memory: the sweep below still removes everything */
+    bool paused = false;
+    for (int i = 0; i < n; i++) {
+        char path[192];
+        if (!paused) paused = display_pause_for_spi(2000);
+        if (snprintf(path, sizeof(path), "%s/%.71s", dir, list[i].rel) < (int)sizeof(path)) remove(path);
+        s_tm.progress = (i + 1) * 90 / n;
+        if ((i & 7) == 7) {
+            if (paused) display_unpause();
+            paused = false;
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    if (!paused) paused = display_pause_for_spi(2000);
+    const int rc = fs_remove_recursive(dir);   /* what is left: the folders and the marker */
+    if (paused) display_unpause();
+    free(list);
+    fs_usage_invalidate();
+    display_theme_cache_flush();
+    if (rc != 0) snprintf(s_tm.error, sizeof(s_tm.error), "Delete failed");
+}
+
 /* One task for both operations: refresh the catalog, or download + install one pack (s_tm.install / s_tm.id). */
-/* Runs on the shared network task (see tm_tick), whose stack is allocated once at boot: the internal heap is far too fragmented
+/* Runs on the shared network task (see np_job_tick), whose stack is allocated once at boot: the internal heap is far too fragmented
  * to create a new task of this size mid-uptime. The long strings live in one PSRAM block to keep this frame small. */
 typedef struct { char repo[64], ua[128], base[160], url[256], zip_rel[96], sha[65]; } tm_strs_t;
 
@@ -4052,6 +4068,7 @@ static void tm_job(void)
 {
     const bool install = s_tm.install;
     const bool check = s_tm.check;
+    const bool uninstall = s_tm.uninstall;
     bool parked = false, suspended = false, have_tls = false, ok = false, was_spectrum = false;
     uint8_t *buf = NULL;
     tm_strs_t *ts = heap_caps_calloc(1, sizeof(*ts), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -4063,14 +4080,19 @@ static void tm_job(void)
     s_tm.progress = 0;
     s_tm.error[0] = '\0';
     s_tm.changed = 0;
-    strlcpy(s_tm.phase, install ? "download" : check ? "checking" : "catalog", sizeof(s_tm.phase));
+    strlcpy(s_tm.phase, install ? "download" : uninstall ? "removing" : check ? "checking" : "catalog", sizeof(s_tm.phase));
 
     if (!ts) {
         snprintf(s_tm.error, sizeof(s_tm.error), "Out of memory");
         goto done;
     }
-    if (s_stock_check_task_running) {      /* cannot normally happen (tm_start refuses, spawns wait), but never overlap */
+    if (s_stock_scan_active) {      /* cannot normally happen (tm_start refuses, spawns wait), but never overlap */
         snprintf(s_tm.error, sizeof(s_tm.error), "A stock-file check is running - try again in a moment");
+        goto done;
+    }
+    if (uninstall) {                       /* local only, like the check below */
+        tm_do_remove();
+        ok = !s_tm.error[0];
         goto done;
     }
     if (check) {                           /* local only: no network, no clock time needed */
@@ -4227,7 +4249,7 @@ done:
     if (parked) display_resume_after_wait();
     if (was_spectrum) config_set_mode(APP_MODE_SPECTRUM);
     if (!ok && !s_tm.error[0]) snprintf(s_tm.error, sizeof(s_tm.error), "Failed");
-    if (!ok) ESP_LOGE(TAG, "[themes] %s failed: %s", install ? "install" : "refresh", s_tm.error);
+    if (!ok) ESP_LOGE(TAG, "[themes] %s failed: %s", install ? "install" : uninstall ? "remove" : "refresh", s_tm.error);
     s_tm.progress = ok ? 100 : s_tm.progress;
     s_tm.state = ok ? TM_DONE : TM_ERROR;
     s_ota_active = false;
@@ -4237,35 +4259,420 @@ done:
     ESP_LOGI(TAG, "[themes] net_poll stack high-water mark: %u B unused", (unsigned)uxTaskGetStackHighWaterMark(NULL));
 }
 
-/* The job's entry on the shared network task: runs the queued refresh / install, then sleeps until woken again. */
-static uint32_t tm_tick(void)
+/* Once a day the catalog refreshes by itself (while the automatic update check is on), so a theme update is known without anyone
+ * pressing Check for themes. The saved fetch time counts across reboots, the first look waits out the boot, and a failed attempt is
+ * retried after a couple of hours instead of at the next wake-up. */
+#define TM_AUTO_INTERVAL_S    (24 * 3600)
+#define TM_AUTO_RETRY_S       (2 * 3600)
+#define TM_AUTO_BOOT_GRACE_US (180LL * 1000000)
+#define TM_AUTO_POLL_MS       (15U * 60U * 1000U)
+static int64_t s_tm_auto_after_us;
+
+static void tm_auto_check(void)
 {
+    const int64_t now_us = esp_timer_get_time();
+    bool enabled;
+    config_lock();
+    enabled = config_get()->update_check_enabled;
+    config_unlock();
+    if (!enabled || now_us < TM_AUTO_BOOT_GRACE_US || now_us < s_tm_auto_after_us) return;
+    if (s_ota_active || s_tm.state == TM_RUNNING || s_stock_scan_active || !ntp_has_valid_time()) return;
+    tm_restore_catalog();
+    const time_t now = time(NULL);
+    if (s_tm_catalog && s_tm_fetched > 0 && now >= s_tm_fetched && now - s_tm_fetched < TM_AUTO_INTERVAL_S) {
+        s_tm_auto_after_us = now_us + (int64_t)(TM_AUTO_INTERVAL_S - (now - s_tm_fetched)) * 1000000;
+        return;
+    }
+    ESP_LOGI(TAG, "[themes] daily catalog check");
+    s_tm_busy = true;
+    s_tm.install = false;
+    s_tm.check = false;
+    s_tm.uninstall = false;
+    s_tm.id[0] = '\0';
+    s_tm.state = TM_RUNNING;
+    s_tm.progress = 0;
+    s_tm.error[0] = '\0';
+    s_ota_active = true;
+    strlcpy(s_tm.phase, "queued", sizeof(s_tm.phase));
+    tm_job();
+    s_tm_auto_after_us = esp_timer_get_time() + (int64_t)(s_tm.state == TM_DONE ? TM_AUTO_INTERVAL_S : TM_AUTO_RETRY_S) * 1000000;
+}
+
+/* ── Automatic firmware update ────────────────────────────────────────────────────────────────────────────
+ * While it is being tested its controls are in the hidden debug panel (config auto_update_*). Once a day, inside a 2-hour window
+ * starting at auto_update_hour (local time), the clock reads the newest release from GitHub (the same endpoints as the update check:
+ * /releases/latest, or /releases?per_page=1 with pre-releases when update_repo is overridden), applies the policy (same major.minor
+ * only, or any stable release), and hands the firmware and Web UI assets with their SHA-256 digests to the same ota_pull_task() the
+ * Online Updater drives; the Web UI pull after the reboot is the existing post-OTA one. Dry run only records what it would do. A
+ * version that was rolled back (pb_failed) or failed AU_MAX_TRIES times is skipped. */
+#define AU_NS            "nextube_diag"
+#define AU_WINDOW_H      2
+#define AU_MIN_UPTIME_US (600LL * 1000000)
+#define AU_RECHECK_US    (6LL * 3600 * 1000000)
+#define AU_MAX_TRIES     2
+#define AU_API_MAX       (96 * 1024)
+#define AU_DEFAULT_REPO  "MrToast99/Nextube-Remaster"
+
+static struct {
+    volatile bool busy;
+    time_t        last;            /* last look at GitHub (epoch s), 0 = none since boot */
+    char          result[120];
+    char          latest[24];
+    char          updated_to[24];  /* set when this boot followed an automatic update */
+} s_au;
+static int64_t s_au_next_us;
+static volatile bool s_au_force_install;
+
+static bool au_ver(const char *s, int v[3])
+{
+    v[0] = v[1] = v[2] = 0;
+    if (s && (*s == 'v' || *s == 'V')) s++;
+    return s && sscanf(s, "%d.%d.%d", &v[0], &v[1], &v[2]) >= 2;
+}
+
+static int au_cmp(const int a[3], const int b[3])
+{
+    for (int i = 0; i < 3; i++)
+        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+static bool au_nvs_str(const char *key, char *out, size_t n)
+{
+    nvs_handle_t h;
+    bool ok = false;
+    out[0] = '\0';
+    if (nvs_open(AU_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = n;
+        ok = nvs_get_str(h, key, out, &len) == ESP_OK;
+        nvs_close(h);
+    }
+    return ok;
+}
+
+static void au_nvs_set_str(const char *key, const char *val)
+{
+    nvs_handle_t h;
+    if (nvs_open(AU_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, key, val);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static uint8_t au_nvs_u8(const char *key)
+{
+    nvs_handle_t h;
+    uint8_t v = 0;
+    if (nvs_open(AU_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, key, &v);
+        nvs_close(h);
+    }
+    return v;
+}
+
+static void au_nvs_set_u8(const char *key, uint8_t v)
+{
+    nvs_handle_t h;
+    if (nvs_open(AU_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, key, v);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+/* The release JSON (PSRAM, NUL-terminated), or NULL with s_au.result explaining why. */
+static char *au_fetch_release(const char *repo, bool overridden)
+{
+    char ua[128], url[160];
+    snprintf(ua, sizeof(ua), HTTP_UA_BASE "%s", repo);
+    snprintf(url, sizeof(url), overridden ? "https://api.github.com/repos/%s/releases?per_page=1"
+                                          : "https://api.github.com/repos/%s/releases/latest", repo);
+    char *buf = NULL;
+    TLS_LOCK(tls);
+    esp_http_client_handle_t c = hp_stock_client_init(ua, 15000);
+    if (!c) {
+        snprintf(s_au.result, sizeof(s_au.result), "could not start the HTTPS client");
+    } else if (esp_http_client_set_url(c, url) != ESP_OK || esp_http_client_open(c, 0) != ESP_OK) {
+        snprintf(s_au.result, sizeof(s_au.result), "could not reach GitHub");
+    } else {
+        esp_http_client_fetch_headers(c);
+        const int st = esp_http_client_get_status_code(c);
+        if (st != 200) {
+            snprintf(s_au.result, sizeof(s_au.result), "GitHub answered HTTP %d%s", st, st == 404 ? " (private repository or no release)" : "");
+        } else {
+            buf = heap_caps_malloc(AU_API_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            int got = 0;
+            while (buf && got < AU_API_MAX) {
+                const int n = esp_http_client_read(c, buf + got, AU_API_MAX - got);
+                if (n <= 0) break;
+                got += n;
+            }
+            if (!buf) {
+                snprintf(s_au.result, sizeof(s_au.result), "out of memory");
+            } else if (got <= 0 || got >= AU_API_MAX) {
+                snprintf(s_au.result, sizeof(s_au.result), got <= 0 ? "empty answer from GitHub" : "release data too large");
+                free(buf);
+                buf = NULL;
+            } else {
+                buf[got] = '\0';
+            }
+        }
+        esp_http_client_close(c);
+    }
+    if (c) esp_http_client_cleanup(c);
+    return buf;
+}
+
+/* One look at GitHub. force = from the debug panel (ignores the window, the switch and the attempt limit); install = really install
+ * (otherwise only record what would happen). On a real install this only returns if it failed: the clock reboots on success. */
+static void au_run(bool force, bool install)
+{
+    s_au.busy = true;
+    s_au.last = time(NULL);
+    s_au.result[0] = '\0';
+    char repo[64], ver[24] = "", fw_sha[65] = "", ui_sha[65] = "";
+    char *urls = heap_caps_calloc(1, sizeof(s_pull.url) + sizeof(s_pull.webui_url), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *fw_url = urls, *ui_url = urls ? urls + sizeof(s_pull.url) : NULL;
+    uint8_t policy;
+    config_lock();
+    policy = config_get()->auto_update_policy;
+    config_unlock();
+    resolve_update_repo(repo, sizeof(repo));
+    const bool overridden = strcmp(repo, AU_DEFAULT_REPO) != 0;
+
+    char *body = urls ? au_fetch_release(repo, overridden) : NULL;
+    if (!urls) snprintf(s_au.result, sizeof(s_au.result), "out of memory");
+    const bool have_body = body != NULL;
+    cJSON *root = have_body ? cJSON_Parse(body) : NULL;
+    free(body);
+    if (!have_body && !s_au.result[0]) snprintf(s_au.result, sizeof(s_au.result), "no answer");
+    else if (have_body && !root) snprintf(s_au.result, sizeof(s_au.result), "could not read the release data");
+    cJSON *rel = root ? (cJSON_IsArray(root) ? cJSON_GetArrayItem(root, 0) : root) : NULL;
+    const char *tag = rel ? cJSON_GetStringValue(cJSON_GetObjectItem(rel, "tag_name")) : NULL;
+    if (root && !tag) snprintf(s_au.result, sizeof(s_au.result), "no release found");
+    if (tag) {
+        int cur[3], lat[3];
+        au_ver(FW_VERSION_STR, cur);
+        const bool ok_ver = au_ver(tag, lat);
+        strlcpy(ver, tag[0] == 'v' || tag[0] == 'V' ? tag + 1 : tag, sizeof(ver));
+        strlcpy(s_au.latest, ver, sizeof(s_au.latest));
+        char failed[24], tried[24];
+        au_nvs_str("pb_failed", failed, sizeof(failed));
+        const bool tried_same = au_nvs_str("au_try", tried, sizeof(tried)) && strcmp(tried, ver) == 0;
+        if (!ok_ver) snprintf(s_au.result, sizeof(s_au.result), "cannot read the version '%.20s'", tag);
+        else if ((cJSON_IsTrue(cJSON_GetObjectItem(rel, "prerelease")) && !overridden) || cJSON_IsTrue(cJSON_GetObjectItem(rel, "draft")))
+            snprintf(s_au.result, sizeof(s_au.result), "newest release v%s is a pre-release: skipped", ver);
+        else if (au_cmp(lat, cur) <= 0)
+            snprintf(s_au.result, sizeof(s_au.result), "up to date (running v%s, latest v%s)", FW_VERSION_STR, ver);
+        else if (policy == 0 && (lat[0] != cur[0] || lat[1] != cur[1]))
+            snprintf(s_au.result, sizeof(s_au.result), "v%s is a larger step than a patch release: not installed automatically", ver);
+        else if (failed[0] && strcmp(failed, ver) == 0)
+            snprintf(s_au.result, sizeof(s_au.result), "v%s was rolled back before: skipped", ver);
+        else if (!force && tried_same && au_nvs_u8("au_tries") >= AU_MAX_TRIES)
+            snprintf(s_au.result, sizeof(s_au.result), "v%s failed %d times: skipped", ver, AU_MAX_TRIES);
+        else {
+            const char *fu = NULL, *fs = NULL, *uu = NULL, *us = NULL;
+            cJSON *a;
+            cJSON_ArrayForEach(a, cJSON_GetObjectItem(rel, "assets")) {
+                const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(a, "name"));
+                const char *url  = cJSON_GetStringValue(cJSON_GetObjectItem(a, "browser_download_url"));
+                const char *dig  = cJSON_GetStringValue(cJSON_GetObjectItem(a, "digest"));
+                if (!name || !url) continue;
+                dig = (dig && strncmp(dig, "sha256:", 7) == 0 && strlen(dig) == 71) ? dig + 7 : NULL;
+                const size_t nl = strlen(name);
+                if (strncmp(name, "nextube-fw-", 11) == 0 && nl > 8 && strcmp(name + nl - 8, "-ota.bin") == 0) { fu = url; fs = dig; }
+                else if (strncmp(name, "nextube-WebUI-", 14) == 0 && nl > 4 && strcmp(name + nl - 4, ".zip") == 0) { uu = url; us = dig; }
+            }
+            char want[120];
+            snprintf(want, sizeof(want), "https://github.com/%.80s/releases/download/", repo);
+            const size_t wl = strlen(want);
+            if (!fu || !fs || !uu || !us)
+                snprintf(s_au.result, sizeof(s_au.result), "release v%s is incomplete (%s missing): not installed", ver,
+                         !fu ? "firmware file" : !fs ? "firmware hash" : !uu ? "Web UI file" : "Web UI hash");
+            else if (strncmp(fu, want, wl) != 0 || strncmp(uu, want, wl) != 0 || strlen(fu) >= sizeof(s_pull.url) || strlen(uu) >= sizeof(s_pull.webui_url))
+                snprintf(s_au.result, sizeof(s_au.result), "release v%s has unexpected download addresses: not installed", ver);
+            else {
+                strlcpy(fw_url, fu, sizeof(s_pull.url)); strlcpy(fw_sha, fs, sizeof(fw_sha));
+                strlcpy(ui_url, uu, sizeof(s_pull.webui_url)); strlcpy(ui_sha, us, sizeof(ui_sha));
+                snprintf(s_au.result, sizeof(s_au.result), install ? "installing v%s" : "would install v%s (dry run)", ver);
+            }
+        }
+    }
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "[auto-update] %s", s_au.result);
+
+    if (install && fw_url && fw_url[0]) {
+        char tried[24];
+        const bool tried_same = au_nvs_str("au_try", tried, sizeof(tried)) && strcmp(tried, ver) == 0;
+        au_nvs_set_str("au_try", ver);
+        au_nvs_set_u8("au_tries", (uint8_t)((tried_same ? au_nvs_u8("au_tries") : 0) + 1));
+        au_nvs_set_str("au_done", ver);
+        snprintf(s_pull.url, sizeof(s_pull.url), "%s", fw_url);
+        snprintf(s_pull.sha256, sizeof(s_pull.sha256), "%s", fw_sha);
+        snprintf(s_pull.webui_url, sizeof(s_pull.webui_url), "%s", ui_url);
+        snprintf(s_pull.webui_sha256, sizeof(s_pull.webui_sha256), "%s", ui_sha);
+        s_pull.state = OTA_PULL_IDLE;
+        s_pull.progress = 0;
+        s_pull.bytes_received = s_pull.bytes_total = s_pull.bytes_flashed = 0;
+        s_pull.error[0] = '\0';
+        free(urls);
+        urls = NULL;
+        s_ota_active = true;
+        ota_pull_task(NULL);   /* returns only when the update failed */
+        au_nvs_set_str("au_done", "");
+        snprintf(s_au.result, sizeof(s_au.result), "install of v%s failed: %.70s", ver, s_pull.error);
+        ESP_LOGW(TAG, "[auto-update] %s", s_au.result);
+    }
+    free(urls);
+    s_au.busy = false;
+}
+
+static void au_forced_job(void *arg)
+{
+    (void)arg;
+    au_run(true, s_au_force_install);
+}
+
+/* Runs on the shared network task every wake-up: starts a look when it is inside the window and nothing else is going on. */
+static void au_tick(void)
+{
+    bool enabled, dry;
+    uint8_t hour;
+    config_lock();
+    enabled = config_get()->auto_update_enabled;
+    dry = config_get()->auto_update_dry_run;
+    hour = config_get()->auto_update_hour;
+    config_unlock();
+    const int64_t now_us = esp_timer_get_time();
+    if (!enabled || now_us < AU_MIN_UPTIME_US || now_us < s_au_next_us) return;
+    if (s_ota_active || s_tm.state == TM_RUNNING || s_stock_scan_active || s_au.busy || !ntp_has_valid_time()) return;
+    struct tm lt;
+    ntp_get_local(&lt);
+    if (((lt.tm_hour - (int)hour + 24) % 24) >= AU_WINDOW_H) return;
+    s_au_next_us = now_us + AU_RECHECK_US;
+    au_run(false, !dry);
+}
+
+/* At startup: note an update this clock just installed by itself, and clear the marker. */
+static void au_boot_note(void)
+{
+    char done[24];
+    if (au_nvs_str("au_done", done, sizeof(done)) && done[0]) {
+        if (strcmp(done, FW_VERSION_STR) == 0) {
+            snprintf(s_au.updated_to, sizeof(s_au.updated_to), "%s", done);
+            au_nvs_set_u8("au_tries", 0);
+            ESP_LOGI(TAG, "[auto-update] running v%s after an automatic update", done);
+        }
+        au_nvs_set_str("au_done", "");
+    }
+}
+
+/* GET /api/auto_update — settings and the outcome of the last look. */
+static esp_err_t api_auto_update_get(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    cJSON *o = cJSON_CreateObject();
+    config_lock();
+    const nextube_config_t *c = config_get();
+    cJSON_AddBoolToObject(o, "enabled", c->auto_update_enabled);
+    cJSON_AddBoolToObject(o, "dry_run", c->auto_update_dry_run);
+    cJSON_AddNumberToObject(o, "policy", c->auto_update_policy);
+    cJSON_AddNumberToObject(o, "hour", c->auto_update_hour);
+    config_unlock();
+    cJSON_AddBoolToObject(o, "busy", s_au.busy);
+    cJSON_AddStringToObject(o, "current", FW_VERSION_STR);
+    cJSON_AddStringToObject(o, "latest", s_au.latest);
+    cJSON_AddStringToObject(o, "result", s_au.result);
+    cJSON_AddStringToObject(o, "updated_to", s_au.updated_to);
+    cJSON_AddNumberToObject(o, "last_check", (double)s_au.last);
+    char *js = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    if (!js) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    const esp_err_t e = send_json(r, js);
+    free(js);
+    return e;
+}
+
+/* POST /api/auto_update/check {"install":false} — look now, ignoring the window and the switch (async; poll GET /api/auto_update).
+ * "install":true really installs what a scheduled run would. */
+static esp_err_t api_auto_update_check(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char body[48];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
+    const bool install = cJSON_IsTrue(cJSON_GetObjectItem(root, "install"));
+    cJSON_Delete(root);
+    if (s_ota_active || s_au.busy) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"busy\"}");
+    }
+    s_au_force_install = install;
+    s_au.busy = true;
+    if (!np_job_start(au_forced_job)) {
+        s_au.busy = false;
+        httpd_resp_set_status(r, "503 Service Unavailable");
+        return send_json(r, "{\"error\":\"not available (no network or busy)\"}");
+    }
+    return send_json(r, "{\"status\":\"started\"}");
+}
+
+/* The jobs' entry on the shared network task: runs a queued update job, then a queued Theme Manager refresh / install, then the
+ * daily catalog check when it is due, then sleeps until woken again. */
+static uint32_t np_job_tick(void)
+{
+    if (s_np_job) {
+        UBaseType_t prio = uxTaskPriorityGet(NULL);
+        vTaskPrioritySet(NULL, NP_JOB_PRIORITY);
+        s_np_job(NULL);
+        vTaskPrioritySet(NULL, prio);
+        s_np_job = NULL;
+        ESP_LOGI(TAG, "[jobs] net_poll stack high-water mark: %u B unused", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    }
     if (s_tm_pending) {
         s_tm_pending = false;
         tm_job();
     }
-    return 3600U * 1000U;
+    uint32_t wake = TM_AUTO_POLL_MS;
+    if (s_stock_scan_pending) {            /* the stock-file scan, queued by stock_files_check_spawn() */
+        const int64_t left = s_stock_scan_due_us - esp_timer_get_time();
+        if (left <= 0) {
+            s_stock_scan_pending = false;
+            stock_files_check();
+            ESP_LOGI(TAG, "[stock] scan done on the network task; its stack high-water mark: %u B unused", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            s_stock_scan_active = false;
+            heap_watch("stock scan end");
+        } else {
+            wake = (uint32_t)(left / 1000) + 50;
+        }
+    }
+    tm_auto_check();
+    au_tick();
+    heap_watch("net job tick");
+    return wake;
 }
 
 
-static esp_err_t tm_start(httpd_req_t *r, bool install, bool check, const char *id)
+static esp_err_t tm_start(httpd_req_t *r, bool install, bool check, bool uninstall, const char *id)
 {
     if (s_ota_active || s_tm.state == TM_RUNNING) {
         httpd_resp_set_status(r, "409 Conflict");
         return send_json(r, "{\"error\":\"busy\"}");
     }
-    if (!check && !wifi_manager_is_connected()) {
+    if (!check && !uninstall && !wifi_manager_is_connected()) {
         httpd_resp_set_status(r, "503 Service Unavailable");
         return send_json(r, "{\"error\":\"no network\"}");
     }
     s_tm_busy = true;                      /* from here on no stock scan can start ... */
-    if (s_stock_check_task_running) {      /* ... and one that already runs blocks this job */
+    if (s_stock_scan_active) {      /* ... and one that already runs blocks this job */
         s_tm_busy = false;
         httpd_resp_set_status(r, "409 Conflict");
         return send_json(r, "{\"error\":\"busy\"}");
     }
     s_tm.install = install;
     s_tm.check = check;
+    s_tm.uninstall = uninstall;
     strlcpy(s_tm.id, id ? id : "", sizeof(s_tm.id));
     s_tm.state = TM_RUNNING;
     s_tm.progress = 0;
@@ -4273,7 +4680,7 @@ static esp_err_t tm_start(httpd_req_t *r, bool install, bool check, const char *
     s_ota_active = true;
     strlcpy(s_tm.phase, "queued", sizeof(s_tm.phase));
     s_tm_pending = true;
-    periodic_net_poll_force("themes");   /* wakes the shared network task, which runs tm_tick() */
+    periodic_net_poll_force("jobs");   /* wakes the shared network task, which runs np_job_tick() */
     return send_json(r, "{\"status\":\"started\"}");
 }
 
@@ -4291,7 +4698,7 @@ static esp_err_t api_themes_catalog(httpd_req_t *r)
     cJSON *list = cJSON_AddArrayToObject(out, "themes");
     tm_restore_catalog();
     /* While a refresh runs the cached string is about to be replaced, so don't read it. */
-    bool busy = (s_tm.state == TM_RUNNING && !s_tm.install && !s_tm.check);
+    bool busy = (s_tm.state == TM_RUNNING && !s_tm.install && !s_tm.check && !s_tm.uninstall);
     cJSON *cat = (!busy && s_tm_catalog) ? cJSON_Parse(s_tm_catalog) : NULL;
     cJSON_AddBoolToObject(out, "busy", busy);
     cJSON_AddBoolToObject(out, "loaded", cat != NULL);
@@ -4346,7 +4753,7 @@ static esp_err_t api_themes_catalog(httpd_req_t *r)
 static esp_err_t api_themes_refresh(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    return tm_start(r, false, false, NULL);
+    return tm_start(r, false, false, false, NULL);
 }
 
 /* POST /api/themes/verify — re-hash the installed catalog themes against their packs (local only; async, poll /api/themes/status). */
@@ -4356,7 +4763,7 @@ static esp_err_t api_themes_verify(httpd_req_t *r)
     tm_restore_catalog();
     if (!s_tm_catalog)
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Load the catalog first"), ESP_FAIL;
-    return tm_start(r, false, true, NULL);
+    return tm_start(r, false, true, false, NULL);
 }
 
 /* POST /api/themes/install {"id":"Nixie"} — download and install that catalog entry (async; poll /api/themes/status). */
@@ -4384,18 +4791,14 @@ static esp_err_t api_themes_install(httpd_req_t *r)
     cJSON_Delete(cat);
     if (!found) return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not in the catalog"), ESP_FAIL;
     if (!compatible) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Needs a newer firmware"), ESP_FAIL;
-    return tm_start(r, true, false, id);
+    return tm_start(r, true, false, false, id);
 }
 
-/* POST /api/themes/remove {"id":"Nixie"} — delete an installed theme's folder. If it is the active theme, switch to
- * WeatherLive first (it needs no files). */
+/* POST /api/themes/remove {"id":"Nixie"} — delete an installed theme's folder (async; poll /api/themes/status, which reports progress).
+ * If it is the active theme the clock switches to WeatherLive first (status "changed" = 1). */
 static esp_err_t api_themes_remove(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    if (s_ota_active || s_tm.state == TM_RUNNING || s_stock_check_task_running) {
-        httpd_resp_set_status(r, "409 Conflict");
-        return send_json(r, "{\"error\":\"busy\"}");
-    }
     char body[96];
     cJSON *root = read_json_body_small(r, body, sizeof(body));
     if (!root) return ESP_FAIL;
@@ -4406,32 +4809,7 @@ static esp_err_t api_themes_remove(httpd_req_t *r)
     int rev;
     if (!tm_id_valid(id) || !tm_installed(id, &rev))
         return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Theme not installed"), ESP_FAIL;
-
-    s_ota_active = true;                  /* keep an install, update or stock scan out until the files are gone */
-    s_tm_busy = true;
-    bool switched = false;
-    char active[32];
-    config_lock();
-    strlcpy(active, config_get()->theme, sizeof(active));
-    config_unlock();
-    if (strcmp(active, id) == 0) {
-        const char *fallback = "{\"apps\":[{\"theme\":\"WeatherLive\"}]}";
-        config_set_json(fallback, strlen(fallback));
-        display_config_changed();
-        vTaskDelay(pdMS_TO_TICKS(600));   /* let the display task leave the folder before it is deleted */
-        switched = true;
-    }
-    char path[96];
-    snprintf(path, sizeof(path), TM_THEMES_DIR "/%s", id);
-    int rc = fs_remove_recursive(path);
-    s_ota_active = false;
-    s_tm_busy = false;
-    if (s_stock_spawn_deferred) { s_stock_spawn_deferred = false; stock_files_check_spawn(); }
-    fs_usage_invalidate();
-    display_theme_cache_flush();
-    if (rc != 0)
-        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed"), ESP_FAIL;
-    return send_json(r, switched ? "{\"status\":\"removed\",\"switched_to\":\"WeatherLive\"}" : "{\"status\":\"removed\"}");
+    return tm_start(r, false, false, true, id);
 }
 
 /* GET /api/themes/status — progress of the running (or last) refresh / install. */
@@ -4441,7 +4819,7 @@ static esp_err_t api_themes_status(httpd_req_t *r)
     static const char *const names[] = { "idle", "running", "done", "error" };
     char buf[400];
     snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"op\":\"%s\",\"id\":\"%.31s\",\"phase\":\"%.15s\",\"progress\":%d,\"changed\":%d,\"error\":\"%.95s\"}",
-             names[s_tm.state], s_tm.install ? "install" : s_tm.check ? "verify" : "refresh", s_tm.id, s_tm.phase, (int)s_tm.progress,
+             names[s_tm.state], s_tm.install ? "install" : s_tm.uninstall ? "remove" : s_tm.check ? "verify" : "refresh", s_tm.id, s_tm.phase, (int)s_tm.progress,
              s_tm.changed, s_tm.error);
     return send_json(r, buf);
 }
@@ -4801,16 +5179,6 @@ static bool stock_repair_tag_exists(const char *repo, char *err, size_t err_sz)
     return true;
 }
 
-/* 6144, down from an unmeasured 8192 — task creation returned pdFAIL on a
- * real device ~4 min after boot: DMA-CAPABLE largest_free_block=7680, 512 B
- * short of 8192 (MALLOC_CAP_INTERNAL alone isn't the real ceiling here —
- * see the heap-log note in main.c). Same root cause independently hit
- * ota_pull_task and webui_pull_task too — see their own #define comments;
- * all three share the same HTTPS+TLS+esp_crt_bundle code path, which
- * dominates stack cost far more than what's task-specific. Now measured
- * for real: this task's own high-water-mark log consistently reports
- * ~1600 B unused of 6144 (peak ~4544 B). */
-#define STOCK_REPAIR_STACK_SIZE 6144
 
 static void stock_repair_task(void *arg)
 {
@@ -4984,8 +5352,7 @@ stock_repair_done:
     display_resume_after_wait();
     s_ota_active = false;
     ESP_LOGI(TAG, "[stock_repair] stack high-water mark: %u B unused (of %u allocated)",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)STOCK_REPAIR_STACK_SIZE);
-    vTaskDelete(NULL);
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)PERIODIC_NET_POLL_STACK_SIZE);
 }
 
 /* POST /api/stock_repair — no body. Starts stock_repair_task() (see its
@@ -5011,9 +5378,9 @@ static esp_err_t api_stock_repair(httpd_req_t *r)
     s_stock_repair.repaired_files[0] = '\0';
     s_ota_active = true;
 
-    if (!create_task_with_retry(stock_repair_task, "stock_repair", STOCK_REPAIR_STACK_SIZE, NULL, 5, 0)) {
+    if (!np_job_start(stock_repair_task)) {
         s_ota_active = false;
-        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Task create failed"), ESP_FAIL;
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not start (busy or no network)"), ESP_FAIL;
     }
     return send_json(r, "{\"status\":\"started\"}");
 }
@@ -6802,6 +7169,8 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/themes/install",        api_themes_install),
     R(HTTP_POST, "/api/themes/remove",         api_themes_remove),
     R(HTTP_POST, "/api/themes/verify",         api_themes_verify),
+    R(HTTP_GET,  "/api/auto_update",           api_auto_update_get),
+    R(HTTP_POST, "/api/auto_update/check",     api_auto_update_check),
     R(HTTP_GET,  "/api/themes/status",         api_themes_status),
     R(HTTP_GET,  "/api/stock_repair_status",   api_stock_repair_status),
     R(HTTP_GET,  "/api/stock_missing_list",    api_stock_missing_list),
@@ -6913,49 +7282,13 @@ static void post_ota_autostart_timer_cb(void *arg)
         ESP_LOGE(TAG, "[boot] post_ota_autostart_task creation failed");
 }
 
-/* STOCK_CHECK_STACK_SIZE is defined earlier in this file, alongside
- * stock_missing_recompute_after_exception_change(), which also needs it. */
 
-/* Task wrapper for the deferred stock_files_check() call — see
- * stock_files_check_timer_cb() below for why this runs as its own task
- * instead of straight from the timer callback. stock_files_check() now
- * handles its own pausing internally, in batches (see its doc comment) —
- * each stat() is a directory-block read through the same raw
- * esp_flash_read() path esp_littlefs_info() uses (see api_status()'s
- * comment / the boot-crash memory note), which forces ESP32's
- * flash-cache-disable mechanism to park the OTHER core with its interrupts
- * masked for each read's duration; pausing display_task is what keeps that
- * from landing mid an SPI/LEDC critical section there. */
-static void stock_files_check_task(void *arg)
-{
-    /* Grace delay before the first pause — the hotpatch/webui-pull/stock_repair
-     * call sites spawn this task the instant they resume normal operation
-     * (tasks resumed, display un-parked), so without this, the display's
-     * very first frames back are immediately chopped up by this scan's
-     * batch pauses: a boot log showed the "all present" result landing
-     * ~29s after resume, all of it stock_files_check()'s own pause/150ms-
-     * delay loop, starting at essentially the same instant as resume — read
-     * by a user as the tube going stale right when the update finished,
-     * not a brief post-update hitch. Applies uniformly to every trigger
-     * (including the periodic boot-time check), since none of them need
-     * the scan to start any sooner than this. */
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    stock_files_check();
-    ESP_LOGI(TAG, "stock_files_check_task stack high-water mark: %u B unused (of %u allocated)",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)STOCK_CHECK_STACK_SIZE);
-    s_stock_check_task_running = false;   /* see stock_files_check_spawn() above */
-    vTaskDelete(NULL);
-}
 
 /* Shared with web_server_start()'s one-time setup block below, which creates
  * this on the initial 6 s defer — reused here so an OTA-busy reschedule (see
  * stock_files_check_timer_cb()) doesn't need its own separate timer. */
 static esp_timer_handle_t s_stock_check_timer;
 
-/* Bounded retry count for stock_files_check_task's own creation — see the
- * non-blocking retry logic at the bottom of stock_files_check_timer_cb(). */
-#define STOCK_CHECK_CREATE_MAX_ATTEMPTS 4
-static int s_stock_check_create_attempts = 0;
 
 /* Timer callback for the deferred stock_files_check(). Spawns a task rather
  * than calling it directly: this callback runs on the shared esp_timer
@@ -6986,7 +7319,7 @@ static void stock_files_check_timer_cb(void *arg)
             esp_timer_start_once(s_stock_check_timer, 10000 * 1000ULL);  /* 10 s in µs */
         return;
     }
-    /* stock_files_check_task pauses display_task for the whole scan — a
+    /* The stock scan pauses display_task for its whole run — a
      * generic hitch elsewhere in the UI, but the AP-PIN marquee redraws
      * every ~200ms, so a pause here reads as the tubes visibly stuttering.
      * Same defer-and-retry pattern as the s_ota_active guard above. */
@@ -7006,49 +7339,7 @@ static void stock_files_check_timer_cb(void *arg)
             esp_timer_start_once(s_stock_check_timer, 5000 * 1000ULL);  /* 5 s in µs */
         return;
     }
-    /* Priority 2 — below every network task this scan could otherwise delay
-     * (net_poll/ha_mqtt/wled_sync run at 3; httpd higher), so it only gets
-     * CPU when nothing more time-sensitive wants it. The vTaskDelay(1)
-     * yields inside stock_files_check() itself are separate and still
-     * needed: they stop this task starving the IDLE task (and its
-     * watchdog) when nothing else is ready to run either. */
-    if (!stock_files_check_spawn()) {
-        /* stock_files_check_spawn() returning false means an actual
-         * xTaskCreate failure, not "one's already running" (that's a
-         * silent success — see the helper's own comment). Retries like
-         * create_task_with_retry() (used by ota_pull/webui_pull/
-         * stock_repair), for the same genuinely-transient case: a concurrent
-         * TLS/mDNS burst briefly starving the largest contiguous internal-RAM
-         * block below this task's stack size. Can't reuse that helper
-         * directly: it retries via vTaskDelay(), and this function runs ON
-         * the shared esp_timer dispatch task — blocking here would stall
-         * every other pending timer behind it (the exact bug this file's
-         * other deferred timer callbacks were already fixed to avoid).
-         * Reschedule through the timer instead, same as the three guards
-         * above, bounded so a genuinely sustained exhaustion still gives up
-         * instead of retrying forever.
-         *
-         * This bound is what actually surfaces a NON-transient shortage
-         * rather than papering over it: a real device once failed all 4
-         * attempts identically, which is what led to finding (and fixing)
-         * the static-array internal-DRAM regression documented at
-         * stock_missing_paths_buf() above. Don't reinterpret 4/4 failures
-         * here as "just needs more retries" without checking that class of
-         * cause first. */
-        s_stock_check_create_attempts++;
-        if (s_stock_check_create_attempts < STOCK_CHECK_CREATE_MAX_ATTEMPTS) {
-            ESP_LOGW(TAG, "stock_files_check_task creation failed (attempt %d/%d, internal largest=%u B) — retrying in 300 ms",
-                     s_stock_check_create_attempts, STOCK_CHECK_CREATE_MAX_ATTEMPTS,
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-            if (s_stock_check_timer)
-                esp_timer_start_once(s_stock_check_timer, 300 * 1000ULL);  /* 300 ms in µs */
-        } else {
-            ESP_LOGE(TAG, "stock_files_check_task creation failed after %d attempts — recovery banner will not update this boot",
-                     STOCK_CHECK_CREATE_MAX_ATTEMPTS);
-        }
-        return;
-    }
-    s_stock_check_create_attempts = 0;
+    stock_files_check_spawn();
 }
 
 /* Refresh the HTTP server when STA obtains a new IP after a credential change.
@@ -7071,7 +7362,8 @@ void web_server_start(void)
      * subsequent calls (after a WiFi reconnect) skip straight to httpd_start. */
     if (!s_log_mutex) {
         s_log_mutex = xSemaphoreCreateMutex();
-        periodic_net_poll_register(tm_tick, 3600U * 1000U, "themes");   /* Theme Manager jobs run on the shared network task */
+        au_boot_note();
+        periodic_net_poll_register(np_job_tick, 0, "jobs");   /* update and Theme Manager jobs run on the shared network task */
         esp_log_set_vprintf(log_vprintf_hook);
         /* Restart the HTTP server whenever STA obtains a (new) IP address,
          * so the listening socket is always fresh after a credential change. */
@@ -7151,7 +7443,7 @@ void web_server_start(void)
      * registrations fail and, since the wildcard registers last, every web
      * UI page 404s while the APIs still work. The loop below logs any
      * failure loudly. */
-    cfg.max_uri_handlers = 84;
+    cfg.max_uri_handlers = 86;
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     cfg.stack_size       = 8192;
     /* Bump the open-socket cap so concurrent OTA + page reload + status polls

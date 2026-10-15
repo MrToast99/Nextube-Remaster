@@ -43,7 +43,7 @@ ZIP is left behind; run it before committing. `remove <id>` takes a theme out of
 
 GitHub runs the same `check` on every push or pull request that touches `themes/`, `helpers/theme_pack/` or `data/images/themes/` (workflow *Check theme packs*), and it also verifies that a `--bundled` theme still matches its copy in `data/images/themes/`. A themes-only change does not start the firmware build.
 
-Keep each pack under 1 MB (the clock refuses bigger downloads), and commit the ZIP, the preview and `catalog.json` together. The Theme Manager adds `?v=<rev>` to the preview address, so a changed preview shows up as soon as the revision goes up.
+Keep each pack under 1 MB and `catalog.json` under 64 KB, about 110 themes (the clock refuses bigger downloads, and `check` fails above 64 KB). The clock saves a local copy of the preview for the first 64 themes; any further ones still work, their thumbnails just load from the repository. Commit the ZIP, the preview and `catalog.json` together. The Theme Manager adds `?v=<rev>` to the preview address, so a changed preview shows up as soon as the revision goes up.
 
 ## Folder names
 

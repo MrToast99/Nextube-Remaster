@@ -1,0 +1,6 @@
+# Heap-tracing debug build: layered over sdkconfig.defaults by the "heap_trace" input of the Build workflow
+# (idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.heaptrace" build). Never part of a normal or release build.
+# main.c then records every allocation made during the first minute after boot that is still alive at the end and dumps it to the log;
+# decode_heap_trace.py (dev tools) turns that dump into function names with the build's ELF.
+CONFIG_HEAP_TRACING_STANDALONE=y
+CONFIG_HEAP_TRACING_STACK_DEPTH=8

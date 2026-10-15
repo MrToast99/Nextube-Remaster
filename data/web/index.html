@@ -493,8 +493,8 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
   </div>
 </header>
 <div id="ota-rollback-banner" style="display:none;background:rgba(255,160,0,.12);border:1px solid rgba(255,160,0,.55);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
-  <span style="flex:1">⚠️ <strong>OTA rollback</strong> — firmware <strong id="rb-bad-ver"></strong> crashed or failed to start after update. The device automatically reverted to the previous firmware (<strong id="rb-cur-ver"></strong>). Re-try the update or check <strong>System → Device Log</strong> for the crash reason.</span>
-  <button onclick="dismissOtaRollback()" style="background:none;border:none;color:rgba(255,160,0,.9);font-size:1.1rem;cursor:pointer;padding:0;line-height:1" title="Dismiss">✕</button>
+  <span style="flex:1" id="rb-msg"></span>
+  <button onclick="dismissOtaRollback()" style="background:none;border:none;color:rgba(255,160,0,.9);font-size:1.1rem;cursor:pointer;padding:0;line-height:1" title="Dismiss" data-i18n-title="ota.rollback_dismiss">✕</button>
 </div>
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap">
@@ -1185,6 +1185,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <select id="f-spec-style" onchange="specStyleChange()" style="grid-column:2/4;height:36px;background:var(--surface);color:var(--text);border:1px solid #444;border-radius:6px;padding:0 .5rem;font-size:.9rem">
         <option value="0" data-i18n="spec.style_bars">Bars</option>
         <option value="1" data-i18n="spec.style_scope">Oscilloscope (waveform across all six tubes)</option>
+        <option value="2" data-i18n="spec.style_split">Split scope (each tube shows its own frequency band)</option>
       </select>
       <div class="meter" id="spec-thick-row" style="grid-column:1/4;display:none"><label data-i18n="spec.scope_thick" for="f-spec-thick">Oscilloscope line thickness</label><input type="range" id="f-spec-thick" min="1" max="8" step="1" style="flex:1" oninput="document.getElementById('v-spec-thick').textContent=this.value"><span id="v-spec-thick">2</span> px</div>
       <label data-i18n="spec.led_src" for="f-spec-led-src">LED Source</label>
@@ -2147,6 +2148,30 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       </div>
     </div>
     <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
+      <h2 style="color:#ffa000">&#x1F680; Automatic firmware update (testing)</h2>
+      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.8rem">
+        Once a day, inside a 2-hour window, the clock looks for a new release and installs it by itself (firmware first, then the
+        matching web UI). <strong>Dry run</strong> only records what it would do. A release is only installed when both files and
+        their SHA-256 hashes are in it. The <code>update_repo</code> override above is used when set (pre-releases count then).
+        A version that was rolled back, or failed twice, is skipped.
+      </p>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:.5rem .9rem;align-items:center;margin-bottom:.8rem;font-size:.85rem">
+        <label for="dbg-au-on">Enabled</label>
+        <label class="toggle"><input type="checkbox" id="dbg-au-on" data-no-dirty="1" onchange="dbgAutoUpdSave()"><span class="track"><span class="thumb"></span></span></label>
+        <label for="dbg-au-dry">Dry run (log only)</label>
+        <label class="toggle"><input type="checkbox" id="dbg-au-dry" data-no-dirty="1" checked onchange="dbgAutoUpdSave()"><span class="track"><span class="thumb"></span></span></label>
+        <label for="dbg-au-policy">Which releases</label>
+        <select id="dbg-au-policy" data-no-dirty="1" onchange="dbgAutoUpdSave()"><option value="0">Same major.minor only (patch releases)</option><option value="1">Any stable release</option></select>
+        <label for="dbg-au-hour">Window starts (local time)</label>
+        <select id="dbg-au-hour" data-no-dirty="1" onchange="dbgAutoUpdSave()"><option value="0">00:00</option><option value="1">01:00</option><option value="2">02:00</option><option value="3">03:00</option><option value="4">04:00</option><option value="5">05:00</option><option value="6">06:00</option><option value="7">07:00</option><option value="8">08:00</option><option value="9">09:00</option><option value="10">10:00</option><option value="11">11:00</option><option value="12">12:00</option><option value="13">13:00</option><option value="14">14:00</option><option value="15">15:00</option><option value="16">16:00</option><option value="17">17:00</option><option value="18">18:00</option><option value="19">19:00</option><option value="20">20:00</option><option value="21">21:00</option><option value="22">22:00</option><option value="23">23:00</option></select>
+      </div>
+      <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:.6rem">
+        <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="dbgAutoUpdCheck(false)">Check now (dry run)</button>
+        <button class="btn btn-outline" style="padding:.3rem .7rem" onclick="dbgAutoUpdCheck(true)">Install now (real)</button>
+      </div>
+      <p id="dbg-au-status" style="font-family:monospace;font-size:.8rem;color:var(--dim);margin:0;word-break:break-word"></p>
+    </div>
+    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
       <h2 style="color:#ffa000">&#x1F527; Hardware Debug</h2>
       <p style="font-size:.8rem;color:var(--dim);margin-bottom:.8rem">
         Runtime ADC pin selection — change takes effect immediately without a rebuild.
@@ -2576,6 +2601,8 @@ Object.assign(I18N.en, {
   "sys.fs_recovery":"LittleFS Recovery",
   "sys.fs_recovery_help":"Flashes a complete <strong>nextube-littlefs-v*.bin</strong> image. Use only when the release notes explicitly require a full LittleFS reflash, or to recover a corrupted filesystem.",
   "sys.fs_recovery_warn":"⚠️ <strong>This erases the entire LittleFS partition</strong> — all custom themes, album images, and audio files will be lost. Back up anything you want to keep using the LittleFS Files browser above.<br>Your settings (Wi-Fi, theme, brightness, etc.) are backed up to NVS automatically before the erase and restored on the next boot — no manual config backup needed for this step.",
+  "ota.rollback":"⚠️ <strong>OTA rollback</strong> — firmware <strong>{0}</strong> was reset before it was confirmed (a crash, a watchdog reset or a power cut within 3 minutes of the update) or crashed repeatedly during its first day, so the device went back to the previous firmware (<strong>{1}</strong>). Try the update again, and if it happens again check <strong>{2}</strong> for the crash reason.",
+  "ota.rollback_dismiss":"Dismiss",
   "sys.logs":"Device Logs",
   "sys.logs_help":"Live device log output — buffered in RAM from boot, not written to flash. Last 200 lines. Use auto-refresh to watch in real time.",
   "sys.auto_refresh":"Auto-refresh","sys.clear":"Clear",
@@ -2677,6 +2704,9 @@ Object.assign(I18N.en, {
   "tm.verify":"Verify installed",
   "tm.verify_ok":"All installed themes are intact.",
   "tm.verify_bad":"{0} theme(s) differ from the catalog or have damaged files. They are tagged “Differs from catalog”; use Update to repair them.",
+  "tm.toast_updates":"Theme updates available ({0}). Open the Theme Manager to install them.",
+  "tm.toast_open":"Open",
+  "tm.phase_remove":"Removing…",
   "tm.title":"Theme Manager",
   "tm.desc":"Download extra themes and colour variants from the project repository, or remove the ones you don't use. WeatherLive, DotMatrix and Segments are built into the firmware and are always available.",
   "tm.check":"Check for themes",
@@ -2708,6 +2738,7 @@ Object.assign(I18N.en, {
   "spec.scope_thick":"Oscilloscope line thickness",
   "spec.style_bars":"Bars",
   "spec.style_scope":"Oscilloscope (waveform across all six tubes)",
+  "spec.style_split":"Split scope (each tube shows its own frequency band)",
   "spec.led_src":"LED Source",
   "spec.led_src_custom":"Custom glow color (amplitude-modulated)",
   "spec.led_src_follow":"Follow accent mode (Static / Breath / Rainbow / Off / WLED)",
@@ -3249,7 +3280,7 @@ function onProfileChange(sel) {
 }
 
 function dismissOtaRollback() {
-  const badVer = $('rb-bad-ver')?.textContent?.replace(/^v/, '') || 'unknown';
+  const badVer = $('ota-rollback-banner').dataset.ver || 'unknown';
   localStorage.setItem('rollback_dismissed_' + badVer, '1');
   $('ota-rollback-banner').style.display = 'none';
 }
@@ -5661,8 +5692,8 @@ async function tmPoll() {
     } catch (e) { if (e?.message === 'unauthorized') throw e; }
     if (s) {
       if (s.state === 'done' || s.state === 'error') return s;
-      const label = { catalog: 'tm.phase_catalog', download: 'tm.phase_download', verify: 'tm.phase_verify', extract: 'tm.phase_extract', checking: 'tm.phase_checking' }[s.phase];
-      tmShowStatus(label ? tr(label) : '…', s.op === 'install' ? s.progress : null);
+      const label = { catalog: 'tm.phase_catalog', download: 'tm.phase_download', verify: 'tm.phase_verify', extract: 'tm.phase_extract', checking: 'tm.phase_checking', removing: 'tm.phase_remove' }[s.phase];
+      tmShowStatus(label ? tr(label) : '…', (s.op === 'install' || s.op === 'remove') ? s.progress : null);
       const key = s.phase + ':' + s.progress;
       if (key !== lastKey) { lastKey = key; lastMove = Date.now(); }
     }
@@ -5715,6 +5746,19 @@ document.addEventListener('click', e => {
   const im = e.target.closest && e.target.closest('#tm-list .tm-zoom');
   if (im) tmOpenFull(im.getAttribute('data-full'), im.getAttribute('data-title'));
 });
+
+/* Right after the saved catalog loads on page open: say once per catalog version when an installed theme has an update. */
+function tmNotify() {
+  const d = s_tm.data;
+  const up = (d && d.loaded) ? d.themes.filter(t => t.update) : [];
+  if (!up.length) return;
+  const key = d.pack_version + ':' + up.map(t => t.id + '@' + t.rev).join(',');
+  try { if (localStorage.getItem('tmNotified') === key) return; localStorage.setItem('tmNotified', key); } catch (_) {}
+  toast(tr('tm.toast_updates', up.length), false, {
+    label: tr('tm.toast_open'),
+    fn: () => { $('tabbtn-display').click(); const c = $('theme-manager-card'); if (c) c.scrollIntoView({ behavior: 'smooth' }); }
+  });
+}
 
 /* A preview that failed to load from the clock is retried once from the repository; if that fails too the image is dropped. */
 function tmImgFail(img) {
@@ -5850,14 +5894,18 @@ async function tmRemove(id, name) {
   const wasActive = !!(s_tm.data && s_tm.data.active === id);
   if (!confirm(tr(wasActive ? 'tm.confirm_remove_active' : 'tm.confirm_remove', name))) return;
   tmSetBusy(true);
+  s_tm.rowId = id;
   try {
+    tmShowStatus(tr('tm.phase_remove'), 0);
     await tmPost('themes/remove', { id });
+    const s = await tmPoll();
+    if (s.state === 'error') throw new Error(s.error || 'failed');
     toast(tr('tm.done_remove', name));
     await loadThemes();
     if (wasActive) { $('f-theme').value = 'WeatherLive'; updateClockFaceControls(); }
     await tmLoad();
   } catch (e) { if (e.message !== 'unauthorized') toast(tr('tm.err', e.message), true); }
-  finally { tmSetBusy(false); tmRender(); }
+  finally { tmShowStatus(null); s_tm.rowId = null; tmSetBusy(false); tmRender(); }
 }
 
 document.addEventListener('click', ev => {
@@ -6693,7 +6741,8 @@ async function loadSettings() {
     UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
     const gl = $('github-repo-link'); if (gl) gl.href = UPDATE_REPO_URL;
   }
-  tmLoad();   /* Theme Manager: cached catalog + what is installed (no network access); after UPDATE_REPO is set so previews use the override */
+  tmLoad().then(tmNotify).catch(() => {});
+  autoUpdNotify();   /* Theme Manager: cached catalog + what is installed (no network access); after UPDATE_REPO is set so previews use the override */
   /* Every field's load side runs here, in SETTINGS_SCHEMA's array order —
    * see that array's own doc comment for why order matters. */
   for (const f of SETTINGS_SCHEMA) {
@@ -7879,6 +7928,75 @@ function dbgShow() {
     dbgSetGate(cfg.mic_silence_gate);
   dbgMicTuneLoad();
   dbgRefreshUpdateRepo();
+  dbgAutoUpdLoad();
+}
+
+/* ── Automatic firmware update (hidden debug panel while it is being tested) ───────────────── */
+function dbgAutoUpdLoad() {
+  if (!cfg) return;
+  $('dbg-au-on').checked = cfg.auto_update_enabled === true;
+  $('dbg-au-dry').checked = cfg.auto_update_dry_run !== false;
+  $('dbg-au-policy').value = String(cfg.auto_update_policy || 0);
+  $('dbg-au-hour').value = String(cfg.auto_update_hour != null ? cfg.auto_update_hour : 3);
+  dbgAutoUpdShow();
+}
+
+async function dbgAutoUpdSave() {
+  const body = {
+    auto_update_enabled: $('dbg-au-on').checked,
+    auto_update_dry_run: $('dbg-au-dry').checked,
+    auto_update_policy: +$('dbg-au-policy').value,
+    auto_update_hour: +$('dbg-au-hour').value
+  };
+  try {
+    const r = await secureFetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { toast('Save failed: ' + await r.text(), true); return; }
+    if (cfg) Object.assign(cfg, body);
+    toast('Auto-update settings saved');
+  } catch (e) { toast('Save failed: ' + e.message, true); }
+}
+
+/* Shows what the clock last found; returns the status object (or null). */
+async function dbgAutoUpdShow() {
+  const el = $('dbg-au-status');
+  if (!el) return null;
+  try {
+    const r = await secureFetch('/api/auto_update');
+    if (!r || !r.ok) return null;
+    const s = await r.json();
+    const when = s.last_check ? new Date(s.last_check * 1000).toLocaleString() : 'not since boot';
+    el.textContent = 'Running v' + s.current + (s.latest ? ' · latest seen v' + s.latest : '') + ' · last look: ' + when +
+      (s.result ? ' · ' + s.result : '') + (s.updated_to ? ' · updated automatically to v' + s.updated_to : '');
+    return s;
+  } catch (_) { return null; }
+}
+
+async function dbgAutoUpdCheck(install) {
+  if (install && !confirm('Install the newest release now, the way the automatic update would?\nThe clock will download it, flash it and reboot.')) return;
+  const el = $('dbg-au-status');
+  el.textContent = 'Looking…';
+  try {
+    const r = await secureFetch('/api/auto_update/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ install: !!install }) });
+    if (!r.ok) { el.textContent = 'Could not start: ' + (await r.text()); return; }
+    for (let i = 0; i < 90; i++) {
+      await new Promise(res => setTimeout(res, 1000));
+      const s = await dbgAutoUpdShow();
+      if (s && !s.busy) break;
+    }
+  } catch (e) { el.textContent = 'Check failed: ' + e.message; }
+}
+
+/* On page open: say once when the clock has updated itself. */
+async function autoUpdNotify() {
+  if (!cfg || !cfg.auto_update_enabled) return;
+  try {
+    const r = await secureFetch('/api/auto_update');
+    if (!r || !r.ok) return;
+    const s = await r.json();
+    if (!s.updated_to) return;
+    try { if (localStorage.getItem('auUpdated') === s.updated_to) return; localStorage.setItem('auUpdated', s.updated_to); } catch (_) {}
+    toast('The clock updated itself to v' + s.updated_to + '.');
+  } catch (_) {}
 }
 
 /* Reflect the current update_repo override (or its absence) in the debug panel. */
@@ -8291,7 +8409,7 @@ function dbgGateSync(fromNum) {
 }
 /* Show the oscilloscope's line thickness, or the bar-only speed / peak dot settings. */
 function specStyleChange() {
-  const scope = $('f-spec-style').value === '1';
+  const scope = $('f-spec-style').value !== '0';
   $('spec-thick-row').style.display = scope ? 'flex' : 'none';
   $('spec-bar-speeds').style.display = scope ? 'none' : '';
   $('spec-peak-label').style.display = $('f-spec-peak-color').style.display = scope ? 'none' : '';
@@ -8682,8 +8800,8 @@ async function refreshStatus() {
     const badVer = s.ota_rollback_ver || 'unknown';
     const key    = 'rollback_dismissed_' + badVer;
     if (!localStorage.getItem(key)) {
-      $('rb-bad-ver').textContent = 'v' + badVer;
-      $('rb-cur-ver').textContent = 'v' + (s.firmware || '--');
+      $('ota-rollback-banner').dataset.ver = badVer;
+      $('rb-msg').innerHTML = tr('ota.rollback', esc('v' + badVer), esc('v' + (s.firmware || '--')), esc(tr('tab.system') + ' → ' + tr('sys.logs')));
       $('ota-rollback-banner').style.display = 'flex';
     }
   } else {

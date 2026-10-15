@@ -260,6 +260,12 @@ When the update check finds a newer GitHub release (see [Automatic Update Checks
 3. **Reboot** — into the new firmware.
 4. **Web UI** — the device then pulls and applies the matching web UI on its own; the browser tracks progress and finishes with **✓ Update finished**, a list of which files actually changed, and a **Reload page** button.
 
+The firmware download, the Web UI update, **Verify & Repair Stock Files** and the [Theme Manager](#downloadable-theme-packs)'s catalog check and installs all run on one shared network task (the same one that polls weather, subscribers and update checks), whose memory is set aside once at startup. Starting an update therefore never needs a free block of RAM, so it can't fail with "Task create failed" on a clock that has been running for days. Only one of these jobs runs at a time, they need the clock to be online, and the routine polling pauses until the job finishes.
+
+**Automatic rollback:** a newly installed firmware is only kept once it has stayed up for 3 minutes, or once you restart the clock yourself from the web UI. If it crashes, hangs or is reset by the watchdog before that, or the power is cut in that window, the clock starts the previous firmware again and the web UI shows an **OTA rollback** banner naming the version that failed. (The web UI files are replaced separately, so after a rollback the web UI may briefly be newer than the firmware; run the Online Updater again once the cause is fixed.)
+
+**Update probation:** for the first 24 hours of uptime after an update the clock also counts crashes. A crash or watchdog reset counts; a power cut, a brown-out or a restart you trigger does not. Two such resets less than an hour of uptime apart, or three in total during those 24 hours, make the clock go back to the previous firmware (which stays in the other flash slot until the next update) and show the same banner. After 24 hours of uptime without that, the update is final. Updates installed by flashing over USB are not put on probation.
+
 
 #### Manual Updating
 
@@ -1095,7 +1101,7 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 - **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
 - **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
 - **Multiple devices** — each Nextube uses its hostname as the unique ID. Give each device a different hostname in **Network Settings** to avoid topic collisions.
-- **Update check runs on-device** — independent of MQTT and of whether the web UI is ever open, the firmware itself checks GitHub for a newer release once on boot and every 24 hours after, entirely on its own. `Nextube Update Available` and `Nextube Latest Version` simply report that check's result over MQTT. This is on by default; it respects the same **Update Repo Override** (System → hidden debug panel) the web UI's own checker uses, so both always agree on which repo they're watching.
+- **Update check runs on-device** — independent of MQTT and of whether the web UI is ever open, the firmware itself checks GitHub for a newer release once on boot and every 24 hours after, entirely on its own. `Nextube Update Available` and `Nextube Latest Version` simply report that check's result over MQTT. This is on by default.
 
 ### Ticker
 
@@ -1253,6 +1259,8 @@ Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image
 | **Shadow** | Toggle drop shadow on/off and pick its color. Applies to clock digits, panel text, and the graphical weather elements (Hi/Lo range bar, current-temperature marker, and humidity teardrop). |
 | **Night color set** | A second Font color / Digit color / Shadow set the display crossfades to through twilight, tracking the WeatherLive sky's real sunrise/sunset. Only active on the WeatherLive background — see the note in [WeatherLive theme](#weatherlive-theme). |
 
+These color, shadow, font and background settings apply to everything drawn with the Custom face or the WeatherLive sky: the clock, the weather panels, the date and the social counters (YouTube, Instagram, TikTok, Mastodon). A change shows on whichever of them is on screen right away; there is no need to wait for the clock face or a mode rotation.
+
 **Custom color / gradient background:** when selected, a **Fill style** dropdown and one or two color pickers appear:
 
 | Fill style | Result |
@@ -1301,7 +1309,7 @@ See [Custom TTF Fonts](#custom-ttf-fonts) for font upload instructions and `pyft
 
 ### Downloadable Theme Packs
 
-Use **Display → Theme Manager**: press **Check for themes** to load the catalog, then **Install**, **Update** or **Remove** next to a theme. **Verify installed** re-checks the files of every installed catalog theme against its pack (no internet needed); a theme with a changed or missing file is tagged **Differs from catalog** and can be repaired with **Update**. The catalog and the previews are kept on the clock, so they are still there after a reboot or a firmware update. Each row shows a strip of the theme's digits 0–9 (click it to see all ten digits at their real tube size, fetched from the repository on demand), its size and what changed (the clock saves these small previews in its own storage when the catalog is loaded and the page uses those first, falling back to the repository only for one it doesn't have yet); the clock's own themes that are not in the catalog are listed under *Other installed themes* so they can be removed as well.
+Use **Display → Theme Manager**: press **Check for themes** to load the catalog, then **Install**, **Update** or **Remove** next to a theme. **Verify installed** re-checks the files of every installed catalog theme against its pack (no internet needed); a theme with a changed or missing file is tagged **Differs from catalog** and can be repaired with **Update**. The catalog and the previews are kept on the clock, so they are still there after a reboot or a firmware update. While automatic update checks are on, the clock also refreshes the catalog by itself once a day (a few minutes after startup at the earliest, retrying after two hours if it fails), and the web UI shows a toast with an **Open** button when an installed theme has an update (once per catalog version). The catalog can list about 110 themes (a `catalog.json` over 64 KB is refused); the clock keeps its own copy of the preview for the first 64. Each row shows a strip of the theme's digits 0–9 (click it to see all ten digits at their real tube size, fetched from the repository on demand), its size and what changed (the clock saves these small previews in its own storage when the catalog is loaded and the page uses those first, falling back to the repository only for one it doesn't have yet); the clock's own themes that are not in the catalog are listed under *Other installed themes* so they can be removed as well.
 
 Themes that are not shipped inside the firmware (colour variants, community themes) live in the repository's [`themes/`](themes/) folder as one ZIP per theme, listed in `themes/catalog.json`. The clock fetches that catalog from `raw.githubusercontent.com` (the repository set under **Update repository**, `main` branch) and installs a pack the same way a Web UI update is applied: the tubes show the wait screen, the ZIP is downloaded into PSRAM, its SHA-256 is checked against the catalog, and it is extracted into `/images/themes/<id>/`. The old folder is moved aside first and restored if anything fails. Each installed pack keeps a small `.pack.json` (`id`, `rev`) so a higher `rev` in the catalog shows as an update. Right after the catalog loads the clock fingerprints every catalog theme that is on the clock. A folder with no marker (for example one that shipped with the firmware) is compared with the catalog entry: an exact match gets its `.pack.json` written and is tracked from then on, while a folder that differs (an older or hand-edited copy) is tagged **Differs from catalog** and can be replaced with the catalog version. A folder that already has a marker is not re-read on a normal catalog check; the **Verify installed** button re-hashes every installed catalog theme against what its pack contained (no internet needed), and if a file was changed, added or lost since, the marker is dropped and the theme is tagged **Differs from catalog** the same way, so a damaged theme can be repaired from the Theme Manager. A theme whose folder is missing is assumed to have been removed on purpose and is listed as a download. Older designs such as NixieOY are listed in a separate **Legacy** section below the main list. Removing a theme deletes its folder; if it was the active theme the clock switches to **WeatherLive**, which is drawn by the firmware and needs no files. The stock-file check and Verify & Repair do not look at theme folders, so removing or updating a theme here never raises a missing-files banner or gets undone. A saved theme whose folder is missing at startup (for example NixieOY after a full LittleFS flash) falls back to **Nixie**, or to WeatherLive if that is missing too. See [`themes/README.md`](themes/README.md) for how packs and versions are built.
 
@@ -1563,8 +1571,8 @@ GET  /api/themes/catalog     → the cached theme-pack catalog merged with what 
 POST /api/themes/refresh     → fetch themes/catalog.json from the repository, check installed themes against it and save the previews (async)
 POST /api/themes/install     → download and install one catalog theme (JSON: {"id":"Nixie"}; async; the SHA-256 in the catalog is checked first)
 POST /api/themes/verify      → re-hash every installed catalog theme against its pack, no network (async); a theme that no longer matches loses its marker and shows as differing
-POST /api/themes/remove      → delete an installed theme folder (JSON: {"id":"Nixie"}); the active theme falls back to WeatherLive
-GET  /api/themes/status      → {"state":"idle|running|done|error","op","id","phase","progress","changed","error"} for refresh / install / verify
+POST /api/themes/remove      → delete an installed theme folder (JSON: {"id":"Nixie"}; async, progress on /api/themes/status); the active theme falls back to WeatherLive
+GET  /api/themes/status      → {"state":"idle|running|done|error","op","id","phase","progress","changed","error"} for refresh / install / verify / remove
 GET  /api/file/ls?dir=/      → LittleFS directory listing
 POST /api/file/rename        → rename a file or folder (JSON: {"from":"/path","to":"/newpath"})
 POST /api/wifi/scan          → trigger WiFi scan
@@ -1887,13 +1895,15 @@ brightness and mode. At the default 8 kHz top frequency the ripple bins are simp
 
 | Setting | Range | Default | Description |
 |---|---|---|---|
-| **Display style** (Spectrum card) | Bars / Oscilloscope | Bars | **Oscilloscope** draws the microphone waveform as a single trace across all six tubes (480 columns, about 30 ms of audio) in the LCD bar color with a dim center line. It triggers on a rising zero crossing so steady tones hold still, scales to a slowly falling peak envelope (never amplifying room noise) and goes flat while the silence gate is closed. The LED glow still follows the bands. Only the tube rows between the old and new trace are redrawn each frame. |
-| **Oscilloscope line thickness** (Spectrum card) | 1–8 px | 2 | Width of the oscilloscope trace. |
+| **Display style** (Spectrum card) | Bars / Oscilloscope / Split scope | Bars | **Oscilloscope** draws the microphone waveform as a single trace across all six tubes (480 columns, about 30 ms of audio) in the LCD bar color with a dim center line. It triggers on a rising zero crossing so steady tones hold still, scales to a slowly falling peak envelope (never amplifying room noise) and goes flat while the silence gate is closed. The LED glow still follows the bands. Only the tube rows between the old and new trace are redrawn each frame. **Split scope** gives every tube its own frequency band instead (see below). |
+| **Oscilloscope line thickness** (Spectrum card) | 1–8 px | 2 | Width of the oscilloscope and split-scope trace. |
 | **Bar rise speed** (Spectrum card) | 1–10 | 4 | How fast a bar jumps up when a band gets louder (1 = slow and smooth, 10 = instant). |
 | **Bar fall speed** (Spectrum card) | 1–10 | 4 | How fast a bar drops back (1 = lingers, 10 = drops at once). |
 | **Peak dot fall speed** (Spectrum card) | 1–10 | 3 | How fast the white peak dot falls after its peak (3 = about 1.8 s from top to bottom, 5 = about 1 s). |
 | **Peak dot hold** (Spectrum card) | 0–2000 ms | 350 ms | How long the peak dot waits at its peak before it starts to fall. |
 | **Spectrum top frequency** (Spectrum card) | 1200–8000 Hz | 8000 Hz | Centre of the highest band; the 24 bands are spread from 280 Hz up to it. Takes effect after Save (the noise floor relearns for a few seconds). |
+
+**Split scope** gives each tube the waveform of its own frequency band instead of one trace across all six: the microphone signal passes through six steep band-pass filters (24 dB/octave on both sides), one per tube, covering that tube's four bands from the lowest tube (left) to the highest (right) — the same ranges the bars use, set by **Spectrum top frequency**, with the top edge held at 7 kHz. Each tube has its own time scale (about 18 ms across the tube for the lowest down to 2.5 ms for the highest), its own trigger and its own level scaling, and goes flat when its bands are below the silence gate. The filters only run while this style is on.
 
 The ripple ranges are chosen for the reference unit (`LED_RIPPLE_HZ` in `microphone.c`); LED chip batches can differ.
 
@@ -2005,7 +2015,7 @@ nextube-fw/
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
 │   ├── sun_calc/                  # Sunrise/sunset time calculation (NOAA algorithm) from lat/lon
 │   ├── subscribers/               # Subscriber/follower counter (YouTube, Bilibili, Instagram, TikTok, Mastodon)
-│   ├── periodic_net_poll/         # Scheduled background task driving weather/subscribers/update_check polling
+│   ├── periodic_net_poll/         # Shared network task: weather/subscribers/update_check polling, plus the firmware / Web UI / stock-repair / Theme Manager jobs
 │   ├── u8g2/                      # Vendored u8g2 bitmap font library (fetched via CMake FetchContent)
 │   └── font_render/               # stb_truetype TrueType rasterizer — PSRAM glyph cache, norm_ratio height correction
 │       ├── font_render.c          # Renderer implementation (stb_truetype.h must be placed here before building)

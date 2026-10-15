@@ -103,6 +103,10 @@ string(APPEND _STOCK_FILES_H "#define STOCK_FILES_COUNT (sizeof(STOCK_FILES) / s
 
 file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/components/config_mgr/include/stock_files.h" "${_STOCK_FILES_H}")
 
+# The version stored in the app image header (esp_app_desc_t.version), which the OTA rollback banner reads from the slot that failed.
+# Without this it is "1" for every build.
+set(PROJECT_VER "${FW_VERSION}")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(nextube-fw)

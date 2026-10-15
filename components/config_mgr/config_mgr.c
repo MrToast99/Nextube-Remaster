@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"   /* xTaskGetCurrentTaskHandle — tls_sem ownership */
@@ -218,6 +219,10 @@ static void set_defaults(void)
      * existing behaviour is preserved on upgrade. */
     s_cfg.weather_enabled = true;
     s_cfg.update_check_enabled = true;
+    s_cfg.auto_update_enabled = false;
+    s_cfg.auto_update_dry_run = true;
+    s_cfg.auto_update_policy = 0;
+    s_cfg.auto_update_hour = 3;
     s_cfg.social_enabled           = false; /* opt-in: user must enable explicitly */
     s_cfg.youtube_enabled          = false; /* opt-in: user must enable explicitly */
     s_cfg.sub_poll_interval_min    = 60;   /* 1 hour default */
@@ -471,6 +476,12 @@ static void parse_json(const char *json, size_t len)
      * behaviour for existing devices upgrading from older firmware). */
     json_read_bool(root, "weather_enabled", &s_cfg.weather_enabled);
     json_read_bool(root, "update_check_enabled", &s_cfg.update_check_enabled);
+    json_read_bool(root, "auto_update_enabled", &s_cfg.auto_update_enabled);
+    json_read_bool(root, "auto_update_dry_run", &s_cfg.auto_update_dry_run);
+    json_read_u8  (root, "auto_update_policy", &s_cfg.auto_update_policy);
+    if (s_cfg.auto_update_policy > 1) s_cfg.auto_update_policy = 0;
+    json_read_u8  (root, "auto_update_hour", &s_cfg.auto_update_hour);
+    if (s_cfg.auto_update_hour > 23) s_cfg.auto_update_hour = 3;
     json_read_bool(root, "social_enabled", &s_cfg.social_enabled);
     {
         json_read_bool(root, "youtube_enabled", &s_cfg.youtube_enabled);
@@ -961,7 +972,7 @@ static void parse_json(const char *json, size_t len)
     json_read_u8 (root, "spectrum_peak_fall",  &s_cfg.spectrum_peak_fall);
     json_read_u16(root, "spectrum_peak_hold_ms", &s_cfg.spectrum_peak_hold_ms);
     json_read_u8 (root, "spectrum_style", &s_cfg.spectrum_style);
-    if (s_cfg.spectrum_style > 1) s_cfg.spectrum_style = 0;
+    if (s_cfg.spectrum_style > 2) s_cfg.spectrum_style = 0;
     json_read_u8 (root, "spectrum_scope_thick", &s_cfg.spectrum_scope_thick);
     if (s_cfg.spectrum_scope_thick < 1) s_cfg.spectrum_scope_thick = 1;
     if (s_cfg.spectrum_scope_thick > 8) s_cfg.spectrum_scope_thick = 8;
@@ -1285,6 +1296,32 @@ void tls_sem_give(void) {
     /* else: our take() timed out — we never owned it; giving would assert. */
 }
 
+#ifdef NX_HEAP_DIAG
+void heap_watch(const char *label)
+{
+    static size_t s_ref;   /* the last level that was reported; shared by every caller (a torn read at worst skips or repeats a line) */
+    const size_t now = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (s_ref == 0) { s_ref = now; return; }
+    if (now + 1024 <= s_ref) {
+        ESP_LOGW("heap", "largest %u -> %u after %s (internal free %u)", (unsigned)s_ref, (unsigned)now, label,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        s_ref = now;
+    } else if (s_ref + 1024 <= now) {
+        ESP_LOGI("heap", "largest %u -> %u (recovered) after %s", (unsigned)s_ref, (unsigned)now, label);
+        s_ref = now;
+    }
+}
+
+void heap_checkpoint(const char *label)
+{
+    multi_heap_info_t i;
+    heap_caps_get_info(&i, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ESP_LOGI("heap", "[%s] internal free=%u largest=%u free blocks=%u", label, (unsigned)i.total_free_bytes,
+             (unsigned)i.largest_free_block, (unsigned)i.free_blocks);
+    heap_watch(label);
+}
+#endif
+
 const nextube_config_t *config_get(void)
 {
     return &s_cfg;
@@ -1371,6 +1408,10 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "mic_enabled",       s_cfg.mic_enabled);
     cJSON_AddBoolToObject  (root, "weather_enabled",   s_cfg.weather_enabled);
     cJSON_AddBoolToObject  (root, "update_check_enabled", s_cfg.update_check_enabled);
+    cJSON_AddBoolToObject  (root, "auto_update_enabled", s_cfg.auto_update_enabled);
+    cJSON_AddBoolToObject  (root, "auto_update_dry_run", s_cfg.auto_update_dry_run);
+    cJSON_AddNumberToObject(root, "auto_update_policy", s_cfg.auto_update_policy);
+    cJSON_AddNumberToObject(root, "auto_update_hour", s_cfg.auto_update_hour);
     cJSON_AddBoolToObject  (root, "social_enabled",    s_cfg.social_enabled);
     cJSON_AddBoolToObject  (root, "youtube_enabled",         s_cfg.youtube_enabled);
     cJSON_AddNumberToObject(root, "sub_poll_interval_min",   s_cfg.sub_poll_interval_min);

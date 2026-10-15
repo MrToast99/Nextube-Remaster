@@ -21,4 +21,5 @@ idf_component_register(
         ha_mqtt
         wled_sync
         json
+        mbedtls
 )

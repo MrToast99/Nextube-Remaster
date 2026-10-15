@@ -156,7 +156,7 @@ typedef struct {
     uint8_t          spectrum_bar_fall;     /* bar fall speed, 1 (lingers) .. 10 (drops at once); default 4 */
     uint8_t          spectrum_peak_fall;    /* peak dot fall speed, 1 (slow) .. 10 (fast); default 3 = 1.8 s top to bottom */
     uint8_t          spectrum_scope_thick;  /* oscilloscope trace thickness in pixels (1-8, default 2) */
-    uint8_t          spectrum_style;        /* 0 = bars, 1 = oscilloscope trace across all six tubes */
+    uint8_t          spectrum_style;        /* 0 = bars, 1 = oscilloscope trace across all six tubes, 2 = split scope (each tube its own band) */
     uint16_t         spectrum_peak_hold_ms; /* how long the peak dot waits at its peak before it starts to fall (0-2000, default 350) */
     uint8_t          spectrum_led_source;   /* 0 = custom glow color (amplitude-modulated),
                                                1 = follow configured accent mode (Static/Breath/Rainbow/Off) */
@@ -316,6 +316,11 @@ typedef struct {
     bool             update_check_enabled; /* gate the periodic GitHub release check that
                                                drives the tube-6 update indicator and
                                                the Home Assistant "Nextube Update Available" topic */
+    /* Automatic firmware update (controls in the hidden debug panel while it is being tested). */
+    bool             auto_update_enabled;  /* install new releases by itself during a daily window */
+    bool             auto_update_dry_run;  /* only log what would be installed */
+    uint8_t          auto_update_policy;   /* 0 = same major.minor only (patch releases), 1 = any stable release */
+    uint8_t          auto_update_hour;     /* local hour (0-23) the 2-hour window starts */
     bool             social_enabled;     /* master gate — if false, social counter polling never starts */
     bool             youtube_enabled;       /* gate subscribers_task YouTube fetch */
     uint16_t         sub_poll_interval_min; /* social counter re-poll interval in minutes (default 30, min 5) */
@@ -478,6 +483,31 @@ void config_backup_to_nvs(void);
  *  a WebUI update, or a stock-file repair running as a separate task. */
 void tls_sem_take(void);
 void tls_sem_give(void);
+
+/* Heap diagnostics are compiled in only for the heap-tracing debug build (CONFIG_HEAP_TRACING_STANDALONE) or when NX_HEAP_LOG is
+ * defined; in every other build both calls below are empty, so a release build has no extra log lines, no heap walks and no timers. */
+#include "sdkconfig.h"
+#if defined(CONFIG_HEAP_TRACING_STANDALONE) || defined(NX_HEAP_LOG)
+#define NX_HEAP_DIAG 1
+#endif
+
+/** Heap-fragmentation watch. Call it at points that follow a runtime operation (and before the next one): when the largest free block
+ *  of internal RAM that can hold a task stack has dropped by 1 KB or more since the previous call from anywhere, it logs
+ *  "heap: largest A -> B after <label>" (and the recovery, when it grows back by 1 KB or more). The change is attributed to the
+ *  interval before the call, so use a label for what just finished. Cheap enough for a few calls a minute. */
+#ifdef NX_HEAP_DIAG
+void heap_watch(const char *label);
+#else
+static inline void heap_watch(const char *label) { (void)label; }
+#endif
+
+/** Always logs "heap: [label] internal free=… largest=… free blocks=…" (the 8-bit internal heap a stack comes from), then runs
+ *  heap_watch(). For fixed points in the boot sequence, to see where the layout of two boots starts to differ. */
+#ifdef NX_HEAP_DIAG
+void heap_checkpoint(const char *label);
+#else
+static inline void heap_checkpoint(const char *label) { (void)label; }
+#endif
 
 /** Acquire / release the config mutex.
  *  Must bracket any code that reads multiple fields from config_get() to

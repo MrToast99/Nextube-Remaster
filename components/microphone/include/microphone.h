@@ -62,6 +62,12 @@ void mic_get_bands(float out[MIC_BAND_COUNT]);
 #define MIC_SCOPE_SAMPLES 768
 void mic_get_scope(int16_t out[MIC_SCOPE_SAMPLES]);
 
+/** Split-scope style: the newest MIC_SCOPE_SAMPLES samples of each tube's own band-pass output (tube 1 = lowest band), tube after
+ *  tube, so `out` holds MIC_SPLIT_TUBES * MIC_SCOPE_SAMPLES values. Calling this is what switches the six filters on: they run only
+ *  while it keeps being called (the first call after a pause returns zeros). */
+#define MIC_SPLIT_TUBES 6
+void mic_get_split_scope(int16_t out[MIC_SPLIT_TUBES * MIC_SCOPE_SAMPLES]);
+
 /** While held, capture stays off even in Spectrum mode (the display holds it during the boot splash so the analysis
  *  doesn't compete with Wi-Fi / network start-up and the noise floor isn't learned from boot noise). */
 void mic_hold_capture(bool hold);

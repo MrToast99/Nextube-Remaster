@@ -29,6 +29,8 @@ PREVIEW_H = 48            # px; ten digits side by side come to about 260 x 48 (
 CATALOG = os.path.join(THEMES, "catalog.json")
 SCHEMA = 1
 MAX_PACK = 1024 * 1024          # the device refuses bigger downloads
+MAX_CATALOG = 65536             # ... and a bigger catalog.json (TM_MAX_CATALOG in web_server.c)
+MAX_THEMES = 64                 # themes whose preview the device keeps a local copy of (TM_PREV_THEMES); more still work
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,31}$")
 SKIP = {".DS_Store", "Thumbs.db", ".pack.json"}
 
@@ -247,6 +249,10 @@ def cmd_check(_a):
     bad = []
     if themes_hash(cat) != cat.get("data_sha256"):
         bad.append("the theme data in catalog.json changed since the last stamp (run 'stamp' once after your changes)")
+    if os.path.exists(CATALOG) and os.path.getsize(CATALOG) > MAX_CATALOG:
+        bad.append(f"catalog.json is {os.path.getsize(CATALOG)} bytes; the clock refuses a catalog over {MAX_CATALOG}")
+    if len(cat["themes"]) > MAX_THEMES:
+        print(f"WARNING: {len(cat['themes'])} themes; the clock keeps local copies of the first {MAX_THEMES} previews only (the rest load from the repository)")
     seen = set()
     seen_prev = set()
     for t in cat["themes"]:

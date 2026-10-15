@@ -18,6 +18,10 @@ on:
       - 'helpers/theme_pack/**'
   workflow_dispatch:
     inputs:
+      heap_trace:
+        description: 'Build the heap-tracing debug variant (layers sdkconfig.heaptrace; also keeps the ELF). Flash it, save the serial log for the first 90 s after boot, and decode with decode_heap_trace.py (dev tools). Not for release use.'
+        type: boolean
+        default: false
       keep_elf:
         description: 'Include the unstripped nextube-fw.elf in build artifacts (needed to symbolicate a crash backtrace with addr2line/idf.py monitor). Not included in tagged releases — this only affects the raw Actions-run artifact, manually triggered runs only.'
         type: boolean
@@ -111,7 +115,12 @@ jobs:
         shell: bash
         run: |
           . $IDF_PATH/export.sh
-          idf.py build
+          if [ "${{ github.event.inputs.heap_trace }}" = "true" ]; then
+            echo "Heap-tracing debug build (sdkconfig.heaptrace layered on sdkconfig.defaults)"
+            idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.heaptrace" build
+          else
+            idf.py build
+          fi
           echo "Build complete"
 
       - name: Prepare artifacts
@@ -157,7 +166,7 @@ jobs:
         # artifacts/ dir, but only nextube-fw.bin/littlefs.bin/etc. are ever
         # zipped or attached to the release — an extra file sitting in
         # artifacts/ that nothing references there is simply never picked up).
-        if: github.event.inputs.keep_elf == 'true'
+        if: github.event.inputs.keep_elf == 'true' || github.event.inputs.heap_trace == 'true'
         run: |
           FW_VER=${{ steps.version.outputs.fw_version }}
           cp build/nextube-fw.elf artifacts/nextube-fw-v${FW_VER}.elf
