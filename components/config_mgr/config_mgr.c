@@ -26,6 +26,39 @@ static uint32_t s_flash_write_fail_count = 0;
 void config_mgr_note_flash_write_failure(void) { s_flash_write_fail_count++; }
 uint32_t config_mgr_get_flash_write_fail_count(void) { return s_flash_write_fail_count; }
 
+/* The 24H Custom info panels: name, tube-6 default, tube-5 default. The order is the panel numbering (CFG_CXP_*). */
+#define CX_PANEL_LIST(X) \
+    X(weather, false, false) X(weekdate, true, false) X(ht, true, true) X(temp, false, false) X(sunrise, false, false) \
+    X(push, false, false) X(humidity, false, false) X(wind, false, false) X(aqi, false, false) X(outdoor_ht, false, false) \
+    X(outlook, false, false)
+/* The weather-mode pages: number, default. */
+#define WX_PANEL_LIST(X) X(0, true) X(1, true) X(2, false) X(3, false) X(4, false) X(5, false) X(6, false) X(7, false)
+
+#define X(n, d6, d5) +1
+_Static_assert(0 CX_PANEL_LIST(X) == CFG_CXP_COUNT, "CX_PANEL_LIST and CFG_CXP_* disagree");
+#undef X
+#define X(i, d) +1
+_Static_assert(0 WX_PANEL_LIST(X) == CFG_WX_PANEL_COUNT, "WX_PANEL_LIST and CFG_WX_PANEL_COUNT disagree");
+#undef X
+
+int config_cx_panels(const nextube_config_t *cfg, int tube, bool out[CFG_CXP_COUNT])
+{
+    const bool t6 = (tube != 5);
+    int k = 0, on = 0;
+#define X(n, d6, d5) out[k] = t6 ? cfg->tube6_panel_##n : cfg->tube5_panel_##n; if (out[k]) on++; k++;
+    CX_PANEL_LIST(X)
+#undef X
+    return on;
+}
+
+void config_weather_panels(const nextube_config_t *cfg, bool out[CFG_WX_PANEL_COUNT])
+{
+    int k = 0;
+#define X(i, d) out[k++] = cfg->weather_panel##i##_en;
+    WX_PANEL_LIST(X)
+#undef X
+}
+
 /* ── Defaults ──────────────────────────────────────────────────────── */
 static void set_defaults(void)
 {
@@ -220,7 +253,6 @@ static void set_defaults(void)
     s_cfg.weather_enabled = true;
     s_cfg.update_check_enabled = true;
     s_cfg.auto_update_enabled = false;
-    s_cfg.auto_update_dry_run = true;
     s_cfg.auto_update_policy = 0;
     s_cfg.auto_update_hour = 3;
     s_cfg.social_enabled           = false; /* opt-in: user must enable explicitly */
@@ -263,37 +295,20 @@ static void set_defaults(void)
     s_cfg.album_switch_ms   = 2000;
     s_cfg.album_shuffle     = false;
     s_cfg.weather_panel_ms  = 5000;  /* 5 s between temp and humidity panels */
-    s_cfg.weather_panel0_en = true;   /* temperature panel on by default */
-    s_cfg.weather_panel1_en = true;   /* humidity panel on by default */
-    s_cfg.weather_panel2_en = false;  /* sunrise/sunset panel off by default */
-    s_cfg.weather_panel3_en = false;  /* wind speed panel off by default */
-    s_cfg.weather_panel4_en = false;  /* Hi/Lo panel off by default */
-    s_cfg.weather_panel5_en = false;  /* indoor temperature panel off by default — not every unit has SHT30 */
-    s_cfg.weather_panel6_en = false;  /* indoor humidity panel off by default */
+#define X(i, d) s_cfg.weather_panel##i##_en = d;   /* temperature and humidity on, the rest off (indoor ones need an SHT30) */
+    WX_PANEL_LIST(X)
+#undef X
+    s_cfg.weather_sun_split = false;  /* sunrise / sunset: both small on one screen unless turned on */
 
     /* 24H Custom — tube 6 panel rotation */
-    s_cfg.tube6_panel_weather  = false;
-    s_cfg.tube6_panel_weekdate = true;
-    s_cfg.tube6_panel_ht       = true;
-    s_cfg.tube6_panel_temp     = false;
-    s_cfg.tube6_panel_sunrise  = false;
-    s_cfg.tube6_panel_push     = false;
-    s_cfg.tube6_panel_humidity = false;
-    s_cfg.tube6_panel_wind     = false;
-    s_cfg.tube6_panel_aqi      = false;
-    s_cfg.tube6_panel_outdoor_ht = false;
+#define X(n, d6, d5) s_cfg.tube6_panel_##n = d6;
+    CX_PANEL_LIST(X)
+#undef X
     s_cfg.tube6_panel_ms       = 5000;
     s_cfg.cx_dual_panel        = false;   /* single panel + colon (original layout) */
-    s_cfg.tube5_panel_weather  = false;
-    s_cfg.tube5_panel_weekdate = false;
-    s_cfg.tube5_panel_ht       = true;    /* sensible distinct default vs tube 6 */
-    s_cfg.tube5_panel_temp     = false;
-    s_cfg.tube5_panel_sunrise  = false;
-    s_cfg.tube5_panel_push     = false;
-    s_cfg.tube5_panel_humidity = false;
-    s_cfg.tube5_panel_wind     = false;
-    s_cfg.tube5_panel_aqi      = false;
-    s_cfg.tube5_panel_outdoor_ht = false;
+#define X(n, d6, d5) s_cfg.tube5_panel_##n = d5;   /* a distinct default from tube 6 */
+    CX_PANEL_LIST(X)
+#undef X
     strncpy(s_cfg.aqi_standard, "auto", sizeof(s_cfg.aqi_standard) - 1);
     s_cfg.update_repo[0]       = '\0';
 
@@ -365,7 +380,7 @@ static void json_read_bool(cJSON *root, const char *key, bool *dst)
 /* Parse a 6-element per-tube integer array from a JSON key.
  * Values are clamped to [lo, hi] and cast to T via the caller's pointer.
  * Avoids six near-identical copy-pasted blocks for lcd_* per-tube fields. */
-#define JSON_READ_TUBE_INT_ARRAY(root, key, field, lo, hi, T) do {             \
+#define JSON_READ_TUBE_INT_ARRAY_C(c, root, key, field, lo, hi, T) do {         \
     cJSON *_arr = cJSON_GetObjectItem((root), (key));                           \
     if (cJSON_IsArray(_arr)) {                                                  \
         int _cnt = cJSON_GetArraySize(_arr); if (_cnt > 6) _cnt = 6;           \
@@ -375,10 +390,60 @@ static void json_read_bool(cJSON *root, const char *key, bool *dst)
                 int _val = _v->valueint;                                        \
                 if (_val < (lo)) _val = (lo);                                   \
                 if (_val > (hi)) _val = (hi);                                   \
-                s_cfg.field[_i] = (T)_val;                                     \
+                (c)->field[_i] = (T)_val;                                       \
             }                                                                   \
         }                                                                       \
     }                                                                           \
+} while (0)
+#define JSON_READ_TUBE_INT_ARRAY(root, key, field, lo, hi, T) \
+    JSON_READ_TUBE_INT_ARRAY_C(&s_cfg, root, key, field, lo, hi, T)
+
+/* Per-tube software gamma — clamped to 0.5..3.0. Accepts the array form [g0..g5] and the legacy scalar form (written by firmware before
+ * the per-tube refactor), which is broadcast to all 6 tubes so old configs look the same after an upgrade. */
+static void parse_lcd_gamma(cJSON *root, float out[6])
+{
+    cJSON *v = cJSON_GetObjectItem(root, "lcd_gamma");
+    if (cJSON_IsArray(v)) {
+        int cnt = cJSON_GetArraySize(v);
+        if (cnt > 6) cnt = 6;
+        for (int i = 0; i < cnt; i++) {
+            cJSON *el = cJSON_GetArrayItem(v, i);
+            if (cJSON_IsNumber(el)) {
+                float g = (float)el->valuedouble;
+                if (g < 0.5f) g = 0.5f;
+                if (g > 3.0f) g = 3.0f;
+                out[i] = g;
+            }
+        }
+    } else if (cJSON_IsNumber(v)) {
+        float g = (float)v->valuedouble;
+        if (g < 0.5f) g = 0.5f;
+        if (g > 3.0f) g = 3.0f;
+        for (int i = 0; i < 6; i++) out[i] = g;
+    }
+}
+
+/* Every per-tube LCD tuning key, read into `c` (a nextube_config_t * or a lcd_tuning_t *, which share the field names). */
+#define LCD_TUNING_PARSE(root, c) do {                                                                        \
+    json_read_u8((root), "lcd_invert_mask", &(c)->lcd_invert_mask);                                          \
+    (c)->lcd_invert_mask &= 0x3F;                                                                             \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_init_profile", lcd_init_profile, 0, 1, uint8_t);            \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_vcom", lcd_vcom, 0x00, 0x3F, uint8_t);                      \
+    parse_lcd_gamma((root), (c)->lcd_gamma);                                                                  \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_col_offset", lcd_col_offset, -8, 8, int8_t);                \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_row_offset", lcd_row_offset, -8, 8, int8_t);                \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_tube_brightness", lcd_tube_brightness, 0, 100, uint8_t);    \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_shadow_lift", lcd_shadow_lift, 0, 100, uint8_t);            \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_gain_r", lcd_gain_r, 50, 150, uint8_t);                     \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_gain_g", lcd_gain_g, 50, 150, uint8_t);                     \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_gain_b", lcd_gain_b, 50, 150, uint8_t);                     \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_black_level", lcd_black_level, 0, 30, uint8_t);             \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_curve_r", lcd_curve_r, 50, 200, uint8_t);                   \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_curve_g", lcd_curve_g, 50, 200, uint8_t);                   \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_curve_b", lcd_curve_b, 50, 200, uint8_t);                   \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_pedestal_r", lcd_pedestal_r, 0, 30, uint8_t);               \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_pedestal_g", lcd_pedestal_g, 0, 30, uint8_t);               \
+    JSON_READ_TUBE_INT_ARRAY_C((c), (root), "lcd_pedestal_b", lcd_pedestal_b, 0, 30, uint8_t);               \
 } while (0)
 
 /* Serialise a 6-element per-tube uint8_t array to a JSON array. */
@@ -477,7 +542,6 @@ static void parse_json(const char *json, size_t len)
     json_read_bool(root, "weather_enabled", &s_cfg.weather_enabled);
     json_read_bool(root, "update_check_enabled", &s_cfg.update_check_enabled);
     json_read_bool(root, "auto_update_enabled", &s_cfg.auto_update_enabled);
-    json_read_bool(root, "auto_update_dry_run", &s_cfg.auto_update_dry_run);
     json_read_u8  (root, "auto_update_policy", &s_cfg.auto_update_policy);
     if (s_cfg.auto_update_policy > 1) s_cfg.auto_update_policy = 0;
     json_read_u8  (root, "auto_update_hour", &s_cfg.auto_update_hour);
@@ -710,64 +774,41 @@ static void parse_json(const char *json, size_t len)
      * config_set_json call (or an old config.json that pre-dates weather_panel2_en)
      * from resetting panel2 to false on every parse. */
     {
-        json_read_bool(root, "weather_panel0_en", &s_cfg.weather_panel0_en);
-        json_read_bool(root, "weather_panel1_en", &s_cfg.weather_panel1_en);
-        json_read_bool(root, "weather_panel2_en", &s_cfg.weather_panel2_en);
-        json_read_bool(root, "weather_panel3_en", &s_cfg.weather_panel3_en);
-        json_read_bool(root, "weather_panel4_en", &s_cfg.weather_panel4_en);
-        json_read_bool(root, "weather_panel5_en", &s_cfg.weather_panel5_en);
-        json_read_bool(root, "weather_panel6_en", &s_cfg.weather_panel6_en);
+#define X(i, d) json_read_bool(root, "weather_panel" #i "_en", &s_cfg.weather_panel##i##_en);
+        WX_PANEL_LIST(X)
+#undef X
+        json_read_bool(root, "weather_sun_split", &s_cfg.weather_sun_split);
     }
-    if (!s_cfg.weather_panel0_en && !s_cfg.weather_panel1_en &&
-        !s_cfg.weather_panel2_en && !s_cfg.weather_panel3_en &&
-        !s_cfg.weather_panel4_en && !s_cfg.weather_panel5_en &&
-        !s_cfg.weather_panel6_en)
-        s_cfg.weather_panel0_en = true;
+    {
+        bool wx_on[CFG_WX_PANEL_COUNT];
+        config_weather_panels(&s_cfg, wx_on);
+        bool any = false;
+        for (int i = 0; i < CFG_WX_PANEL_COUNT; i++) any = any || wx_on[i];
+        if (!any) s_cfg.weather_panel0_en = true;   /* at least one page stays on */
+    }
 
     /* 24H Custom — tube 6 panel rotation */
     {
-        json_read_bool(root, "tube6_panel_weather", &s_cfg.tube6_panel_weather);
-        json_read_bool(root, "tube6_panel_weekdate", &s_cfg.tube6_panel_weekdate);
-        json_read_bool(root, "tube6_panel_ht", &s_cfg.tube6_panel_ht);
-        json_read_bool(root, "tube6_panel_temp", &s_cfg.tube6_panel_temp);
-        json_read_bool(root, "tube6_panel_sunrise", &s_cfg.tube6_panel_sunrise);
-        json_read_bool(root, "tube6_panel_push", &s_cfg.tube6_panel_push);
-        json_read_bool(root, "tube6_panel_humidity", &s_cfg.tube6_panel_humidity);
-        json_read_bool(root, "tube6_panel_wind", &s_cfg.tube6_panel_wind);
-        json_read_bool(root, "tube6_panel_aqi", &s_cfg.tube6_panel_aqi);
-        json_read_bool(root, "tube6_panel_outdoor_ht", &s_cfg.tube6_panel_outdoor_ht);
+#define X(n, d6, d5) json_read_bool(root, "tube6_panel_" #n, &s_cfg.tube6_panel_##n);
+        CX_PANEL_LIST(X)
+#undef X
 
         /* Dual-panel mode + tube 5's independent panel set */
         json_read_bool(root, "cx_dual_panel", &s_cfg.cx_dual_panel);
-        json_read_bool(root, "tube5_panel_weather", &s_cfg.tube5_panel_weather);
-        json_read_bool(root, "tube5_panel_weekdate", &s_cfg.tube5_panel_weekdate);
-        json_read_bool(root, "tube5_panel_ht", &s_cfg.tube5_panel_ht);
-        json_read_bool(root, "tube5_panel_temp", &s_cfg.tube5_panel_temp);
-        json_read_bool(root, "tube5_panel_sunrise", &s_cfg.tube5_panel_sunrise);
-        json_read_bool(root, "tube5_panel_push", &s_cfg.tube5_panel_push);
-        json_read_bool(root, "tube5_panel_humidity", &s_cfg.tube5_panel_humidity);
-        json_read_bool(root, "tube5_panel_wind", &s_cfg.tube5_panel_wind);
-        json_read_bool(root, "tube5_panel_aqi", &s_cfg.tube5_panel_aqi);
-        json_read_bool(root, "tube5_panel_outdoor_ht", &s_cfg.tube5_panel_outdoor_ht);
+#define X(n, d6, d5) json_read_bool(root, "tube5_panel_" #n, &s_cfg.tube5_panel_##n);
+        CX_PANEL_LIST(X)
+#undef X
     }
     json_read_str(root, "aqi_standard", s_cfg.aqi_standard, sizeof(s_cfg.aqi_standard));
     json_read_u16(root, "tube6_panel_ms", &s_cfg.tube6_panel_ms);
     if (s_cfg.tube6_panel_ms < 1000) s_cfg.tube6_panel_ms = 5000;
     /* Guard: fall back to weekdate if every panel is disabled */
-    if (!s_cfg.tube6_panel_weather && !s_cfg.tube6_panel_weekdate &&
-        !s_cfg.tube6_panel_ht      && !s_cfg.tube6_panel_temp     &&
-        !s_cfg.tube6_panel_sunrise && !s_cfg.tube6_panel_push     &&
-        !s_cfg.tube6_panel_humidity && !s_cfg.tube6_panel_wind &&
-        !s_cfg.tube6_panel_aqi    && !s_cfg.tube6_panel_outdoor_ht)
-        s_cfg.tube6_panel_weekdate = true;
-    /* Tube 5 only matters in dual mode — guarantee ≥1 panel there too. */
-    if (s_cfg.cx_dual_panel &&
-        !s_cfg.tube5_panel_weather && !s_cfg.tube5_panel_weekdate &&
-        !s_cfg.tube5_panel_ht      && !s_cfg.tube5_panel_temp     &&
-        !s_cfg.tube5_panel_sunrise && !s_cfg.tube5_panel_push     &&
-        !s_cfg.tube5_panel_humidity && !s_cfg.tube5_panel_wind &&
-        !s_cfg.tube5_panel_aqi    && !s_cfg.tube5_panel_outdoor_ht)
-        s_cfg.tube5_panel_ht = true;
+    {
+        bool f[CFG_CXP_COUNT];
+        if (config_cx_panels(&s_cfg, 6, f) == 0) s_cfg.tube6_panel_weekdate = true;
+        /* Tube 5 only matters in dual mode — guarantee >= 1 panel there too. */
+        if (s_cfg.cx_dual_panel && config_cx_panels(&s_cfg, 5, f) == 0) s_cfg.tube5_panel_ht = true;
+    }
 
     /* Backlight mode */
     char bl_mode[16] = {0};
@@ -1015,60 +1056,9 @@ static void parse_json(const char *json, size_t len)
     /* stock_auto_check_enabled — see config_mgr.h */
     json_read_bool(root, "stock_auto_check_enabled", &s_cfg.stock_auto_check_enabled);
 
-    /* lcd_invert_mask — per-tube INVON flag for color-inverted replacement panels */
-    json_read_u8(root, "lcd_invert_mask", &s_cfg.lcd_invert_mask);
-    s_cfg.lcd_invert_mask &= 0x3F;   /* only 6 tubes */
-
-    /* Per-tube panel profile — 0=Standard, 1=Vivid */
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_init_profile", lcd_init_profile, 0, 1, uint8_t);
-
-    /* Per-tube VCOM (VMCTR1) — clamped to 0x00..0x3F (0–63) */
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_vcom", lcd_vcom, 0x00, 0x3F, uint8_t);
-
-    /* Per-tube software gamma — clamped to 0.5..3.0.
-     * Accepts both the new array form [g0,g1,g2,g3,g4,g5] and the legacy
-     * scalar form (written by firmware before the per-tube refactor):
-     * if a scalar is found it is broadcast to all 6 tubes so old configs
-     * produce the same visual result they did before the upgrade. */
-    {
-        cJSON *v = cJSON_GetObjectItem(root, "lcd_gamma");
-        if (cJSON_IsArray(v)) {
-            int cnt = cJSON_GetArraySize(v);
-            if (cnt > 6) cnt = 6;
-            for (int i = 0; i < cnt; i++) {
-                cJSON *el = cJSON_GetArrayItem(v, i);
-                if (cJSON_IsNumber(el)) {
-                    float g = (float)el->valuedouble;
-                    if (g < 0.5f) g = 0.5f;
-                    if (g > 3.0f) g = 3.0f;
-                    s_cfg.lcd_gamma[i] = g;
-                }
-            }
-        } else if (cJSON_IsNumber(v)) {
-            /* Legacy scalar — broadcast to all tubes */
-            float g = (float)v->valuedouble;
-            if (g < 0.5f) g = 0.5f;
-            if (g > 3.0f) g = 3.0f;
-            for (int i = 0; i < 6; i++) s_cfg.lcd_gamma[i] = g;
-        }
-    }
-
-    /* Per-tube CASET/RASET window offset adjustments — clamped to -8..+8 */
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_col_offset", lcd_col_offset, -8, 8, int8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_row_offset", lcd_row_offset, -8, 8, int8_t);
-    /* Per-tube software brightness — clamped to 0-100 */
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_tube_brightness", lcd_tube_brightness, 0, 100, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_shadow_lift", lcd_shadow_lift, 0, 100, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_gain_r", lcd_gain_r, 50, 150, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_gain_g", lcd_gain_g, 50, 150, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_gain_b", lcd_gain_b, 50, 150, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_black_level", lcd_black_level, 0, 30, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_curve_r", lcd_curve_r, 50, 200, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_curve_g", lcd_curve_g, 50, 200, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_curve_b", lcd_curve_b, 50, 200, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_pedestal_r", lcd_pedestal_r, 0, 30, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_pedestal_g", lcd_pedestal_g, 0, 30, uint8_t);
-    JSON_READ_TUBE_INT_ARRAY(root, "lcd_pedestal_b", lcd_pedestal_b, 0, 30, uint8_t);
+    /* Per-tube LCD tuning: INVON flags, panel profile, VCOM, software gamma, window offsets, brightness / shadow / color / curve /
+     * pedestal / black-level trims (same keys and clamping as the LCD preview, see config_parse_lcd_tuning()). */
+    LCD_TUNING_PARSE(root, &s_cfg);
 
     json_read_str(root, "update_repo", s_cfg.update_repo, sizeof(s_cfg.update_repo));
 
@@ -1327,6 +1317,41 @@ const nextube_config_t *config_get(void)
     return &s_cfg;
 }
 
+void config_get_lcd_tuning(lcd_tuning_t *out)
+{
+    xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
+    out->lcd_invert_mask = s_cfg.lcd_invert_mask;
+    memcpy(out->lcd_init_profile,    s_cfg.lcd_init_profile,    sizeof(out->lcd_init_profile));
+    memcpy(out->lcd_vcom,            s_cfg.lcd_vcom,            sizeof(out->lcd_vcom));
+    memcpy(out->lcd_gamma,           s_cfg.lcd_gamma,           sizeof(out->lcd_gamma));
+    memcpy(out->lcd_col_offset,      s_cfg.lcd_col_offset,      sizeof(out->lcd_col_offset));
+    memcpy(out->lcd_row_offset,      s_cfg.lcd_row_offset,      sizeof(out->lcd_row_offset));
+    memcpy(out->lcd_tube_brightness, s_cfg.lcd_tube_brightness, sizeof(out->lcd_tube_brightness));
+    memcpy(out->lcd_shadow_lift,     s_cfg.lcd_shadow_lift,     sizeof(out->lcd_shadow_lift));
+    memcpy(out->lcd_gain_r,          s_cfg.lcd_gain_r,          sizeof(out->lcd_gain_r));
+    memcpy(out->lcd_gain_g,          s_cfg.lcd_gain_g,          sizeof(out->lcd_gain_g));
+    memcpy(out->lcd_gain_b,          s_cfg.lcd_gain_b,          sizeof(out->lcd_gain_b));
+    memcpy(out->lcd_black_level,     s_cfg.lcd_black_level,     sizeof(out->lcd_black_level));
+    memcpy(out->lcd_curve_r,         s_cfg.lcd_curve_r,         sizeof(out->lcd_curve_r));
+    memcpy(out->lcd_curve_g,         s_cfg.lcd_curve_g,         sizeof(out->lcd_curve_g));
+    memcpy(out->lcd_curve_b,         s_cfg.lcd_curve_b,         sizeof(out->lcd_curve_b));
+    memcpy(out->lcd_pedestal_r,      s_cfg.lcd_pedestal_r,      sizeof(out->lcd_pedestal_r));
+    memcpy(out->lcd_pedestal_g,      s_cfg.lcd_pedestal_g,      sizeof(out->lcd_pedestal_g));
+    memcpy(out->lcd_pedestal_b,      s_cfg.lcd_pedestal_b,      sizeof(out->lcd_pedestal_b));
+    xSemaphoreGiveRecursive(s_mutex);
+}
+
+bool config_parse_lcd_tuning(const char *json, lcd_tuning_t *out)
+{
+    if (!json || !out) return false;
+    cJSON *root = cJSON_Parse(json);
+    if (!root) return false;
+    config_get_lcd_tuning(out);
+    LCD_TUNING_PARSE(root, out);
+    cJSON_Delete(root);
+    return true;
+}
+
 bool config_set_json(const char *json, size_t len)
 {
     if (!json || len == 0) return false;
@@ -1409,7 +1434,6 @@ char *config_to_json(bool include_password)
     cJSON_AddBoolToObject  (root, "weather_enabled",   s_cfg.weather_enabled);
     cJSON_AddBoolToObject  (root, "update_check_enabled", s_cfg.update_check_enabled);
     cJSON_AddBoolToObject  (root, "auto_update_enabled", s_cfg.auto_update_enabled);
-    cJSON_AddBoolToObject  (root, "auto_update_dry_run", s_cfg.auto_update_dry_run);
     cJSON_AddNumberToObject(root, "auto_update_policy", s_cfg.auto_update_policy);
     cJSON_AddNumberToObject(root, "auto_update_hour", s_cfg.auto_update_hour);
     cJSON_AddBoolToObject  (root, "social_enabled",    s_cfg.social_enabled);
@@ -1499,35 +1523,18 @@ char *config_to_json(bool include_password)
     cJSON_AddNumberToObject(root, "album_switch_time",      s_cfg.album_switch_ms);
     cJSON_AddBoolToObject  (root, "album_shuffle",          s_cfg.album_shuffle);
     cJSON_AddNumberToObject(root, "weather_panel_ms",       s_cfg.weather_panel_ms);
-    cJSON_AddBoolToObject  (root, "weather_panel0_en",      s_cfg.weather_panel0_en);
-    cJSON_AddBoolToObject  (root, "weather_panel1_en",      s_cfg.weather_panel1_en);
-    cJSON_AddBoolToObject  (root, "weather_panel2_en",      s_cfg.weather_panel2_en);
-    cJSON_AddBoolToObject  (root, "weather_panel3_en",      s_cfg.weather_panel3_en);
-    cJSON_AddBoolToObject  (root, "weather_panel4_en",      s_cfg.weather_panel4_en);
-    cJSON_AddBoolToObject  (root, "weather_panel5_en",      s_cfg.weather_panel5_en);
-    cJSON_AddBoolToObject  (root, "weather_panel6_en",      s_cfg.weather_panel6_en);
-    cJSON_AddBoolToObject  (root, "tube6_panel_weather",    s_cfg.tube6_panel_weather);
-    cJSON_AddBoolToObject  (root, "tube6_panel_weekdate",   s_cfg.tube6_panel_weekdate);
-    cJSON_AddBoolToObject  (root, "tube6_panel_ht",         s_cfg.tube6_panel_ht);
-    cJSON_AddBoolToObject  (root, "tube6_panel_temp",       s_cfg.tube6_panel_temp);
-    cJSON_AddBoolToObject  (root, "tube6_panel_sunrise",    s_cfg.tube6_panel_sunrise);
-    cJSON_AddBoolToObject  (root, "tube6_panel_push",       s_cfg.tube6_panel_push);
-    cJSON_AddBoolToObject  (root, "tube6_panel_humidity",   s_cfg.tube6_panel_humidity);
-    cJSON_AddBoolToObject  (root, "tube6_panel_wind",       s_cfg.tube6_panel_wind);
-    cJSON_AddBoolToObject  (root, "tube6_panel_aqi",        s_cfg.tube6_panel_aqi);
-    cJSON_AddBoolToObject  (root, "tube6_panel_outdoor_ht", s_cfg.tube6_panel_outdoor_ht);
+#define X(i, d) cJSON_AddBoolToObject(root, "weather_panel" #i "_en", s_cfg.weather_panel##i##_en);
+    WX_PANEL_LIST(X)
+#undef X
+    cJSON_AddBoolToObject  (root, "weather_sun_split",      s_cfg.weather_sun_split);
+#define X(n, d6, d5) cJSON_AddBoolToObject(root, "tube6_panel_" #n, s_cfg.tube6_panel_##n);
+    CX_PANEL_LIST(X)
+#undef X
     cJSON_AddNumberToObject(root, "tube6_panel_ms",         s_cfg.tube6_panel_ms);
     cJSON_AddBoolToObject  (root, "cx_dual_panel",          s_cfg.cx_dual_panel);
-    cJSON_AddBoolToObject  (root, "tube5_panel_weather",    s_cfg.tube5_panel_weather);
-    cJSON_AddBoolToObject  (root, "tube5_panel_weekdate",   s_cfg.tube5_panel_weekdate);
-    cJSON_AddBoolToObject  (root, "tube5_panel_ht",         s_cfg.tube5_panel_ht);
-    cJSON_AddBoolToObject  (root, "tube5_panel_temp",       s_cfg.tube5_panel_temp);
-    cJSON_AddBoolToObject  (root, "tube5_panel_sunrise",    s_cfg.tube5_panel_sunrise);
-    cJSON_AddBoolToObject  (root, "tube5_panel_push",       s_cfg.tube5_panel_push);
-    cJSON_AddBoolToObject  (root, "tube5_panel_humidity",   s_cfg.tube5_panel_humidity);
-    cJSON_AddBoolToObject  (root, "tube5_panel_wind",       s_cfg.tube5_panel_wind);
-    cJSON_AddBoolToObject  (root, "tube5_panel_aqi",        s_cfg.tube5_panel_aqi);
-    cJSON_AddBoolToObject  (root, "tube5_panel_outdoor_ht", s_cfg.tube5_panel_outdoor_ht);
+#define X(n, d6, d5) cJSON_AddBoolToObject(root, "tube5_panel_" #n, s_cfg.tube5_panel_##n);
+    CX_PANEL_LIST(X)
+#undef X
     cJSON_AddStringToObject(root, "aqi_standard",           s_cfg.aqi_standard);
 
     cJSON_AddStringToObject(root, "backlight_mode",  backlight_mode_name(s_cfg.backlight_mode));

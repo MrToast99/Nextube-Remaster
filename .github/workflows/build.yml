@@ -111,6 +111,17 @@ jobs:
           # usable base found above) — the script's own fallback handles that.
           echo "base=$BASE" >> $GITHUB_OUTPUT
 
+      - name: Ship the Web UI shell gzipped
+        # The LittleFS image is built from data/, so a fresh flash would otherwise carry the plain index.html (about 727 KB) and serve it as is,
+        # while a device that has had a Web UI update already serves index.html.gz (about 196 KB). Build the image with the .gz in place of the
+        # plain file (the firmware prefers the .gz and treats web/index.html(.gz) as an either/or in its stock-file check); the plain file is put
+        # back right after the build, so the Web UI ZIP below and the repository tree are unaffected. -n keeps the output reproducible.
+        run: |
+          gzip -9 -n -c data/web/index.html > data/web/index.html.gz
+          mv data/web/index.html /tmp/index.html.plain
+          ls -l data/web/index.html.gz
+          gzip -t data/web/index.html.gz
+
       - name: Build firmware
         shell: bash
         run: |
@@ -122,6 +133,14 @@ jobs:
             idf.py build
           fi
           echo "Build complete"
+
+      - name: Restore the plain index.html
+        if: always()
+        run: |
+          if [ -f /tmp/index.html.plain ]; then
+            mv /tmp/index.html.plain data/web/index.html
+            rm -f data/web/index.html.gz
+          fi
 
       - name: Prepare artifacts
         run: |

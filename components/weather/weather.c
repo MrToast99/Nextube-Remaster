@@ -1,4 +1,5 @@
 #include "weather.h"
+#include "outlook_calc.h"
 #include "config_mgr.h"
 #include "periodic_net_poll.h"
 #include "json_util.h"
@@ -879,17 +880,20 @@ static void fetch_daily_range(void)
     float lat, lon;
     if (!weather_get_location(&lat, &lon)) return;
 
-    char url[320];
+    char url[384];
     snprintf(url, sizeof(url),
              "https://api.open-meteo.com/v1/forecast"
              "?latitude=%.4f&longitude=%.4f"
              "&daily=temperature_2m_max,temperature_2m_min"
              "&current_weather=true"
              "&current=cloud_cover,precipitation"
+             "&hourly=precipitation,snowfall,precipitation_probability&forecast_hours=24"
              "&forecast_days=1&timezone=auto",
              (double)lat, (double)lon);
 
-    char *body = http_get(url);
+    /* The hourly arrays take the answer from about 1 KB to about 2 KB; 8 KB leaves room (a body cut at HTTP_MAX_BODY would be invalid JSON
+     * and lose the daily range and wind with it). */
+    char *body = http_get_sized(url, 8192);
     if (!body) return;
     cJSON *root = cJSON_Parse(body);
     free(body);
@@ -933,6 +937,45 @@ static void fetch_daily_range(void)
         ESP_LOGI(TAG, "cloud cover: %.0f%%  precip: %.1f mm",
                  cJSON_IsNumber(cc)    ? cc->valuedouble    : -1.0,
                  cJSON_IsNumber(precp) ? precp->valuedouble : -1.0);
+    }
+
+    /* Next-24-hour precipitation outlook: slot 0 is the hour that is current now. */
+    cJSON *hr = cJSON_GetObjectItem(root, "hourly");
+    cJSON *hp = hr ? cJSON_GetObjectItem(hr, "precipitation") : NULL;
+    if (cJSON_IsArray(hp)) {
+        cJSON *hs = cJSON_GetObjectItem(hr, "snowfall");
+        cJSON *hc = cJSON_GetObjectItem(hr, "precipitation_probability");
+        int n = cJSON_GetArraySize(hp);
+        if (n > 24) n = 24;
+        const time_t now = time(NULL);
+        struct tm lt;
+        localtime_r(&now, &lt);
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        for (int i = 0; i < n; i++) {
+            cJSON *pv = cJSON_GetArrayItem(hp, i);
+            cJSON *sv = cJSON_IsArray(hs) ? cJSON_GetArrayItem(hs, i) : NULL;
+            cJSON *cv = cJSON_IsArray(hc) ? cJSON_GetArrayItem(hc, i) : NULL;
+            double c = cJSON_IsNumber(cv) ? cv->valuedouble : 0.0;
+            if (c < 0.0) c = 0.0;
+            if (c > 100.0) c = 100.0;
+            s_weather.outlook_mm[i]      = cJSON_IsNumber(pv) ? (float)pv->valuedouble : 0.0f;
+            s_weather.outlook_snow_cm[i] = cJSON_IsNumber(sv) ? (float)sv->valuedouble : 0.0f;
+            s_weather.outlook_prob[i]    = (uint8_t)c;
+        }
+        s_weather.outlook_slot0  = (now > 1700000000) ? now - (time_t)(lt.tm_min * 60 + lt.tm_sec) : 0;   /* 0 = the clock is not set yet */
+        /* Anchor on what the response says its first hour is, not on when it was fetched: the array need not start at the current hour, and
+         * the clock's own time zone may differ from the location's. Falls back to the fetch hour above when the fields are missing. */
+        cJSON *ht = cJSON_GetObjectItem(hr, "time");
+        cJSON *t0 = cJSON_IsArray(ht) ? cJSON_GetArrayItem(ht, 0) : NULL;
+        cJSON *uo = cJSON_GetObjectItem(root, "utc_offset_seconds");
+        if (s_weather.outlook_slot0 && cJSON_IsString(t0) && cJSON_IsNumber(uo)) {
+            const time_t anchored = wx_local_iso_to_epoch(t0->valuestring, (int)uo->valuedouble);
+            const time_t diff = anchored > now ? anchored - now : now - anchored;
+            if (anchored > 0 && diff < 36 * 3600) s_weather.outlook_slot0 = anchored;
+        }
+        s_weather.outlook_hours  = (uint8_t)n;
+        xSemaphoreGive(s_wx_mutex);
+        ESP_LOGI(TAG, "precipitation outlook: %d h", n);
     }
     cJSON_Delete(root);
 }
@@ -1134,6 +1177,38 @@ bool weather_get_location(float *lat, float *lon)
     if (ok) { *lat = s_wx_lat; *lon = s_wx_lon; }
     xSemaphoreGive(s_wx_mutex);
     return ok;
+}
+
+bool weather_get_outlook(weather_outlook_t *o)
+{
+    memset(o, 0, sizeof(*o));
+    if (!s_wx_mutex) return false;
+    const time_t now = time(NULL);
+    time_t base = 0;   /* start of slot 0 of *o */
+    xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+    const int hours = s_weather.outlook_hours;
+    const time_t slot0 = s_weather.outlook_slot0;
+    if (hours > 0 && slot0 > 0) {
+        long shift = (now > slot0) ? (long)((now - slot0) / 3600) : 0;
+        if (shift < hours) {
+            const int n = hours - (int)shift;
+            o->valid = true;
+            o->hours = (uint8_t)n;
+            base = slot0 + (time_t)shift * 3600;
+            for (int i = 0; i < n; i++) {
+                o->mm[i]   = s_weather.outlook_mm[shift + i];
+                o->snow[i] = s_weather.outlook_snow_cm[shift + i] > 0.0f;
+                o->prob[i] = s_weather.outlook_prob[shift + i];
+            }
+        }
+    }
+    xSemaphoreGive(s_wx_mutex);
+    if (!o->valid) return false;
+
+    struct tm lt;
+    localtime_r(&now, &lt);
+    outlook_summarize(o, base, now, (long)lt.tm_hour * 3600L + lt.tm_min * 60L + lt.tm_sec);   /* leaves o->event false when it stays dry */
+    return true;
 }
 
 int weather_get_aqi(bool *is_european)

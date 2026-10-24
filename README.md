@@ -33,7 +33,7 @@ Like the work? Help keep me Caffeinated! <br>
   - [Setup (WiFi Provisioning and First Setup)](#setup-wifi-provisioning-and-first-connection)
   - [Web UI Language](#web-ui-language)
   - [Static IP & Network Diagnostics](#static-ip--network-diagnostics)
-  - [Advanced Display (LCD Calibration)](#advanced-display-lcd-calibration)
+  - [Advanced LCD Tuning (LCD Calibration)](#advanced-lcd-tuning-lcd-calibration)
     - [Calibration walkthrough](#calibration-walkthrough)
     - [Calibration Test Screen](#calibration-test-screen)
   - [Admin Authentication (optional)](#admin-authentication-optional)
@@ -266,6 +266,8 @@ The firmware download, the Web UI update, **Verify & Repair Stock Files** and th
 
 **Update probation:** for the first 24 hours of uptime after an update the clock also counts crashes. A crash or watchdog reset counts; a power cut, a brown-out or a restart you trigger does not. Two such resets less than an hour of uptime apart, or three in total during those 24 hours, make the clock go back to the previous firmware (which stays in the other flash slot until the next update) and show the same banner. After 24 hours of uptime without that, the update is final. Updates installed by flashing over USB are not put on probation.
 
+**Automatic Firmware Update:** in the **System** tab, the **Automatic Firmware Update** card lets the clock install new releases by itself. Once a day, inside a 2-hour window that starts at the hour you choose (local time), it looks for a new release on GitHub and, if one is found, downloads and installs the firmware, then the matching web UI, and restarts. It only installs a release that includes both files with their SHA-256 hashes, and you can limit it to patch releases (same major.minor) or allow any stable release. **Check now** shows what the clock would do without installing anything. A version that was rolled back, or that failed twice, is skipped. After an automatic update, the web UI shows a banner (with a link to the release notes) the next time you open it, until you click OK. It is off by default, and a new firmware installed this way is on the same probation as any other update.
+
 
 #### Manual Updating
 
@@ -327,7 +329,7 @@ The web UI automatically checks for new GitHub releases and shows a **dismissabl
 
 The notification tells you which partitions changed (firmware-only, LittleFS-only, or both). Click **Online Updater** on the toast to install it automatically (see [Online Updater](#online-updater-recommended--one-click-no-downloads)), or note which files to download for a manual update. Dismiss it by clicking **✕** — it won't reappear until the next page load or 24-hour interval.
 
-**Clock-face indicator (tube 6):** when the update toast appears, the firmware can also paint a **4-row solid red bar at the physical bottom of tube 6** (the rightmost tube) on every render frame so you know an update is waiting without having the web UI open. This is opt-in — enable it under **Display → Enable clock face update notification**. The bar appears as soon as an update is detected and clears automatically when the toast is dismissed or the option is unchecked. The indicator state is RAM-only and resets on reboot (the update check re-runs on next page load).
+**Clock-face indicator (tube 6):** when the update toast appears, the firmware can also paint a **4-row solid red bar at the physical bottom of tube 6** (the rightmost tube) on every render frame so you know an update is waiting without having the web UI open. This is opt-in — enable it under **Appearance → Clock face → Enable clock face update notification**. The bar appears as soon as an update is detected and clears automatically when the toast is dismissed or the option is unchecked. The indicator state is RAM-only and resets on reboot (the update check re-runs on next page load).
 
 #### Migrating from an older SPIFFS build (v1.0.10 or older, all releases past v1.1.0 are already LittleFS)
 
@@ -348,7 +350,7 @@ The device uses a **WPA2-secured** `Nextube-Setup` network for initial WiFi prov
 
 **Finding the PIN:**
 - **LCD tubes** — while the setup AP is active and no client is connected, the PIN scrolls across the tubes as a repeating marquee: 3 blank tubes followed by all 8 digits, cycling continuously. Read the digits as they scroll past — the 3-blank gap gives your eye a clear reset point between repetitions.
-- **Web UI** — once logged in, go to **System → WiFi Setup AP → Show** to display the PIN. You can also regenerate it there.
+- **Web UI** — once logged in, go to **Connections → Setup AP → Show** to display the PIN. You can also regenerate it there.
 - **Serial monitor** — on first boot the PIN is logged: `Generated new AP PIN (first boot): 47391082`
 
 **Connecting to the setup AP:**
@@ -384,31 +386,33 @@ After setup, access the management interface via:
 - **http://nextube-remaster.local** (mDNS — works on most platforms without knowing the IP)
 - **http://\<device-ip\>** (shown on the dashboard and in your router's DHCP table)
 
-The web UI provides:
-- **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
-- **Display**
-  - **Live preview** — six tubes at the top of Display Settings mirroring what the clock would show with the settings currently on the page, saved or not: the selected theme's own digit images (DotMatrix is drawn exactly as the device draws it; Custom/WeatherLive faces use a port of the device's own renderer — the live sky, sun/moon, stars, clouds, rain/snow and lightning from the device's current weather, the real logisoso digits or your custom TTF font, AM/PM, and every info panel), the 24H Custom info panels on image themes and DotMatrix, the time format's tube layout, and the accent LED mode/colors as a glowing arch above each tube (Follow Sun/Moon cross-fades between tubes like the clock). Pins under the search box while you scroll through Display Settings, until the Theme Rotation card pushes it away. Can be switched off; the toggle is saved with your other settings (`web_live_preview`). A custom TTF font is drawn by the browser, so it can differ slightly from the clock's rasterizer, and pushed `/api/cx_image` images aren't shown
-  - Theme — populated dynamically from LittleFS; add a folder to `/images/themes/` and it appears in the dropdown automatically
-  - **Custom Face** — select a TrueType font as the clockface digit renderer and weather-panel text font; choose from any `.ttf` uploaded to `/fonts/` on the device; selecting **None** reverts to the theme's JPEG digit artwork. Configure drop shadow color and toggle under this section (see [Custom TTF Fonts](#custom-ttf-fonts))
-  - Brightness; LED accent lighting (Static / Breath / Rainbow / Off / **Follow Sun/Moon**) with per-tube color pickers — see [Follow Sun/Moon LED mode](#follow-sunmoon-led-mode)
-  - Enabled mode toggles; auto mode rotation; auto theme rotation (cycle all or selected themes on a timer)
-  - Spectrum settings — LED source (amplitude-modulated glow color **or** follow accent mode), LCD bar color (fixed **or** follow live WLED primary), Noise Floor threshold
-  - **Advanced Display** — per-tube gamma, VCOM, panel profile, brightness trim, color inversion, window offsets, anti-burn-in (see below)
-- **Network** — WiFi SSID/password, hostname, timezone, NTP server, optional static IP (see [Static IP & Network Diagnostics](#static-ip--network-diagnostics)). Only reconnects when credentials actually change, preserving the live connection for all other saves.
-- **Services**
-  - Weather (source, city, units, panel rotation interval, per-panel enable/disable)
-  - Social Media Counters (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters))
-  - WLED Sync (see [WLED Sync](#wled-sync))
-  - Home Assistant MQTT (broker, port, credentials, optional telemetry groups — see [Home Assistant MQTT](#home-assistant-mqtt))
-- **Audio** — volume, ticker notification sound file
+The web UI has six tabs, ordered the way you would set a clock up:
+- **Home** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap) and **Quick Actions** for switching modes
+- **Appearance** — how the clock looks
+  - **Theme** — the theme dropdown (populated dynamically from LittleFS; add a folder to `/images/themes/` and it appears in the dropdown automatically), with the **Live preview** and the **Custom face** settings below it: background, font and digit colors, drop shadow, **Night color set**, and the TrueType font used as the clockface digit renderer and weather-panel text font (any `.ttf` uploaded to `/fonts/`; **None** reverts to the theme's JPEG digit artwork — see [Custom TTF Fonts](#custom-ttf-fonts)). **Live preview** — six tubes mirroring what the clock would show with the settings currently on the page, saved or not: the selected theme's own digit images (DotMatrix is drawn exactly as the device draws it; Custom/WeatherLive faces use a port of the device's own renderer — the live sky, sun/moon, stars, clouds, rain/snow and lightning from the device's current weather, the real logisoso digits or your custom TTF font, AM/PM, and every info panel), the 24H Custom info panels on image themes and DotMatrix, the time format's tube layout, and the accent LED mode/colors as a glowing arch above each tube (Follow Sun/Moon cross-fades between tubes like the clock). Pins under the search box while you scroll through the Theme card. Can be switched off; the toggle is saved with your other settings (`web_live_preview`). A custom TTF font is drawn by the browser, so it can differ slightly from the clock's rasterizer, and pushed `/api/cx_image` images aren't shown
+  - **Clock face** — time format, leading zero, the clock-face update notification, the clock's display language, and the **24H Custom** info panels for tubes 5 and 6 (single or dual panels, AQI scale, panel duration)
+  - **Brightness and night** — LCD and LED brightness, with a separate night brightness and the hours it applies
+  - **LED Accent Lighting** (Static / Breath / Rainbow / Off / **Follow Sun/Moon**) with per-tube color pickers — see [Follow Sun/Moon LED mode](#follow-sunmoon-led-mode)
+  - **Theme Manager** (downloadable themes) and **Theme Rotation** (cycle all or selected themes on a timer)
+- **Modes** — what the clock shows
+  - **Enabled Modes** toggles and **Mode Rotation** (auto rotation on a timer)
+  - **Weather** (source, city, units, panel rotation interval, per-panel enable/disable)
+  - **Social Media Counters** (YouTube / Bilibili / Instagram / TikTok / Mastodon — see [Social Media Counters](#social-media-counters))
+  - **Album Settings**
+  - **Spectrum Mode** — LED source (amplitude-modulated glow color **or** follow accent mode), LCD bar color (fixed **or** follow live WLED primary), Noise Floor threshold
+- **Connections** — **WiFi Configuration** (SSID/password, hostname, optional static IP — see [Static IP & Network Diagnostics](#static-ip--network-diagnostics); it only reconnects when credentials actually change, preserving the live connection for all other saves), **Network Info**, **Setup AP** (PIN show / regenerate), **Home Assistant MQTT** (broker, port, credentials, optional telemetry groups — see [Home Assistant MQTT](#home-assistant-mqtt)) and **WLED Sync** (see [WLED Sync](#wled-sync))
+- **Device** — the clock's hardware
+  - **Date and time zone** (region, date format, NTP servers)
+  - **Indoor Sensor (SHT30)** and **Audio Settings** (volume, button click sound, ticker notification sound)
+  - **Scheduled Anti Burn-in / LCD Refresh**
+  - **Advanced LCD Tuning** — per-tube gamma, VCOM, panel profile, brightness trim, color inversion, window offsets, with a calibration test screen and a live A/B compare (see [Advanced LCD Tuning](#advanced-lcd-tuning-lcd-calibration))
 - **System**
-  - OTA firmware update and web UI / LittleFS update
-  - LittleFS file browser (browse / upload / delete / new folder / rename)
+  - OTA firmware update and web UI / LittleFS update, **Automatic Firmware Update**, and **Backup & Restore**
+  - LittleFS file browser (browse / upload / delete / new folder / rename) and **Verify & Repair Stock Files**
   - Device log viewer — live RAM-buffered log (last 200 lines), auto-refresh, per-subsystem enable/disable toggles, and a **Debug logging** checkbox that raises the runtime log level to DEBUG for diagnostic-only lines (not saved, resets on reboot)
   - Firmware update check (automatic on page load and every 24 h; dismissable toast; compares against latest GitHub release)
-  - Lock Webui (enable/disable password protection, change password, sign out)
-  - WiFi Setup AP PIN management (show / regenerate)
-  - Factory reset (settings-only or full)
+  - **Admin Authentication** (enable/disable password protection, change password, sign out)
+  - **Danger Zone** — factory reset (settings-only or full) and reboot
   - About (shows firmware + web UI versions independently)
 
 ### Web UI Language
@@ -434,11 +438,11 @@ On first load the UI auto-detects your **browser's preferred language**. If a ma
 
 To switch languages manually, use the **Language** dropdown at the top of any page.
 
-**Tube display language** (the day-of-week abbreviation shown on clock and date panels — e.g. *Mon*, *Lun*, *Mo*) is a separate **device-wide** setting stored in firmware config. Configure it under **Network → Date & Time → Language**. It defaults to English and does not follow the web UI language — this lets the physical clock show one language while the management interface is in another.
+**Tube display language** (the day-of-week abbreviation shown on clock and date panels — e.g. *Mon*, *Lun*, *Mo*) is a separate **device-wide** setting stored in firmware config. Configure it under **Appearance → Clock face → Clock Display language**. It defaults to English and does not follow the web UI language — this lets the physical clock show one language while the management interface is in another.
 
 ### Static IP & Network Diagnostics
 
-**Network → WiFi Configuration** includes an optional **Use static IP** toggle. When enabled, set the IP address, subnet mask, gateway, and DNS (a second DNS server is optional). DHCP is used whenever this is off (the default) or any required field is left blank on boot.
+**Connections → WiFi Configuration** includes an optional **Use static IP** toggle. When enabled, set the IP address, subnet mask, gateway, and DNS (a second DNS server is optional). DHCP is used whenever this is off (the default) or any required field is left blank on boot.
 
 > [!IMPORTANT]
 > **Requires reboot to take effect**, same as the Hostname field above. If you enter settings that make the device unreachable (wrong gateway/subnet), hold the **LEFT** and **RIGHT** touch pads for 15 seconds to bring up the `Nextube-Setup` recovery network (see [Setup](#setup-wifi-provisioning-and-first-connection) above) and fix the settings from there — misconfigured static IP doesn't prevent the device from associating to your WiFi, so this recovery path always works.
@@ -451,15 +455,15 @@ Below the WiFi Configuration card, a collapsible **Network Info** panel shows re
 - **MAC / BSSID / Channel** — link-level details of the current AP association
 - **Netmask / Gateway / DNS** — the STA interface's active IP configuration, whether obtained via DHCP or set statically
 
-### Advanced Display (LCD Calibration)
+### Advanced LCD Tuning (LCD Calibration)
 
-**Display → Advanced Display** contains per-tube hardware calibration controls for mixed panel sets (original + replacement tubes, or batches of replacement panels that differ slightly from each other). Every per-tube slider has a **↺** button at its right that puts that one slider back to its neutral value (it still needs a **Save**). All changes take effect after **Save** and are applied immediately without a reboot.
+**Device → Advanced LCD Tuning** contains per-tube hardware calibration controls for mixed panel sets (original + replacement tubes, or batches of replacement panels that differ slightly from each other). The controls are in five groups — **Panel type**, **Position**, **Brightness and shadows**, **Color matching** and **Fine-tuning: curves and pedestal** — and a bar stays pinned above them with the tube picker (**All** or one tube; **Copy from** copies another tube's settings), the **A · Saved / B · Edits** compare switch, **Live** and **Discard edits**. A dot marks every setting that differs from its default; every per-tube slider has a **↺** button at its right that puts that one slider back to its neutral value, each group has **Reset to default**, and **Reset to defaults** at the bottom puts one tube or all six back. Edits become permanent with **Save** and are applied immediately without a reboot.
 
 #### Calibration walkthrough
 
 How to match a replacement tube to a stock one, using the **Calibration Test Screen** (described below) to judge each step by eye. You need the web UI open and, ideally, one original tube beside the replacement to compare against. Work in the lighting the clock will actually live in.
 
-**Setup.** Open **Display → Advanced Display**. In the **Calibration Test Screen** card tick the replacement tube (and a stock tube to compare), pick a pattern and press **Show on tubes**. Slider and dropdown changes only take effect when you press **Save**; the pattern then repaints on its own within a second or so, so the loop is: change → Save → look.
+**Setup.** Open **Device → Advanced LCD Tuning**. In the **Calibration Test Screen** section at the top of the card tick the replacement tube (and a stock tube to compare), pick a pattern and press **Show on tubes**. You can look at an edit before keeping it: **B · Edits** puts your unsaved edits on the tubes and **A · Saved** puts the saved values back, and with **Live** ticked every edit shows on the tubes as you make it (**Discard edits** drops them; a preview that is left on puts the saved values back by itself after 5 minutes). The pattern repaints on its own, so the loop is: change → compare A/B → **Save**.
 
 1. **Get the basics right — pattern: Full white.**
    - White should look white. If a tube looks like a photo negative, tick **Color Inversion** for it.
@@ -506,7 +510,7 @@ How to match a replacement tube to a stock one, using the **Calibration Test Scr
 
 **Using it:** tick the tubes (All / None are there for convenience), choose a pattern, press **Show on tubes**; **Stop** returns the tubes to normal. The screen cannot start while an anti burn-in or snow session is running — you get a "cancel it first" message. See the walkthrough above for which pattern to use when.
 
-The pattern goes through each tube's full correction chain, so it shows exactly what the clock face will get. Press **Save** after a change — the pattern repaints immediately. It stops by itself after 5 minutes, or press **Stop**. It shares the anti burn-in session, so it can't start while a burn-in or snow session is running.
+The pattern goes through each tube's full correction chain, so it shows exactly what the clock face will get. Edits show on the pattern right away with **B · Edits** or **Live**, or when you press **Save**. It stops by itself after 5 minutes, or press **Stop**. It shares the anti burn-in session, so it can't start while a burn-in or snow session is running.
 
 #### Gamma Correction
 
@@ -583,7 +587,7 @@ Gamma is applied first, so a high gamma leaves less to lift — if the glow only
 | **Color Cycle** | Cycles each selected tube through red → green → blue → white → black (30 s per step) to exercise every sub-pixel at both voltage extremes. Can run for 1–4 hours or until manually stopped. |
 | **Static Snow** | Writes truly random RGB565 pixels to every selected tube each frame (5 Hz) — more thorough than the color cycle because every pixel address receives an independent random level. Tube selection and duration are the same as color cycle. |
 | **Scheduled** | Automatic overnight burn-in recovery. Fires at a configured hour on a **daily**, **weekly** (every Sunday), or **monthly** (1st of month) schedule. Tube bitmask, session duration, and trigger hour are all configurable. Disabled by default. |
-| **Quick Refresh** | One-click, one-off 5-minute color-cycle recovery on all 6 tubes, in the Scheduled Anti Burn-in / LCD Refresh card (Display tab). Works whether or not the schedule above is enabled, and doesn't change any of its settings. If a burn-in or snow session is already running, it's left alone rather than cut short. |
+| **Quick Refresh** | One-click, one-off 5-minute color-cycle recovery on all 6 tubes, in the Scheduled Anti Burn-in / LCD Refresh card (Device tab). Works whether or not the schedule above is enabled, and doesn't change any of its settings. If a burn-in or snow session is already running, it's left alone rather than cut short. |
 
 The CASET window also drifts ±2 px every hour automatically (synchronized to the real-time hour value) as a passive column-shift anti-burn-in measure — no configuration needed.
 
@@ -591,7 +595,7 @@ The CASET window also drifts ±2 px every hour automatically (synchronized to th
 
 Authentication is **disabled by default** — the web UI is fully accessible to anyone on your network without a password, matching the behaviour of all previous firmware versions.
 
-To enable password protection, go to **System → Lock Webui** and check **Require admin password to change settings**. On first enable you will be prompted to set a password (minimum 6 characters). The password is stored as a PBKDF2-SHA256 hash in NVS — it survives firmware OTA and is never visible in any API response. It is cleared only by a **Full factory reset**.
+To enable password protection, go to **System → Admin Authentication**, enter a password (6 to 64 characters) twice and click **Enable Authentication**. The password is stored as a PBKDF2-SHA256 hash in NVS — it survives firmware OTA and is never visible in any API response. It is cleared only by a **Full factory reset**.
 
 Once enabled:
 - Every visit shows a login prompt. Sessions are stored in your browser's `localStorage` and remain valid for 7 days (sliding window).
@@ -599,7 +603,7 @@ Once enabled:
 - All mutation endpoints and any endpoint that returns secrets (settings, AP PIN) require a valid bearer token.
 - `/api/status`, static files, and the login endpoints remain open so the UI can always load and authenticate.
 
-Authentication can be disabled again at any time from the same **Lock Webui** card (requires a valid session to turn off). You can also change the password there, or sign out to clear your local session.
+Authentication can be disabled again at any time from the same **Admin Authentication** card with **Disable Authentication** (requires a valid session to turn off). You can also change the password there, or sign out to clear your local session.
 
 Sessions are **RAM-only** and lost on reboot — you will be asked to log in once after each restart.
 
@@ -607,7 +611,7 @@ Sessions are **RAM-only** and lost on reboot — you will be asked to log in onc
 
 | Mode | Description |
 |---|---|
-| **Clock** | 12H or 24H digital clock. **24H Custom** shows rotating info panel(s) on the right-hand tube(s) (configurable under Display → 24H Custom). Available panels: Day+date, Indoor temp & humidity (SHT30), Outdoor temperature + today's Hi/Lo, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon, and **Pushed image** (an 80×160 JPG you POST from an external script — see [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)). **Single-panel (default):** `H H : M M` with one rotating panel on tube 6. **Dual-panel:** the colon is dropped (`H H  M M`) and tubes 5 **and** 6 each show an **independently-configured** rotating panel — each tube has its own enabled-panel set and cycles through it on the shared rotation interval. Selecting the **WeatherLive** theme replaces the clock with a fully procedural animated weather sky — see [WeatherLive theme](#weatherlive-theme). |
+| **Clock** | 12H or 24H digital clock. **24H Custom** shows rotating info panel(s) on the right-hand tube(s) (configurable under Appearance → Clock face). Available panels: Day+date, Indoor temp & humidity (SHT30), Outdoor temperature + today's Hi/Lo, Sunrise & Sunset times (NOAA algorithm, geocoded from weather city), Weather icon, and **Pushed image** (an 80×160 JPG you POST from an external script — see [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)). **Single-panel (default):** `H H : M M` with one rotating panel on tube 6. **Dual-panel:** the colon is dropped (`H H  M M`) and tubes 5 **and** 6 each show an **independently-configured** rotating panel — each tube has its own enabled-panel set and cycles through it on the shared rotation interval. Selecting the **WeatherLive** theme replaces the clock with a fully procedural animated weather sky — see [WeatherLive theme](#weatherlive-theme). |
 | **Date** | Date display (DD/MM/YY). Can be enabled alongside Clock — both appear as separate stops in the touch cycle. |
 | **YouTube** | Live subscriber count. Direct fetch or via local relay (recommended — see [Social Media Counters](#social-media-counters)). |
 | **Instagram** | Live follower count. **Relay** (via local relay, no API key needed) is the default and recommended fetch method — Instagram increasingly blocks direct requests from the device outright, regardless of headers sent. **Internal** (direct, no relay) remains available but is unreliable and likely to fail; only use it if relay isn't an option. |
@@ -615,15 +619,15 @@ Sessions are **RAM-only** and lost on reboot — you will be asked to log in onc
 | **Mastodon** | Live follower count. Fetched directly from the configured Mastodon instance API — no relay required. |
 | **Weather** | Up to three panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon; **Panel 3** — animated sunrise/sunset (rising/setting sun + mountain silhouettes at 20 Hz, solar times in HH:MM). Any combination of panels can be enabled; at least one must remain on. Temperatures rounded to whole degrees; leading zeros suppressed; minus sign shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
-| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280 Hz up to an adjustable top frequency, default 8 kHz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard electret capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring color**, **LCD bar color**, and **Noise Floor** threshold are independently configurable in **Display → Spectrum Mode**. |
+| **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280 Hz up to an adjustable top frequency, default 8 kHz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard electret capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring color**, **LCD bar color**, and **Noise Floor** threshold are independently configurable in **Modes → Spectrum Mode**. |
 
 ### Mode Rotation
 
-Enable **Auto Rotation** in Display settings to automatically cycle through all enabled modes on a configurable interval (15 s → 1 hour). When disabled, modes only change via the Quick Actions buttons or the physical left/right touch pads. Any manual mode change resets the rotation timer.
+Enable **Auto Rotation** under **Modes → Mode Rotation** to automatically cycle through all enabled modes on a configurable interval (15 s → 1 hour). When disabled, modes only change via the Quick Actions buttons or the physical left/right touch pads. Any manual mode change resets the rotation timer.
 
 ### Theme Rotation
 
-Enable **Theme Rotation** in Display settings to automatically cycle through themes on a timer (1 minute → 4 hours, default 5 minutes).
+Enable **Theme Rotation** under **Appearance → Theme Rotation** to automatically cycle through themes on a timer (1 minute → 4 hours, default 5 minutes).
 
 - **All themes** — leave every checkbox ticked (or click **All**) to rotate through every theme installed on the device. Any custom theme you upload to `/images/themes/` is picked up automatically at the next rotation event — no restart required.
 - **Selected themes** — uncheck themes you want to exclude. Only the ticked themes participate in rotation. Click **None** to start a fresh selection.
@@ -653,7 +657,7 @@ Weather mode cycles through all enabled weather APIs until one succeeds. Support
 
 ### City format
 
-All providers share a single **City** field (**Services → Weather → City**). The same string is used by whichever provider is active, so pick a format that works for your selected source.
+All providers share a single **City** field (**Modes → Weather → City**). The same string is used by whichever provider is active, so pick a format that works for your selected source.
 
 **Plain city name — works with all providers:**
 ```
@@ -695,7 +699,7 @@ EC1A,GB                  ← UK postcode prefix
 
 ### External weather (push your own data)
 
-Selecting **Services → Weather → Source → External** stops the firmware from contacting any online service. Instead, *you* push readings to the device — ideal if your home-automation system already averages several providers for a more stable result. Set the source to **External** and save (no reboot needed; the poller stops on its next cycle).
+Selecting **Modes → Weather → Source → External** stops the firmware from contacting any online service. Instead, *you* push readings to the device — ideal if your home-automation system already averages several providers for a more stable result. Set the source to **External** and save (no reboot needed; the poller stops on its next cycle).
 
 **Endpoint:** `POST /api/weather`
 
@@ -724,7 +728,7 @@ All fields are **optional** — any field you omit keeps its current value (part
 | `lat` / `lon` | number | Optional. Used **on-device** for the Sunrise & Sunset panel (no extra API call). Send both or neither. |
 
 > [!IMPORTANT]
-> **Temperature units:** send your reading in **only one** format — `temp_c` *or* `temp_f` — using whichever unit your source produces. The firmware stores everything in Celsius internally and converts `temp_f` on the way in. What the clock *displays* (°C or °F) is controlled separately by **Services → Weather → Units**, independent of which format you POST.
+> **Temperature units:** send your reading in **only one** format — `temp_c` *or* `temp_f` — using whichever unit your source produces. The firmware stores everything in Celsius internally and converts `temp_f` on the way in. What the clock *displays* (°C or °F) is controlled separately by **Modes → Weather → Units**, independent of which format you POST.
 
 **Built-in icon names:** `sun`, `fewClouds`, `overcastClouds`, `fog`, `rain`, `snow`, `squalls`, `thunderstorm`.
 
@@ -736,7 +740,7 @@ All fields are **optional** — any field you omit keeps its current value (part
 **Sunrise/Sunset location:** the sun panel computes rise/set times locally from `lat`/`lon`. In External mode there is no geocoding, so coordinates come only from your push. The last pushed `lat`/`lon` is **persisted to flash** (written only when it changes, so periodic pushes don't wear flash) and **restored on boot**, so the panel works immediately after a reboot. Send `lat`/`lon` once (or in every push — harmless); until coordinates are provided the panel shows `--:--`.
 
 **Requirements & notes:**
-- Weather must be **enabled** (**Services → Weather → Enable**) so the panel and subsystem are running.
+- Weather must be **enabled** (**Modes → Weather → Enable**) so the panel and subsystem are running.
 - The endpoint honours auth like every other mutation route: with no admin password set it is open on the LAN; once a password is set, send the `Authorization: Bearer <token>` header.
 - Pushed data is held until the next push; it does not expire. If your automation stops pushing, the last value stays on screen.
 
@@ -749,7 +753,7 @@ curl -X POST http://nextube.local/api/weather \
 
 Weather fetching (online sources): On WiFi connect the first fetch happens immediately with automatic 5-second retries until data arrives. After the first successful fetch, weather is refreshed every 10 minutes.
 
-Weather mode auto-cycles between up to three panels on a configurable interval (default 5 s). Each panel can be individually enabled or disabled under **Services → Weather → Display Panels**; at least one must remain on.
+Weather mode auto-cycles between up to three panels on a configurable interval (default 5 s). Each panel can be individually enabled or disabled under **Modes → Weather → Display Panels**; at least one must remain on.
 
 **Panel 1 — temperature + icon:**
 ```
@@ -780,6 +784,15 @@ tube 5 : local sunset time "HH:MM"
 ```
 Solar times are calculated on-device using the NOAA solar position algorithm from lat/lon — the coordinates resolved by the weather fetch (online sources), or the `lat`/`lon` you supply via `POST /api/weather` (External source, persisted across reboots). No extra API call is made. Before coordinates are available (no successful fetch yet, no city configured, or no coordinates pushed) the times show `--:--`. The animation runs at 20 Hz; switching from another weather panel to Panel 3 starts the animation within 50 ms.
 
+**Large sunrise / sunset times (option, off by default):** turn on **Large sunrise / sunset times** under **Modes → Weather → Display panels** to read the times from across the room. The page then shows the sunrise and the sunset one after another (each for the panel rotation time), laid out like the clock:
+```
+tube 0 : animated sun (rising for the sunrise screen, setting for the sunset screen)
+tube 1-2 : hour    tube 3 : colon    tube 4-5 : minutes   (12H drops AM/PM; the sun says which time it is)
+```
+Digits use your theme's own clock digits (or the WeatherLive font). Before the location is known, or on a day without a sunrise or sunset, the digits show dashes.
+
+**Panel 7 — Rain / snow outlook (off by default):** the next 24 hours of precipitation as one smooth curve across all six tubes, from the same Open-Meteo request as the daily range (so it works whichever weather source you use, once a location is known). It is drawn over the same background as the other weather pages (the live sky on WeatherLive, the theme's own background otherwise) and switches between light ink on a dark background and dark ink on a light one, so it stays readable at midday. With WeatherLive animation on, the sky keeps moving behind it. The chart starts with the current hour (a dot) and covers four hours per tube, with one time pill under each tube (*now*, then the hour that tube starts at), with a thin line up from it to that hour and a dot on the curve there: blue for rain, light cyan for snow. A higher curve means more rain; the top is 4 mm per hour, dotted guides mark 1 and 2.5 mm, and a second dot marks the heaviest hour, with its amount in a small label above it. Above the chart, one row says it in words, a tube each: **RAIN** or **SNOW**, the start time, *in* how long (or **NOW** *to* when), the heaviest hour in mm, the chance, and how many hours it lasts. If nothing wet is forecast it shows **DRY NEXT 24H**. An hour counts as wet from 0.2 mm, or from any measurable amount at a 60 % chance or more. Turn it on under **Modes → Weather → Display panels**. The same data is in `GET /api/status` (`precip_outlook`) and in Home Assistant (below).
+
 **Waiting (no data yet):**
 ```
 [·] [·] [·] [·] [·] [·]   (all tubes show dot.jpg until first fetch)
@@ -799,7 +812,7 @@ MultiInfo/Weather/       sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
 
 The **Pushed image** info panel lets an external script drive the right-hand tube(s) with arbitrary artwork — a tiny status icon, a sparkline rendered elsewhere, a now-playing thumbnail, anything you can produce as a JPG. It is one of the rotating 24H Custom panels, so it shares the tube with whatever other panels you enable.
 
-**Enable it:** Display → **24H Custom**, tick **Pushed Image** for tube 6 (and/or tube 5 in dual-panel mode). Use Clock mode with **24H Custom** time format on any normal (asset) theme.
+**Enable it:** Appearance → **Clock face** (Time Format **24H Custom**), tick **Pushed Image** for tube 6 (and/or tube 5 in dual-panel mode). Use Clock mode with **24H Custom** time format on any normal (asset) theme.
 
 > Asset/base themes only. The **WeatherLive** theme draws its own procedural panels and ignores the pushed-image panel.
 
@@ -836,7 +849,7 @@ An outdoor **Air Quality Index** info panel for tube 5/6, available on both the 
 
 **Data source:** the free, keyless **Open-Meteo Air Quality API**, reusing the same geocoded location as the weather provider — so it works with any weather source (Met.no, Open-Meteo, wttr.in, OWM, external) and needs **no API key**. The value refreshes on the weather poll (every 10 min, but AQI itself is only hourly in nature).
 
-**Two scales** (Display → 24H Custom → **AQI scale**):
+**Two scales** (Appearance → Clock face → **AQI scale**):
 
 | Setting | Behaviour |
 |---|---|
@@ -846,7 +859,13 @@ An outdoor **Air Quality Index** info panel for tube 5/6, available on both the 
 
 The number is drawn in its band color; the "AQI" label uses the theme/Custom-Face font color. Until the first fetch completes it shows `--`.
 
-**Enable it:** Display → **24H Custom**, tick **Air Quality** for tube 6 (and/or tube 5 in dual-panel mode), and pick the **AQI scale**. Also exposed to Home Assistant as the **Nextube Air Quality** sensor — see [Home Assistant MQTT](#home-assistant-mqtt).
+**Enable it:** Appearance → **Clock face** (Time Format **24H Custom**), tick **Air Quality** for tube 6 (and/or tube 5 in dual-panel mode), and pick the **AQI scale**. Also exposed to Home Assistant as the **Nextube Air Quality** sensor — see [Home Assistant MQTT](#home-assistant-mqtt).
+
+## Rain / snow outlook panel
+
+A Tube 5/6 info panel (24H Custom) that answers "do I need an umbrella?". It shows the first wet spell in the next 24 hours in three lines (**RAIN** or **SNOW**, the start time large, and *in* how long or **NOW** *to* when), with the next 24 hours as a smooth curve underneath, in the same style as the six-tube Weather page: a dot for this hour, a dot and a small label for the heaviest hour (in mm per hour), and *now* / *24h* under the ends. Blue is rain, light cyan snow; a higher curve means heavier, with the top at 4 mm per hour; on a light background it switches to navy ink and deeper blues. **DotMatrix** keeps a pixel bar graph instead, one bar per hour (the theme's dot color, the current hour marked), since a smooth curve does not fit its dot grid. With nothing wet forecast it shows **DRY** *next 24H*. An hour counts as wet from 0.2 mm, or from any measurable amount at a 60 % chance or more. It works on every theme (asset themes, DotMatrix, Segments, Custom and WeatherLive) and takes its forecast from Open-Meteo whichever weather source you use, once the clock knows its location.
+
+**Enable it:** Appearance → **Clock face** (Time Format **24H Custom**), tick **Rain / snow outlook** for tube 6 (and/or tube 5 in dual-panel mode). The Live preview does not draw this panel. The same forecast is also a full-width page of Weather mode (see **Weather**) and is available to Home Assistant (see below).
 
 ## NTP & Clock Accuracy
 
@@ -907,7 +926,7 @@ Five platforms are supported. Tube 0 shows the platform icon; tubes 1–5 show t
 | **TikTok** | Via local relay | **Yes** — TikTok's JS fingerprinting blocks direct device fetches |
 | **Mastodon** | Direct Mastodon instance API | No |
 
-Configure all platforms under **Services → Social Media Counters** in the web UI.
+Configure all platforms under **Modes → Social Media Counters** in the web UI.
 
 ### Optional API Keys
 
@@ -1000,7 +1019,7 @@ Results are cached for 5 minutes. The ESP32 HTTP timeout for relay requests is 4
 #### Configuring the relay host
 
 1. Start the relay — it prints the relay address on startup, e.g. `http://192.168.1.50:8888`
-2. Open the Nextube web UI → **Services → Social Media Counters**
+2. Open the Nextube web UI → **Modes → Social Media Counters**
 3. Enter the IP address (without port) in **Relay host**
 4. Save
 
@@ -1017,6 +1036,9 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 | **Nextube Temperature** | `sensor` | Always | SHT30 temperature in °C, updated every 60 s |
 | **Nextube Humidity** | `sensor` | Always | SHT30 relative humidity %, updated every 60 s |
 | **Nextube Air Quality** | `sensor` | Always | Outdoor AQI (US or European per the panel's scale setting) from Open-Meteo, updated every 60 s |
+| **Nextube Next Precipitation** | `sensor` | Always | `rain`, `snow` or `none`: the first wet spell in the next 24 hours (Open-Meteo hourly forecast) |
+| **Nextube Next Precipitation In** | `sensor` | Always | Minutes until that spell starts (0 when it is already wet; unknown when none is forecast) |
+| **Nextube Next Precipitation Amount** | `sensor` | Always | Heaviest hour of that spell, in mm/h |
 | **Nextube Mode** | `select` | Always | Read and set the active display mode (Clock, Weather, YouTube, …) |
 | **Nextube Display** | `switch` | Always | Turn the backlight ON or OFF (same as the middle touch button) |
 | **Nextube LCD Brightness** | `number` | Always | LCD brightness 0–100 slider. Shows the brightness actually in use; during the Night Mode window it reads and sets the night brightness, otherwise the daytime one. Reads 0 while the display is off. |
@@ -1035,14 +1057,14 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 ### Setup
 
 1. Make sure your Home Assistant instance has an MQTT broker running (the built-in **Mosquitto** add-on works). Plain `mqtt://` (no TLS) is used.
-2. Open the Nextube web UI → **Services → Home Assistant MQTT**.
+2. Open the Nextube web UI → **Connections → Home Assistant MQTT**.
 3. Check **Enable** (restart required).
 4. Enter your broker's **Broker** hostname or IP address (e.g. `homeassistant.local` or `192.168.1.x`).
 5. Set **Port** (default `1883`).
 6. Fill in **Username** and **Password** if your broker requires authentication; leave blank for anonymous access.
 7. Leave **Publish HA auto-discovery payloads** checked (recommended).
 8. Optionally enable extra publishing groups: **Clock telemetry** (NTP sync drift sensors — off by default), **Device health** (RSSI / heap / uptime sensors, 60 s interval — off by default), **Button presses** (touch events as HA device-automation triggers — off by default). New entity groups appear after the next broker reconnect or reboot.
-9. Click **Save**, then reboot the device (**System → Reboot**).
+9. Click **Save**, then reboot the device (**System → Danger Zone → Reboot Device**).
 
 After reboot HA will show a new **Nextube** device under **Settings → Devices & Services → MQTT** within a few seconds of the device connecting.
 
@@ -1096,7 +1118,7 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 ### Notes
 
 - **Boot-time gate** — MQTT is only started if both **Enable** is checked *and* a broker address is set. Disabling MQTT frees the task stack and stops all polling — useful if you don't use Home Assistant.
-- **Optional publishing groups** — three checkboxes under **Services → MQTT** control extra telemetry: **Clock telemetry** (XTAL drift + RTC max error per NTP sync; default off), **Device health** (WiFi RSSI / free heap / uptime sensors every 60 s; default off), and **Button presses** (touch events as HA device triggers, usable in automations — e.g. "left button → toggle the bedroom lights"; default off). Publishing toggles take effect immediately; HA *entities* for a newly enabled group appear after the next broker reconnect or reboot.
+- **Optional publishing groups** — three checkboxes under **Connections → Home Assistant MQTT** control extra telemetry: **Clock telemetry** (XTAL drift + RTC max error per NTP sync; default off), **Device health** (WiFi RSSI / free heap / uptime sensors every 60 s; default off), and **Button presses** (touch events as HA device triggers, usable in automations — e.g. "left button → toggle the bedroom lights"; default off). Publishing toggles take effect immediately; HA *entities* for a newly enabled group appear after the next broker reconnect or reboot.
 - **Restart required** — changes to MQTT settings take effect after a reboot (unlike the weather and social counter master switches, which apply live).
 - **Reconnection** — the MQTT client reconnects automatically on broker restart or network interruption with a 5 s backoff. Discovery payloads are republished on every reconnect so entities reappear after a broker wipe.
 - **TLS** — the current implementation uses plain `mqtt://`. If you need TLS, a reverse-proxy (e.g. nginx with stream passthrough) in front of Mosquitto is the simplest workaround for now.
@@ -1121,16 +1143,16 @@ mosquitto_pub -h <broker> -t "nextube/nextube-remaster/ticker/set" -m "Good morn
 | **Color** | Matches the currently loaded theme's digit color. |
 | **Mode rotation** | Paused for the duration of the ticker; resumes when the text finishes scrolling. |
 | **Not persistent** | Ticker text is RAM-only; clears on device reboot. |
-| **Notification sound** | Optional (off by default): when **Ticker Sound** is enabled, each non-empty `ticker/set` plays the configured sound file (default `/spiffs/audio/bell.wav`, changeable under **Hardware → Ticker Notification Sound**). Toggle via the HA **Nextube Ticker Sound** switch, `ticker_sound/set`, or the web UI; persists across reboots. Requires **audio output** enabled in device settings. |
+| **Notification sound** | Optional (off by default): when **Ticker Sound** is enabled, each non-empty `ticker/set` plays the configured sound file (default `/spiffs/audio/bell.wav`, changeable under **Device → Audio Settings → Ticker Notification Sound**). Toggle via the HA **Nextube Ticker Sound** switch, `ticker_sound/set`, or the web UI; persists across reboots. Requires **audio output** enabled in device settings. |
 | **Requires MQTT** | Ticker is only available when Home Assistant MQTT integration is enabled. |
 
 In Home Assistant, the **Nextube Ticker** appears as a `text` entity on the Nextube device card — type your message and press Enter. The **Nextube XTAL Drift** and **Nextube RTC Max Error** telemetry sensors update after every NTP sync, giving graphable long-term history of the crystal's drift and the RTC discipline's hold accuracy.
 
 ## Follow Sun/Moon LED Mode
 
-The accent LEDs can track the sun during the day and the moon at night instead of running a fixed animation. Select **Follow Sun/Moon** under **Display → LED Accent Lighting**. The LEDs are mostly off — only the tube(s) nearest the sun/moon's current position across the sky glow, fading smoothly as it passes between two adjacent tubes (e.g. the sun sitting exactly between tube 2 and tube 3 lights both at half intensity; as it drifts toward tube 3, tube 2 fades out while tube 3 brightens). Sun and moon each get their own configurable color. The moon default (pale blue-white), while tThe sun default is a saturated warm yellow tuned for the LEDs specifically,.
+The accent LEDs can track the sun during the day and the moon at night instead of running a fixed animation. Select **Follow Sun/Moon** under **Appearance → LED Accent Lighting**. The LEDs are mostly off — only the tube(s) nearest the sun/moon's current position across the sky glow, fading smoothly as it passes between two adjacent tubes (e.g. the sun sitting exactly between tube 2 and tube 3 lights both at half intensity; as it drifts toward tube 3, tube 2 fades out while tube 3 brightens). Sun and moon each get their own configurable color. The moon default (pale blue-white), while tThe sun default is a saturated warm yellow tuned for the LEDs specifically,.
 
-Position is computed from the same real geocoded sunrise/sunset the WeatherLive theme uses (see [Time-of-day sky](#weatherlive-theme)), independently of which clock face is actually selected — Follow Sun/Moon LEDs work with any theme. Set a location under **Services → Weather** for accurate timing; without one, a fixed 6 AM–7 PM approximation is used instead. Moon position (and whether it's visible at all — it isn't shown near new moon) uses the same phase-based approximation as WeatherLive's on-screen moon, not a precise lunar-position calculation.
+Position is computed from the same real geocoded sunrise/sunset the WeatherLive theme uses (see [Time-of-day sky](#weatherlive-theme)), independently of which clock face is actually selected — Follow Sun/Moon LEDs work with any theme. Set a location under **Modes → Weather** for accurate timing; without one, a fixed 6 AM–7 PM approximation is used instead. Moon position (and whether it's visible at all — it isn't shown near new moon) uses the same phase-based approximation as WeatherLive's on-screen moon, not a precise lunar-position calculation.
 
 ### Notes
 
@@ -1151,7 +1173,7 @@ The **Spectrum mode LCD bars** can also follow the WLED primary color: enable **
 
 ### Setup (Nextube side)
 
-1. Open **Services → WLED Sync**.
+1. Open **Connections → WLED Sync**.
 2. Check **Enable** and optionally change the UDP port (default **21324**).
 3. Click **Save**, then reboot the device.
 
@@ -1175,7 +1197,7 @@ In the WLED app: **Config → Sync interfaces → UDP Sync → Send on direct ch
 
 ### Built-in Themes
 
-Six image themes ship pre-loaded in LittleFS with every firmware image (plus the built-in WeatherLive, DotMatrix and Segments themes, which are drawn by the firmware). More can be downloaded from the [Theme Manager](#downloadable-theme-packs). Select them from **Display → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
+Six image themes ship pre-loaded in LittleFS with every firmware image (plus the built-in WeatherLive, DotMatrix and Segments themes, which are drawn by the firmware). More can be downloaded from the [Theme Manager](#downloadable-theme-packs). Select them from **Appearance → Theme** in the web UI; the dropdown is populated at runtime by scanning `/images/themes/` — any theme you upload appears there automatically.
 
 | Theme | Style |
 |---|---|
@@ -1190,7 +1212,7 @@ Available as optional downloads in the Theme Manager (not built into the firmwar
 
 All built-in themes include the complete required asset set: digits, AMPM indicators, weather icons, WeekDate images, and info-panel assets. See [Adding a Custom Theme](#adding-a-custom-theme) to install your own.
 
-**Theme rotation** — enable **Theme Rotation** under **Display** to auto-cycle through all or a curated selection of themes on a timer. See [Theme Rotation](#theme-rotation) for details.
+**Theme rotation** — enable **Theme Rotation** under **Appearance** to auto-cycle through all or a curated selection of themes on a timer. See [Theme Rotation](#theme-rotation) for details.
 
 ### WeatherLive theme
 
@@ -1200,13 +1222,13 @@ All built-in themes include the complete required asset set: digits, AMPM indica
 - **Sun & moon arc** — the sun arcs from sunrise to sunset; at night a moon traces the same path with the **true lunar phase** (crescent → gibbous → full) and position.
 - **Twinkling stars** at night, fading in/out through twilight.
 - **Weather-driven** drifting clouds, wind-blown rain/snow, and lightning flashes on thunderstorms (which also flash the LED ring when the weather-event LED override is on). Driven by the same weather data as the rest of the firmware (online source or your `POST /api/weather`).
-- **Info panel(s)** on tube 5/6 honouring the **24H Custom** dual-tube layout: Day + Date (localised month abbreviation), current temperature over today's Hi/Lo range bar, and Sunrise/Sunset. When a **Custom Face** TTF font is selected the temperature, Hi/Lo, and other panel text are rendered with that font; the Hi/Lo range track, current-temperature marker, and humidity teardrop all honour the shadow setting from **Display → Custom Face**.
+- **Info panel(s)** on tube 5/6 honouring the **24H Custom** dual-tube layout: Day + Date (localised month abbreviation), current temperature over today's Hi/Lo range bar, and Sunrise/Sunset. When a **Custom Face** TTF font is selected the temperature, Hi/Lo, and other panel text are rendered with that font; the Hi/Lo range track, current-temperature marker, and humidity teardrop all honour the shadow setting from **Appearance → Theme**.
 
 **Settings:** when WeatherLive is selected, a **WeatherLive scene** dropdown appears under the theme picker:
 - **Realtime (animated)** — re-renders every tick (~20 Hz) for smooth motion.
 - **Static (updates ~10 min)** — a still snapshot redrawn only on clock/data changes (near-zero CPU).
 
-**Night color set:** because the sky darkens dramatically at night, a color set tuned for the day sky can be illegible after dark (and vice versa). Enable **Night color set** under **Display → Custom Face** to configure a second Font color / Digit color / Shadow set that the clock **crossfades to through twilight**, tracking the scene's real geocoded sunrise/sunset (the same signal that fades the stars in) — not the Night Brightness hour window. Colors blend smoothly over the ~55-minute twilight ramp; the shadow on/off flag flips once at mid-twilight. Only active while the WeatherLive sky is the background — static theme-image and Custom color/gradient backgrounds always use the day set. Tip: **WeatherLive Demo**'s accelerated 60-second day cycle previews the full crossfade in one minute.
+**Night color set:** because the sky darkens dramatically at night, a color set tuned for the day sky can be illegible after dark (and vice versa). Enable **Night color set** under **Appearance → Theme** to configure a second Font color / Digit color / Shadow set that the clock **crossfades to through twilight**, tracking the scene's real geocoded sunrise/sunset (the same signal that fades the stars in) — not the Night Brightness hour window. Colors blend smoothly over the ~55-minute twilight ramp; the shadow on/off flag flips once at mid-twilight. Only active while the WeatherLive sky is the background — static theme-image and Custom color/gradient backgrounds always use the day set. Tip: **WeatherLive Demo**'s accelerated 60-second day cycle previews the full crossfade in one minute.
 
 **WeatherLive Demo** is a sibling theme that accelerates the day/night cycle (full day every 60 s) and auto-cycles every weather condition (10 s each) to preview the whole repertoire unattended.
 
@@ -1248,7 +1270,7 @@ Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image
 
 ### Custom Face
 
-**Custom Face** layers a TrueType font over a background of your choosing. Configure it under **Display → Custom Face**.
+**Custom Face** layers a TrueType font over a background of your choosing. Configure it under **Appearance → Theme** (the Custom face settings).
 
 | Setting | Description |
 |---|---|
@@ -1289,7 +1311,7 @@ The background is rendered once and shared identically across every tube, the sa
 | **24H (No Sec)** | `H H : M M [info] [info]` | Tube 5 and 6 show rotating info panels |
 | **24H (Custom / CX)** | `H H : M M [blank] [info]` *(single)* or `H H M M [info] [info]` *(dual)* | Fully configurable per-tube rotating panel sets |
 
-**24H Custom info panels** (configured per tube under **Display → 24H Custom**):
+**24H Custom info panels** (configured per tube under **Appearance → Clock face**):
 
 | Panel | Content |
 |---|---|
@@ -1309,7 +1331,7 @@ See [Custom TTF Fonts](#custom-ttf-fonts) for font upload instructions and `pyft
 
 ### Downloadable Theme Packs
 
-Use **Display → Theme Manager**: press **Check for themes** to load the catalog, then **Install**, **Update** or **Remove** next to a theme. **Verify installed** re-checks the files of every installed catalog theme against its pack (no internet needed); a theme with a changed or missing file is tagged **Differs from catalog** and can be repaired with **Update**. The catalog and the previews are kept on the clock, so they are still there after a reboot or a firmware update. While automatic update checks are on, the clock also refreshes the catalog by itself once a day (a few minutes after startup at the earliest, retrying after two hours if it fails), and the web UI shows a toast with an **Open** button when an installed theme has an update (once per catalog version). The catalog can list about 110 themes (a `catalog.json` over 64 KB is refused); the clock keeps its own copy of the preview for the first 64. Each row shows a strip of the theme's digits 0–9 (click it to see all ten digits at their real tube size, fetched from the repository on demand), its size and what changed (the clock saves these small previews in its own storage when the catalog is loaded and the page uses those first, falling back to the repository only for one it doesn't have yet); the clock's own themes that are not in the catalog are listed under *Other installed themes* so they can be removed as well.
+Use **Appearance → Theme Manager**: press **Check for themes** to load the catalog, then **Install**, **Update** or **Remove** next to a theme. **Verify installed** re-checks the files of every installed catalog theme against its pack (no internet needed); a theme with a changed or missing file is tagged **Differs from catalog** and can be repaired with **Update**. The catalog and the previews are kept on the clock, so they are still there after a reboot or a firmware update. While automatic update checks are on, the clock also refreshes the catalog by itself once a day (a few minutes after startup at the earliest, retrying after two hours if it fails), and the web UI shows a toast with an **Open** button when an installed theme has an update (once per catalog version). The catalog can list about 110 themes (a `catalog.json` over 64 KB is refused); the clock keeps its own copy of the preview for the first 64. Each row shows a strip of the theme's digits 0–9 (click it to see all ten digits at their real tube size, fetched from the repository on demand), its size and what changed (the clock saves these small previews in its own storage when the catalog is loaded and the page uses those first, falling back to the repository only for one it doesn't have yet); the clock's own themes that are not in the catalog are listed under *Other installed themes* so they can be removed as well.
 
 Themes that are not shipped inside the firmware (colour variants, community themes) live in the repository's [`themes/`](themes/) folder as one ZIP per theme, listed in `themes/catalog.json`. The clock fetches that catalog from `raw.githubusercontent.com` (the repository set under **Update repository**, `main` branch) and installs a pack the same way a Web UI update is applied: the tubes show the wait screen, the ZIP is downloaded into PSRAM, its SHA-256 is checked against the catalog, and it is extracted into `/images/themes/<id>/`. The old folder is moved aside first and restored if anything fails. Each installed pack keeps a small `.pack.json` (`id`, `rev`) so a higher `rev` in the catalog shows as an update. Right after the catalog loads the clock fingerprints every catalog theme that is on the clock. A folder with no marker (for example one that shipped with the firmware) is compared with the catalog entry: an exact match gets its `.pack.json` written and is tracked from then on, while a folder that differs (an older or hand-edited copy) is tagged **Differs from catalog** and can be replaced with the catalog version. A folder that already has a marker is not re-read on a normal catalog check; the **Verify installed** button re-hashes every installed catalog theme against what its pack contained (no internet needed), and if a file was changed, added or lost since, the marker is dropped and the theme is tagged **Differs from catalog** the same way, so a damaged theme can be repaired from the Theme Manager. A theme whose folder is missing is assumed to have been removed on purpose and is listed as a download. Older designs such as NixieOY are listed in a separate **Legacy** section below the main list. Removing a theme deletes its folder; if it was the active theme the clock switches to **WeatherLive**, which is drawn by the firmware and needs no files. The stock-file check and Verify & Repair do not look at theme folders, so removing or updating a theme here never raises a missing-files banner or gets undone. A saved theme whose folder is missing at startup (for example NixieOY after a full LittleFS flash) falls back to **Nixie**, or to WeatherLive if that is missing too. See [`themes/README.md`](themes/README.md) for how packs and versions are built.
 
@@ -1326,7 +1348,7 @@ Use the built-in LittleFS file browser under **System → LittleFS Files**:
 3. Navigate into `MyTheme/`, click **New Folder** → `Numbers`
 4. Navigate into `Numbers/`, click **⬆ Upload File(s)** → select `0.jpg` … `9.jpg`
 5. Go back to `MyTheme/` and repeat for `AMPM/` and `MultiInfo/Weather/` (and any other subfolders needed)
-6. Open the **Display** tab — your theme appears in the dropdown immediately
+6. Open the **Appearance** tab — your theme appears in the dropdown immediately
 
 #### Option B — Bulk folder upload
 
@@ -1426,7 +1448,7 @@ Requires Python 3 and Pillow (`pip install Pillow` — auto-installed on first r
 
 ## Custom TTF Fonts
 
-The WeatherLive theme and all custom clock faces support user-supplied TrueType fonts for clock digits and panel text. Any `.ttf` file stored in `/fonts/` on the device is available for selection in the web UI under **Display → Custom Face → Digit font**.
+The WeatherLive theme and all custom clock faces support user-supplied TrueType fonts for clock digits and panel text. Any `.ttf` file stored in `/fonts/` on the device is available for selection in the web UI under **Appearance → Theme → Digit font**.
 
 ### How it works
 
@@ -1439,7 +1461,7 @@ The WeatherLive theme and all custom clock faces support user-supplied TrueType 
 
 ### Shadow
 
-When a Custom Face font is active a **drop shadow** can be drawn around glyphs. **Digit shadow** and **Font shadow** are independent controls — each has its own On/Off toggle and color under **Display → Custom Face** (and independent day/night variants if Night color set is enabled). Splitting them lets you, for example, run a dark digit color with a matching dark digit shadow while keeping font/label text light with a lighter (or disabled) font shadow, without the two fighting each other. Both are a soft bloom (±2 px) behind each rendered character.
+When a Custom Face font is active a **drop shadow** can be drawn around glyphs. **Digit shadow** and **Font shadow** are independent controls — each has its own On/Off toggle and color under **Appearance → Theme** (and independent day/night variants if Night color set is enabled). Splitting them lets you, for example, run a dark digit color with a matching dark digit shadow while keeping font/label text light with a lighter (or disabled) font shadow, without the two fighting each other. Both are a soft bloom (±2 px) behind each rendered character.
 
 - **Digit shadow** — the clock face numerals only.
 - **Font shadow** — info-panel and label text, plus the graphical weather-panel elements that are visually part of the same text:
@@ -1456,7 +1478,7 @@ Set either color to pure black for a classic engraved look, or to a tinted hue t
 
 1. Use **System → LittleFS Files** to browse to `/fonts/` (create the folder if it does not exist).
 2. Click **⬆ Upload File(s)** and select your `.ttf` file.
-3. Go to **Display → Custom Face**, click the **↺** button next to the Digit font field to scan for available fonts, then choose your file from the dropdown.
+3. Go to **Appearance → Theme**, click the **↺** button next to the Digit font field to scan for available fonts, then choose your file from the dropdown.
 4. Click **Save** — the new font takes effect on the next clock tick.
 
 ### Reducing font file size with `pyftsubset`
@@ -1603,12 +1625,12 @@ POST /api/debug/pwm          → override backlight PWM: {"freq_hz":10000,"brigh
                                or {"restore":true}
 POST /api/debug/loglevel     → runtime per-tag log verbosity: {"tag":"ntp","level":4}
                                (0=none … 5=verbose) or {"tag":"…","enabled":false}; resets on reboot
-POST /api/debug/burnin       → trigger the burn-in / color-cycle routine (see Advanced Display);
+POST /api/debug/burnin       → trigger the burn-in / color-cycle routine (see Advanced LCD Tuning);
                                {"stop_all":true} stops any running color-cycle or snow session (and a test pattern);
                                {"mask":63,"duration_s":300,"pattern":2} instead shows a calibration test pattern
                                on the masked tubes (1 grey ramp, 2 orange + dim glow, 3 color bars, 4 full white) —
                                responds {"status":"busy"} if a burn-in or snow session is already running
-POST /api/debug/snow         → trigger the static-snow routine (see Advanced Display)
+POST /api/debug/snow         → trigger the static-snow routine (see Advanced LCD Tuning)
 GET  /api/debug/micframe     → atomic snapshot of one DMA capture: {"samples":[512 raw ADC values],
                                "dec":[256 decimated values]} — both arrays come from the same frame
 GET  /api/debug/micbands     → per-band spectrum state for all 24 Goertzel bands:
@@ -1854,7 +1876,7 @@ Capture is driven by the ESP32's **digital ADC controller via I²S0 DMA** (`adc_
 
 #### Frequency bands
 
-**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Each band is the **sum of all 62.5 Hz analysis bins inside its frequency range** (up to ~123 bins across 250–7937 Hz, mapped to bands by geometric band edges; only the bins the current top frequency needs are computed), not a single bin at the band centre — a single bin only hears ±125 Hz, and the log-spaced centres above ~1 kHz sit 200–400 Hz apart, so tones between centres would fall into spectral cracks and vanish (a tone-sweep test measured literal zero at 3.2 kHz before this fix). Bands are logarithmically spaced from 280 Hz up to the **Spectrum top frequency** (Display → Spectrum Mode; 1200–8000 Hz, default **8000 Hz**), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. The default spreads the six tubes over the whole analysable range so the upper tubes follow hi-hats and cymbals; the microphone hears less above ~2.5 kHz, so those tubes work from a weaker signal. Lower the setting (for example to 2000 Hz) to give each tube a narrower slice of the range the microphone hears best. Changing it restarts the noise learning, and a saved baseline made for another range is ignored until you capture a new one. The table below lists the band centres at the default of 8000 Hz. This layout avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
+**24 bands** are computed per frame using the **Goertzel algorithm** — far cheaper than an FFT for a fixed set of target frequencies. Each band is the **sum of all 62.5 Hz analysis bins inside its frequency range** (up to ~123 bins across 250–7937 Hz, mapped to bands by geometric band edges; only the bins the current top frequency needs are computed), not a single bin at the band centre — a single bin only hears ±125 Hz, and the log-spaced centres above ~1 kHz sit 200–400 Hz apart, so tones between centres would fall into spectral cracks and vanish (a tone-sweep test measured literal zero at 3.2 kHz before this fix). Bands are logarithmically spaced from 280 Hz up to the **Spectrum top frequency** (Modes → Spectrum Mode; 1200–8000 Hz, default **8000 Hz**), grouped **4 per tube** so each display shows a small 4-bar mini-spectrum. The default spreads the six tubes over the whole analysable range so the upper tubes follow hi-hats and cymbals; the microphone hears less above ~2.5 kHz, so those tubes work from a weaker signal. Lower the setting (for example to 2000 Hz) to give each tube a narrower slice of the range the microphone hears best. Changing it restarts the noise learning, and a saved baseline made for another range is ignored until you capture a new one. The table below lists the band centres at the default of 8000 Hz. This layout avoids the 125–250 Hz region that attracts SPI switching harmonics and mains-frequency interference on this PCB:
 
 | Tube | Bar 0 | Bar 1 | Bar 2 | Bar 3 | Range |
 |---|---|---|---|---|---|
@@ -1874,7 +1896,7 @@ Because the LMV321 preamp amplifies broadband electrical noise alongside audio, 
 - **Phase 1 (first ~4 s, 250 frames):** fast convergence (α = 0.02, no signal guard) locks the per-band noise floor from zero.
 - **Phase 2 (steady state):** slow drift tracking (α = 0.002) only when the current bin is below 4× the estimated floor — prevents audio signals from biasing the floor upward.
 
-Each band's noise floor is subtracted before the peak-hold, and the floor itself is kept within **2× the quiet reference** (the floor when Phase 1 ended, or the saved baseline): sustained loud sound can no longer drag it up to the music's own level — measured with a bass-heavy track, the lowest bands' floor had climbed from ~8 to ~190, so the bars subtracted the music itself. (A permanently noisier room needs a new **Capture Baseline**.) A band must also exceed **2× its floor** (the floor plus a dead zone of 1× the floor) before it counts towards the silence gate; the bars themselves use a smaller dead zone of 0.25× the floor so that quiet mids and treble, which sit only just above the noise in a typical room, still move the middle and right tubes (the gate still blanks everything in a quiet room): measured in a quiet room, band energy is bursty — the median sits below the mean and the 99th percentile is 5× (low bands) to 20×+ (higher bands) above it — so the mean alone let bursts light the bars, mostly on the noisy low bands. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** setting (`mic_silence_gate` in config, adjustable under **Display → Spectrum Mode → Noise Floor**) is the sensitivity of a *spectral* gate that blanks all bars when nothing audible is playing. Each band's power above its own noise threshold is counted in units of that threshold, and a band only counts once it has stayed clearly above its threshold for about 80 ms; the gate opens when the counted units add up to enough (2 at a setting of 30, scaling in proportion with the slider). Measuring against each band's own noise level means a quiet tone at 1–5 kHz opens the gate just as a bass note does — an earlier version summed raw power across all bands, so the bass dominated it and quiet treble-only sounds were ignored — and requiring a band to persist keeps one-to-three-frame noise bursts from opening it. Once open, the gate stays open for a short while (up to about a quarter of a second, in proportion to how long it has been open) after the sound dips, so the gaps between beats don't blank the bars. **Default 25; 0 disables** (the bars then show whatever is above each band's threshold). *(Semantics changed: the old gate compared time-domain RMS² with a default of 250 — it was volume-calibrated rather than correctness-calibrated, blanking clearly-detected mid-frequency tones at listening level while letting loud sub-bass open the display onto nothing but speaker-distortion hash. Users upgrading should re-tune the slider, starting at 25.)*
+Each band's noise floor is subtracted before the peak-hold, and the floor itself is kept within **2× the quiet reference** (the floor when Phase 1 ended, or the saved baseline): sustained loud sound can no longer drag it up to the music's own level — measured with a bass-heavy track, the lowest bands' floor had climbed from ~8 to ~190, so the bars subtracted the music itself. (A permanently noisier room needs a new **Capture Baseline**.) A band must also exceed **2× its floor** (the floor plus a dead zone of 1× the floor) before it counts towards the silence gate; the bars themselves use a smaller dead zone of 0.25× the floor so that quiet mids and treble, which sit only just above the noise in a typical room, still move the middle and right tubes (the gate still blanks everything in a quiet room): measured in a quiet room, band energy is bursty — the median sits below the mean and the 99th percentile is 5× (low bands) to 20×+ (higher bands) above it — so the mean alone let bursts light the bars, mostly on the noisy low bands. Bars sit at zero in a quiet room without any manual tuning. A secondary **Noise Floor** setting (`mic_silence_gate` in config, adjustable under **Modes → Spectrum Mode → Noise Floor**) is the sensitivity of a *spectral* gate that blanks all bars when nothing audible is playing. Each band's power above its own noise threshold is counted in units of that threshold, and a band only counts once it has stayed clearly above its threshold for about 80 ms; the gate opens when the counted units add up to enough (2 at a setting of 30, scaling in proportion with the slider). Measuring against each band's own noise level means a quiet tone at 1–5 kHz opens the gate just as a bass note does — an earlier version summed raw power across all bands, so the bass dominated it and quiet treble-only sounds were ignored — and requiring a band to persist keeps one-to-three-frame noise bursts from opening it. Once open, the gate stays open for a short while (up to about a quarter of a second, in proportion to how long it has been open) after the sound dips, so the gaps between beats don't blank the bars. **Default 25; 0 disables** (the bars then show whatever is above each band's threshold). *(Semantics changed: the old gate compared time-domain RMS² with a default of 250 — it was volume-calibrated rather than correctness-calibrated, blanking clearly-detected mid-frequency tones at listening level while letting loud sub-bass open the display onto nothing but speaker-distortion hash. Users upgrading should re-tune the slider, starting at 25.)*
 
 **Per-band scaling.** The microphone typically hears bass far stronger than the mids and treble (measured with a bass-heavy track: band 0 at ~300 vs ~4 in the mids), so scaling every bar to the loudest band left tubes 2–6 dark. Each bar is now scaled almost entirely (95 %) to 2× its *own* recent average level (rising quickly, falling over ~8 s) and slightly (5 %) to the loudest band's (which keeps a little of the bass-heavy shape), and never to less than 4× its own noise threshold so a quiet room stays quiet. Bar height follows the band's level to the power 0.6 (`SPEC_GAMMA`; lower lifts quiet bands, higher gives loud hits more punch). These values were tuned against recorded music so that the bass hits reach full height while the mids and treble move at about the level a software analyser shows, instead of everything sitting at the same middle height. Constants `SPEC_EQ`, `REF_GAIN`, `REF_UP`, `REF_DOWN` and `REF_SNR` in `microphone.c`; `SPEC_EQ` 0 gives the old all-against-the-loudest behaviour.
 
@@ -1909,7 +1931,7 @@ The ripple ranges are chosen for the reference unit (`LED_RIPPLE_HZ` in `microph
 
 #### Spectrum LED Control
 
-The LED ring behaviour in Spectrum mode is independently configurable under **Display → Spectrum Mode → LED Source**:
+The LED ring behaviour in Spectrum mode is independently configurable under **Modes → Spectrum Mode → LED Source**:
 
 | Source | Behaviour |
 |---|---|
@@ -1931,7 +1953,7 @@ The **SHT30** is fitted on the Nextube PCB and shares the I²C bus with the PCF8
 | Poll interval | Every 30 seconds (background FreeRTOS task) |
 | Detection | Probed at boot via `i2c_master_probe()`; if the probe fails the driver disables itself silently |
 
-Readings appear on the **Dashboard** under *Local Sensor* (temperature and humidity) and are included in the `/api/status` response as `sensor.temp_c` and `sensor.humidity`. The displayed temperature respects the **Units** setting (Celsius / Fahrenheit).
+Readings appear on the **Home** tab under *Local Sensor* (temperature and humidity) and are included in the `/api/status` response as `sensor.temp_c` and `sensor.humidity`. The displayed temperature respects the **Units** setting (Celsius / Fahrenheit).
 
 ### Replacement LCD Panels
 
@@ -1949,7 +1971,7 @@ Note the connector when purchasing
 | **LH096NT-IF09W** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (Requires Invert Set)| [Alibaba listing](https://www.alibaba.com/product-detail/0-96-inch-Small-TFT-Display_1600887795945.html) |
 | **LY096X1608TBBIG09C08** | ST7735S controller, 80×160 IPS, 0.96″, 4-pin FPC; confirmed working (No Invert Required) | [Alibaba listing](https://www.alibaba.com/product-detail/TFT-LCD-0-96-Inch-80X160_1600462526823.html) |
 
-ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colors on the Nextube PCB without calibration. The firmware's **Advanced Display** settings (see below) handle this entirely in software — no hardware modification is required.
+ST7735S panels are electrically identical to the original ST7735 but have a different factory register set: the default VCOM voltage and gamma curve produce washed, low-contrast colors on the Nextube PCB without calibration. The firmware's **Advanced LCD Tuning** settings (see below) handle this entirely in software — no hardware modification is required.
 
 > [!TIP]
 > **LCD swap guide:** For a step-by-step video walkthrough of the physical panel replacement process, see the [community discussion thread](https://github.com/MrToast99/Nextube-Remaster/discussions/35).
@@ -1957,7 +1979,7 @@ ST7735S panels are electrically identical to the original ST7735 but have a diff
 #### Quick-start for LH096NT-IF09W replacement panels
 
 1. Flash firmware, open the web UI
-2. Go to **Display → Advanced Display → Panel Profile**
+2. Go to **Device → Advanced LCD Tuning → Panel type → Panel Profile**
 3. For each replaced tube set **Profile → Vivid** and **VCOM → 40** as a starting point
 4. Click **Save** and evaluate — if colors are still washed raise VCOM toward 50–60; if they look over-saturated or too dark lower it toward 25–30
 5. If colors remain washed even at high VCOM, raise **Gamma Correction** for that tube (try **1.3–1.8**; higher values crush the dim tube-fill glow, which **Shadow Lift** can bring back)
@@ -1967,7 +1989,7 @@ ST7735S panels are electrically identical to the original ST7735 but have a diff
 7. If there is a 1-pixel static border on the right or bottom edge, set **Column Offset → +2** and **Row Offset → +1** for that tube
 8. Click **Save** — changes take effect immediately without a reboot
 
-For fine-tuning against a stock tube — contrast, tint, the dim tube-fill glow and brightness matching — follow the [Calibration walkthrough](#calibration-walkthrough) under Advanced Display, which uses the built-in test patterns.
+For fine-tuning against a stock tube — contrast, tint, the dim tube-fill glow and brightness matching — follow the [Calibration walkthrough](#calibration-walkthrough) under Advanced LCD Tuning, which uses the built-in test patterns.
 
 > **Note on window offsets:** The LH096NT-IF09W ST7735S variant uses a frame-buffer that is 2 px wider than the visible area. Without the +2 column offset, the rightmost column of uninitialized frame-buffer appears as a thin static line. Row offset of +1 corrects the same issue at the bottom edge.
 

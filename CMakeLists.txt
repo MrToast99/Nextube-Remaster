@@ -62,6 +62,7 @@ file(GLOB_RECURSE _STOCK_FILES RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/data"
      "${CMAKE_CURRENT_SOURCE_DIR}/data/*")
 list(REMOVE_ITEM _STOCK_FILES "config.json")
 list(REMOVE_ITEM _STOCK_FILES "web/index.html")
+list(REMOVE_ITEM _STOCK_FILES "web/index.html.gz")   # the CI build ships the shell gzipped instead (see build.yml); same either/or special case
 list(REMOVE_ITEM _STOCK_FILES "images/album/.keep")   # git placeholder, not a real stock asset
 # Themes belong to the Theme Manager (it installs, updates, repairs and removes them, and lists a missing one as a download), so the
 # stock-file check neither flags nor restores anything under images/themes/ -- an updated theme must not be put back to this build's.

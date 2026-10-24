@@ -46,6 +46,9 @@
 #include "auth.h"
 #include "nvs.h"
 
+/* Sensor and weather readings are floats: written as raw doubles they come out as 22.538108825683594. One decimal is all they carry. */
+static double json_round1(float v) { return (double)lroundf(v * 10.0f) / 10.0; }
+
 static const char *TAG = "web_srv";
 /* Shared with the max_open_sockets config below AND web_server_socket_count()'s
  * httpd_get_client_list() buffer size -- httpd_get_client_list() rejects the
@@ -80,6 +83,11 @@ static size_t  s_fs_used_cached   = 0;
  * stall behind the extraction long enough for the browser's poll to abort. */
 static char    s_fs_ver_cached[32] = "unknown";
 static void fs_usage_invalidate(void) { s_fs_cache_valid = false; }
+static void lcd_preview_revert(void);        /* LCD tuning preview (A/B compare), defined further down */
+static bool s_lcd_preview_pending = false;   /* a preview is on the tubes */
+static void lcd_applied_invalidate(void);
+static const char *webui_state_name(void);   /* "idle" / "running" / "done" / "error"; defined with s_webui */
+static const char *webui_error_text(void);   /* why the last Web UI pull failed, "" if it did not */
 
 /* True while a firmware/filesystem OTA or Web UI hotpatch is running. Declared
  * here (not with its doc comment further down) so api_status() can check it:
@@ -766,6 +774,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     uint8_t old_gain_r[6], old_gain_g[6], old_gain_b[6], old_black[6];
     uint8_t old_curve[3][6], old_ped[3][6];
     uint8_t old_stock_exc_count;
+    if (s_lcd_preview_pending) lcd_preview_revert();   /* the tubes must show the saved values before they are compared with the new ones */
     config_lock();
     const nextube_config_t *old_cfg = config_get();
     old_stock_exc_count = old_cfg->stock_exception_count;
@@ -896,6 +905,7 @@ static esp_err_t api_post_settings(httpd_req_t *r)
         memcmp(new_ped,   old_ped,   sizeof(new_ped))   != 0)
         display_apply_tube_channel_curves(new_curve[0], new_curve[1], new_curve[2],
                                           new_ped[0], new_ped[1], new_ped[2]);
+    lcd_applied_invalidate();   /* the tubes now match the saved config again */
 
     /* Boot-time feature flags or hostname changed — reboot required.
      * Hostname is baked into LWIP netif, DHCP option 12, and mDNS at start-up;
@@ -1319,14 +1329,14 @@ static esp_err_t api_wl_scene(httpd_req_t *r)
     cJSON_AddBoolToObject(root, "valid", w && w->valid);
     if (w && w->valid) {
         cJSON_AddStringToObject(root, "icon", w->icon);
-        cJSON_AddNumberToObject(root, "temp_c", w->temp_c);
-        cJSON_AddNumberToObject(root, "humidity", w->humidity);
-        cJSON_AddNumberToObject(root, "wind_kph", w->wind_kph);
-        cJSON_AddNumberToObject(root, "cloud_cover_pct", w->cloud_cover_pct);
-        cJSON_AddNumberToObject(root, "precip_mm", w->precip_mm);
+        cJSON_AddNumberToObject(root, "temp_c", json_round1(w->temp_c));
+        cJSON_AddNumberToObject(root, "humidity", json_round1(w->humidity));
+        cJSON_AddNumberToObject(root, "wind_kph", json_round1(w->wind_kph));
+        cJSON_AddNumberToObject(root, "cloud_cover_pct", json_round1(w->cloud_cover_pct));
+        cJSON_AddNumberToObject(root, "precip_mm", json_round1(w->precip_mm));
         cJSON_AddBoolToObject(root, "day_range_valid", w->day_range_valid);
-        cJSON_AddNumberToObject(root, "day_min_c", w->day_min_c);
-        cJSON_AddNumberToObject(root, "day_max_c", w->day_max_c);
+        cJSON_AddNumberToObject(root, "day_min_c", json_round1(w->day_min_c));
+        cJSON_AddNumberToObject(root, "day_max_c", json_round1(w->day_max_c));
     }
     bool aqi_eu;
     int aqi = weather_get_aqi(&aqi_eu);   /* -1 until the first AQI fetch */
@@ -1336,8 +1346,8 @@ static esp_err_t api_wl_scene(httpd_req_t *r)
     }
     sht30_reading_t sensor;
     if (sht30_get(&sensor)) {   /* indoor H/T panel */
-        cJSON_AddNumberToObject(root, "indoor_temp_c", sensor.temp_c);
-        cJSON_AddNumberToObject(root, "indoor_hum", sensor.humidity);
+        cJSON_AddNumberToObject(root, "indoor_temp_c", json_round1(sensor.temp_c));
+        cJSON_AddNumberToObject(root, "indoor_hum", json_round1(sensor.humidity));
     }
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1347,6 +1357,7 @@ static esp_err_t api_wl_scene(httpd_req_t *r)
     return ret;
 }
 
+static int ota_verify_wait_s(void);
 static esp_err_t api_status(httpd_req_t *r)
 {
     /* NOT REQUIRE_AUTH'd, deliberately — frontend bootAuth() does a plain
@@ -1382,16 +1393,33 @@ static esp_err_t api_status(httpd_req_t *r)
     const weather_data_t *w = weather_get();
     if (w && w->valid) {
         cJSON *wj = cJSON_AddObjectToObject(root, "weather");
-        cJSON_AddNumberToObject(wj, "temp_c", w->temp_c);
-        cJSON_AddNumberToObject(wj, "humidity", w->humidity);
+        cJSON_AddNumberToObject(wj, "temp_c", json_round1(w->temp_c));
+        cJSON_AddNumberToObject(wj, "humidity", json_round1(w->humidity));
         cJSON_AddStringToObject(wj, "condition", w->condition);
+    }
+    {   /* Next-24-hour precipitation outlook (Open-Meteo hourly), independent of the current-conditions provider. */
+        weather_outlook_t ol;   /* about 170 bytes on the httpd stack */
+        if (weather_get_outlook(&ol)) {
+            cJSON *oj = cJSON_AddObjectToObject(root, "precip_outlook");
+            cJSON_AddBoolToObject(oj, "event", ol.event);
+            cJSON_AddBoolToObject(oj, "now", ol.now);
+            cJSON_AddStringToObject(oj, "type", ol.event ? (ol.snow_event ? "snow" : "rain") : "none");
+            cJSON_AddNumberToObject(oj, "start_min", ol.event ? ol.start_min : -1);
+            cJSON_AddNumberToObject(oj, "start_hour", ol.event ? ol.start_hour : -1);
+            cJSON_AddNumberToObject(oj, "duration_h", ol.event ? ol.duration_h : 0);
+            cJSON_AddNumberToObject(oj, "peak_mm", ol.event ? (double)((int)(ol.peak_mm * 10.0f + 0.5f)) / 10.0 : 0.0);
+            cJSON_AddNumberToObject(oj, "chance_pct", ol.event ? ol.chance_pct : 0);
+            cJSON *arr = cJSON_AddArrayToObject(oj, "mm");   /* hourly mm, from this hour on */
+            for (int i = 0; i < ol.hours; i++)
+                cJSON_AddItemToArray(arr, cJSON_CreateNumber((double)((int)(ol.mm[i] * 10.0f + 0.5f)) / 10.0));
+        }
     }
     int64_t t_weather = esp_timer_get_time();
     sht30_reading_t sensor;
     if (sht30_get(&sensor)) {
         cJSON *sj = cJSON_AddObjectToObject(root, "sensor");
-        cJSON_AddNumberToObject(sj, "temp_c",   sensor.temp_c);
-        cJSON_AddNumberToObject(sj, "humidity", sensor.humidity);
+        cJSON_AddNumberToObject(sj, "temp_c",   json_round1(sensor.temp_c));
+        cJSON_AddNumberToObject(sj, "humidity", json_round1(sensor.humidity));
     }
     int64_t t_sht30 = esp_timer_get_time();
     const sub_count_t *s = subscribers_get();
@@ -1481,6 +1509,11 @@ static esp_err_t api_status(httpd_req_t *r)
      * The UI shows a mismatch banner when these two differ — i.e. the LittleFS
      * image on the device is not the one this firmware expects. */
     cJSON_AddStringToObject(root, "expected_fs", FS_VERSION_STR);
+    /* The Web UI pull's state, readable without a login: the online updater's page cannot always read /api/webui_pull_status
+     * after the OTA reboot (sessions are gone and the no-password window may not be open), but it can always read this. */
+    cJSON_AddStringToObject(root, "webui_state", webui_state_name());
+    if (webui_error_text()[0]) cJSON_AddStringToObject(root, "webui_error", webui_error_text());
+    { const int vw = ota_verify_wait_s(); if (vw > 0) cJSON_AddNumberToObject(root, "ota_verify_s", vw); }   /* firmware still being verified: flashing waits */
     /* Theme JPEG decode error — non-null when the active theme has an image
      * that couldn't be decoded (wrong size, truncated file, etc.).
      * Cleared automatically when the theme changes. */
@@ -1774,6 +1807,28 @@ static esp_err_t ota_finish_and_reboot(httpd_req_t *r, const char *json_msg)
 
 /* Guard wrapper — auth, reject concurrent OTA, then run the flash.  s_ota_active
  * is cleared only on failure; a success path defers a reboot (stays locked). */
+/* A freshly flashed image stays PENDING_VERIFY until it has been up for OTA_VALID_AFTER_S (the OTA health gate in main.c), and
+ * esp_ota_begin() refuses to write while the running image is unconfirmed. That is deliberate (a bad build must still be able to roll
+ * back), so the user is told why and how long, instead of "OTA begin fail". Returns the seconds left, 0 when flashing is allowed. */
+static int ota_verify_wait_s(void)
+{
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (!run || esp_ota_get_state_partition(run, &st) != ESP_OK || st != ESP_OTA_IMG_PENDING_VERIFY) return 0;
+    const int left = OTA_VALID_AFTER_S - (int)(esp_timer_get_time() / 1000000);
+    return left > 0 ? left : 1;
+}
+
+/* Text for a refused esp_ota_begin(): the wait (when that is the reason) in plain words, else a generic failure. */
+static void ota_begin_fail_text(char *buf, size_t n)
+{
+    const int left = ota_verify_wait_s();
+    if (left <= 0) { snprintf(buf, n, "Could not start the firmware write - try again, or restart the clock first."); return; }
+    const unsigned mins = ((unsigned)left + 59u) / 60u % 100u;
+    snprintf(buf, n, "The clock is still checking the update it just installed, and cannot take another yet. Try again in about %u minute%s, or restart the clock and flash again.",
+             mins, mins == 1u ? "" : "s");
+}
+
 static esp_err_t api_ota_impl(httpd_req_t *r);
 static esp_err_t api_ota(httpd_req_t *r)
 {
@@ -1871,7 +1926,9 @@ static esp_err_t api_ota_impl(httpd_req_t *r)
         esp_ota_handle_t h;
         if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK) {
             heap_caps_free(img_buf);
-            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin fail"), ESP_FAIL;
+            char why[192];
+            ota_begin_fail_text(why, sizeof(why));
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, why), ESP_FAIL;
         }
         {
             int rem = img_len;
@@ -1897,8 +1954,11 @@ static esp_err_t api_ota_impl(httpd_req_t *r)
         ESP_LOGW(TAG, "OTA: PSRAM unavailable for %d B — using 4 KB chunk loop", img_len);
 
         esp_ota_handle_t h;
-        if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK)
-            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin fail"), ESP_FAIL;
+        if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK) {
+            char why[192];
+            ota_begin_fail_text(why, sizeof(why));
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, why), ESP_FAIL;
+        }
 
         char *buf = malloc(4096);
         if (!buf) { esp_ota_abort(h); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
@@ -3031,7 +3091,7 @@ static void ota_pull_task(void *arg)
 
     esp_ota_handle_t h;
     if (esp_ota_begin(upd, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK) {
-        snprintf(s_pull.error, sizeof(s_pull.error), "OTA begin failed");
+        ota_begin_fail_text(s_pull.error, sizeof(s_pull.error));
         ESP_LOGE(TAG, "[ota] %s", s_pull.error);
         free(img);
         goto pull_err;
@@ -3335,6 +3395,14 @@ static struct {
                                  * actually wrote — see append_bounded_list() */
 } s_webui;
 
+static const char *webui_state_name(void)
+{
+    static const char *const names[] = { "idle", "running", "done", "error" };
+    return names[s_webui.state];
+}
+
+static const char *webui_error_text(void) { return s_webui.error; }
+
 
 static void webui_pull_task(void *arg)
 {
@@ -3545,15 +3613,115 @@ static bool start_webui_pull_task(void)
 static esp_err_t api_webui_pull_status(httpd_req_t *r)
 {
     if (!post_ota_auth_valid()) { REQUIRE_AUTH(r); }
-    static const char *const names[] = { "idle","running","done","error" };
     /* 1024, not 768: GCC's -Werror=format-truncation worst case assumes
      * error[128] and written_files[512] both fill to their full declared
      * size — see api_stock_repair_status()'s matching comment, which hit
      * this same class of build failure at 768. */
     char buf[1024];
     snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"error\":\"%s\",\"written_files\":\"%s\"}",
-             names[s_webui.state], s_webui.error, s_webui.written_files);
+             webui_state_name(), s_webui.error, s_webui.written_files);
     return send_json(r, buf);
+}
+
+/* ── LCD tuning preview (A/B compare) ─────────────────────────────────────────────────────────────────────────────────
+ * POST /api/lcd_preview puts a set of per-tube LCD tuning values on the tubes WITHOUT saving them, so the web UI can flip between the saved
+ * values (A) and its unsaved edits (B). {"revert":true} puts the saved values back. A preview also ends by itself after LCD_PREVIEW_MS, when
+ * settings are saved (api_settings reverts first, then applies the new values as usual) and on reboot; nothing is written to flash.
+ * s_lcd_applied tracks what the tubes currently have, so only the groups that differ are applied again (a profile change re-initialises
+ * the panel, the others are cheap). */
+#define LCD_PREVIEW_MS (5 * 60 * 1000)
+static lcd_tuning_t       s_lcd_applied;
+static bool               s_lcd_applied_valid = false;
+static esp_timer_handle_t s_lcd_prev_timer = NULL;
+
+static void lcd_applied_invalidate(void) { s_lcd_applied_valid = false; }
+
+static void lcd_apply_diff(const lcd_tuning_t *w)
+{
+    if (!s_lcd_applied_valid) { config_get_lcd_tuning(&s_lcd_applied); s_lcd_applied_valid = true; }
+    const lcd_tuning_t *a = &s_lcd_applied;
+    if (w->lcd_invert_mask != a->lcd_invert_mask) display_apply_invert_mask(w->lcd_invert_mask);
+    if (memcmp(w->lcd_init_profile, a->lcd_init_profile, sizeof(w->lcd_init_profile)) != 0) display_apply_init_profiles(w->lcd_init_profile);
+    if (memcmp(w->lcd_vcom, a->lcd_vcom, sizeof(w->lcd_vcom)) != 0) display_apply_tube_vcom(w->lcd_vcom);
+    bool gamma_changed = false;
+    for (int i = 0; i < 6; i++) {
+        if (fabsf(w->lcd_gamma[i] - a->lcd_gamma[i]) > 0.005f) { gamma_changed = true; break; }
+    }
+    if (gamma_changed) display_apply_tube_gamma(w->lcd_gamma);
+    if (memcmp(w->lcd_col_offset, a->lcd_col_offset, sizeof(w->lcd_col_offset)) != 0 ||
+        memcmp(w->lcd_row_offset, a->lcd_row_offset, sizeof(w->lcd_row_offset)) != 0)
+        display_apply_tube_offsets(w->lcd_col_offset, w->lcd_row_offset);
+    if (memcmp(w->lcd_tube_brightness, a->lcd_tube_brightness, sizeof(w->lcd_tube_brightness)) != 0)
+        display_apply_tube_brightness(w->lcd_tube_brightness);
+    if (memcmp(w->lcd_shadow_lift, a->lcd_shadow_lift, sizeof(w->lcd_shadow_lift)) != 0)
+        display_apply_tube_shadow_lift(w->lcd_shadow_lift);
+    if (memcmp(w->lcd_gain_r, a->lcd_gain_r, sizeof(w->lcd_gain_r)) != 0 ||
+        memcmp(w->lcd_gain_g, a->lcd_gain_g, sizeof(w->lcd_gain_g)) != 0 ||
+        memcmp(w->lcd_gain_b, a->lcd_gain_b, sizeof(w->lcd_gain_b)) != 0 ||
+        memcmp(w->lcd_black_level, a->lcd_black_level, sizeof(w->lcd_black_level)) != 0)
+        display_apply_tube_color(w->lcd_gain_r, w->lcd_gain_g, w->lcd_gain_b, w->lcd_black_level);
+    if (memcmp(w->lcd_curve_r, a->lcd_curve_r, sizeof(w->lcd_curve_r)) != 0 ||
+        memcmp(w->lcd_curve_g, a->lcd_curve_g, sizeof(w->lcd_curve_g)) != 0 ||
+        memcmp(w->lcd_curve_b, a->lcd_curve_b, sizeof(w->lcd_curve_b)) != 0 ||
+        memcmp(w->lcd_pedestal_r, a->lcd_pedestal_r, sizeof(w->lcd_pedestal_r)) != 0 ||
+        memcmp(w->lcd_pedestal_g, a->lcd_pedestal_g, sizeof(w->lcd_pedestal_g)) != 0 ||
+        memcmp(w->lcd_pedestal_b, a->lcd_pedestal_b, sizeof(w->lcd_pedestal_b)) != 0)
+        display_apply_tube_channel_curves(w->lcd_curve_r, w->lcd_curve_g, w->lcd_curve_b,
+                                          w->lcd_pedestal_r, w->lcd_pedestal_g, w->lcd_pedestal_b);
+    s_lcd_applied = *w;
+}
+
+static void lcd_preview_revert(void)
+{
+    if (s_lcd_prev_timer) esp_timer_stop(s_lcd_prev_timer);
+    if (!s_lcd_preview_pending) return;
+    lcd_tuning_t saved;
+    config_get_lcd_tuning(&saved);
+    lcd_apply_diff(&saved);
+    s_lcd_preview_pending = false;
+    ESP_LOGI(TAG, "[lcd] preview ended - saved tuning restored");
+}
+
+static void lcd_prev_work(void *arg) { (void)arg; lcd_preview_revert(); }
+/* esp_timer task: only queue the revert, the SPI work belongs on the httpd task like every other display apply. */
+static void lcd_prev_timer_cb(void *arg) { (void)arg; if (s_server) httpd_queue_work(s_server, lcd_prev_work, NULL); }
+
+static esp_err_t api_lcd_preview_get(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    return send_json(r, s_lcd_preview_pending ? "{\"preview\":true}" : "{\"preview\":false}");
+}
+
+static esp_err_t api_lcd_preview_post(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char body[1536];
+    cJSON *root = read_json_body_small(r, body, sizeof(body));
+    if (!root) return ESP_FAIL;
+    const bool revert = cJSON_IsTrue(cJSON_GetObjectItem(root, "revert"));
+    cJSON_Delete(root);
+    if (revert) {
+        lcd_preview_revert();
+        return send_json(r, "{\"status\":\"ok\",\"preview\":false}");
+    }
+    if (s_ota_active) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return send_json(r, "{\"error\":\"busy\"}");
+    }
+    lcd_tuning_t want;
+    if (!config_parse_lcd_tuning(body, &want))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid body"), ESP_FAIL;
+    lcd_apply_diff(&want);
+    s_lcd_preview_pending = true;
+    if (!s_lcd_prev_timer) {
+        const esp_timer_create_args_t ta = { .callback = lcd_prev_timer_cb, .name = "lcd_preview" };
+        if (esp_timer_create(&ta, &s_lcd_prev_timer) != ESP_OK) s_lcd_prev_timer = NULL;
+    }
+    if (s_lcd_prev_timer) {
+        esp_timer_stop(s_lcd_prev_timer);
+        esp_timer_start_once(s_lcd_prev_timer, (uint64_t)LCD_PREVIEW_MS * 1000ULL);
+    }
+    return send_json(r, "{\"status\":\"ok\",\"preview\":true}");
 }
 
 /* ── Theme Manager (downloadable theme packs) ───────────────────────────────
@@ -4299,11 +4467,11 @@ static void tm_auto_check(void)
 }
 
 /* ── Automatic firmware update ────────────────────────────────────────────────────────────────────────────
- * While it is being tested its controls are in the hidden debug panel (config auto_update_*). Once a day, inside a 2-hour window
+ * Settings: config auto_update_* (System tab). Once a day, inside a 2-hour window
  * starting at auto_update_hour (local time), the clock reads the newest release from GitHub (the same endpoints as the update check:
  * /releases/latest, or /releases?per_page=1 with pre-releases when update_repo is overridden), applies the policy (same major.minor
  * only, or any stable release), and hands the firmware and Web UI assets with their SHA-256 digests to the same ota_pull_task() the
- * Online Updater drives; the Web UI pull after the reboot is the existing post-OTA one. Dry run only records what it would do. A
+ * Online Updater drives; the Web UI pull after the reboot is the existing post-OTA one. A
  * version that was rolled back (pb_failed) or failed AU_MAX_TRIES times is skipped. */
 #define AU_NS            "nextube_diag"
 #define AU_WINDOW_H      2
@@ -4318,7 +4486,8 @@ static struct {
     time_t        last;            /* last look at GitHub (epoch s), 0 = none since boot */
     char          result[120];
     char          latest[24];
-    char          updated_to[24];  /* set when this boot followed an automatic update */
+    char          updated_to[24];  /* set when this boot followed an automatic update ... */
+    char          updated_from[24];/* ... and the version it replaced */
 } s_au;
 static int64_t s_au_next_us;
 static volatile bool s_au_force_install;
@@ -4424,7 +4593,7 @@ static char *au_fetch_release(const char *repo, bool overridden)
     return buf;
 }
 
-/* One look at GitHub. force = from the debug panel (ignores the window, the switch and the attempt limit); install = really install
+/* One look at GitHub. force = from the Check now button (ignores the window, the switch and the attempt limit); install = really install
  * (otherwise only record what would happen). On a real install this only returns if it failed: the clock reboots on success. */
 static void au_run(bool force, bool install)
 {
@@ -4495,7 +4664,7 @@ static void au_run(bool force, bool install)
             else {
                 strlcpy(fw_url, fu, sizeof(s_pull.url)); strlcpy(fw_sha, fs, sizeof(fw_sha));
                 strlcpy(ui_url, uu, sizeof(s_pull.webui_url)); strlcpy(ui_sha, us, sizeof(ui_sha));
-                snprintf(s_au.result, sizeof(s_au.result), install ? "installing v%s" : "would install v%s (dry run)", ver);
+                snprintf(s_au.result, sizeof(s_au.result), install ? "installing v%s" : "v%s is available", ver);
             }
         }
     }
@@ -4508,6 +4677,7 @@ static void au_run(bool force, bool install)
         au_nvs_set_str("au_try", ver);
         au_nvs_set_u8("au_tries", (uint8_t)((tried_same ? au_nvs_u8("au_tries") : 0) + 1));
         au_nvs_set_str("au_done", ver);
+        au_nvs_set_str("au_from", FW_VERSION_STR);
         snprintf(s_pull.url, sizeof(s_pull.url), "%s", fw_url);
         snprintf(s_pull.sha256, sizeof(s_pull.sha256), "%s", fw_sha);
         snprintf(s_pull.webui_url, sizeof(s_pull.webui_url), "%s", ui_url);
@@ -4537,11 +4707,10 @@ static void au_forced_job(void *arg)
 /* Runs on the shared network task every wake-up: starts a look when it is inside the window and nothing else is going on. */
 static void au_tick(void)
 {
-    bool enabled, dry;
+    bool enabled;
     uint8_t hour;
     config_lock();
     enabled = config_get()->auto_update_enabled;
-    dry = config_get()->auto_update_dry_run;
     hour = config_get()->auto_update_hour;
     config_unlock();
     const int64_t now_us = esp_timer_get_time();
@@ -4551,7 +4720,7 @@ static void au_tick(void)
     ntp_get_local(&lt);
     if (((lt.tm_hour - (int)hour + 24) % 24) >= AU_WINDOW_H) return;
     s_au_next_us = now_us + AU_RECHECK_US;
-    au_run(false, !dry);
+    au_run(false, true);
 }
 
 /* At startup: note an update this clock just installed by itself, and clear the marker. */
@@ -4561,6 +4730,7 @@ static void au_boot_note(void)
     if (au_nvs_str("au_done", done, sizeof(done)) && done[0]) {
         if (strcmp(done, FW_VERSION_STR) == 0) {
             snprintf(s_au.updated_to, sizeof(s_au.updated_to), "%s", done);
+            au_nvs_str("au_from", s_au.updated_from, sizeof(s_au.updated_from));
             au_nvs_set_u8("au_tries", 0);
             ESP_LOGI(TAG, "[auto-update] running v%s after an automatic update", done);
         }
@@ -4576,7 +4746,6 @@ static esp_err_t api_auto_update_get(httpd_req_t *r)
     config_lock();
     const nextube_config_t *c = config_get();
     cJSON_AddBoolToObject(o, "enabled", c->auto_update_enabled);
-    cJSON_AddBoolToObject(o, "dry_run", c->auto_update_dry_run);
     cJSON_AddNumberToObject(o, "policy", c->auto_update_policy);
     cJSON_AddNumberToObject(o, "hour", c->auto_update_hour);
     config_unlock();
@@ -4585,6 +4754,7 @@ static esp_err_t api_auto_update_get(httpd_req_t *r)
     cJSON_AddStringToObject(o, "latest", s_au.latest);
     cJSON_AddStringToObject(o, "result", s_au.result);
     cJSON_AddStringToObject(o, "updated_to", s_au.updated_to);
+    cJSON_AddStringToObject(o, "updated_from", s_au.updated_from);
     cJSON_AddNumberToObject(o, "last_check", (double)s_au.last);
     char *js = cJSON_PrintUnformatted(o);
     cJSON_Delete(o);
@@ -7171,6 +7341,8 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/themes/verify",         api_themes_verify),
     R(HTTP_GET,  "/api/auto_update",           api_auto_update_get),
     R(HTTP_POST, "/api/auto_update/check",     api_auto_update_check),
+    R(HTTP_GET,  "/api/lcd_preview",           api_lcd_preview_get),
+    R(HTTP_POST, "/api/lcd_preview",           api_lcd_preview_post),
     R(HTTP_GET,  "/api/themes/status",         api_themes_status),
     R(HTTP_GET,  "/api/stock_repair_status",   api_stock_repair_status),
     R(HTTP_GET,  "/api/stock_missing_list",    api_stock_missing_list),

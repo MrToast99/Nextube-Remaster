@@ -15,6 +15,9 @@
  *  A _Static_assert in main.c enforces that the two constants stay in sync. */
 #define CFG_MIC_BAND_COUNT  24
 
+/* A freshly flashed firmware image is confirmed after this much uptime (see the OTA health gate in main.c); until then it cannot be flashed over. */
+#define OTA_VALID_AFTER_S   180
+
 /* Missing-stock-files exception list (see stock_exception_paths below) —
  * 32 entries is generous headroom (most real usage is a handful of removed
  * theme directories), and 96 chars comfortably fits any real STOCK_FILES
@@ -318,7 +321,6 @@ typedef struct {
                                                the Home Assistant "Nextube Update Available" topic */
     /* Automatic firmware update (controls in the hidden debug panel while it is being tested). */
     bool             auto_update_enabled;  /* install new releases by itself during a daily window */
-    bool             auto_update_dry_run;  /* only log what would be installed */
     uint8_t          auto_update_policy;   /* 0 = same major.minor only (patch releases), 1 = any stable release */
     uint8_t          auto_update_hour;     /* local hour (0-23) the 2-hour window starts */
     bool             social_enabled;     /* master gate — if false, social counter polling never starts */
@@ -377,6 +379,8 @@ typedef struct {
     bool             weather_panel4_en;  /* true = show daily Hi/Lo panel    */
     bool             weather_panel5_en;  /* true = show indoor temperature panel (SHT30) */
     bool             weather_panel6_en;  /* true = show indoor humidity panel (SHT30)    */
+    bool             weather_panel7_en;  /* true = show the 24 h rain / snow outlook chart (6 tubes) */
+    bool             weather_sun_split;  /* true = sunrise and sunset on separate screens, one large time each, laid out like the clock */
 
     /* Mode Rotation – auto-cycle through enabled modes on a timer.
      * When rotation_enabled is false the mode never changes automatically;
@@ -445,6 +449,7 @@ typedef struct {
     bool             tube6_panel_outdoor_ht;  /* Outdoor temp (top half) + outdoor humidity (bottom half) —
                                                 * combines what tube6_panel_temp + tube6_panel_humidity would
                                                 * otherwise need two separate rotation slots for. */
+    bool             tube6_panel_outlook;     /* Rain / snow outlook: first wet spell in the next 24 h + an hourly bar strip */
     uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
     /* Dual info-panel mode (24H Custom): when true the colon is dropped and an
      * INDEPENDENT info panel is shown on BOTH tube 5 (2nd-from-right, LCD index
@@ -463,6 +468,7 @@ typedef struct {
     bool             tube5_panel_wind;        /* Wind speed (wind symbol + km/h value) */
     bool             tube5_panel_aqi;         /* Air quality — US EPA AQI (Open-Meteo, keyless) */
     bool             tube5_panel_outdoor_ht;  /* Outdoor temp (top half) + outdoor humidity (bottom half) */
+    bool             tube5_panel_outlook;     /* Rain / snow outlook (see tube6_panel_outlook) */
     char             aqi_standard[8];         /* AQI scale: "auto" (by location) | "us" | "eu" */
     char             update_repo[64];
 } nextube_config_t;
@@ -519,6 +525,40 @@ void config_unlock(void);
 
 /** Get pointer to the live config.  Call only while holding config_lock(). */
 const nextube_config_t *config_get(void);
+
+/* The 24H Custom info panels, in the order the display numbers them (the panel kinds of render_cx_panel()), and the weather-mode pages.
+ * The per-panel config flags (tube6_panel_*, tube5_panel_*, weather_panelN_en) stay separate fields and JSON keys; these helpers give the
+ * display and the web server the same flags as arrays, so a new panel is one line in config_mgr.c's lists instead of a dozen places. */
+enum { CFG_CXP_WEATHER, CFG_CXP_WEEKDATE, CFG_CXP_HT, CFG_CXP_TEMP, CFG_CXP_SUNRISE, CFG_CXP_PUSH, CFG_CXP_HUMIDITY, CFG_CXP_WIND,
+       CFG_CXP_AQI, CFG_CXP_OUTDOOR_HT, CFG_CXP_OUTLOOK, CFG_CXP_COUNT };
+#define CFG_WX_PANEL_COUNT 8
+/* Which panels are enabled for tube 6 (tube == 6) or tube 5 (tube == 5), in CFG_CXP_* order. Returns how many are on. */
+int  config_cx_panels(const nextube_config_t *cfg, int tube, bool out[CFG_CXP_COUNT]);
+/* Which weather-mode pages are enabled (page 0..7). */
+void config_weather_panels(const nextube_config_t *cfg, bool out[CFG_WX_PANEL_COUNT]);
+
+/** The per-tube LCD tuning values only (everything the Advanced LCD Tuning card sets), under the same names as in nextube_config_t. */
+typedef struct {
+    uint8_t lcd_invert_mask;
+    uint8_t lcd_init_profile[6];
+    uint8_t lcd_vcom[6];
+    float   lcd_gamma[6];
+    int8_t  lcd_col_offset[6];
+    int8_t  lcd_row_offset[6];
+    uint8_t lcd_tube_brightness[6];
+    uint8_t lcd_shadow_lift[6];
+    uint8_t lcd_gain_r[6], lcd_gain_g[6], lcd_gain_b[6];
+    uint8_t lcd_black_level[6];
+    uint8_t lcd_curve_r[6], lcd_curve_g[6], lcd_curve_b[6];
+    uint8_t lcd_pedestal_r[6], lcd_pedestal_g[6], lcd_pedestal_b[6];
+} lcd_tuning_t;
+
+/** Copies the saved LCD tuning values out of the live config. */
+void config_get_lcd_tuning(lcd_tuning_t *out);
+
+/** Starts from the saved LCD tuning and overlays the lcd_* keys found in `json` (same keys, ranges and clamping as config.json), without touching
+ *  the live config or flash. Returns false when `json` is not valid JSON. Used by the LCD preview (A/B compare). */
+bool config_parse_lcd_tuning(const char *json, lcd_tuning_t *out);
 
 /** Update config from a JSON string, save to flash, and broadcast. */
 bool config_set_json(const char *json, size_t len);

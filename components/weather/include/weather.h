@@ -1,5 +1,7 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
+#include <time.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,7 +37,37 @@ typedef struct {
     int   european_aqi;
     float pm2_5;
     bool  aqi_valid;
+    /* Next-24-hour precipitation outlook: the hourly arrays of the same Open-Meteo request as the daily range. Slot 0 is the hour that was
+     * current when the data was fetched (outlook_slot0 = its start, epoch seconds); outlook_hours is 0 until the first successful fetch.
+     * Read it through weather_get_outlook(), which lines the slots up with "now". */
+    uint8_t outlook_hours;
+    float   outlook_mm[24];        /* precipitation per hour (mm, rain plus the water in snow) */
+    float   outlook_snow_cm[24];   /* snowfall per hour (cm) */
+    uint8_t outlook_prob[24];      /* precipitation probability, % */
+    time_t  outlook_slot0;
 } weather_data_t;
+
+/** The precipitation outlook lined up with the current hour (slot 0 = this hour), plus a summary of the first wet spell in it. An hour counts
+ *  as wet from 0.2 mm, or from any measurable amount at a 60 % chance or more. */
+typedef struct {
+    bool    valid;          /* outlook data is present and not stale */
+    bool    event;          /* a wet hour is expected within the window */
+    bool    now;            /* it is already wet this hour */
+    bool    snow_event;     /* the first wet hour has snowfall */
+    uint8_t hours;          /* number of slots filled in mm[] / prob[] / snow[] */
+    uint8_t duration_h;     /* consecutive wet hours of the first spell */
+    int     start_min;      /* minutes until the first wet hour starts (0 when it is already wet) */
+    int     start_hour;     /* local clock hour (0-23) the first wet hour starts */
+    int     chance_pct;     /* highest probability during the spell */
+    float   peak_mm;        /* heaviest hour of the spell */
+    float   mm[24];
+    uint8_t prob[24];
+    bool    snow[24];
+} weather_outlook_t;
+
+/** Fills *o from the latest Open-Meteo hourly data. Returns false (and o->valid = false) before the first successful fetch, or when the data
+ *  is older than its 24 hours. Thread-safe; keep *o off a small stack (about 170 bytes). */
+bool weather_get_outlook(weather_outlook_t *o);
 void weather_start(void);
 const weather_data_t *weather_get(void);
 

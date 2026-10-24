@@ -316,8 +316,51 @@ static void publish_discovery(bool include_sensors)
                  s_hostname, st, dev);
         publish(topic, payload, 1);
         vTaskDelay(pdMS_TO_TICKS(1));
+
     }
 
+    /* ── Rain / snow outlook (next 24 h, Open-Meteo): one state topic, three sensors. Independent of the SHT30, so outside include_sensors. ── */
+    make_topic(st, sizeof(st), "sensor/precip/state");
+    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s_precip_type/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Next Precipitation\","
+             "\"unique_id\":\"%s_precip_type\","
+             "\"state_topic\":\"%s\","
+             "\"value_template\":\"{{ value_json.type }}\","
+             "\"icon\":\"mdi:umbrella\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, st, dev);
+    publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s_precip_in/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Next Precipitation In\","
+             "\"unique_id\":\"%s_precip_in\","
+             "\"state_topic\":\"%s\","
+             "\"value_template\":\"{{ none if value_json.minutes < 0 else value_json.minutes }}\","
+             "\"unit_of_measurement\":\"min\","
+             "\"device_class\":\"duration\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, st, dev);
+    publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s_precip_mm/config", s_hostname);
+    snprintf(payload, sizeof(payload),
+             "{"
+             "\"name\":\"Nextube Next Precipitation Amount\","
+             "\"unique_id\":\"%s_precip_mm\","
+             "\"state_topic\":\"%s\","
+             "\"value_template\":\"{{ value_json.mm }}\","
+             "\"unit_of_measurement\":\"mm/h\","
+             "\"device\":{%s}"
+             "}",
+             s_hostname, st, dev);
+    publish(topic, payload, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
     /* ── Mode select ── */
     make_topic(st, sizeof(st), "mode/state");
     make_topic(cmd, sizeof(cmd), "mode/set");
@@ -743,6 +786,22 @@ static void publish_sensors(void)
         make_topic(topic, sizeof(topic), "sensor/aqi/state");
         snprintf(payload, sizeof(payload), "{\"aqi\":%d}", aqi);
         publish(topic, payload, 0);
+    }
+
+    /* Next-24-hour rain / snow outlook: type "rain" / "snow" / "none", minutes until it starts (-1 = none), heaviest hour in mm. */
+    {
+        weather_outlook_t ol;
+        if (weather_get_outlook(&ol)) {
+            char op[128];
+            make_topic(topic, sizeof(topic), "sensor/precip/state");
+            unsigned mm10 = (ol.event && ol.peak_mm > 0.0f) ? (unsigned)(ol.peak_mm * 10.0f + 0.5f) : 0u;
+            mm10 %= 1000u;
+            const int minutes = ol.event ? (ol.start_min % 10000) : -1;
+            snprintf(op, sizeof(op), "{\"type\":\"%s\",\"minutes\":%d,\"mm\":%u.%u,\"chance\":%u}",
+                     ol.event ? (ol.snow_event ? "snow" : "rain") : "none", minutes, mm10 / 10u, mm10 % 10u,
+                     ol.event ? ((unsigned)ol.chance_pct % 1000u) : 0u);
+            publish(topic, op, 0);
+        }
     }
 
     sht30_reading_t s;

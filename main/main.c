@@ -384,8 +384,6 @@ static void cjson_psram_free(void *ptr)
  * started fine and then crashed or hung a minute later was never rolled back. It is now confirmed after OTA_VALID_AFTER_S of
  * uptime, or when the clock is restarted on purpose (esp_restart() runs the shutdown handler; a panic or watchdog reset does
  * not). A crash loop, or a power cut inside the window, therefore returns to the last firmware that stayed up. */
-#define OTA_VALID_AFTER_S 180
-
 static void ota_mark_valid_if_pending(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();

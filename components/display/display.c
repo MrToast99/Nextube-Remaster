@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "weather.h"
+#include "outlook_calc.h"      /* the outlook's pure logic (host-tested): outlook_fmt_hour / outlook_eta_text */
 #include "sun_calc.h"           /* sun_calc_solar / sun_calc_moon_phase — shared with leds.c */
 #include "leds.h"               /* leds_weather_flash() — WeatherLive lightning */
 #include "sht30.h"              /* sht30_get() — indoor H/T for 24H_CX panel */
@@ -351,6 +352,13 @@ static struct {
  * uniform color block.  State mirrors the color-cycle variables above. */
 static volatile uint8_t s_snow_mask     = 0;
 static int64_t          s_snow_end_us   = 0;   /* same convention as s_burnin_end_us */
+
+/* A tube held by Anti Burn-in (color cycle, snow or test pattern) belongs to the burn-in painter in the display task: nothing else may write
+ * to it, or its own content shows until the next repaint. Every writer the render paths funnel through (display_fill, display_show_digit,
+ * display_show_digit_dirty, ht_blit_at, the update-indicator stamps, the spectrum margins) tests BURNIN_HELD() and returns. The burn-in's
+ * own painters and the panel (re)initialisation raise s_bi_bypass around their writes. Single writer (the display task), so no lock. */
+#define BURNIN_HELD(tube) (((s_burnin_mask | s_snow_mask) & (1u << (tube))) != 0)
+static bool s_bi_bypass = false;
 
 /* ── Panel profiles (VCOM + gamma) ──────────────────────────────────────────
  * ST7735 "Green Tab" (original panels) and ST7735S (replacements like
@@ -732,7 +740,9 @@ void display_init(void)
     gpio_set_level(PIN_LCD_RST, 0); vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_level(PIN_LCD_RST, 1); vTaskDelay(pdMS_TO_TICKS(120));
 #endif
+    s_bi_bypass = true;
     for (int i = 0; i < LCD_COUNT; i++) { st7735_init_one(i); display_fill(i, 0x0000); }
+    s_bi_bypass = false;
     /* display_apply_invert_mask(), display_apply_tube_offsets(), and
      * display_apply_tube_brightness() are called by app_main() after display_init()
      * once config_mgr has loaded the saved values. */
@@ -984,7 +994,9 @@ void display_apply_tube_vcom(const uint8_t vcom[6])
         select_tube(i);
         lcd_cmd((s_invert_mask & (1u << i)) ? 0x21 : 0x20);
         deselect_all();
+        s_bi_bypass = true;
         display_fill(i, 0x0000);
+        s_bi_bypass = false;
     }
     display_unpause();
 
@@ -1078,7 +1090,9 @@ void display_apply_init_profiles(const uint8_t profiles[6])
         deselect_all();
 
         /* Clear framebuffer; display task re-renders within one 200 ms tick. */
+        s_bi_bypass = true;
         display_fill(i, 0x0000);
+        s_bi_bypass = false;
     }
 
     display_unpause();
@@ -1156,6 +1170,7 @@ static inline void spi_tx_pixels(const void *buf, size_t len_bytes)
 void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
+    if (BURNIN_HELD(tube) && !s_bi_bypass) return;
     select_tube(tube);
     /* Fill the whole ±BURNIN_SHIFT_MAX band in one window — solid color, so
      * simply widening the fill covers the shifted window AND every edge
@@ -1307,6 +1322,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
      * replicate the frame's own edge column (plain images). */
     const uint8_t *marg_src = s_wl_edge_margin_src ? s_wl_edge_margin_src : data;
     s_wl_edge_margin_src = NULL;
+    if (BURNIN_HELD(tube) && !s_bi_bypass) return;
 
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
@@ -1600,7 +1616,9 @@ static void testpat_paint(int tube, uint8_t id)
         testpat_rows(fb, 0, LCD_HEIGHT, 255, 255, 255);
         break;
     }
+    s_bi_bypass = true;
     display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+    s_bi_bypass = false;
 }
 
 bool display_start_test_pattern(uint8_t mask, uint32_t duration_s, uint8_t pattern)
@@ -1672,6 +1690,7 @@ void display_set_debug_wl_fps(int fps)
 #define WEATHER_PANEL_HILO  4   /* daily Hi / Lo — internal HI→LO sub-rotation */
 #define WEATHER_PANEL_INTMP 5   /* indoor temperature (SHT30) — mirrors TEMP */
 #define WEATHER_PANEL_INHUM 6   /* indoor humidity (SHT30) — mirrors HUM */
+#define WEATHER_PANEL_RAIN  7   /* next 24 h rain / snow outlook — one bar chart across all six tubes */
 /* Stack: config snapshot (~1900 B, moved to static cfg_snap in display_task
  * so it's off the stack) + JPEG decode call chain. 8 KB was too tight — the
  * panic handler couldn't print a backtrace. Measured peak across
@@ -2217,6 +2236,7 @@ static void flip_build_frame(uint8_t       *out,
  */
 static void flip_to_image(int tube, const uint8_t *new_buf, const char *path)
 {
+    if (BURNIN_HELD(tube) && !s_bi_bypass) return;
     bool path_changed = (strncmp(path,
                                  s_flip_path[tube],
                                  sizeof(s_flip_path[tube]) - 1) != 0);
@@ -3057,6 +3077,7 @@ static void ht_blit_at(int tube, const uint8_t *tile_buf, int rows, int y_tube,
      * (b) send extra pixel data to the ST7735 after its window closes, which
      * some panel variants wrap to a visible row, producing a phantom color bar. */
     if (y_tube < 0 || y_tube >= LCD_HEIGHT) return;   /* no negative-index bg reads */
+    if (BURNIN_HELD(tube) && !s_bi_bypass) return;
     if (rows > LCD_HEIGHT - y_tube) rows = LCD_HEIGHT - y_tube;
 
     fg = wl_apply_px(fg, tube, s_gamma_lut_active[tube]);
@@ -3274,6 +3295,7 @@ static const char *inout_label(const char *lang, bool indoor)
 static void cx_stamp_update_indicator(int tube)
 {
     if (!s_update_indicator) return;
+    if (BURNIN_HELD(tube) && !s_bi_bypass) return;
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x
                             + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
@@ -3339,6 +3361,8 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
 static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g, int fg_b);
 static void wl_outdoor_ht_panel(uint8_t *fb, const char *lang, int temp_disp, int hum, bool valid,
                                 int fg_r, int fg_g, int fg_b);
+static void wl_outlook_panel(uint8_t *fb, int fg_r, int fg_g, int fg_b);
+static void outlook_rect(uint8_t *fb, int x0, int y0, int w, int h, uint16_t c);
 
 /* Per-frame render state set by render_weatherlive at the top of each frame.
  * Defaults reflect legacy WeatherLive behaviour (white glyphs, dark shadow). */
@@ -3540,7 +3564,7 @@ static float to_display_temp(float celsius, bool use_fahrenheit)
 }
 
 static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
-                             int lcd_tube, const bool enabled[10],
+                             int lcd_tube, const bool enabled[11],
                              uint8_t panel_id, int8_t *last_kind)
 {
     /* Same burn-in/snow guard as wl_draw_tube()/wl_draw_panel() — avoids a
@@ -3596,10 +3620,10 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
     /* Resolve panel_id → concrete panel kind by walking the caller's enabled[].
      * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor temp+Hi/Lo,
      * 4=sunrise, 5=externally-pushed image, 6=outdoor humidity, 7=wind,
-     * 8=air quality, 9=outdoor H/T (combined). */
+     * 8=air quality, 9=outdoor H/T (combined), 10=rain / snow outlook. */
     int kind = -1;
     int count = 0;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 11; i++) {
         if (enabled[i]) {
             if (count == (int)panel_id) { kind = i; break; }
             count++;
@@ -3989,6 +4013,20 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         int  temp_disp = ow ? (int)lroundf(to_display_temp(ow->temp_c, use_f)) : 0;
         int  hum       = ow ? (int)lroundf(ow->humidity) : 0;
         wl_outdoor_ht_panel(fb, cfg->language, temp_disp, hum, ow != NULL, fg_r, fg_g, fg_b);
+        display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
+
+    } else if (kind == 10) {
+        /* ── Rain / snow outlook — the SAME wl_outlook_panel() drawing code as the WeatherLive panel, over the theme's AMPM/blank.jpg.
+         * Its data (Open-Meteo hourly) does not depend on the current-conditions provider, so there is no cold-boot weekdate fallback:
+         * until the first fetch the panel shows "--". */
+        uint8_t *fb = wl_fb();
+        if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+
+        cx_seed_framebuf(fb, lcd_tube, cfg);
+
+        int fg_r, fg_g, fg_b;
+        cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
+        wl_outlook_panel(fb, fg_r, fg_g, fg_b);
         display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
     }
 
@@ -5880,6 +5918,7 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
      * delegating so the fallback paints the same sky margin. */
     const uint8_t *marg_src = s_wl_edge_margin_src ? s_wl_edge_margin_src : data;
     s_wl_edge_margin_src = NULL;
+    if (BURNIN_HELD(tube) && !s_bi_bypass) { s_wl_prev_valid[tube] = false; return; }
 
     const size_t tube_bytes = (size_t)w * h * 2;
     const int    row_bytes  = w * 2;
@@ -6652,6 +6691,12 @@ static const wx_pt_t WX_RAIN[] = { {20,32}, {16,30}, {14,27}, {15,22}, {19,20}, 
  * coordinates — a deliberate balance tweak against rows 1/3, not a
  * transcription slip. Don't "fix" it back to match the source exactly. */
 static const wx_pt_t WX_SQUALLS[] = { {12,12}, {14,12}, {255,255}, {18,12}, {22,12}, {27,12}, {31,12}, {35,12}, {39,10}, {40,6}, {36,4}, {32,4}, {255,255}, {18,24}, {20,24}, {255,255}, {24,24}, {29,24}, {34,24}, {39,24}, {45,24}, {50,24}, {53,22}, {54,18}, {50,16}, {44,16}, {255,255}, {12,36}, {14,36}, {255,255}, {18,36}, {22,36}, {27,36}, {31,36}, {35,36}, {39,36}, {42,39}, {40,43}, {36,44}, {32,44}, {255,255} };
+/* The wind glyph (wind page full-tube, tube 5/6 wind panel): three streaks, the top and middle curling up, the bottom curling down.
+ * Own 120x96 design space (twice the other icons'), drawn at WX_SCALE / 2, so the curls have enough points to stay round. */
+static const wx_pt_t WX_WIND[] = {
+    {18,34}, {66,34}, {69,33}, {71,32}, {73,31}, {75,29}, {76,27}, {76,25}, {76,23}, {76,20}, {75,18}, {74,16}, {72,15}, {70,14}, {67,13}, {65,13}, {63,14}, {60,15}, {59,17}, {57,19}, {255,255},
+    {8,48}, {102,48}, {104,48}, {106,47}, {108,45}, {110,44}, {111,42}, {112,40}, {112,37}, {111,35}, {111,33}, {109,31}, {107,30}, {105,29}, {103,28}, {101,28}, {99,28}, {97,29}, {95,31}, {93,33}, {92,35}, {255,255},
+    {31,63}, {74,63}, {77,63}, {79,64}, {81,65}, {82,67}, {83,69}, {84,71}, {84,73}, {84,75}, {83,77}, {82,79}, {80,81}, {78,82}, {76,83}, {74,83}, {72,82}, {70,82}, {68,80}, {66,79}, {65,77}, {255,255} };
 static const wx_pt_t WX_THUNDERSTORM[] = { {20,32}, {16,30}, {14,27}, {15,22}, {19,20}, {21,17}, {23,13}, {27,11}, {31,10}, {35,11}, {38,15}, {40,19}, {43,21}, {46,24}, {45,29}, {42,32}, {38,32}, {33,32}, {29,32}, {24,32}, {20,32}, {255,255}, {30,32}, {27,35}, {25,39}, {27,40}, {29,41}, {27,45}, {27,47}, {30,44}, {33,41}, {36,38}, {32,38}, {31,36}, {34,32}, {30,32}, {255,255} };
 static const wx_pt_t WX_SNOW[] = { {20,32}, {16,30}, {14,27}, {15,22}, {19,20}, {21,17}, {23,13}, {27,11}, {31,10}, {35,11}, {38,15}, {40,19}, {43,21}, {46,24}, {45,29}, {42,32}, {38,32}, {33,32}, {29,32}, {24,32}, {20,32}, {255,255}, {18,34}, {18,40}, {255,255}, {15,37}, {21,37}, {255,255}, {16,35}, {20,39}, {255,255}, {16,39}, {20,35}, {255,255}, {29,38}, {29,44}, {255,255}, {26,41}, {32,41}, {255,255}, {27,39}, {31,43}, {255,255}, {27,43}, {31,39}, {255,255}, {39,34}, {39,38}, {255,255}, {37,36}, {41,36}, {255,255}, {38,35}, {40,37}, {255,255}, {38,37}, {40,35}, {255,255} };
 static const wx_pt_t WX_TORNADO[] = { {18,12}, {22,12}, {27,12}, {31,12}, {35,12}, {40,12}, {41,14}, {40,18}, {36,18}, {31,18}, {27,18}, {23,18}, {21,19}, {23,23}, {27,24}, {32,24}, {36,24}, {37,26}, {36,30}, {31,30}, {27,30}, {27,33}, {29,36}, {34,36}, {33,40}, {30,42}, {255,255} };
@@ -6668,23 +6713,29 @@ static const wx_pt_t WX_VOLCANICASH[] = { {14,44}, {16,40}, {18,37}, {21,33}, {2
 #define WX_Y0      ((LCD_HEIGHT - 48.0f * WX_SCALE) / 2.0f)
 #define WX_THICK   2.88f   /* max(1.5, SEG_THICK*0.24) * WX_SCALE */
 
-/* Draws one weather icon's point table at (0,y0), scaled by WX_SCALE, at the
- * given stroke thickness — the shared primitive behind wx_draw_icon() below
- * and every "universal" wind-streak glyph call site (render_weather_wind()'s
- * full-tube glyph, wl_wind_panel()'s compact icon-above-value layout): same
- * WX_SQUALLS point table everywhere a wind streak appears, just placed and
- * weighted differently per call site, so the shape itself never drifts. */
-static void wx_draw_icon_ex(uint8_t *fb, const wx_pt_t *pts, size_t n,
-                             float y0, float thick, int r, int g, int b)
+/* Draws one icon's point table at (0,y0), scaled by `scale`, at the given
+ * stroke thickness — the shared primitive behind wx_draw_icon_ex() below
+ * (every 60x48 weather icon, scale WX_SCALE) and the wind glyph (WX_WIND,
+ * 120x96, scale WX_SCALE / 2): render_weather_wind()'s full-tube glyph and
+ * wl_wind_panel()'s compact icon-above-value layout use the same table,
+ * just placed differently, so the shape itself never drifts. */
+static void wx_draw_icon_scaled(uint8_t *fb, const wx_pt_t *pts, size_t n,
+                                 float y0, float scale, float thick, int r, int g, int b)
 {
     bool have_prev = false;
     float px = 0, py = 0;
     for (size_t i = 0; i < n; i++) {
         if (pts[i].x == 255 && pts[i].y == 255) { have_prev = false; continue; }
-        float x = pts[i].x * WX_SCALE, y = y0 + pts[i].y * WX_SCALE;
+        float x = pts[i].x * scale, y = y0 + pts[i].y * scale;
         if (have_prev) wx_stroke_line(fb, px, py, x, y, thick, r, g, b);
         px = x; py = y; have_prev = true;
     }
+}
+
+static void wx_draw_icon_ex(uint8_t *fb, const wx_pt_t *pts, size_t n,
+                             float y0, float thick, int r, int g, int b)
+{
+    wx_draw_icon_scaled(fb, pts, n, y0, WX_SCALE, thick, r, g, b);
 }
 
 /* Draws one weather icon's point table at (0,WX_Y0), scaled by WX_SCALE. */
@@ -7170,15 +7221,15 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
         dm_paint_grid_bg(fb, 2, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
         dm_draw_glyph_on_scaled(fb, 40, 41, DM_CP_ICON_WIND, 2, 1, 2, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
     } else {
-        /* Same WX_SQUALLS icon as render_weather_wind() and the "squalls"
-         * weather condition — placed higher (y0=8, not the standard WX_Y0)
-         * since this tube shares space with the value below it. */
-        const size_t wn = sizeof(WX_SQUALLS) / sizeof(WX_SQUALLS[0]);
+        /* Same WX_WIND glyph as render_weather_wind() — placed higher (y0=8,
+         * not the standard WX_Y0) since this tube shares space with the
+         * value below it. */
+        const size_t wn = sizeof(WX_WIND) / sizeof(WX_WIND[0]);
         const float  icon_y0 = 8.0f;
         if (wl_shadow_on())
-            wx_draw_icon_ex(fb, WX_SQUALLS, wn, icon_y0, WX_THICK + 4,
-                            s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
-        wx_draw_icon_ex(fb, WX_SQUALLS, wn, icon_y0, WX_THICK, r, g, b);
+            wx_draw_icon_scaled(fb, WX_WIND, wn, icon_y0, WX_SCALE / 2, WX_THICK + 4,
+                                s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
+        wx_draw_icon_scaled(fb, WX_WIND, wn, icon_y0, WX_SCALE / 2, WX_THICK, r, g, b);
     }
     /* Convert km/h → the configured unit, then draw the value with a small
      * unit label beneath it.  wind_kph/unit only change on a weather poll
@@ -7399,9 +7450,353 @@ static void wl_outdoor_ht_panel(uint8_t *fb, const char *lang, int temp_disp, in
     }
 }
 
+/* Drawing helpers shared by the six-tube outlook page (render_weather_outlook) and the tube 5/6 outlook panel (wl_outlook_panel). */
+#define OUTLOOK_TOP      54   /* chart row of 4 mm/h (the peak pill sits 21 rows above it) */
+#define OUTLOOK_YMAX     135  /* chart row of a dry hour (the baseline sits right under it) */
+
+static inline void ol_px(uint8_t *fb, int x, int y, int r, int g, int b)
+{
+    if (x < 0 || x >= LCD_WIDTH || y < 0 || y >= LCD_HEIGHT) return;
+    const uint16_t c = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    uint8_t *px = fb + ((size_t)y * LCD_WIDTH + (size_t)x) * 2;
+    px[0] = (uint8_t)(c >> 8);
+    px[1] = (uint8_t)(c & 0xFF);
+}
+
+/* Blend over what is already there (the sky or theme background), alpha 0..255. */
+static void ol_mix(uint8_t *fb, int x, int y, int r, int g, int b, int a)
+{
+    if (x < 0 || x >= LCD_WIDTH || y < 0 || y >= LCD_HEIGHT) return;
+    wl_blend_px(fb + ((size_t)y * LCD_WIDTH + (size_t)x) * 2, r, g, b, a);
+}
+
+static void ol_dot(uint8_t *fb, int cx, int cy, int r, int g, int b)
+{
+    for (int dy = -3; dy <= 3; dy++)
+        for (int dx = -3; dx <= 3; dx++)
+            if (dx * dx + dy * dy <= 10) ol_px(fb, cx + dx, cy + dy, r, g, b);
+}
+
+/* 5x7 pixel glyphs for the peak pill and the hour labels: digits, '.', and the letters m n o w a p h. Too small for any of the real fonts, and the same on every theme. */
+static const uint8_t ol_glyph[18][7] = {
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F},
+    {0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E}, {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E},
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E},
+    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, {0,0,0,0,0,0,0x10},                   {0,0,0x1A,0x15,0x15,0x15,0x15},
+    {0,0,0x16,0x19,0x11,0x11,0x11},       {0,0,0x0E,0x11,0x11,0x11,0x0E},       {0,0,0x11,0x11,0x15,0x15,0x0A},   /* n o w */
+    {0,0,0x0E,0x01,0x0F,0x11,0x0F},       {0,0,0x1E,0x11,0x11,0x1E,0x10},       {0x10,0x10,0x16,0x19,0x11,0x11,0x11},   /* a p h */
+};
+
+static int ol_tiny_idx(char ch)
+{
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    switch (ch) { case '.': return 10; case 'm': return 11; case 'n': return 12; case 'o': return 13; case 'w': return 14;
+                  case 'a': return 15; case 'p': return 16; case 'h': return 17; default: return -1; }
+}
+
+/* The pixel font is drawn 25 % larger: every source pixel covers OL_S(n+1) - OL_S(n) output pixels (one or two), so the 5x7 glyph comes out
+ * 6x9 and the strokes keep their shape. */
+#define OL_S(v) (((v) * 5 + 2) / 4)
+
+static int ol_tiny_width(const char *s)   /* scaled width in pixels */
+{
+    int w = 0;
+    for (; *s; s++) w += (*s == '.' ? 1 : *s == ' ' ? 2 : 5) + 1;
+    return w > 0 ? OL_S(w - 1) : 0;
+}
+
+static void ol_tiny(uint8_t *fb, int x, int y, const char *s, int r, int g, int b)
+{
+    int xu = 0;   /* cursor in unscaled pixels */
+    for (; *s; s++) {
+        const int gi = ol_tiny_idx(*s);
+        const int gw = (*s == '.') ? 1 : 5;
+        if (gi >= 0)
+            for (int row = 0; row < 7; row++)
+                for (int col = 0; col < gw; col++) {
+                    if (!(ol_glyph[gi][row] & (gw == 1 ? 0x10 : (0x10 >> col)))) continue;
+                    for (int py = OL_S(row); py < OL_S(row + 1); py++)
+                        for (int px = OL_S(xu + col); px < OL_S(xu + col + 1); px++) ol_px(fb, x + px, y + py, r, g, b);
+                }
+        xu += (*s == ' ' ? 2 : gw) + 1;
+    }
+}
+
+/* Filled rounded rectangle, corners cut 2 px on the outer row and 1 px on the next. */
+static void ol_pill(uint8_t *fb, int x, int y, int w, int h, int r, int g, int b)
+{
+    for (int row = 0; row < h; row++) {
+        const int edge = (row == 0 || row == h - 1) ? 2 : (row == 1 || row == h - 2) ? 1 : 0;
+        for (int col = edge; col < w - edge; col++) ol_px(fb, x + col, y + row, r, g, b);
+    }
+}
+
+/* Row of the curve at chart column x (0..479): flat before the first and after the last hour, spline in between. */
+static float ol_curve(const float *yv, int x)
+{
+    if (x <= 10)  return yv[0];
+    if (x >= 470) return yv[23];
+    const float f = (float)(x - 10) / 20.0f;
+    const int i = (int)f;
+    const float t = f - (float)i;
+    const float p0 = yv[i > 0 ? i - 1 : 0], p1 = yv[i], p2 = yv[i + 1], p3 = yv[i + 2 < 24 ? i + 2 : 23];
+    return 0.5f * (2.0f * p1 + (p2 - p0) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t * t + (3.0f * (p1 - p2) + p3 - p0) * t * t * t);
+}
+
+static void outlook_rect(uint8_t *fb, int x0, int y0, int w, int h, uint16_t c)
+{
+    for (int y = y0; y < y0 + h; y++) {
+        if (y < 0 || y >= LCD_HEIGHT) continue;
+        for (int x = x0; x < x0 + w; x++) {
+            if (x < 0 || x >= LCD_WIDTH) continue;
+            uint8_t *px = fb + ((size_t)y * LCD_WIDTH + (size_t)x) * 2;
+            px[0] = (uint8_t)(c >> 8);
+            px[1] = (uint8_t)(c & 0xFF);
+        }
+    }
+}
+
+/* accent per kind: [light background][snow] */
+static const uint8_t ol_acc_pal[2][2][3] = { { {70, 185, 255}, {190, 235, 255} }, { {5, 60, 150}, {15, 95, 150} } };
+
+/* ── Shared by the six-tube page and the tube 5/6 panel: the curve, the guides, the peak marker and the time pills ───────────────────── */
+
+/* The curve column by column: its row at each column (one extra for the last column's step) and whether that hour is snow. */
+typedef struct { uint8_t y[LCD_WIDTH + 1]; bool snow[LCD_WIDTH]; } ol_cols_t;
+
+static uint8_t ol_row(float y, int top, int ymax)
+{
+    if (y < (float)top)  y = (float)top;
+    if (y > (float)ymax) y = (float)ymax;
+    return (uint8_t)(y + 0.5f);
+}
+
+/* Fill under the curve (strongest at the top row, fading to the floor) and the line along it, over columns [x0, x1). The fill's opacity
+ * only depends on the row, so it is worked out once, and each column then blends straight down its own bytes. */
+static void ol_curve_fill(uint8_t *fb, const ol_cols_t *cols, int x0, int x1, int top, int ymax, bool light)
+{
+    const int a_top = light ? 170 : 192, a_bot = light ? 25 : 26;
+    uint8_t arow[LCD_HEIGHT];
+    for (int y = top; y <= ymax; y++) arow[y] = (uint8_t)(a_top - (a_top - a_bot) * (y - top) / (ymax - top));
+    for (int x = x0; x < x1; x++) {
+        const uint8_t *acc = ol_acc_pal[light][cols->snow[x]];
+        const int ar = acc[0], ag = acc[1], ab = acc[2];
+        const int ya = cols->y[x], yb = cols->y[x + 1];
+        uint8_t *px = fb + ((size_t)ya * LCD_WIDTH + (size_t)x) * 2;
+        for (int y = ya; y <= ymax; y++, px += LCD_WIDTH * 2) wl_blend_px(px, ar, ag, ab, arow[y]);
+        const int lo = ya < yb ? ya : yb, hi = ya < yb ? yb : ya;   /* the line covers the whole step to the next column */
+        for (int y = lo; y <= hi + 1 && y <= ymax + 1; y++) {
+            if (light) ol_px(fb, x, y, ar * 7 / 10, ag * 7 / 10, ab * 7 / 10);
+            else       ol_px(fb, x, y, ar + (255 - ar) * 35 / 100, ag + (255 - ag) * 35 / 100, ab);
+        }
+    }
+}
+
+/* A dotted horizontal guide: dashes of `len` px every `step` px from x0 to x1. */
+static void ol_guide(uint8_t *fb, int y, int x0, int x1, int step, int len, int r, int g, int b)
+{
+    for (int x = x0; x < x1; x += step)
+        for (int dx = 0; dx < len; dx++) ol_mix(fb, x + dx, y, r, g, b, 55);
+}
+
+/* The heaviest hour: a dot on the curve and a pill above it with the amount, kept inside the tube. The pill's text goes with its fill
+ * (navy on the light one, white on the dark one), not with the page's ink. */
+static void ol_peak(uint8_t *fb, int px, int py, float mm, bool snow, bool light, int ink_r, int ink_g, int ink_b)
+{
+    ol_dot(fb, px, py, ink_r, ink_g, ink_b);
+    char pl[12];
+    const unsigned mm10 = (unsigned)(mm * 10.0f + 0.5f);
+    if (mm10 >= 100u) snprintf(pl, sizeof(pl), "%u mm", (mm10 / 10u) % 1000u);
+    else              snprintf(pl, sizeof(pl), "%u.%u mm", (mm10 / 10u) % 10u, mm10 % 10u);
+    const int pw = ol_tiny_width(pl) + 12, ph = 16;
+    int pxl = px - pw / 2;
+    if (pxl < 2) pxl = 2;
+    if (pxl > LCD_WIDTH - 2 - pw) pxl = LCD_WIDTH - 2 - pw;
+    const int pyt = py - 5 - ph;
+    const uint8_t *acc = ol_acc_pal[light][snow];
+    ol_pill(fb, pxl, pyt, pw, ph, acc[0], acc[1], acc[2]);
+    if (light) ol_pill(fb, pxl + 1, pyt + 1, pw - 2, ph - 2, 244, 248, 255);
+    else       ol_pill(fb, pxl + 1, pyt + 1, pw - 2, ph - 2, 20, 30, 52);
+    ol_tiny(fb, pxl + 6, pyt + 3, pl, light ? 10 : 245, light ? 25 : 248, light ? 55 : 255);
+}
+
+/* A time label: white pill with black text on a light background, black pill with white text on a dark one. */
+static int ol_time_pill_w(const char *text) { return ol_tiny_width(text) + 12; }
+static void ol_time_pill(uint8_t *fb, int lx, int ly, const char *text, bool light)
+{
+    ol_pill(fb, lx, ly, ol_time_pill_w(text), 16, light ? 250 : 0, light ? 250 : 0, light ? 250 : 0);
+    ol_tiny(fb, lx + 6, ly + 3, text, light ? 0 : 255, light ? 0 : 255, light ? 0 : 255);
+}
+
 /* WeatherLive info-panel kinds (the subset rendered procedurally over the sky).
  * Today's high/low is folded into the TEMP panel — there is no separate kind. */
-enum { WLP_WEEKDATE = 0, WLP_TEMP, WLP_SUNRISE, WLP_HUMIDITY, WLP_WIND, WLP_INDOOR_HT, WLP_AQI, WLP_OUTDOOR_HT };
+/* DotMatrix version of the tube 5/6 outlook panel (see wl_outlook_panel below, which hands DotMatrix to this): the first wet spell in three
+ * short lines (kind, time or NOW, heaviest hour in mm), and the next 24 hours as a strip of 24 pixel bars underneath, 3 px per hour so the
+ * whole day fits the 80 px tube, in the theme's dot color on its dot grid, with the same square-root height scale as the six-tube page. */
+static void wl_outlook_bars(uint8_t *fb, int fg_r, int fg_g, int fg_b)
+{
+    weather_outlook_t o;
+    const bool ok = weather_get_outlook(&o);
+    bool h12;
+    config_lock();
+    h12 = (strcmp(config_get()->time_type, "12H") == 0);
+    config_unlock();
+
+    char l1[12], l2[16], l3[12];
+    l1[0] = l2[0] = l3[0] = '\0';
+    int c1r = fg_r, c1g = fg_g, c1b = fg_b;
+    if (!ok) {
+        snprintf(l2, sizeof(l2), "--");
+    } else if (!o.event) {
+        snprintf(l1, sizeof(l1), "DRY");
+        snprintf(l2, sizeof(l2), "%uH", (unsigned)o.hours % 100u);
+    } else {
+        snprintf(l1, sizeof(l1), "%s", o.snow_event ? "SNOW" : "RAIN");
+        if (!s_wl_ink) {   /* a pale tint reads on dark themes and the sky; on paper keep the ink color */
+            c1r = o.snow_event ? 190 : 90;  c1g = o.snow_event ? 230 : 170;  c1b = 255;
+        }
+        if (o.now) snprintf(l2, sizeof(l2), "NOW");
+        else       outlook_fmt_hour(l2, sizeof(l2), o.start_hour, h12);
+        unsigned mm10 = (o.peak_mm > 0.0f) ? (unsigned)(o.peak_mm * 10.0f + 0.5f) : 0u;
+        mm10 %= 1000u;
+        snprintf(l3, sizeof(l3), "%u.%umm", mm10 / 10u, mm10 % 10u);
+    }
+
+    const int base = 150, chart_h = 62;
+    if (s_wl_dm_active) {
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_paint_grid_bg(fb, 2, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+    }
+    outlook_rect(fb, 3, base, 74, 1, 0x4208);   /* baseline */
+    const uint16_t dm_on = wl_rgb565(s_dm_on_r, s_dm_on_g, s_dm_on_b);
+    for (int h = 0; h < 24; h++) {
+        const int x = 4 + h * 3;
+        if (h % 6 == 0) outlook_rect(fb, x, base + 1, 1, 3, 0x4208);   /* a tick every 6 hours */
+        if (!ok || h >= (int)o.hours) continue;
+        const float mm = o.mm[h];
+        if (mm > 0.04f) {
+            const float r = sqrtf(fminf(mm, 4.0f) / 4.0f);
+            const int bh = 2 + (int)(r * (float)(chart_h - 2));
+            const uint16_t c = s_wl_dm_active ? dm_on : ((mm < 0.2f) ? 0x39E7 : (o.snow[h] ? 0xDFFF : 0x2D7F));
+            outlook_rect(fb, x, base - bh, 2, bh, c);
+        }
+    }
+    outlook_rect(fb, 4, base + 1, 2, 3, 0xFFE0);   /* this hour */
+
+    /* Baselines for the u8g2 path; DotMatrix treats the same numbers as line centres. */
+    const int y1 = s_wl_dm_active ? 18 : 26, y2 = s_wl_dm_active ? 46 : 54, y3 = s_wl_dm_active ? 70 : 78;
+    if (l1[0]) wl_text(fb, 40, y1, u8g2_font_logisoso20_tf, l1, c1r, c1g, c1b, 24);
+    if (l2[0]) wl_text(fb, 40, y2, u8g2_font_logisoso20_tf, l2, fg_r, fg_g, fg_b, 24);
+    if (l3[0]) wl_text(fb, 40, y3, u8g2_font_logisoso16_tf, l3, fg_r, fg_g, fg_b, 20);
+}
+
+
+/* The tube 5/6 outlook panel, styled like the six-tube page 7: the first wet spell as three lines (kind in the accent color, the start time
+ * large, "in 2h15" or "to 3 PM"), and under them the next 24 hours as a smooth gradient curve, 3 px per hour, with a dot on this hour and on
+ * the heaviest hour, a pill with that amount, and "now" / "24h" labels. It paints over whatever background is already in fb (the sky or the
+ * theme's blank image) and reads light or dark off that background: navy ink and deeper blues on a light one. DotMatrix keeps the dot-bar
+ * strip (wl_outlook_bars), since a smooth curve does not fit its on/off grid. */
+#define OLP_TOP   100   /* panel row of 4 mm/h */
+#define OLP_YMAX  137   /* panel row of a dry hour */
+static void wl_outlook_panel(uint8_t *fb, int fg_r, int fg_g, int fg_b)
+{
+    if (s_wl_dm_active) { wl_outlook_bars(fb, fg_r, fg_g, fg_b); return; }
+
+    weather_outlook_t o;
+    const bool ok = weather_get_outlook(&o);
+    bool h12;
+    config_lock();
+    h12 = (strcmp(config_get()->time_type, "12H") == 0);
+    config_unlock();
+
+    /* Light or dark from the background itself; keep the panel's own ink unless it would not stand out from it. */
+    int sum = 0, cnt = 0;
+    for (int y = 100; y <= 138; y += 19)
+        for (int x = 20; x <= 60; x += 40) {
+            const uint8_t *px = fb + ((size_t)y * LCD_WIDTH + (size_t)x) * 2;
+            const int v = (px[0] << 8) | px[1];
+            sum += (((v >> 11) & 31) * 8 * 30 + ((v >> 5) & 63) * 4 * 59 + (v & 31) * 8 * 11) / 100;
+            cnt++;
+        }
+    const int bgl = sum / cnt, fgl = (fg_r * 30 + fg_g * 59 + fg_b * 11) / 100;
+    const bool light = bgl >= 120;
+    int ink_r = fg_r, ink_g = fg_g, ink_b = fg_b;
+    if (abs(bgl - fgl) < 110) { ink_r = light ? 10 : 255;  ink_g = light ? 25 : 255;  ink_b = light ? 55 : 255; }   /* ink of the chart's dots and guides; the text is white with a shadow */
+
+    /* White text with a black 1 px shadow, day and night, whatever the theme or face uses elsewhere. Restored at the end. */
+    const bool    sv_shadow = s_wl_shadow;
+    const uint8_t sv_sr = s_wl_shadow_r, sv_sg = s_wl_shadow_g, sv_sb = s_wl_shadow_b, sv_ss = s_wl_shadow_size;
+    s_wl_shadow = true;
+    s_wl_shadow_r = s_wl_shadow_g = s_wl_shadow_b = 0;
+    s_wl_shadow_size = 1;
+
+    const bool snow_ev = ok && o.event && o.snow_event;
+    char l1[12], l2[16], l3[16];
+    l1[0] = l2[0] = l3[0] = '\0';
+    if (!ok) {
+        snprintf(l2, sizeof(l2), "--");
+    } else if (!o.event) {
+        snprintf(l1, sizeof(l1), "DRY");
+        snprintf(l2, sizeof(l2), "next");
+        snprintf(l3, sizeof(l3), "%uH", (unsigned)o.hours % 100u);
+    } else {
+        snprintf(l1, sizeof(l1), "%s", o.snow_event ? "SNOW" : "RAIN");
+        if (o.now) {
+            char hh[10];
+            snprintf(l2, sizeof(l2), "NOW");
+            outlook_fmt_hour(hh, sizeof(hh), o.start_hour + (int)o.duration_h, h12);
+            snprintf(l3, sizeof(l3), "to %s", hh);
+        } else {
+            outlook_fmt_hour(l2, sizeof(l2), o.start_hour, h12);
+            outlook_eta_text(l3, sizeof(l3), o.start_min);
+        }
+    }
+
+    /* Row of every hourly point, and the heaviest hour. */
+    float yv[24];
+    int pk = -1;
+    float pk_mm = 0.04f;
+    const float span = (float)(OLP_YMAX - OLP_TOP);
+    for (int h = 0; h < 24; h++) {
+        const float mm = (ok && h < (int)o.hours) ? o.mm[h] : 0.0f;
+        yv[h] = (float)OLP_YMAX - sqrtf(fminf(fmaxf(mm, 0.0f), 4.0f) / 4.0f) * span;
+        if (mm > pk_mm) { pk_mm = mm; pk = h; }
+    }
+    ol_cols_t cols;
+    for (int x = 0; x <= LCD_WIDTH; x++) {   /* hour h sits at column 5 + 3h; ol_curve() wants the six-tube page's 20 px per hour */
+        cols.y[x] = ol_row(ol_curve(yv, 10 + (int)((float)(x - 5) * 20.0f / 3.0f)), OLP_TOP, OLP_YMAX);
+        if (x < LCD_WIDTH) {
+            int h = (x - 4) / 3;
+            if (h < 0) h = 0;
+            if (h > 23) h = 23;
+            cols.snow[x] = ok && h < (int)o.hours && o.snow[h];
+        }
+    }
+
+    ol_guide(fb, (int)((float)OLP_YMAX - 0.5f * span + 0.5f), 6, 76, 6, 2, ink_r, ink_g, ink_b);   /* 1 mm/h */
+    for (int y = OLP_TOP - 4; y <= OLP_YMAX + 1; y++) ol_mix(fb, 5, y, ink_r, ink_g, ink_b, 110);   /* this hour */
+    ol_curve_fill(fb, &cols, 4, 77, OLP_TOP, OLP_YMAX, light);
+    ol_dot(fb, 5, cols.y[5], ink_r, ink_g, ink_b);
+    if (pk >= 0) ol_peak(fb, 5 + 3 * pk, cols.y[5 + 3 * pk], pk_mm, ok && o.snow[pk], light, ink_r, ink_g, ink_b);
+
+    /* Text. A custom TTF face is sized by the height of its digits and sits on a lifted baseline (see wl_text), so it gets its own sizes:
+     * rows 4-24 kind, 28-54 time, 59-74 detail. */
+    const bool ft = s_ft_face_id >= 0;
+    if (l1[0]) wl_text(fb, 40, ft ? 24 + 20 / 5 : 24, u8g2_font_logisoso20_tf, l1, ol_acc_pal[0][snow_ev][0], ol_acc_pal[0][snow_ev][1], ol_acc_pal[0][snow_ev][2], 20);
+    if (l2[0]) {
+        const bool big = strlen(l2) <= 4;
+        wl_text(fb, 40, ft ? (big ? 54 + 26 / 5 : 52 + 20 / 5) : (big ? 54 : 50), big ? u8g2_font_logisoso28_tf : u8g2_font_logisoso20_tf,
+                l2, 255, 255, 255, ft ? (big ? 26 : 20) : (big ? 30 : 24));
+    }
+    if (l3[0]) wl_text(fb, 40, ft ? 74 + 15 / 5 : 74, u8g2_font_logisoso16_tf, l3, 255, 255, 255, ft ? 15 : 19);
+    /* "now" and "24h" on pills, like the six-tube page. */
+    ol_time_pill(fb, 20 - ol_time_pill_w("now") / 2, LCD_HEIGHT - 18, "now", light);
+    ol_time_pill(fb, 60 - ol_time_pill_w("24h") / 2, LCD_HEIGHT - 18, "24h", light);
+    s_wl_shadow = sv_shadow;
+    s_wl_shadow_r = sv_sr;  s_wl_shadow_g = sv_sg;  s_wl_shadow_b = sv_sb;  s_wl_shadow_size = sv_ss;
+}
+
+enum { WLP_WEEKDATE = 0, WLP_TEMP, WLP_SUNRISE, WLP_HUMIDITY, WLP_WIND, WLP_INDOOR_HT, WLP_AQI, WLP_OUTDOOR_HT, WLP_OUTLOOK };
 
 /* Render one WeatherLive info panel (`kind`) over the sky panorama on `tube`.
  * Temperatures are already unit-converted by the caller; sunrise/sunset are
@@ -7501,6 +7896,9 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
         int  hum   = valid ? (int)lroundf(w->humidity) : 0;
         wl_outdoor_ht_panel(fb, lang, temp_disp, hum, valid, fg_r, fg_g, fg_b);
 
+    } else if (kind == WLP_OUTLOOK) {
+        wl_outlook_panel(fb, fg_r, fg_g, fg_b);
+
     } else { /* WLP_SUNRISE — asset-style sun glyphs: rise on top, set below. */
         char rs[8], ss[8];
         snprintf(rs, sizeof(rs), "%02d:%02d", (sunrise / 60) % 24, sunrise % 60);
@@ -7525,7 +7923,7 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
 /* Build the ordered list of WeatherLive panel kinds enabled for a tube; returns
  * the count (≥1, falls back to weekday/date).  The TEMP panel already carries
  * today's high/low, so there is no separate Hi/Lo entry. */
-static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, bool aq, bool oht, int out[8])
+static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, bool aq, bool oht, bool ol, int out[9])
 {
     int n = 0;
     if (wd) out[n++] = WLP_WEEKDATE;
@@ -7536,6 +7934,7 @@ static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, b
     if (ht) out[n++] = WLP_INDOOR_HT;
     if (aq) out[n++] = WLP_AQI;
     if (oht) out[n++] = WLP_OUTDOOR_HT;
+    if (ol) out[n++] = WLP_OUTLOOK;
     if (n == 0) out[n++] = WLP_WEEKDATE;
     return n;
 }
@@ -7804,29 +8203,21 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     /* Tube-6 panel kinds for this device (WeatherLive subset).  Default layout
      * (non-CX) rotates weekday/date → temp → lo/hi on tube 6 every ~rot_ms. */
     /* Panel-list cache — only rebuilt when the config flags change. */
-    static int  s_l6[8], s_n6, s_l5[8], s_n5;
-    static bool s_t6wd, s_t6tp, s_t6sr, s_t6hm, s_t6wn, s_t6ht, s_t6aq, s_t6oht;
-    static bool s_t5wd, s_t5tp, s_t5sr, s_t5hm, s_t5wn, s_t5ht, s_t5aq, s_t5oht;
+    static int  s_l6[9], s_n6, s_l5[9], s_n5;
+    static bool s_f6[CFG_CXP_COUNT], s_f5[CFG_CXP_COUNT];
     static bool s_pl_init;
-    bool t6wd = cfg->tube6_panel_weekdate, t6tp = cfg->tube6_panel_temp,
-         t6sr = cfg->tube6_panel_sunrise,  t6hm = cfg->tube6_panel_humidity,
-         t6wn = cfg->tube6_panel_wind,     t6ht = cfg->tube6_panel_ht,
-         t6aq = cfg->tube6_panel_aqi,      t6oht = cfg->tube6_panel_outdoor_ht;
-    bool t5wd = cfg->tube5_panel_weekdate, t5tp = cfg->tube5_panel_temp,
-         t5sr = cfg->tube5_panel_sunrise,  t5hm = cfg->tube5_panel_humidity,
-         t5wn = cfg->tube5_panel_wind,     t5ht = cfg->tube5_panel_ht,
-         t5aq = cfg->tube5_panel_aqi,      t5oht = cfg->tube5_panel_outdoor_ht;
-    if (!s_pl_init ||
-        t6wd!=s_t6wd || t6tp!=s_t6tp || t6sr!=s_t6sr ||
-        t6hm!=s_t6hm || t6wn!=s_t6wn || t6ht!=s_t6ht || t6aq!=s_t6aq || t6oht!=s_t6oht ||
-        t5wd!=s_t5wd || t5tp!=s_t5tp || t5sr!=s_t5sr ||
-        t5hm!=s_t5hm || t5wn!=s_t5wn || t5ht!=s_t5ht || t5aq!=s_t5aq || t5oht!=s_t5oht) {
+    bool f6[CFG_CXP_COUNT], f5[CFG_CXP_COUNT];
+    config_cx_panels(cfg, 6, f6);
+    config_cx_panels(cfg, 5, f5);
+    if (!s_pl_init || memcmp(f6, s_f6, sizeof(f6)) != 0 || memcmp(f5, s_f5, sizeof(f5)) != 0) {
         s_n6 = is_24cx
-            ? wl_panel_list(t6wd, t6tp, t6sr, t6hm, t6wn, t6ht, t6aq, t6oht, s_l6)
+            ? wl_panel_list(f6[CFG_CXP_WEEKDATE], f6[CFG_CXP_TEMP], f6[CFG_CXP_SUNRISE], f6[CFG_CXP_HUMIDITY], f6[CFG_CXP_WIND], f6[CFG_CXP_HT],
+                            f6[CFG_CXP_AQI], f6[CFG_CXP_OUTDOOR_HT], f6[CFG_CXP_OUTLOOK], s_l6)
             : (s_l6[0] = WLP_WEEKDATE, s_l6[1] = WLP_TEMP, s_l6[2] = WLP_SUNRISE, 3);
-        s_n5 = wl_panel_list(t5wd, t5tp, t5sr, t5hm, t5wn, t5ht, t5aq, t5oht, s_l5);
-        s_t6wd=t6wd; s_t6tp=t6tp; s_t6sr=t6sr; s_t6hm=t6hm; s_t6wn=t6wn; s_t6ht=t6ht; s_t6aq=t6aq; s_t6oht=t6oht;
-        s_t5wd=t5wd; s_t5tp=t5tp; s_t5sr=t5sr; s_t5hm=t5hm; s_t5wn=t5wn; s_t5ht=t5ht; s_t5aq=t5aq; s_t5oht=t5oht;
+        s_n5 = wl_panel_list(f5[CFG_CXP_WEEKDATE], f5[CFG_CXP_TEMP], f5[CFG_CXP_SUNRISE], f5[CFG_CXP_HUMIDITY], f5[CFG_CXP_WIND], f5[CFG_CXP_HT],
+                             f5[CFG_CXP_AQI], f5[CFG_CXP_OUTDOOR_HT], f5[CFG_CXP_OUTLOOK], s_l5);
+        memcpy(s_f6, f6, sizeof(f6));
+        memcpy(s_f5, f5, sizeof(f5));
         s_pl_init = true;
     }
     int k6 = s_l6[(int)((now_us / rot_us) % s_n6)];
@@ -8369,6 +8760,7 @@ static uint8_t  s_spec_seg_buf[SPEC_BAR_W * SPEC_SEG_H * 2];   /* one segment of
 /* Black-fill the burn-in edge bands on both sides of the (shifted) tube window; the tube must already be selected. */
 static void spec_black_margins(int tube, uint8_t oy)
 {
+    if (BURNIN_HELD(tube) && !s_bi_bypass) return;
     int base = (int)LCD_OFFSET_X + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube];
     int s    = (int)s_burnin_shift_x;
     const struct { int x0, w; } band[2] = {
@@ -8973,6 +9365,7 @@ static void render_album(const nextube_config_t *cfg,
 static float s_sun_pos = 30.0f;  /* sun starts at horizon — visible from first frame */
 static int   s_sun_ph  = 0;
 static int   s_sun_cnt = 0;
+static bool  s_sun_solo = false;   /* split sunrise / sunset screens: one sun on screen, so advance on its own call */
 
 /* Restarts the rise from the horizon. Called whenever the Sun panel becomes
  * newly visible — this animation's state only advances while the panel is
@@ -9069,7 +9462,7 @@ static void wx_blit_glow_bloom(uint8_t *fb, const uint8_t *tile, int y0,
  * rise/set travel-distance explanation). */
 static float wx_sun_advance(bool rising)
 {
-    if (rising) {
+    if (rising || s_sun_solo) {
         if (s_sun_ph == 0) {
             s_sun_pos += 2.25f;
             if (s_sun_pos >= 110.0f) { s_sun_pos = 110.0f; s_sun_ph = 1; s_sun_cnt = 0; }
@@ -9417,9 +9810,88 @@ static const char *wx_panel_prep(const nextube_config_t *cfg)
     return th;
 }
 
-static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
-                                bool anim_only)
+/* Sunrise and sunset as minutes of the day, for the weather pages. The NOAA calculation depends only on the date and the location, and these
+ * pages redraw up to 20 times a second on an animated sky, so it is worked out once per day (or when the location or the DST state changes). Returns false
+ * until a location is known. */
+static bool wx_sun_times(const struct tm *t, int *rise_min, int *set_min)
 {
+    static int   s_year = -1, s_yday = -1, s_dst = -1, s_rise, s_set;
+    static float s_lat, s_lon;
+    float lat, lon;
+    if (!weather_get_location(&lat, &lon)) return false;
+    if (s_year != t->tm_year || s_yday != t->tm_yday || s_dst != t->tm_isdst || lat != s_lat || lon != s_lon) {
+        sun_calc_solar(lat, lon, t, &s_rise, &s_set);
+        s_year = t->tm_year;  s_yday = t->tm_yday;  s_dst = t->tm_isdst;  s_lat = lat;  s_lon = lon;
+    }
+    *rise_min = s_rise;
+    *set_min  = s_set;
+    return true;
+}
+
+/* ── Large sunrise / sunset (option "weather_sun_split") ─────────────────────────────────────────────────────────────
+ * Two screens instead of one small-text screen: the sunrise time, then the sunset time (the Hi / Lo sub-rotation of panel 4). Laid out
+ * like the clock, so it reads from across the room: [animated sun] [H] [H] [:] [M] [M], on every theme. 12H drops AM / PM, the icon
+ * says which time it is. */
+static void wx_show_glyph(int tube, int code, const char *th, bool wl_sky)   /* 0-9 digit, -1 blank, -2 colon, -3 minus */
+{
+    char path[128], ds[4];
+    if (wl_sky) {
+        if (code == -1) { wl_tube_sky(tube); return; }
+        if (code >= 0) snprintf(ds, sizeof(ds), "%d", code % 10);
+        else           snprintf(ds, sizeof(ds), "%s", code == -2 ? ":" : "-");
+        wl_tube_str(tube, u8g2_font_logisoso46_tf, ds, 100);
+        return;
+    }
+    if (code == -1)      display_show_ampm(tube, "blank", th);
+    else if (code == -2) display_show_ampm(tube, "colon", th);
+    else if (code == -3) { display_path_temperature(path, sizeof(path), th, "minus"); display_show_image(tube, path); }
+    else                 { display_path_number(path, sizeof(path), th, code % 10); display_show_image(tube, path); }
+}
+
+static void wx_sun_split(const nextube_config_t *cfg, const struct tm *t, bool anim_only, bool sunset, const char *th,
+                         bool wl_sky, uint8_t *wl_bgfb, uint16_t fg, const uint8_t *bg)
+{
+    if (!anim_only) {
+        int mins = -1;
+        int rise_min = 0, set_min = 0;
+        if (wx_sun_times(t, &rise_min, &set_min)) mins = sunset ? set_min : rise_min;
+        int d[4] = { -3, -3, -3, -3 };   /* no time yet (no location, or no sunrise / sunset today): dashes */
+        if (mins >= 0) {
+            int h = (mins / 60) % 24;
+            if (strcmp(cfg->time_type, "12H") == 0) { h %= 12; if (h == 0) h = 12; }
+            d[0] = (h / 10 == 0 && !cfg->leading_zero) ? -1 : h / 10;
+            d[1] = h % 10;
+            d[2] = (mins % 60) / 10;
+            d[3] = mins % 10;
+        }
+        wx_show_glyph(1, d[0], th, wl_sky);
+        wx_show_glyph(2, d[1], th, wl_sky);
+        wx_show_glyph(3, -2,   th, wl_sky);
+        wx_show_glyph(4, d[2], th, wl_sky);
+        wx_show_glyph(5, d[3], th, wl_sky);
+    }
+
+    /* Tube 0: the sun, every frame. DotMatrix gets the same static arrow as the other sunrise / sunset panels. */
+    if (s_wl_dm_active) {
+        uint8_t *fb = wl_fb();
+        if (!fb) return;
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_draw_glyph(fb, 40, 80, sunset ? DM_CP_ICON_SUNSET : DM_CP_ICON_SUNRISE, 9, 2, true,
+                      s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        display_show_digit(0, fb, LCD_WIDTH, LCD_HEIGHT);
+    } else if (wl_sky && wl_bgfb) {
+        wl_paint_background(wl_bgfb, 0, &s_wl_last_scene);
+        wx_sun_anim_frame_buf(wl_bgfb, !sunset, fg);
+        display_show_digit(0, wl_bgfb, LCD_WIDTH, LCD_HEIGHT);
+    } else {
+        wx_sun_anim_frame(0, !sunset, fg, bg);
+    }
+}
+
+static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
+                                bool anim_only, int phase)
+{
+    s_sun_solo = cfg->weather_sun_split;
     const char *th = wx_panel_prep(cfg);
     bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
     uint8_t *wl_bgfb = wl_sky ? wl_fb() : NULL;
@@ -9441,6 +9913,11 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
         if (bg_w != LCD_WIDTH || bg_h != LCD_HEIGHT) bg = NULL;
     }
 
+    if (cfg->weather_sun_split) {   /* phase 0 = sunrise, 1 = sunset */
+        wx_sun_split(cfg, t, anim_only, phase == 1, th, wl_sky, wl_bgfb, fg, bg);
+        return;
+    }
+
     if (s_wl_dm_active) {
         /* wx_sun_draw_time()/wx_sun_draw_time_buf() draw with raw u8g2 calls
          * (not wl_text()), so they don't get dot-matrix text for free like
@@ -9453,10 +9930,8 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
         if (!anim_only) {
             char rise_str[8] = "--:--";
             char set_str[8]  = "--:--";
-            float lat = 0.0f, lon = 0.0f;
-            if (weather_get_location(&lat, &lon)) {
-                int rise_min = 0, set_min = 0;
-                sun_calc_solar(lat, lon, t, &rise_min, &set_min);
+            int rise_min = 0, set_min = 0;
+            if (wx_sun_times(t, &rise_min, &set_min)) {
                 if (rise_min >= 0)
                     snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
                              (rise_min / 60) % 24, rise_min % 60);
@@ -9514,10 +9989,8 @@ static void render_weather_sun(const nextube_config_t *cfg, const struct tm *t,
         char rise_str[8] = "--:--";
         char set_str[8]  = "--:--";
 
-        float lat = 0.0f, lon = 0.0f;
-        if (weather_get_location(&lat, &lon)) {
-            int rise_min = 0, set_min = 0;
-            sun_calc_solar(lat, lon, t, &rise_min, &set_min);
+        int rise_min = 0, set_min = 0;
+        if (wx_sun_times(t, &rise_min, &set_min)) {
             if (rise_min >= 0)
                 snprintf(rise_str, sizeof(rise_str), "%02d:%02d",
                          (rise_min / 60) % 24, rise_min % 60);
@@ -9621,11 +10094,10 @@ static void render_weather_wind(const nextube_config_t *cfg)
         else display_show_ampm(0, "blank", th);
     }
 
-    /* Wind-streak glyph — the same WX_SQUALLS icon used for the "squalls"
-     * weather condition and wl_wind_panel()'s tube 5/6 info panel below, at
-     * its standard full-tube placement (wx_draw_icon() / WX_Y0), so every
-     * wind glyph in the UI is visibly the same design, not three variants
-     * that can drift apart over time. Pushed to tube 0 on 3-digit values. */
+    /* Wind glyph — the same WX_WIND design as wl_wind_panel()'s tube 5/6 info
+     * panel, at its standard full-tube placement (WX_Y0), so both wind
+     * displays are visibly the same design. Pushed to tube 0 on 3-digit
+     * values. */
     uint8_t *fb = wl_fb();
     if (fb) {
         if (wl_sky) {
@@ -9640,13 +10112,13 @@ static void render_weather_wind(const nextube_config_t *cfg)
             dm_draw_glyph(fb, 40, 80, DM_CP_ICON_WIND, 9, 2, true,
                           s_dm_on_r, s_dm_on_g, s_dm_on_b, s_dm_off_r, s_dm_off_g, s_dm_off_b);
         } else {
-            const size_t wn = sizeof(WX_SQUALLS) / sizeof(WX_SQUALLS[0]);
+            const size_t wn = sizeof(WX_WIND) / sizeof(WX_WIND[0]);
             /* Shadow pass: same icon, thicker stroke, shadow color, drawn
              * first so only its edges peek out from under the real glyph. */
             if (wl_shadow_on())
-                wx_draw_icon_ex(fb, WX_SQUALLS, wn, WX_Y0, WX_THICK + 4,
-                                s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
-            wx_draw_icon(fb, WX_SQUALLS, wn, wind_r, wind_g, wind_b);
+                wx_draw_icon_scaled(fb, WX_WIND, wn, WX_Y0, WX_SCALE / 2, WX_THICK + 4,
+                                    s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b);
+            wx_draw_icon_scaled(fb, WX_WIND, wn, WX_Y0, WX_SCALE / 2, WX_THICK, wind_r, wind_g, wind_b);
         }
         display_show_digit(glyph_tube, fb, LCD_WIDTH, LCD_HEIGHT);
     } else {
@@ -10274,6 +10746,340 @@ static void render_weather_indoor_hum(const nextube_config_t *cfg)
     wx_tube5_blank(wl_sky, th);
 }
 
+/* ── Weather page 7: rain / snow outlook ──────────────────────────────────────────────────────────────────────────────
+ * The next 24 hours of precipitation as one smooth area chart across the six tubes (an hour is 20 px, four per tube; the curve is a
+ * Catmull-Rom spline through the hourly points, filled with a fade into the background). It is drawn over the same background as the
+ * other weather pages (the live sky on WeatherLive, the theme's blank image otherwise), in light ink with a blue accent on a dark
+ * background and navy ink with a deeper blue on a light one (read off the background itself). With WeatherLive animation on, the sky
+ * keeps moving behind it: the chart is built once as an overlay and laid over each repainted sky frame (see ol_overlay_*). Height grows with the square root of the hourly amount
+ * (full height at 4 mm/h), so drizzle is still visible; blue for rain, light cyan for snow. A white dot marks this hour and the heaviest
+ * hour, dotted guides sit at 1 and 2.5 mm/h. Above it, one headline row, one cell per tube: kind, start, in how long (or NOW to when),
+ * peak per hour, chance, duration.  Below it, one time pill per tube, with a tick up to its hour. */
+
+/* Everything one frame of the page is drawn from, worked out once per redraw. */
+typedef struct {
+    weather_outlook_t o;
+    bool     ok, light, dm, ft, h12;
+    int      h0, pk, ink_r, ink_g, ink_b;
+    float    pk_mm;
+    float    yv[24];
+    char     txt[LCD_COUNT][16];
+    int      cr[LCD_COUNT], cg[LCD_COUNT], cb[LCD_COUNT];
+} ol_ctx_t;
+
+/* The page's own state, in one place. Without live animation the page does not move, so it is drawn only when what it shows changed
+ * (sig) or when it has not been drawn for a while (last_us: another page, or a burn-in session, has had the tubes since). With it, the
+ * chart and text are kept as a premultiplied overlay in PSRAM (px, a) that is laid over each repainted sky frame. */
+typedef struct {
+    ol_ctx_t c;                                  /* what the last frame was drawn from (file-scope, not the display task's stack) */
+    uint32_t sig;
+    int64_t  last_us;
+    bool     light;                              /* light background: dark ink, deeper blue; read once per visit */
+    uint8_t *px, *a;                             /* overlay: LCD_COUNT x RGB565 over black, LCD_COUNT x opacity 0..255, then LCD_COUNT x LCD_HEIGHT row flags */
+    bool     ov_valid;
+    int64_t  ov_used_us;
+} ol_state_t;
+static ol_state_t s_ol;
+
+/* Draws tube t of the page (chart, markers, pills, headline) over whatever is already in fb. */
+static void ol_draw_tube(uint8_t *fb, int t, const ol_ctx_t *c)
+{
+    const weather_outlook_t *o = &c->o;
+    const bool ok = c->ok, light = c->light, dm = c->dm, ft = c->ft;
+    const int ink_r = c->ink_r, ink_g = c->ink_g, ink_b = c->ink_b;
+    const float span = (float)(OUTLOOK_YMAX - OUTLOOK_TOP);
+
+    ol_cols_t cols;   /* the slice of the 480-px-wide curve that falls in this tube */
+    for (int x = 0; x <= LCD_WIDTH; x++) cols.y[x] = ol_row(ol_curve(c->yv, t * LCD_WIDTH + x), OUTLOOK_TOP, OUTLOOK_YMAX);
+    for (int x = 0; x < LCD_WIDTH; x++) {
+        const int h = (t * LCD_WIDTH + x) / 20;
+        cols.snow[x] = ok && h < (int)o->hours && o->snow[h];
+    }
+
+    /* dotted guides at 1 and 2.5 mm/h, then a thin vertical at the hour each tube's time pill names ("now" on the first), down to the pill */
+    ol_guide(fb, (int)((float)OUTLOOK_YMAX - 0.5f * span + 0.5f), 8, LCD_WIDTH, 8, 3, ink_r, ink_g, ink_b);                  /* 1 mm/h */
+    ol_guide(fb, (int)((float)OUTLOOK_YMAX - sqrtf(2.5f / 4.0f) * span + 0.5f), 8, LCD_WIDTH, 8, 3, ink_r, ink_g, ink_b);   /* 2.5 mm/h */
+    for (int y = OUTLOOK_TOP - 4; y < LCD_HEIGHT - 18; y++) ol_mix(fb, 10, y, ink_r, ink_g, ink_b, 110);
+
+    ol_curve_fill(fb, &cols, 0, LCD_WIDTH, OUTLOOK_TOP, OUTLOOK_YMAX, light);
+    ol_dot(fb, 10, cols.y[10], ink_r, ink_g, ink_b);   /* a dot on the curve at each time pill's hour, like the one at "now" */
+    if (c->pk >= 0 && c->pk / 4 == t) {
+        const int px = (c->pk % 4) * 20 + 10;
+        ol_peak(fb, px, cols.y[px], c->pk_mm, ok && o->snow[c->pk], light, ink_r, ink_g, ink_b);
+    }
+
+    /* One time label per tube, for the hour the tube starts at ("now" on the first), on a pill so it reads on any sky, joined to its dot on the
+     * curve by the vertical line above. They use the pixel font, so they look the same with every theme and font. */
+    {
+        const int hoff = t * 4;   /* this tube holds hours hoff .. hoff + 3; the first one sits at column 10 */
+        char lab[8];
+        const unsigned hr = (unsigned)((c->h0 + hoff) % 24);
+        if (hoff == 0)    snprintf(lab, sizeof(lab), "now");
+        else if (c->h12)  snprintf(lab, sizeof(lab), "%u%c", (hr % 12u ? hr % 12u : 12u) % 100u, hr < 12u ? 'a' : 'p');
+        else              snprintf(lab, sizeof(lab), "%02u", hr % 100u);
+        const int pw = ol_time_pill_w(lab);
+        int lx = 10 - pw / 2;
+        if (lx < 2) lx = 2;
+        if (lx > LCD_WIDTH - 2 - pw) lx = LCD_WIDTH - 2 - pw;
+        const int ly = LCD_HEIGHT - 18;
+        ol_time_pill(fb, lx, ly, lab, light);
+    }
+
+    /* Headline cell: each cell takes the largest size that fits the tube (up to 28 px high), centred on row 16. DotMatrix treats the baseline
+     * as the line centre. */
+    const char *str = c->txt[t];
+    if (str[0]) {
+        if (dm) {
+            wl_text(fb, 40, 16, u8g2_font_logisoso20_tf, str, c->cr[t], c->cg[t], c->cb[t], 24);
+        } else if (ft) {
+            /* fit to 72 px (fr_fit_px_size leaves a 10 px margin on each side of the width it is given) and draw at exactly that size */
+            const uint16_t px   = fr_fit_px_size(LCD_WIDTH + 12, (uint8_t)s_ft_face_id, 28, str);
+            const uint16_t px_free = fr_fit_px_size(1000, (uint8_t)s_ft_face_id, 28, str);
+            const int cap = px_free ? (int)(28u * px / px_free) : 28;   /* glyph height after the width shrink */
+            fr_draw_text_exact(fb, LCD_WIDTH, LCD_HEIGHT, 40, 16 + cap / 2, (uint8_t)s_ft_face_id, px, str,
+                               (uint8_t)c->cr[t], (uint8_t)c->cg[t], (uint8_t)c->cb[t],
+                               s_wl_shadow, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, s_wl_shadow_size);
+        } else {
+            static const uint8_t *const fonts[4] = { u8g2_font_logisoso28_tf, u8g2_font_logisoso24_tf, u8g2_font_logisoso20_tf, u8g2_font_logisoso16_tf };
+            static const int heights[4] = { 28, 24, 20, 16 };
+            int pick = 3;
+            for (int i = 0; i < 3; i++) {
+                u8g2_SetFont(&s_u8g2, fonts[i]);
+                if ((int)u8g2_GetUTF8Width(&s_u8g2, str) <= 74) { pick = i; break; }
+            }
+            wl_text(fb, 40, 16 + heights[pick] / 2, fonts[pick], str, c->cr[t], c->cg[t], c->cb[t], 0);
+        }
+    }
+}
+
+/* Live sky behind the page: the chart and text are drawn once onto black and once onto white, which gives every pixel its colour and its
+ * opacity, so each animation tick only has to repaint the sky and lay that over it, one write per tube. The overlay is about 230 KB of
+ * PSRAM, taken on first use and given back after five minutes without the page. */
+#define OL_PIX ((size_t)LCD_WIDTH * LCD_HEIGHT)
+#define OL_ROWS(t) (s_ol.a + OL_PIX * LCD_COUNT + (size_t)(t) * LCD_HEIGHT)   /* per tube: 1 for a row that holds anything (most of a tube is empty) */
+
+static bool ol_overlay_alloc(void)
+{
+    if (!s_ol.px) s_ol.px = PSRAM_MALLOC(OL_PIX * 2 * LCD_COUNT);
+    if (!s_ol.a)  s_ol.a  = PSRAM_MALLOC(OL_PIX * LCD_COUNT + (size_t)LCD_COUNT * LCD_HEIGHT);
+    return s_ol.px && s_ol.a;
+}
+
+/* Called from the other weather pages: frees the overlay once panel 7 has been away for a while. */
+static void ol_overlay_release_if_idle(void)
+{
+    if (!s_ol.px || esp_timer_get_time() - s_ol.ov_used_us < 300LL * 1000000LL) return;
+    free(s_ol.px);
+    free(s_ol.a);
+    s_ol.px = s_ol.a = NULL;
+    s_ol.ov_valid = false;
+}
+
+static void ol_overlay_build(uint8_t *fb, const ol_ctx_t *c)
+{
+    for (int t = 0; t < LCD_COUNT; t++) {
+        uint8_t *op = s_ol.px + (size_t)t * OL_PIX * 2;
+        uint8_t *oa = s_ol.a + (size_t)t * OL_PIX;
+        memset(fb, 0x00, OL_PIX * 2);
+        ol_draw_tube(fb, t, c);
+        memcpy(op, fb, OL_PIX * 2);
+        memset(fb, 0xFF, OL_PIX * 2);
+        ol_draw_tube(fb, t, c);
+        uint8_t *rows = OL_ROWS(t);
+        memset(rows, 0, LCD_HEIGHT);
+        for (size_t i = 0; i < OL_PIX; i++) {
+            const int b = (op[i * 2] << 8) | op[i * 2 + 1], w = (fb[i * 2] << 8) | fb[i * 2 + 1];
+            int dr = ((w >> 11) & 31) - ((b >> 11) & 31), dg = ((w >> 5) & 63) - ((b >> 5) & 63), db = (w & 31) - (b & 31);
+            if (dr < 0) dr = 0;
+            if (dg < 0) dg = 0;
+            if (db < 0) db = 0;
+            int a = 255 - (dr * 255 / 31 + dg * 255 / 63 + db * 255 / 31) / 3;   /* white shows through by (1 - opacity) */
+            if (a < 6)        { a = 0; op[i * 2] = op[i * 2 + 1] = 0; }
+            else if (a > 249) a = 255;
+            oa[i] = (uint8_t)a;
+            if (a) rows[i / LCD_WIDTH] = 1;
+        }
+    }
+    s_ol.ov_valid = true;
+}
+
+static void ol_overlay_apply(uint8_t *fb, int t)
+{
+    const uint8_t *op = s_ol.px + (size_t)t * OL_PIX * 2;
+    const uint8_t *oa = s_ol.a + (size_t)t * OL_PIX;
+    for (int y = 0; y < LCD_HEIGHT; y++) {
+        if (!OL_ROWS(t)[y]) continue;   /* a transparent row: the sky shows through untouched, nothing to read */
+        for (size_t i = (size_t)y * LCD_WIDTH, end = i + LCD_WIDTH; i < end; i++) {
+            const int a = oa[i];
+            if (!a) continue;
+            uint8_t *d = fb + i * 2;
+            if (a == 255) { d[0] = op[i * 2]; d[1] = op[i * 2 + 1]; continue; }
+            const int bg = (d[0] << 8) | d[1], ov = (op[i * 2] << 8) | op[i * 2 + 1], k = 255 - a;
+            int r = ((ov >> 11) & 31) + ((((bg >> 11) & 31) * k) >> 8);
+            int g = ((ov >> 5) & 63)  + ((((bg >> 5) & 63) * k) >> 8);
+            int b = (ov & 31)         + (((bg & 31) * k) >> 8);
+            if (r > 31) r = 31;
+            if (g > 63) g = 63;
+            if (b > 31) b = 31;
+            const int px = (r << 11) | (g << 5) | b;
+            d[0] = (uint8_t)(px >> 8);
+            d[1] = (uint8_t)(px & 0xFF);
+        }
+    }
+}
+
+/* Brightness of the background behind the chart (0..255), sampled at three rows. On the procedural sky it comes straight from the scene's
+ * top and horizon colours; on a theme image or a custom background the tube is painted into fb and read back. */
+static int ol_background_luma(uint8_t *fb, bool wl_sky, bool sky_procedural, const char *bg_path)
+{
+    int sum = 0, n = 0;
+    if (wl_sky && sky_procedural) {
+        for (int y = 70; y <= 130; y += 30) {
+            const int tt = y * 255 / (LCD_HEIGHT - 1);
+            const int r = s_wl_last_scene.tr + (s_wl_last_scene.hr - s_wl_last_scene.tr) * tt / 255;
+            const int g = s_wl_last_scene.tg + (s_wl_last_scene.hg - s_wl_last_scene.tg) * tt / 255;
+            const int b = s_wl_last_scene.tb + (s_wl_last_scene.hb - s_wl_last_scene.tb) * tt / 255;
+            sum += (r * 30 + g * 59 + b * 11) / 100;
+            n++;
+        }
+        return sum / n;
+    }
+    for (int tt = 0; tt < 2; tt++) {
+        if (wl_sky) wl_paint_background(fb, tt * 3, &s_wl_last_scene);
+        else        seed_fb_blank(fb, bg_path);
+        for (int y = 70; y <= 130; y += 30)
+            for (int x = 20; x <= 60; x += 40) {
+                const uint8_t *px = fb + ((size_t)y * LCD_WIDTH + (size_t)x) * 2;
+                const int v = (px[0] << 8) | px[1];
+                sum += (((v >> 11) & 31) * 8 * 30 + ((v >> 5) & 63) * 4 * 59 + (v & 31) * 8 * 11) / 100;
+                n++;
+            }
+    }
+    return sum / n;
+}
+
+static void render_weather_outlook(const nextube_config_t *cfg)
+{
+    ol_ctx_t *c = &s_ol.c;
+    c->ok = weather_get_outlook(&c->o);
+    const weather_outlook_t *o = &c->o;
+    uint8_t *fb = wl_fb();
+    if (!fb) return;
+    c->h12 = (strcmp(cfg->time_type, "12H") == 0);
+    time_t now_t = time(NULL);
+    struct tm lt;
+    localtime_r(&now_t, &lt);
+    c->h0 = lt.tm_hour;   /* hour of slot 0 */
+
+    /* Background: the live sky (WeatherLive / Custom) or the theme's blank image, like the other weather pages. */
+    const char *th = wx_panel_prep(cfg);
+    if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);
+    const bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
+    char bg_path[160];
+    snprintf(bg_path, sizeof(bg_path), "/images/themes/%.60s/AMPM/blank.jpg", th);
+    /* The sky is the procedural one, not a fixed theme image or a custom background. */
+    const bool sky_procedural = !(s_wl_is_custom && s_wl_bg_theme[0] != '\0' && strncmp(s_wl_bg_theme, "WeatherLive", 11) != 0);
+    /* Same test as the display task's wl_anim_tick: the sky only moves when WeatherLive animation (or night-colour drift) is on. */
+    const bool animated = wl_sky && sky_procedural && (cfg->wlive_animate || (cfg->custom_night_colors && cfg->custom_night_drift));
+
+    const int64_t now_us = esp_timer_get_time();
+    const bool reentry = (now_us - s_ol.last_us >= 1500000);
+
+    /* Light or dark is read off the background itself (the sky brightens and darkens through the day), once per visit, so the palette never
+     * flips mid-screen. */
+    if (reentry) s_ol.light = ol_background_luma(fb, wl_sky, sky_procedural, bg_path) >= 120;
+    c->light = s_ol.light;
+    c->ink_r = c->light ? 10 : 255;  c->ink_g = c->light ? 25 : 255;  c->ink_b = c->light ? 55 : 255;
+    c->dm = s_wl_dm_active;
+    c->ft = !c->dm && s_ft_face_id >= 0;
+
+    /* One headline cell per tube. Numbers are masked to a known width so the compiler can see every snprintf fits. */
+    memset(c->txt, 0, sizeof(c->txt));
+    for (int t = 0; t < LCD_COUNT; t++) { c->cr[t] = c->cg[t] = c->cb[t] = 255; }   /* text: white with a black shadow, day and night, like the clock face */
+    const bool snow_ev = c->ok && o->event && o->snow_event;
+    if (!c->ok) {
+        snprintf(c->txt[2], sizeof(c->txt[2]), "--");
+    } else if (!o->event) {
+        snprintf(c->txt[1], sizeof(c->txt[1]), "DRY");
+        snprintf(c->txt[2], sizeof(c->txt[2]), "next");
+        snprintf(c->txt[3], sizeof(c->txt[3]), "%uH", (unsigned)o->hours % 100u);
+    } else {
+        snprintf(c->txt[0], sizeof(c->txt[0]), "%s", o->snow_event ? "SNOW" : "RAIN");
+        c->cr[0] = ol_acc_pal[0][snow_ev][0];  c->cg[0] = ol_acc_pal[0][snow_ev][1];  c->cb[0] = ol_acc_pal[0][snow_ev][2];   /* pale accent; the shadow carries it */
+        char hh[10];
+        if (o->now) {
+            snprintf(c->txt[1], sizeof(c->txt[1]), "NOW");
+            outlook_fmt_hour(hh, sizeof(hh), o->start_hour + (int)o->duration_h, c->h12);
+            snprintf(c->txt[2], sizeof(c->txt[2]), "to %s", hh);
+        } else {
+            outlook_fmt_hour(c->txt[1], sizeof(c->txt[1]), o->start_hour, c->h12);
+            outlook_eta_text(c->txt[2], sizeof(c->txt[2]), o->start_min);
+        }
+        unsigned mm10 = (o->peak_mm > 0.0f) ? (unsigned)(o->peak_mm * 10.0f + 0.5f) : 0u;
+        mm10 %= 100u;
+        snprintf(c->txt[3], sizeof(c->txt[3]), "%u.%umm", mm10 / 10u, mm10 % 10u);
+        snprintf(c->txt[4], sizeof(c->txt[4]), "%u%%", (unsigned)o->chance_pct % 1000u);
+        snprintf(c->txt[5], sizeof(c->txt[5]), "for %uh", (unsigned)o->duration_h % 100u);
+    }
+
+    uint32_t sig = 2166136261u;
+#define OUTLOOK_MIX(v) do { sig ^= (uint32_t)(v); sig *= 16777619u; } while (0)
+    OUTLOOK_MIX(c->ok);
+    OUTLOOK_MIX(o->hours);
+    OUTLOOK_MIX(c->h0);
+    OUTLOOK_MIX(c->h12);
+    OUTLOOK_MIX(c->light);
+    OUTLOOK_MIX(wl_sky);
+    OUTLOOK_MIX(c->ft);
+    OUTLOOK_MIX(c->dm);
+    OUTLOOK_MIX(s_ft_face_id);
+    for (const char *ch = cfg->custom_font; *ch; ch++) OUTLOOK_MIX((uint8_t)*ch);   /* a changed font must rebuild the text (and the live-sky overlay) */
+    OUTLOOK_MIX((uint32_t)(int32_t)s_burnin_shift_x);
+    OUTLOOK_MIX(s_lut_gen);
+    for (int h = 0; h < (int)o->hours; h++) { OUTLOOK_MIX((unsigned)(fminf(o->mm[h], 200.0f) * 20.0f)); OUTLOOK_MIX(o->snow[h]); }
+    for (int t = 0; t < LCD_COUNT; t++) {
+        OUTLOOK_MIX(c->cr[t]); OUTLOOK_MIX(c->cg[t]); OUTLOOK_MIX(c->cb[t]);
+        for (const char *ch = c->txt[t]; *ch; ch++) OUTLOOK_MIX((uint8_t)*ch);
+    }
+#undef OUTLOOK_MIX
+    const bool changed = (sig != s_ol.sig);
+    s_ol.last_us = now_us;
+    s_ol.sig     = sig;
+    const bool live = animated && ol_overlay_alloc();
+    if (!live && !changed && !reentry) return;
+
+    /* Row of every hourly point, then the heaviest hour (it gets a dot). */
+    c->pk = -1;
+    c->pk_mm = 0.04f;
+    const float span = (float)(OUTLOOK_YMAX - OUTLOOK_TOP);
+    for (int h = 0; h < 24; h++) {
+        const float mm = (c->ok && h < (int)o->hours) ? o->mm[h] : 0.0f;
+        c->yv[h] = (float)OUTLOOK_YMAX - sqrtf(fminf(fmaxf(mm, 0.0f), 4.0f) / 4.0f) * span;
+        if (mm > c->pk_mm) { c->pk_mm = mm; c->pk = h; }
+    }
+
+    /* A black 1 px shadow behind the white text, whatever the other pages use. Restored afterwards. */
+    const bool    sv_shadow = s_wl_shadow;
+    const uint8_t sv_sr = s_wl_shadow_r, sv_sg = s_wl_shadow_g, sv_sb = s_wl_shadow_b, sv_ss = s_wl_shadow_size;
+    s_wl_shadow = true;
+    s_wl_shadow_r = s_wl_shadow_g = s_wl_shadow_b = 0;
+    s_wl_shadow_size = 1;
+
+    if (live) {
+        s_ol.ov_used_us = now_us;
+        if (changed || !s_ol.ov_valid) ol_overlay_build(fb, c);
+    }
+    for (int t = 0; t < LCD_COUNT; t++) {
+        if (wl_sky) wl_paint_background(fb, t, &s_wl_last_scene);
+        else        seed_fb_blank(fb, bg_path);
+        if (live) ol_overlay_apply(fb, t);
+        else      ol_draw_tube(fb, t, c);
+        display_show_digit(t, fb, LCD_WIDTH, LCD_HEIGHT);   /* one write per tube */
+    }
+    s_wl_shadow = sv_shadow;
+    s_wl_shadow_r = sv_sr;  s_wl_shadow_g = sv_sg;  s_wl_shadow_b = sv_sb;  s_wl_shadow_size = sv_ss;
+}
+
 /* render_weather – panel 0 = temperature + icon, panel 1 = humidity + icon,
  *                  panel 2 = sunrise + sunset times, panels 5/6 = indoor
  *                  temperature/humidity (SHT30, dedicated renderers above).
@@ -10311,8 +11117,10 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
      * readings are independent of the outdoor fetch, so an outdoor-fetch
      * failure shouldn't blank an otherwise-valid indoor panel. */
     wl_load_style(cfg);
+    if (panel != WEATHER_PANEL_RAIN) ol_overlay_release_if_idle();   /* panel 7's live-sky overlay, once it has been away for a while */
     if (panel == WEATHER_PANEL_INTMP) { render_weather_indoor_temp(cfg); return; }
     if (panel == WEATHER_PANEL_INHUM) { render_weather_indoor_hum(cfg);  return; }
+    if (panel == WEATHER_PANEL_RAIN)  { render_weather_outlook(cfg);     return; }   /* its own data source, like the indoor panels */
 
     if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);   /* keep anim_t current */
     const char *th = wx_panel_prep(cfg);
@@ -10345,7 +11153,7 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
         time_t now = time(NULL);
         struct tm lt;
         localtime_r(&now, &lt);
-        render_weather_sun(cfg, &lt, anim_only);
+        render_weather_sun(cfg, &lt, anim_only, hilo_phase);
         return;
     }
 
@@ -11560,27 +12368,10 @@ static void display_task(void *arg)
              * set on the same timer.  Each index wraps modulo its own count. */
             bool panel_changed = false;
             if (is_24cx) {
-                int cnt6 = (cfg->tube6_panel_weather  ? 1 : 0)
-                         + (cfg->tube6_panel_weekdate ? 1 : 0)
-                         + (cfg->tube6_panel_ht       ? 1 : 0)
-                         + (cfg->tube6_panel_temp     ? 1 : 0)
-                         + (cfg->tube6_panel_sunrise  ? 1 : 0)
-                         + (cfg->tube6_panel_push     ? 1 : 0)
-                         + (cfg->tube6_panel_humidity ? 1 : 0)
-                         + (cfg->tube6_panel_wind     ? 1 : 0)
-                         + (cfg->tube6_panel_aqi      ? 1 : 0)
-                         + (cfg->tube6_panel_outdoor_ht ? 1 : 0);
+                bool cxf[CFG_CXP_COUNT];
+                int cnt6 = config_cx_panels(cfg, 6, cxf);
                 if (cnt6 < 1) cnt6 = 1;  /* config enforces ≥1 */
-                int cnt5 = (cfg->tube5_panel_weather  ? 1 : 0)
-                         + (cfg->tube5_panel_weekdate ? 1 : 0)
-                         + (cfg->tube5_panel_ht       ? 1 : 0)
-                         + (cfg->tube5_panel_temp     ? 1 : 0)
-                         + (cfg->tube5_panel_sunrise  ? 1 : 0)
-                         + (cfg->tube5_panel_push     ? 1 : 0)
-                         + (cfg->tube5_panel_humidity ? 1 : 0)
-                         + (cfg->tube5_panel_wind     ? 1 : 0)
-                         + (cfg->tube5_panel_aqi      ? 1 : 0)
-                         + (cfg->tube5_panel_outdoor_ht ? 1 : 0);
+                int cnt5 = config_cx_panels(cfg, 5, cxf);
                 if (cnt5 < 1) cnt5 = 1;
                 uint32_t panel_ms = cfg->tube6_panel_ms < 1000 ? 5000
                                                                 : cfg->tube6_panel_ms;
@@ -11714,22 +12505,12 @@ static void display_task(void *arg)
                     t.tm_min  != s_cx_last_t.tm_min  ||  /* H/T: refresh each minute */
                     t.tm_mday != s_cx_last_t.tm_mday;    /* date panel: new day      */
                 if (cx_render) {
-                    const bool en6[10] = {
-                        cfg->tube6_panel_weather, cfg->tube6_panel_weekdate,
-                        cfg->tube6_panel_ht,      cfg->tube6_panel_temp,
-                        cfg->tube6_panel_sunrise, cfg->tube6_panel_push,
-                        cfg->tube6_panel_humidity, cfg->tube6_panel_wind,
-                        cfg->tube6_panel_aqi,      cfg->tube6_panel_outdoor_ht,
-                    };
+                    bool en6[CFG_CXP_COUNT];
+                    config_cx_panels(cfg, 6, en6);
                     render_cx_panel(cfg, &t, 5, en6, s_cx_panel, &s_cx_last_kind);
                     if (dual_cx) {
-                        const bool en5[10] = {
-                            cfg->tube5_panel_weather, cfg->tube5_panel_weekdate,
-                            cfg->tube5_panel_ht,      cfg->tube5_panel_temp,
-                            cfg->tube5_panel_sunrise, cfg->tube5_panel_push,
-                            cfg->tube5_panel_humidity, cfg->tube5_panel_wind,
-                            cfg->tube5_panel_aqi,      cfg->tube5_panel_outdoor_ht,
-                        };
+                        bool en5[CFG_CXP_COUNT];
+                        config_cx_panels(cfg, 5, en5);
                         render_cx_panel(cfg, &t, 4, en5, s_cx_panel5, &s_cx_last_kind5);
                     }
                     s_cx_last_t = t;
@@ -11846,6 +12627,7 @@ static void display_task(void *arg)
              * synced config from a unit that does have one).
              * Panel 4 (HILO) has an internal HI→LO sub-rotation: the first timer
              * fire flips hilo_phase 0→1; the second fire advances to the next panel.
+             * Panel 2 does the same (sunrise→sunset) when weather_sun_split is on.
              * If the currently active panel has been disabled, jumps to the next
              * enabled one immediately without waiting for the rotation timer.   */
             int  prev_weather_panel = weather_panel;
@@ -11856,15 +12638,12 @@ static void display_task(void *arg)
                  * the first weather fetch completes (fixes panel 0 showing
                  * persistently when only another panel is enabled). */
                 bool sht_present = sht30_is_present();
-                bool pen[7] = { cfg->weather_panel0_en,
-                                cfg->weather_panel1_en,
-                                cfg->weather_panel2_en,
-                                cfg->weather_panel3_en,
-                                cfg->weather_panel4_en,
-                                cfg->weather_panel5_en && sht_present,
-                                cfg->weather_panel6_en && sht_present };
-                int elist[7]; int ecnt = 0;
-                for (int _i = 0; _i < 7; _i++)
+                bool pen[CFG_WX_PANEL_COUNT];
+                config_weather_panels(cfg, pen);
+                pen[WEATHER_PANEL_INTMP] = pen[WEATHER_PANEL_INTMP] && sht_present;   /* the indoor pages need the sensor */
+                pen[WEATHER_PANEL_INHUM] = pen[WEATHER_PANEL_INHUM] && sht_present;
+                int elist[8]; int ecnt = 0;
+                for (int _i = 0; _i < 8; _i++)
                     if (pen[_i]) elist[ecnt++] = _i;
                 if (ecnt == 0) {
                     /* Stale/corrupt config — enable the original 5 outdoor
@@ -11880,8 +12659,9 @@ static void display_task(void *arg)
                 if (!cur_ok) {
                     weather_panel = elist[0]; weather_panel_tick = 0;
                     hilo_phase = 0; panel_flipped = true;
-                } else if ((now_valid || pen[5] || pen[6]) &&
-                           (ecnt > 1 || weather_panel == WEATHER_PANEL_HILO)) {
+                } else if ((now_valid || pen[5] || pen[6] || pen[7]) &&
+                           (ecnt > 1 || weather_panel == WEATHER_PANEL_HILO ||
+                            (weather_panel == WEATHER_PANEL_SUN && cfg->weather_sun_split))) {
                     /* Timer-based rotation — needs valid outdoor data, or at
                      * least one indoor panel enabled (SHT30 present), so an
                      * indoor-only setup still cycles even if the outdoor
@@ -11891,8 +12671,9 @@ static void display_task(void *arg)
                         weather_panel_tick = now_t;
                     } else if ((now_t - weather_panel_tick) >= pdMS_TO_TICKS(
                                    cfg->weather_panel_ms ? cfg->weather_panel_ms : 5000)) {
-                        if (weather_panel == WEATHER_PANEL_HILO && hilo_phase == 0) {
-                            /* HI shown — flip to LO before moving on */
+                        if ((weather_panel == WEATHER_PANEL_HILO ||
+                             (weather_panel == WEATHER_PANEL_SUN && cfg->weather_sun_split)) && hilo_phase == 0) {
+                            /* HI (or sunrise) shown — flip to LO (or sunset) before moving on */
                             hilo_phase         = 1;
                             weather_panel_tick = now_t;
                             panel_flipped      = true;
@@ -11916,7 +12697,7 @@ static void display_task(void *arg)
 
             /* Restart the sun's rise on every fresh entry — see
              * wx_sun_anim_reset()'s comment. */
-            if (sun_anim && prev_weather_panel != WEATHER_PANEL_SUN)
+            if (sun_anim && (prev_weather_panel != WEATHER_PANEL_SUN || (panel_flipped && cfg->weather_sun_split)))
                 wx_sun_anim_reset();
 
             /* Trigger re-render when: first draw, mode/theme change, new data
@@ -11934,6 +12715,10 @@ static void display_task(void *arg)
                 if (!wx_changed && weather_panel == WEATHER_PANEL_SUN)
                     wx_changed = (wx_tm.tm_min != last_wx_min);
             }
+            /* The rain / snow outlook counts down ("in 1h16") and has its own data, so it is redrawn every minute, even with it as the only
+             * enabled page (nothing else would redraw it) or while the current-conditions fetch has not succeeded. */
+            if (!wx_changed && weather_panel == WEATHER_PANEL_RAIN)
+                wx_changed = (wx_tm.tm_min != last_wx_min);
             bool valid_changed = (now_valid != last_wx_valid);
 
             /* Indoor (SHT30) change detection — independent of the outdoor
@@ -11972,8 +12757,8 @@ static void display_task(void *arg)
                     if (now_valid) {
                         last_temp_c = w->temp_c;
                         last_hum    = w->humidity;
-                        last_wx_min = wx_tm.tm_min;
                     }
+                    last_wx_min = wx_tm.tm_min;
                     last_wx_valid = now_valid;
                     if (indoor_now_valid) {
                         last_indoor_temp_c = sht_now.temp_c;
@@ -12033,10 +12818,10 @@ static void display_task(void *arg)
          * repaint every BURNIN_REPAINT_US — not every tick. A full-tube fill
          * busy-waits on the SPI bus, and at WeatherLive's 10–20 Hz tick six
          * of them per tick for a whole session starved httpd/MQTT (web UI
-         * dropping mid-session). Most render paths already skip masked tubes;
-         * the safety repaint covers the few that don't (ticker overlay, AP
-         * PIN, direct display_show_digit users), so anything they draw over
-         * a masked tube is gone within 2 s. */
+         * dropping mid-session). The low-level writers all skip masked tubes
+         * (BURNIN_HELD), so nothing needs to be painted over; the safety
+         * repaint stays for the two overlays that draw regardless (MQTT
+         * ticker, AP PIN), which are gone from a masked tube within 2 s. */
         if (s_burnin_mask) {
             /* Monotonic, not time(NULL) — same reasoning as the expiry timer
              * above: a wall-clock step (NTP correction) would otherwise skip
@@ -12053,12 +12838,14 @@ static void display_task(void *arg)
             if (tp) col = (uint16_t)(0x8000u | ((uint16_t)tp << 8) | (s_lut_gen & 0xFFu));
             if (mask != burnin_painted_mask || col != burnin_painted_col ||
                     now_us - burnin_painted_us >= BURNIN_REPAINT_US) {
+                s_bi_bypass = true;
                 for (int _t = 0; _t < LCD_COUNT; _t++) {
                     if (mask & (1u << _t)) {
                         if (tp) testpat_paint(_t, tp);
                         else    display_fill(_t, col);
                     }
                 }
+                s_bi_bypass = false;
                 burnin_painted_mask = mask;
                 burnin_painted_col  = col;
                 burnin_painted_us   = now_us;

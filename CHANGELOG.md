@@ -1,6 +1,33 @@
 # Changelog
 
 
+## [1.21.0] - 2026-10-24
+
+### Added
+- **Automatic Firmware Update** (System tab): the clock can install new releases by itself once a day, inside a 2-hour window you choose. It installs the firmware and then the matching web UI, and only when the release carries both files with their SHA-256 hashes. Choose patch releases only or any stable release. A **Check now** button shows what the clock would do. The next time you open the web UI after an automatic update, a banner says which version the clock updated from and to, with a link to the release notes, until you click OK. A version that was rolled back, or failed twice, is not tried again.
+- **Rain / snow outlook** weather page (Weather mode, off by default): the next 24 hours of precipitation as a smooth curve across all six tubes, with the first wet spell in words (kind, start time, in how long, how heavy, how likely, for how long), or DRY NEXT 24H. The same forecast is also a **Rain / snow outlook** info panel for Tube 5/6 in 24H Custom (first wet spell in three lines plus the 24-hour curve; DotMatrix keeps a pixel bar graph), and is available to Home Assistant as three new sensors (next precipitation type, minutes until it starts, amount) and in the status data.
+- **Large sunrise / sunset times** option for the Sunrise & Sunset weather page (off by default): shows the sunrise and the sunset on separate screens, one big time each, laid out like the clock so it reads from across the room.
+- **Advanced LCD Tuning** (formerly Advanced Display) can show your edits on the clock before you save them: flip between **A · Saved** and **B · Edits**, or tick **Live** to see every edit as you make it (the saved values come back by themselves after 5 minutes). A bar stays pinned with the tube picker and **Copy from**, the settings are grouped (Panel type, Position, Brightness and shadows, Color matching, Fine-tuning), and a dot marks every setting that differs from its default.
+- **Reset tube settings** at the bottom of Advanced LCD Tuning: puts one tube, or all six, back to the default panel profile and VCOM, gamma, color inversion, window offsets and brightness, shadow, color, curve, pedestal and black level trims. Nothing changes on the clock until you press Save.
+
+### Changed
+- **The web UI is reorganised into six tabs: Home, Appearance, Modes, Connections, Device and System.** Appearance holds Theme (with the Custom face settings), Clock face, Brightness and night, LED Accent Lighting, Theme Manager and Theme Rotation; Modes holds Enabled Modes, Mode Rotation, Weather, Social Media Counters, Album and Spectrum; Connections holds WiFi, Setup AP, Home Assistant MQTT and WLED Sync; Device holds Date and time zone, the indoor sensor, audio, Scheduled Anti Burn-in and Advanced LCD Tuning. System is as before, minus Setup AP. One floating **Save** button replaces the per-section Save buttons. Your settings are not affected.
+- The web page loads faster on a freshly flashed clock: the LittleFS image now carries the compressed page (about 196 KB instead of 727 KB), the same as a clock that has had a Web UI update, and the release-notes renderer is only fetched when you open an update's notes instead of on every page load.
+- Typing in the settings is lighter: the page no longer re-reads every field twice per keystroke to decide whether to show the Save button.
+- The weather pages and the Tube 5/6 info panels are now handled from one shared list in the settings code, so adding a panel later touches one place. Your saved settings and the settings file format are unchanged.
+- The wind icon on the Wind page and the Tube 5/6 wind panel is redrawn with three flowing streaks that curl at the ends.
+- Time zone data updated to IANA 2026e: Manitoba (**America/Winnipeg**, also **America/Rainy_River**) moves to permanent UTC−5 on 31 October 2026, so the clock stops changing for daylight saving there.
+
+### Fixed
+- The online updater should no longer end with "Web UI update: device unreachable" when the Web UI was in fact installed: if it cannot read the update status, it now checks the Web UI version on the clock and finishes normally once it matches.
+- Flashing firmware again within a few minutes of a previous flash now says the clock is still checking the last update and how long to wait (or to restart it), instead of "OTA begin fail".
+- After flashing firmware or a Web UI file from the Update tab, the page now reconnects and reloads by itself instead of ending with "Device did not come back online" while the clock was in fact back.
+- The online updater now reads the Web UI update's progress even when the clock does not accept the page's login right after the reboot, and if you reload the page while an update is finishing, it picks the progress up again instead of leaving you guessing.
+- Uploading a large file in **LittleFS Files** no longer fills the page with "API error" toasts: status checks pause during an upload, and a failed background status check now only turns the connection indicator to Offline.
+- Jumping to a setting from the search box on the Appearance tab no longer leaves the match hidden under the pinned live preview: the page now scrolls it into view below the preview, showing the whole card when it fits.
+- **Anti Burn-in / LCD Refresh** now keeps full control of its tubes: WeatherLive and other modes' animations, info panels, labels and fallback fills could draw over the solid color or test pattern for a moment, and now they are blocked from tubes the refresh is using.
+- The Time Zone list now shows the zone you saved, not the first zone that shares its rule: Australia/Sydney no longer appears as Antarctica/Macquarie, and saving no longer swaps the stored zone name for the other one. The selected zone is also highlighted and centered in the list when you open the tab.
+
 ## [1.20.1] - 2026-10-15
 
 ### Added
