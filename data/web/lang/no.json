@@ -575,5 +575,13 @@
   "card.clock_face": "Urskive",
   "card.brightness": "Lysstyrke og natt",
   "card.advanced_lcd": "Avansert LCD-justering",
-  "card.date_tz": "Dato og tidssone"
+  "card.date_tz": "Dato og tidssone",
+  "cp.hex": "Hex-farge",
+  "cp.pick": "Fargevelger",
+  "cp.done": "Ferdig",
+  "cp.preset": "Forhåndsinnstilt farge",
+  "cp.recent": "Nylig farge",
+  "cp.red": "Rød",
+  "cp.green": "Grønn",
+  "cp.blue": "Blå"
 }

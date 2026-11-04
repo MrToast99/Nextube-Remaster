@@ -575,5 +575,13 @@
   "card.clock_face": "Quadrante",
   "card.brightness": "Luminosità e notte",
   "card.advanced_lcd": "Regolazione avanzata LCD",
-  "card.date_tz": "Data e fuso orario"
+  "card.date_tz": "Data e fuso orario",
+  "cp.hex": "Colore esadecimale",
+  "cp.pick": "Selettore colore",
+  "cp.done": "Fatto",
+  "cp.preset": "Colore predefinito",
+  "cp.recent": "Colore recente",
+  "cp.red": "Rosso",
+  "cp.green": "Verde",
+  "cp.blue": "Blu"
 }

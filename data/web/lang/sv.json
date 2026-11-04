@@ -575,5 +575,13 @@
   "card.clock_face": "Urtavla",
   "card.brightness": "Ljusstyrka och natt",
   "card.advanced_lcd": "Avancerad LCD-justering",
-  "card.date_tz": "Datum och tidszon"
+  "card.date_tz": "Datum och tidszon",
+  "cp.hex": "Hex-färg",
+  "cp.pick": "Färgväljare",
+  "cp.done": "Klar",
+  "cp.preset": "Förinställd färg",
+  "cp.recent": "Senaste färg",
+  "cp.red": "Röd",
+  "cp.green": "Grön",
+  "cp.blue": "Blå"
 }

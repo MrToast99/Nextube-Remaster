@@ -575,5 +575,13 @@
   "card.clock_face": "Kellotaulu",
   "card.brightness": "Kirkkaus ja yö",
   "card.advanced_lcd": "LCD:n lisäsäädöt",
-  "card.date_tz": "Päivämäärä ja aikavyöhyke"
+  "card.date_tz": "Päivämäärä ja aikavyöhyke",
+  "cp.hex": "Heksaväri",
+  "cp.pick": "Värinvalitsin",
+  "cp.done": "Valmis",
+  "cp.preset": "Esiasetettu väri",
+  "cp.recent": "Viimeksi käytetty väri",
+  "cp.red": "Punainen",
+  "cp.green": "Vihreä",
+  "cp.blue": "Sininen"
 }

@@ -575,5 +575,13 @@
   "card.clock_face": "Wijzerplaat",
   "card.brightness": "Helderheid en nacht",
   "card.advanced_lcd": "Geavanceerde LCD-afstelling",
-  "card.date_tz": "Datum en tijdzone"
+  "card.date_tz": "Datum en tijdzone",
+  "cp.hex": "Hexkleur",
+  "cp.pick": "Kleurkiezer",
+  "cp.done": "Klaar",
+  "cp.preset": "Vooraf ingestelde kleur",
+  "cp.recent": "Recente kleur",
+  "cp.red": "Rood",
+  "cp.green": "Groen",
+  "cp.blue": "Blauw"
 }

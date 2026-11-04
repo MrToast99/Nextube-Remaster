@@ -575,5 +575,13 @@
   "card.clock_face": "Cadran",
   "card.brightness": "Luminosité et nuit",
   "card.advanced_lcd": "Réglage avancé du LCD",
-  "card.date_tz": "Date et fuseau horaire"
+  "card.date_tz": "Date et fuseau horaire",
+  "cp.hex": "Couleur hexadécimale",
+  "cp.pick": "Sélecteur de couleur",
+  "cp.done": "OK",
+  "cp.preset": "Couleur prédéfinie",
+  "cp.recent": "Couleur récente",
+  "cp.red": "Rouge",
+  "cp.green": "Vert",
+  "cp.blue": "Bleu"
 }

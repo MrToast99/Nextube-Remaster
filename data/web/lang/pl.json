@@ -575,5 +575,13 @@
   "card.clock_face": "Tarcza zegara",
   "card.brightness": "Jasność i noc",
   "card.advanced_lcd": "Zaawansowane ustawienia LCD",
-  "card.date_tz": "Data i strefa czasowa"
+  "card.date_tz": "Data i strefa czasowa",
+  "cp.hex": "Kolor szesnastkowy",
+  "cp.pick": "Selektor kolorów",
+  "cp.done": "Gotowe",
+  "cp.preset": "Kolor predefiniowany",
+  "cp.recent": "Ostatnio użyty kolor",
+  "cp.red": "Czerwony",
+  "cp.green": "Zielony",
+  "cp.blue": "Niebieski"
 }

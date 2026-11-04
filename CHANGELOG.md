@@ -1,6 +1,15 @@
 # Changelog
 
 
+## [1.21.1] - 2026-11-04
+
+### Added
+- **Better colour pickers** in the web UI, on every device: clicking a colour swatch opens a small window with a hex box, RGB sliders and typeable number boxes, chips for common and recently used colours, and a button for the browser's own picker. On a phone it slides up from the bottom.
+- The firmware version in System, About is now a link to that version's release notes on GitHub (#116).
+
+### Changed
+- Time zone data updated to IANA 2026f: Cuba (**America/Havana**) skips the 1 November 2026 fall-back and stays on UTC−4 until November 2027. If you use that zone, the page will offer to update it.
+
 ## [1.21.0] - 2026-10-24
 
 ### Added

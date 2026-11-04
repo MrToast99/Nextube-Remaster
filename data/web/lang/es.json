@@ -575,5 +575,13 @@
   "card.clock_face": "Esfera del reloj",
   "card.brightness": "Brillo y noche",
   "card.advanced_lcd": "Ajuste avanzado del LCD",
-  "card.date_tz": "Fecha y zona horaria"
+  "card.date_tz": "Fecha y zona horaria",
+  "cp.hex": "Color hexadecimal",
+  "cp.pick": "Selector de color",
+  "cp.done": "Listo",
+  "cp.preset": "Color predefinido",
+  "cp.recent": "Color reciente",
+  "cp.red": "Rojo",
+  "cp.green": "Verde",
+  "cp.blue": "Azul"
 }

@@ -254,6 +254,32 @@ select option{background:var(--accent);color:var(--text)}
 input[type=color].color-swatch{width:44px;height:44px;vertical-align:top;border-radius:var(--radius);border:1px solid var(--border);cursor:pointer;background:none;padding:0;box-shadow:inset 0 1px 3px rgba(0,0,0,.25);transition:transform .15s var(--ease),border-color .15s var(--ease),box-shadow .15s var(--ease)}
 input[type=color].color-swatch:hover{transform:scale(1.06);border-color:var(--text)}
 input[type=color].color-swatch:focus{outline:none;border-color:var(--hi);box-shadow:inset 0 1px 3px rgba(0,0,0,.25),0 0 0 3px rgba(var(--hi-rgb),.18)}
+/* Colour pop-up: clicking a colour swatch opens one shared window (hex box, RGB sliders and number boxes, preset / recent chips, and a button for
+ * the browser's own picker) next to it; a bottom sheet on a narrow screen. See cpOpen(). */
+.cp-back{position:fixed;inset:0;z-index:300;display:none}
+.cp-pop{position:fixed;z-index:301;display:none;width:300px;max-width:calc(100vw - 16px);box-sizing:border-box;padding:.9rem;background:var(--card2);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:0 14px 36px rgba(0,0,0,.55)}
+.cp-open .cp-back,.cp-open .cp-pop{display:block}
+.cp-title{font-size:.8rem;color:var(--dim);margin-bottom:.6rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cp-pop input[type=text],.cp-pop input[type=number]{padding:.6rem .7rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--accent);color:var(--text);font-size:.9rem;box-shadow:inset 0 1px 3px rgba(0,0,0,.25)}
+.cp-pop input[type=text]:focus,.cp-pop input[type=number]:focus{outline:none;border-color:var(--hi);box-shadow:inset 0 1px 3px rgba(0,0,0,.25),0 0 0 3px rgba(var(--hi-rgb),.18)}
+.cp-pop input[type=range]{accent-color:var(--hi);min-width:0}
+.cp-row{display:flex;align-items:center;gap:.5rem}
+.cp-prev{flex:0 0 auto;width:36px;height:36px;border-radius:var(--radius-sm);border:1px solid var(--border)}
+.cp-row .cp-hex{width:96px;font-family:var(--mono,ui-monospace,monospace);text-transform:uppercase}
+.cp-row .btn{padding:.5rem .8rem;margin-left:auto}
+.cp-sl{display:grid;grid-template-columns:1rem 1fr 60px;gap:.6rem;align-items:center;margin-top:.4rem;font-size:.78rem;color:var(--dim)}
+.cp-sl input[type=number]{width:60px;padding:.3rem .6rem;text-align:right;-moz-appearance:textfield;appearance:textfield;font-family:var(--mono,ui-monospace,monospace)}
+.cp-sl input[type=number]::-webkit-outer-spin-button,.cp-sl input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;appearance:none;margin:0}
+.cp-chips{display:flex;flex-wrap:wrap;gap:.3rem;margin-top:.7rem}
+.cp-chip{width:24px;height:24px;border-radius:50%;border:1px solid var(--border);padding:0;cursor:pointer}
+.cp-chip.on{outline:2px solid var(--hi);outline-offset:1px}
+.cp-done{display:block;width:100%;margin-top:.8rem}
+input[type=color].cp-sel{outline:2px solid var(--hi);outline-offset:2px}
+@media (max-width:600px),(pointer:coarse){
+  .cp-pop{left:0!important;right:0;top:auto!important;bottom:0;width:auto;max-width:none;border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding-bottom:calc(.9rem + env(safe-area-inset-bottom,0px))}
+  .cp-row .cp-hex,.cp-sl input[type=number]{height:44px;font-size:16px}
+  .cp-chip{width:31px;height:31px}
+}
 input.chk{width:15px;height:15px;flex:0 0 auto;cursor:pointer}
 label.chk-row{display:flex;align-items:center;gap:.6rem;font-size:.85rem;font-weight:400;color:var(--text);cursor:pointer}
 /* Custom pill toggle switch, standing in for the native checkbox on every
@@ -2202,9 +2228,9 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
 <div class="card">
     <h2 data-ico="info" data-i18n="sys.about">About</h2>
     <p style="font-size:.85rem;color:var(--dim)">
-      <span data-i18n="sys.about_firmware">Firmware</span> &nbsp;v<span id="s-fwver" onclick="dbgTap()" style="cursor:default" title=""></span><br>
+      <span data-i18n="sys.about_firmware">Firmware</span> &nbsp;<a id="s-fwnotes" target="_blank" rel="noopener" style="color:inherit;cursor:default">v<span id="s-fwver"></span></a><br>
       <span data-i18n="sys.about_webui">Web UI</span> &nbsp;&nbsp;&nbsp;v<span id="s-spver">--</span><br>
-      <span data-i18n="sys.about_hw_rev">Hardware Rev</span> <span id="s-hwver">1.31</span><br>
+      <span data-i18n="sys.about_hw_rev">Hardware Rev</span> <span id="s-hwver" onclick="dbgTap()" style="cursor:default">1.31</span><br>
       <span data-i18n="sys.about_hw_spec">ESP32-WROVER-E · 16MB Flash · 8MB PSRAM</span><br>
       <a id="github-repo-link" href="https://github.com/MrToast99/Nextube-Remaster" target="_blank" style="color:var(--hi)" data-i18n="sys.github">GitHub Repository</a>
     </p>
@@ -2745,6 +2771,7 @@ Object.assign(I18N.en, {
   "au.ok":"OK",
   "svc.wx_outlook":"Rain / snow outlook",
   "svc.wx_sun_split":"Large sunrise / sunset times",
+  "cp.hex":"Hex color","cp.pick":"Color picker","cp.done":"Done","cp.preset":"Preset color","cp.recent":"Recent color","cp.red":"Red","cp.green":"Green","cp.blue":"Blue",
   "adv.reset_tube_title":"Reset tube settings",
   "adv.reset_tube_desc":"Puts every setting above for one tube, or for all tubes, back to its default: panel profile and VCOM, gamma, color inversion, window offsets, and the brightness, shadow, color, curve, pedestal and black level trims. Nothing is saved until you press Save.",
   "adv.reset_tube_btn":"Reset to defaults",
@@ -7188,6 +7215,165 @@ function applyColorToAll() {
   });
 }
 
+/* ── Colour pop-up ───────────────────────────────────────────────────────────────────────────────────────────────
+ * Every <input type="color"> stays the real control and the rest of the page keeps reading and writing its .value, events and ids. A click on
+ * one opens a shared window (cpOpen) instead of the browser's picker: a hex box, a slider and number box per RGB channel, preset / recent chips,
+ * and a button for the browser's own picker (with its eyedropper where there is one). Edits are written to the swatch the way a pick is (value,
+ * then input and change events), so the live preview and dirty tracking run unchanged. */
+const CP_PRESETS = ['#ffffff', '#ff6600', '#4db8ff', '#ff4d4d', '#7cfc00', '#000000'];
+let _cpRecent = [];
+try { _cpRecent = JSON.parse(localStorage.getItem('nxCpRecent') || '[]').filter(c => /^#[0-9a-f]{6}$/.test(c)).slice(0, 4); } catch (_) { /* storage blocked */ }
+let _cp = null;   /* the pop-up's elements, built on first use */
+let _cpEl = null; /* the swatch being edited */
+function _cpClamp(v) { return Math.max(0, Math.min(255, Math.round(v))); }
+function _cpRgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+function _cpHex(r, g, b) { return '#' + [r, g, b].map(v => _cpClamp(v).toString(16).padStart(2, '0')).join(''); }
+function _cpParseHex(t) {
+  t = String(t).trim().replace(/^#/, '');
+  if (/^[0-9a-f]{3}$/i.test(t)) t = t.replace(/./g, c => c + c);
+  return /^[0-9a-f]{6}$/i.test(t) ? '#' + t.toLowerCase() : null;
+}
+function cpRemember(hex) {
+  if (!hex || CP_PRESETS.includes(hex)) return;
+  _cpRecent = [hex, ..._cpRecent.filter(c => c !== hex)].slice(0, 4);
+  try { localStorage.setItem('nxCpRecent', JSON.stringify(_cpRecent)); } catch (_) { /* ignore */ }
+}
+function cpApply(hex) {
+  const el = _cpEl;
+  if (!el || el.disabled || el.value === hex) return;
+  el.value = hex;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function _cpLabel(el) {
+  if (el.dataset.idx !== undefined && el.closest('#color-swatches')) return 'Tube ' + (+el.dataset.idx + 1);
+  const l = (el.id && document.querySelector('label[for="' + el.id + '"]')) || el.closest('.field, .field-group')?.querySelector('label');
+  return (el.getAttribute('aria-label') || el.title || (l && l.textContent) || '').trim();
+}
+function cpRefresh() {
+  if (!_cp || !_cpEl) return;
+  const v = _cpEl.value, rgb = _cpRgb(v);
+  _cp.prev.style.background = v;
+  if (document.activeElement !== _cp.hex) _cp.hex.value = v;
+  _cp.rows.forEach(r => { r.rg.value = rgb[r.i]; if (document.activeElement !== r.nb) r.nb.value = rgb[r.i]; });
+  _cp.chips.innerHTML = '';
+  [...CP_PRESETS.map(c => [c, 'cp.preset']), ..._cpRecent.map(c => [c, 'cp.recent'])].forEach(([c, key]) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'cp-chip' + (c === v ? ' on' : ''); b.style.background = c;
+    b.title = c; b.setAttribute('aria-label', tr(key) + ' ' + c);
+    b.onclick = () => { cpApply(c); cpRemember(c); cpRefresh(); };
+    _cp.chips.appendChild(b);
+  });
+}
+function _cpBuild() {
+  const back = document.createElement('div');
+  back.className = 'cp-back';
+  const pop = document.createElement('div');
+  pop.className = 'cp-pop'; pop.setAttribute('role', 'dialog');
+  const title = document.createElement('div');
+  title.className = 'cp-title';
+  const row = document.createElement('div');
+  row.className = 'cp-row';
+  const prev = document.createElement('span');
+  prev.className = 'cp-prev';
+  const hex = document.createElement('input');
+  hex.type = 'text'; hex.className = 'cp-hex'; hex.maxLength = 7; hex.autocomplete = 'off'; hex.spellcheck = false;
+  const pick = document.createElement('button');
+  pick.type = 'button'; pick.className = 'btn btn-outline';
+  const rows = [0, 1, 2].map(i => {
+    const d = document.createElement('div');
+    d.className = 'cp-sl';
+    d.innerHTML = '<span></span><input type="range" min="0" max="255" step="1"><input type="number" min="0" max="255" step="1" inputmode="numeric">';
+    d.firstChild.textContent = 'RGB'[i];
+    const [rg, nb] = d.querySelectorAll('input');
+    return { d, rg, nb, i };
+  });
+  const chips = document.createElement('div');
+  chips.className = 'cp-chips';
+  const done = document.createElement('button');
+  done.type = 'button'; done.className = 'btn btn-primary cp-done';
+  row.append(prev, hex, pick);
+  pop.append(title, row, ...rows.map(r => r.d), chips, done);
+  document.body.append(back, pop);
+  const cur = () => _cpEl.value;
+  hex.addEventListener('input', () => { const h = _cpParseHex(hex.value); if (h && hex.value.replace('#', '').length === 6) { cpApply(h); cpRefresh(); } });
+  hex.addEventListener('change', () => { const h = _cpParseHex(hex.value); if (h) { cpApply(h); cpRemember(h); } hex.value = cur(); cpRefresh(); });
+  hex.addEventListener('keydown', e => { if (e.key === 'Enter') hex.blur(); });
+  rows.forEach(r => {
+    const set = v => { const c = _cpRgb(cur()); c[r.i] = _cpClamp(v); cpApply(_cpHex(...c)); cpRefresh(); };
+    r.rg.addEventListener('input', () => set(+r.rg.value));
+    r.rg.addEventListener('change', () => cpRemember(cur()));
+    r.nb.addEventListener('input', () => { if (r.nb.value !== '') set(+r.nb.value); });
+    r.nb.addEventListener('change', () => { r.nb.value = _cpRgb(cur())[r.i]; cpRemember(cur()); });
+    r.nb.addEventListener('keydown', e => { if (e.key === 'Enter') r.nb.blur(); });
+  });
+  pick.addEventListener('click', () => {
+    const el = _cpEl;
+    if (!el) return;
+    el._cpNative = true;
+    try { el.showPicker(); } catch (_) { el.click(); }
+    el._cpNative = false;
+  });
+  const close = () => cpClose(true);
+  back.addEventListener('mousedown', close);
+  back.addEventListener('touchstart', close, { passive: true });
+  done.addEventListener('click', close);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && _cpEl) close(); });
+  window.addEventListener('resize', () => { if (_cpEl) cpPlace(); });
+  window.addEventListener('scroll', () => { if (_cpEl) cpPlace(); }, true);
+  _cp = { back, pop, title, prev, hex, pick, rows, chips, done };
+}
+function cpPlace() {
+  if (window.matchMedia('(max-width:600px),(pointer:coarse)').matches) {
+    _cp.pop.style.left = _cp.pop.style.top = '';
+    /* The sheet covers the bottom of the screen: leave room for it under the page and scroll the swatch above it. */
+    const h = _cp.pop.offsetHeight;
+    document.body.style.paddingBottom = h + 'px';
+    const over = _cpEl.getBoundingClientRect().bottom - (innerHeight - h - 12);
+    if (over > 0) window.scrollBy(0, over);
+    return;
+  }
+  const r = _cpEl.getBoundingClientRect(), w = _cp.pop.offsetWidth, h = _cp.pop.offsetHeight;
+  let top = r.bottom + 8;
+  if (top + h > innerHeight - 8) top = Math.max(8, r.top - h - 8);
+  _cp.pop.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
+  _cp.pop.style.top = top + 'px';
+}
+function cpOpen(el) {
+  if (!_cp) _cpBuild();
+  if (_cpEl && _cpEl !== el) cpClose(false);
+  _cpEl = el;
+  el.classList.add('cp-sel');
+  _cp.title.textContent = _cpLabel(el);
+  _cp.hex.setAttribute('aria-label', tr('cp.hex')); _cp.hex.title = tr('cp.hex');
+  _cp.pick.textContent = tr('cp.pick'); _cp.done.textContent = tr('cp.done');
+  const names = [tr('cp.red'), tr('cp.green'), tr('cp.blue')];
+  _cp.rows.forEach(r => { r.rg.setAttribute('aria-label', names[r.i]); r.nb.setAttribute('aria-label', names[r.i]); });
+  _cp.pop.setAttribute('aria-label', _cp.title.textContent);
+  el.addEventListener('input', cpRefresh);
+  document.body.classList.add('cp-open');
+  cpRefresh();
+  cpPlace();
+}
+function cpClose(returnFocus) {
+  if (!_cpEl) return;
+  const el = _cpEl;
+  _cpEl = null;
+  el.removeEventListener('input', cpRefresh);
+  el.classList.remove('cp-sel');
+  cpRemember(el.value);
+  document.body.classList.remove('cp-open');
+  document.body.style.paddingBottom = '';
+  if (returnFocus) el.focus({ preventScroll: true });
+}
+/* Capture phase, so this wins over the browser opening its picker; the pop-up's own button re-opens that picker on purpose (_cpNative). */
+document.querySelector('main').addEventListener('click', e => {
+  const el = e.target.closest && e.target.closest('input[type=color]');
+  if (!el || el._cpNative) return;
+  e.preventDefault();
+  cpOpen(el);
+}, true);
+
 /* ── Read current enabled-modes bitmask from checkboxes ─────────── */
 function readEnabledModes() {
   return ($('m-clock').checked      ? (1 << 0)  : 0) |
@@ -9066,6 +9252,12 @@ async function refreshStatus() {
     $('fs-pct-lbl').textContent   = pct + '% used';
   }
   $('s-fwver').textContent = s.firmware || '--';
+  /* The version links to its release page; only a plain x.y.z has one (a test build would 404). */
+  const notes = $('s-fwnotes'), plain = /^\d+\.\d+\.\d+$/.test(s.firmware || '');
+  if (plain) notes.href = UPDATE_REPO_URL + '/releases/tag/v' + s.firmware; else notes.removeAttribute('href');
+  notes.style.color = plain ? 'var(--hi)' : 'inherit';
+  notes.style.cursor = plain ? '' : 'default';
+  notes.title = plain ? tr('au.release_notes') : '';
   if ($('s-spver')) $('s-spver').textContent = s.fs_version || '--';
 
   /* OTA rollback banner — shown when the inactive OTA slot is ABORTED,

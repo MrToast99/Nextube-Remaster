@@ -575,5 +575,13 @@
   "card.clock_face": "Zifferblatt",
   "card.brightness": "Helligkeit und Nacht",
   "card.advanced_lcd": "Erweiterte LCD-Abstimmung",
-  "card.date_tz": "Datum und Zeitzone"
+  "card.date_tz": "Datum und Zeitzone",
+  "cp.hex": "Hex-Farbe",
+  "cp.pick": "Farbwähler",
+  "cp.done": "Fertig",
+  "cp.preset": "Voreingestellte Farbe",
+  "cp.recent": "Zuletzt verwendete Farbe",
+  "cp.red": "Rot",
+  "cp.green": "Grün",
+  "cp.blue": "Blau"
 }

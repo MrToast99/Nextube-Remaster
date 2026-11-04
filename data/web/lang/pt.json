@@ -575,5 +575,13 @@
   "card.clock_face": "Mostrador",
   "card.brightness": "Brilho e noite",
   "card.advanced_lcd": "Ajuste avançado do LCD",
-  "card.date_tz": "Data e fuso horário"
+  "card.date_tz": "Data e fuso horário",
+  "cp.hex": "Cor hexadecimal",
+  "cp.pick": "Seletor de cor",
+  "cp.done": "Concluído",
+  "cp.preset": "Cor predefinida",
+  "cp.recent": "Cor recente",
+  "cp.red": "Vermelho",
+  "cp.green": "Verde",
+  "cp.blue": "Azul"
 }
