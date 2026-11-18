@@ -47,6 +47,9 @@ Like the work? Help keep me Caffeinated! <br>
   - [External weather (push your own data)](#external-weather-push-your-own-data)
 - [Pushed images on tube 5/6](#pushed-images-on-tube-56-24h-custom)
 - [Air Quality panel](#air-quality-panel)
+- [Station panel](#station-panel)
+- [Energy panel](#energy-panel)
+- [Sending data from Home Assistant (blueprints)](#sending-data-from-home-assistant-blueprints)
 - [NTP & Clock Accuracy](#ntp--clock-accuracy)
   - [How synchronisation works](#how-synchronisation-works)
   - [Time discipline modes](#time-discipline-modes)
@@ -256,7 +259,7 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
 When the update check finds a newer GitHub release (see [Automatic Update Checks](#automatic-update-checks)), the toast includes an **Online Updater** button. Click it to install everything in one step — no manual downloads, no file picking. **The device pulls the release directly from GitHub itself:**
 
 1. **Review** — a panel shows the release notes and confirms both assets (firmware + web UI) are present, then you click **Proceed**.
-2. **Firmware** — the device downloads the new firmware from GitHub over HTTPS, **verifies it by SHA-256**, and flashes itself, with live download and flash progress.
+2. **Firmware** — the device downloads the new firmware from GitHub over HTTPS into memory, **verifies it by SHA-256** and checks the image's own structure, checksum and built-in hash, and only then erases the spare slot and flashes itself, with live download and flash progress. A damaged or cut-short file is refused with the reason and nothing is written. If memory is too fragmented to hold the image, the clock frees its picture and font caches and tries once more.
 3. **Reboot** — into the new firmware.
 4. **Web UI** — the device then pulls and applies the matching web UI on its own; the browser tracks progress and finishes with **✓ Update finished**, a list of which files actually changed, and a **Reload page** button.
 
@@ -618,6 +621,7 @@ Sessions are **RAM-only** and lost on reboot — you will be asked to log in onc
 | **TikTok** | Live follower count. Requires the local relay (`social_relay.py`) — TikTok's bot detection blocks direct ESP32 fetches. |
 | **Mastodon** | Live follower count. Fetched directly from the configured Mastodon instance API — no relay required. |
 | **Weather** | Up to three panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon; **Panel 3** — animated sunrise/sunset (rising/setting sun + mountain silhouettes at 20 Hz, solar times in HH:MM). Any combination of panels can be enabled; at least one must remain on. Temperatures rounded to whole degrees; leading zeros suppressed; minus sign shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
+| **Energy** | Home Assistant energy data on all six tubes (off by default; enable under **Modes → Enabled Modes**). Its own pages rotate on a page timer: **Flow** (solar → home ← grid, battery), **Now** (grid, solar and battery power), **Today** (solar produced, bought and sold in kWh) and **Home** (home use today). Pages with no data are skipped. See [Energy panel](#energy-panel). |
 | **Album** | Slideshow of JPEGs from `/images/album/`. Each tube shows a **different** image offset by its position — with 6+ images all tubes are unique; with fewer they wrap gracefully. Images advance as a sliding window every `album_switch_ms` (default 2 s). |
 | **Spectrum** | Microphone audio visualiser. 24 Goertzel bands (280 Hz up to an adjustable top frequency, default 8 kHz, log-spaced) drive **4 segmented mini-bars per tube** with a white peak-dot indicator. Tubes read left-to-right from bass to treble. Uses the onboard electret capsule + LMV321IDBVR preamp on GPIO35 (ADC1_CH7). Adaptive per-band noise floor subtraction ensures bars sit at zero in silence. **LED source**, **LED ring color**, **LCD bar color**, and **Noise Floor** threshold are independently configurable in **Modes → Spectrum Mode**. |
 
@@ -653,7 +657,7 @@ Weather mode cycles through all enabled weather APIs until one succeeds. Support
 | **Open-Meteo** | None | Open-Meteo geocoding API | Splits `City,CC` into name + country filter |
 | **OpenWeatherMap** | Free-tier key | OWM built-in | Accepts city, state, zip — see below. Register at [openweathermap.org](https://home.openweathermap.org/users/sign_up) — free tier includes 1 000 calls/day |
 | **Met.no** | None | Open-Meteo geocoding API | **Default.** Uses same geocoder as Open-Meteo; elevation auto-fetched for accurate forecasts |
-| **External** | None | None (you supply lat/lon) | No online fetch — you push your own reading via `POST /api/weather`. See [External weather (push your own data)](#external-weather-push-your-own-data) |
+| **External** | None | None (you supply lat/lon) | No online fetch of current conditions — you push your own reading via `POST /api/weather` (optionally filling gaps from Open-Meteo). See [External weather (push your own data)](#external-weather-push-your-own-data) |
 
 ### City format
 
@@ -701,6 +705,8 @@ EC1A,GB                  ← UK postcode prefix
 
 Selecting **Modes → Weather → Source → External** stops the firmware from contacting any online service. Instead, *you* push readings to the device — ideal if your home-automation system already averages several providers for a more stable result. Set the source to **External** and save (no reboot needed; the poller stops on its next cycle).
 
+**Using Home Assistant?** The **Nextube weather** blueprint does the pushing from a list of your sensors; see [Sending data from Home Assistant](#sending-data-from-home-assistant-blueprints). The rest of this section is the JSON the clock accepts, for any other source (it works the same over `POST /api/weather` and over MQTT).
+
 **Endpoint:** `POST /api/weather`
 
 ```json
@@ -711,7 +717,19 @@ Selecting **Modes → Weather → Source → External** stops the firmware from 
   "icon":         "overcastClouds",
   "weather_code": 3,
   "lat":          51.30,
-  "lon":          -114.02
+  "lon":          -114.02,
+  "wind_kph":     12.4,
+  "precip_mm":    0.6,
+  "day_min_c":    8.1,
+  "day_max_c":    16.9,
+  "cloud_cover_pct": 80,
+  "us_aqi":       42,
+  "outlook_mm":   [0, 0, 0.4, 1.2, 0.8, 0],
+  "pressure_hpa": 1013.2,
+  "wind_dir_deg": 315,
+  "wind_gust_kph": 27,
+  "rain_today_mm": 4.2,
+  "max_age_min":  30
 }
 ```
 
@@ -726,6 +744,17 @@ All fields are **optional** — any field you omit keeps its current value (part
 | `icon` | string | One of the built-in icon names (below). Unknown names are ignored (previous icon kept). |
 | `weather_code` | number | [WMO weather code](https://open-meteo.com/en/docs#weathervariables). Fills `icon`/`condition` automatically when those are absent — so Open-Meteo-style data works directly. |
 | `lat` / `lon` | number | Optional. Used **on-device** for the Sunrise & Sunset panel (no extra API call). Send both or neither. |
+| `wind_kph` | number | Wind speed in km/h. Feeds the Wind panel and the WeatherLive wind. Send only one of `wind_kph` / `wind_mph` / `wind_ms`, in whichever unit your source produces (converted on ingest; the display unit is **Modes → Weather → Wind unit**). |
+| `precip_mm` | number | Current rain rate in mm/h. Scales the WeatherLive rain/snow particles. |
+| `day_min_c` / `day_max_c` | number | Today's **measured** low/high in °C, for the high/low panels. Send both or neither. |
+| `cloud_cover_pct` | number | Cloud cover 0–100 %. Scales the WeatherLive cloud density. |
+| `us_aqi` / `european_aqi` | number | Air Quality Index on either or both scales, for the air-quality panel (which one it shows follows the **AQI scale** setting; if you send only one and the other is selected the panel shows `--`). `pm2_5` (µg/m³) is optional. |
+| `outlook_mm` | array | The next hours of precipitation in mm, up to 24 values, slot 0 being the hour of the push. Drives the rain/snow outlook panel. `outlook_snow_cm` (snowfall per hour; any value above 0 marks that hour as snow) and `outlook_prob` (chance, 0–100 %) are optional arrays of the same length. Push a fresh array at least hourly, e.g. from Home Assistant's `weather.get_forecasts` (hourly). |
+| `pressure_hpa` | number | Pressure in hPa (or `pressure_kpa` / `pressure_inhg`; send one). For the [Station panel](#station-panel). With `pressure_trend` (`rising`, `steady` or `falling`) you choose the arrow yourself; without it the clock works it out from the last 3 hours of pushes, calling a change of 1 hPa or more rising or falling (it shows steady until about an hour of history exists, and starts over after a reboot). |
+| `wind_dir_deg` | number | Direction the wind blows **from**, 0–359 (0 = north). |
+| `wind_gust_kph` | number | Gust speed (or `wind_gust_mph` / `wind_gust_ms`). Pairs with `wind_kph`. |
+| `rain_today_mm` | number | Rain since midnight (or `rain_today_in`), e.g. from a rain gauge. Your automation resets it at midnight; the clock shows what it is told. Without it the clock uses Open-Meteo's figure. |
+| `max_age_min` | number | Minutes after the last push at which the reading counts as stale and the weather panels show `--`. `0` (the default) never expires. Kept in RAM only: send it with your pushes. |
 
 > [!IMPORTANT]
 > **Temperature units:** send your reading in **only one** format — `temp_c` *or* `temp_f` — using whichever unit your source produces. The firmware stores everything in Celsius internally and converts `temp_f` on the way in. What the clock *displays* (°C or °F) is controlled separately by **Modes → Weather → Units**, independent of which format you POST.
@@ -739,10 +768,14 @@ All fields are **optional** — any field you omit keeps its current value (part
 
 **Sunrise/Sunset location:** the sun panel computes rise/set times locally from `lat`/`lon`. In External mode there is no geocoding, so coordinates come only from your push. The last pushed `lat`/`lon` is **persisted to flash** (written only when it changes, so periodic pushes don't wear flash) and **restored on boot**, so the panel works immediately after a reboot. Send `lat`/`lon` once (or in every push — harmless); until coordinates are provided the panel shows `--:--`.
 
+**Pushing everything:** with the fields above, one push can drive every weather panel, so External needs no online service at all. The only thing it doesn't cover is anything you leave out; those panels show `--`.
+
+**Fill gaps from Open-Meteo (optional):** with the source set to External, **Modes → Weather → Fill gaps from Open-Meteo** makes the clock ask the free Open-Meteo service (at the `lat`/`lon` you push) for what your push lacks: wind, the daily range, cloud cover, the rain/snow outlook and the air-quality panel. Anything you *do* push wins while it is fresh. Off by default, so External still contacts no online service unless you turn this on.
+
 **Requirements & notes:**
 - Weather must be **enabled** (**Modes → Weather → Enable**) so the panel and subsystem are running.
 - The endpoint honours auth like every other mutation route: with no admin password set it is open on the LAN; once a password is set, send the `Authorization: Bearer <token>` header.
-- Pushed data is held until the next push; it does not expire. If your automation stops pushing, the last value stays on screen.
+- Pushed data is held until the next push. By default it does not expire, so if your automation stops pushing, the last value stays on screen; send `max_age_min` to have the panels show `--` instead once a reading gets too old (any push, even a partial one, resets the timer).
 
 Example with `curl`:
 ```bash
@@ -790,6 +823,8 @@ tube 0 : animated sun (rising for the sunrise screen, setting for the sunset scr
 tube 1-2 : hour    tube 3 : colon    tube 4-5 : minutes   (12H drops AM/PM; the sun says which time it is)
 ```
 Digits use your theme's own clock digits (or the WeatherLive font). Before the location is known, or on a day without a sunrise or sunset, the digits show dashes.
+
+**Panel 8 — Station (off by default):** three screens in turn, each held for the panel time: the pressure with a rising / steady / falling mark, the wind direction (a compass and the letters) with the gust, and the rain so far today. See [Station panel](#station-panel).
 
 **Panel 7 — Rain / snow outlook (off by default):** the next 24 hours of precipitation as one smooth curve across all six tubes, from the same Open-Meteo request as the daily range (so it works whichever weather source you use, once a location is known). It is drawn over the same background as the other weather pages (the live sky on WeatherLive, the theme's own background otherwise) and switches between light ink on a dark background and dark ink on a light one, so it stays readable at midday. With WeatherLive animation on, the sky keeps moving behind it. The chart starts with the current hour (a dot) and covers four hours per tube, with one time pill under each tube (*now*, then the hour that tube starts at), with a thin line up from it to that hour and a dot on the curve there: blue for rain, light cyan for snow. A higher curve means more rain; the top is 4 mm per hour, dotted guides mark 1 and 2.5 mm, and a second dot marks the heaviest hour, with its amount in a small label above it. Above the chart, one row says it in words, a tube each: **RAIN** or **SNOW**, the start time, *in* how long (or **NOW** *to* when), the heaviest hour in mm, the chance, and how many hours it lasts. If nothing wet is forecast it shows **DRY NEXT 24H**. An hour counts as wet from 0.2 mm, or from any measurable amount at a 60 % chance or more. Turn it on under **Modes → Weather → Display panels**. The same data is in `GET /api/status` (`precip_outlook`) and in Home Assistant (below).
 
@@ -866,6 +901,169 @@ The number is drawn in its band color; the "AQI" label uses the theme/Custom-Fac
 A Tube 5/6 info panel (24H Custom) that answers "do I need an umbrella?". It shows the first wet spell in the next 24 hours in three lines (**RAIN** or **SNOW**, the start time large, and *in* how long or **NOW** *to* when), with the next 24 hours as a smooth curve underneath, in the same style as the six-tube Weather page: a dot for this hour, a dot and a small label for the heaviest hour (in mm per hour), and *now* / *24h* under the ends. Blue is rain, light cyan snow; a higher curve means heavier, with the top at 4 mm per hour; on a light background it switches to navy ink and deeper blues. **DotMatrix** keeps a pixel bar graph instead, one bar per hour (the theme's dot color, the current hour marked), since a smooth curve does not fit its dot grid. With nothing wet forecast it shows **DRY** *next 24H*. An hour counts as wet from 0.2 mm, or from any measurable amount at a 60 % chance or more. It works on every theme (asset themes, DotMatrix, Segments, Custom and WeatherLive) and takes its forecast from Open-Meteo whichever weather source you use, once the clock knows its location.
 
 **Enable it:** Appearance → **Clock face** (Time Format **24H Custom**), tick **Rain / snow outlook** for tube 6 (and/or tube 5 in dual-panel mode). The Live preview does not draw this panel. The same forecast is also a full-width page of Weather mode (see **Weather**) and is available to Home Assistant (see below).
+
+## Station panel
+
+A Tube 5/6 info panel (24H Custom) and a Weather-mode page (panel 8) for a weather station's extras. The Tube 5/6 panel is one tube in three zones:
+
+- **Pressure** with a mark for the trend: ▲ rising, ▼ falling, a bar for steady.
+- **Wind**: a compass whose needle points the way the wind blows (its north tick is red), the direction letters beside it in your language (N, NE, … or NO, O, SO in German, and so on), and the gust underneath. In still air the needle is a dot and the letters say *calm*.
+- **Rain today**, with a drop.
+
+The Weather page shows the same three things on all six tubes, one view at a time. Missing data shows `--` in its zone.
+
+**Where the data comes from:**
+- **Pressure, wind direction, gust and rain today** come from Open-Meteo on every weather source (once a location is known), or from your own push (a fresh push wins). On the External source, tick **Fill gaps from Open-Meteo** to get them without pushing.
+- **Rain today** is Open-Meteo's hourly precipitation added up from local midnight, so it is the nearest weather model's figure, not a gauge. A rain gauge pushed as `rain_today_mm` or `rain_today_in` replaces it while the push is fresh.
+- The pressure trend is worked out on the clock from the last 3 hours, unless you push `pressure_trend`.
+
+**Units:** **Modes → Weather → Station units**. *Follow wind units* (the default) shows hPa and mm, or inHg and inches when the Wind units are mph; the gust uses the Wind units (km/h, mph or m/s). *Metric* and *US* force one set, and *Metric, kPa* is metric with the pressure in kPa (e.g. 101.3).
+
+**Enable it:** Appearance → **Clock face** (Time Format **24H Custom**), tick **Station** for tube 6 (and/or tube 5 in dual-panel mode); for the Weather page, tick **Station** under **Modes → Weather → Display Panels**. The Live preview does not draw this panel. In the DotMatrix theme the panel is three rows of dots instead of the compass and drop.
+
+## Energy panel
+
+Shows your home's energy picture from Home Assistant (the same sensors as its Energy dashboard): **grid balance**, **solar** and **battery**, with colour doing most of the work: **green** = exporting or charging, **red** = importing from the grid, **amber** = solar. The clock has no connection to Home Assistant's dashboard itself. Instead a Home Assistant automation (the **Nextube energy panel** blueprint, see [Sending data from Home Assistant](#sending-data-from-home-assistant-blueprints)) **pushes** the numbers to the clock every 30 seconds or so, over MQTT or `POST /api/energy`, the same way the External weather source works.
+
+**Two forms, same data:**
+- **Tube 5/6 panel** (24H Custom): one zone per source that is pushed. With grid, solar and battery you get three zones (grid number with an import/export triangle, solar with a sun, battery percentage with a fill icon and its charge or discharge power); with two sources the zones are taller; with only the grid, one big zone.
+- **Energy mode** (its own mode, with its own pages that rotate on their own timer): all six tubes, one page at a time. Turn it on under **Modes → Enabled Modes → Energy**, and choose the pages and the page time in the **Energy** card:
+  - **Flow:** a diagram across the tubes, **Solar → Home ← Grid**, with the battery on the last tube. Arrow thickness follows the power, and the grid arrow points toward the house when importing and away when exporting.
+  - **Now:** a pair of tubes for each source (an icon, then its power in kW): grid, solar and battery.
+  - **Today:** a pair for each of **solar produced**, **grid import** and **grid export**, in **kWh**.
+  - **Home:** the house's consumption today in kWh, and the share of it that wasn't bought from the grid (when solar and import totals are pushed).
+
+  A page with no data is skipped by the rotation, and the Energy mode also takes part in Mode Rotation like any other mode.
+
+**A source that you don't have is simply left out.** A field that is never pushed (or is pushed as `null`) doesn't get a zone, so a house with no battery shows a two-zone panel, and a tube for a missing source stays dark on the flow page. If a source was being pushed and then stops (the sensor went `unavailable`, or Home Assistant is down) it shows `--` once `max_age_min` has passed, so a dead sensor is never mistaken for "no battery". **Modes → Weather → Show solar / Show battery** hide a zone even when its data is pushed.
+
+**Endpoint:** `POST /api/energy` (JSON; same auth as the other routes). Every field is optional and a field left out keeps its last value.
+
+| Field | Notes |
+|---|---|
+| `grid_w` (or `grid_kw`) | Grid power. **Import is positive, export negative.** If your sensors are separate import and export, send import minus export. |
+| `solar_w` (or `solar_kw`) | Solar production, 0 or more. |
+| `home_w` (or `home_kw`) | Household consumption. Optional: the clock works it out as solar + grid − battery charge when it is missing. |
+| `battery_pct` | Battery level, 0–100. |
+| `battery_w` (or `battery_kw`) | Battery power. **Charging is positive, discharging negative.** |
+| `solar_today_kwh`, `grid_import_today_kwh`, `grid_export_today_kwh`, `home_today_kwh` | **Today's totals in kWh**, for the Energy mode's Today and Home pages. Send the sensors that Home Assistant restarts at midnight (see below); the clock just shows what it is told. |
+| `max_age_min` | Show `--` for a source whose last push is older than this. `0` (the default) never expires; 5 is a good value with the automation below. |
+
+Send a field as `null` to say "I have no such source" (for example `"battery_pct": null`), which hides its zone straight away.
+
+```bash
+curl -X POST http://nextube-remaster.local/api/energy \
+     -H "Content-Type: application/json" \
+     -d '{"grid_w":-1200,"solar_w":3400,"home_w":2200,"battery_pct":78,"battery_w":0,"max_age_min":5}'
+```
+
+### Home Assistant setup
+
+Use the **Nextube energy panel** blueprint; the steps are in [Sending data from Home Assistant](#sending-data-from-home-assistant-blueprints). In the blueprint:
+
+- **Several sensors for one source are added together.** Solar through multiple breakers or inverters, or a three-phase grid: pick them all in the one field. If one of them is unavailable the source isn't sent, so the clock shows `--` for it rather than a sum that reads too low (a switch lets it add up the rest instead).
+- **Units are detected.** W, kW or MW are converted by itself.
+- **Grid and battery signs.** It takes either one signed grid sensor, or separate import and export sensors, with a switch to flip the sign if yours is the other way round (the same for the battery).
+- **Sends every 15 seconds to 2 minutes,** as you choose, and once when Home Assistant starts.
+- **Sources you leave empty** are sent as `null` (switchable), so their zones disappear at once. A sensor that is `unavailable` is skipped, so the clock shows `--` for it once the stale time passes instead of a wrong number.
+
+The live panel and the Now and Flow pages use **power** sensors (W or kW). For the **Today** and **Home** pages, use energy sensors that **start again at midnight**. If yours are cumulative (the ones the Energy dashboard uses), create a daily **Utility Meter** helper for each one (Settings → Devices & services → Helpers → Create helper → Utility Meter, source sensor = your cumulative sensor, meter reset cycle = **Daily**) and give those to the blueprint. Without the totals, the Today and Home pages are simply skipped.
+
+<details>
+<summary>Plain YAML, without the blueprint</summary>
+
+It takes one sensor per source; for solar through several breakers, first add them up with a **Sensor group** helper of type *Sum* (Settings → Devices & services → Helpers) and use that. Create an automation (Settings → Automations → Create → Edit in YAML) and put your own sensor entity ids at the top of the payload template. Delete or empty the line of any source you don't have (for example no battery: leave out `batt_pct` and `batt_w`). Sensors that are in kW: replace `_w` with `_kw` in the matching `dict(...)` call.
+
+```yaml
+alias: Nextube energy panel
+mode: single
+trigger:
+  - platform: time_pattern
+    seconds: "/30"                       # every 30 seconds
+  - platform: homeassistant
+    event: start
+action:
+  - service: mqtt.publish
+    data:
+      topic: nextube/nextube-remaster/energy/set      # nextube/<hostname>/energy/set
+      retain: true
+      payload: >-
+        {%- set grid  = 'sensor.grid_power' -%}            {# watts, import positive; leave out or set to '' if you have none #}
+        {%- set solar = 'sensor.solar_power' -%}           {# watts, production #}
+        {%- set home  = 'sensor.home_power' -%}            {# watts; optional, the clock works it out if missing #}
+        {%- set batt_pct = 'sensor.battery_level' -%}      {# percent #}
+        {%- set batt_w   = 'sensor.battery_power' -%}      {# watts, charging positive #}
+        {%- set d = {"max_age_min": 5, "ts": now().timestamp() | int} -%}
+        {%- if grid  and is_number(states(grid))  -%}{%- set d = dict(d, grid_w=states(grid)|float) -%}{%- endif -%}
+        {%- if solar and is_number(states(solar)) -%}{%- set d = dict(d, solar_w=states(solar)|float) -%}{%- endif -%}
+        {%- if home  and is_number(states(home))  -%}{%- set d = dict(d, home_w=states(home)|float) -%}{%- endif -%}
+        {%- if batt_pct and is_number(states(batt_pct)) -%}{%- set d = dict(d, battery_pct=states(batt_pct)|float) -%}{%- endif -%}
+        {%- if batt_w   and is_number(states(batt_w))   -%}{%- set d = dict(d, battery_w=states(batt_w)|float) -%}{%- endif -%}
+        {{ d | to_json }}
+```
+
+To send over REST instead, replace the `mqtt.publish` action with `rest_command.nextube_energy` (see [If you can't use MQTT](#if-you-cant-use-mqtt-rest)) and pass the same text as its `payload`.
+
+</details>
+
+## Sending data from Home Assistant (blueprints)
+
+Two Home Assistant **blueprints** do the sending for you. A blueprint is a ready-made automation: you import it once, pick your own sensors from lists, and there is no YAML to write.
+
+| Blueprint | Feeds the clock's | File |
+|---|---|---|
+| **Nextube weather** | External weather source and the [Station panel](#station-panel) | `helpers/home_assistant/nextube_weather.yaml` |
+| **Nextube energy panel** | [Energy panel and Energy mode](#energy-panel) | `helpers/home_assistant/nextube_energy_panel.yaml` |
+
+### Blueprint setup
+
+The same four steps for either blueprint. They send over **MQTT**, which needs nothing extra in Home Assistant's configuration files.
+
+1. **On the clock, turn MQTT on** (**Connections → Home Assistant MQTT**: tick Enable and enter the same broker Home Assistant uses; reboot). Note the clock's hostname (Connections → WiFi; the default is `nextube-remaster`).
+2. **Import the blueprint** in Home Assistant: Settings → Automations & Scenes → Blueprints → **Import Blueprint**, and paste its address:
+   - Weather: `https://github.com/MrToast99/Nextube-Remaster/blob/main/helpers/home_assistant/nextube_weather.yaml`
+   - Energy: `https://github.com/MrToast99/Nextube-Remaster/blob/main/helpers/home_assistant/nextube_energy_panel.yaml`
+3. **Create the automation:** Blueprints → the Nextube blueprint → **Create automation**. Pick the sensors you have and leave the rest empty. Leave **How to send** on *MQTT*. If your hostname isn't `nextube-remaster`, change the **MQTT topic** to `nextube/<hostname>/weather/set` (weather) or `nextube/<hostname>/energy/set` (energy). Save.
+4. **On the clock, switch the feature on:**
+   - Weather: **Modes → Weather → Enable weather**, then set **Source** to **External** and save.
+   - Energy: **Modes → Enabled Modes → Energy** (then pick its pages in the **Energy** card), and/or **Appearance → Clock face** (Time Format **24H Custom**) → tick **Energy** for tube 5 or 6.
+
+The values appear within a minute. The messages are retained and carry a timestamp, so after a clock reboot it gets its last values straight away, and a message older than 10 minutes is ignored.
+
+**The weather blueprint** takes temperature, humidity, pressure, wind speed, gust, wind direction and rain today (all optional), and a weather entity for the icon and condition. It reads each sensor's unit (°C/°F, hPa/kPa/inHg, km/h/mph/m/s/knots, mm/in) and converts it, sends your Home Assistant location for the sunrise and sunset panel, and skips a sensor that is `unavailable`. Sending every 1 to 15 minutes, as you choose.
+
+**The energy blueprint** is described in [Energy panel → Home Assistant setup](#home-assistant-setup).
+
+### If you can't use MQTT: REST
+
+Both blueprints can send over HTTP instead. Home Assistant has no built-in "send an HTTP request" action, so add a REST command once in `configuration.yaml` (then restart Home Assistant or reload the REST commands), and set the blueprint's **How to send** to *REST command* with that command's name:
+
+```yaml
+rest_command:
+  nextube_weather:
+    url: "http://nextube-remaster.local/api/weather"   # or the clock's IP address
+    method: POST
+    content_type: "application/json"
+    # headers:                                          # only if you set an admin password
+    #   Authorization: "Bearer YOUR_TOKEN"
+    payload: "{{ payload }}"
+    timeout: 5
+  nextube_energy:
+    url: "http://nextube-remaster.local/api/energy"
+    method: POST
+    content_type: "application/json"
+    payload: "{{ payload }}"
+    timeout: 5
+```
+
+With REST the clock shows `--` after a reboot until the next push arrives. With more than one clock, add a command per clock and give each automation its own.
+
+### Nothing shows up?
+
+- The clock's Connections page should show MQTT connected, and the topic must use the clock's hostname exactly.
+- Weather only takes pushed data when **Source** is **External**.
+- A message whose timestamp is more than 10 minutes off the clock's own time is ignored, so check that Home Assistant and the clock both have the right time.
+- Not using a blueprint? The plain-YAML versions are under [Energy panel](#home-assistant-setup) and [Data in over MQTT](#data-in-over-mqtt).
 
 ## NTP & Clock Accuracy
 
@@ -1039,7 +1237,7 @@ The Nextube can connect to a Home Assistant MQTT broker and register itself auto
 | **Nextube Next Precipitation** | `sensor` | Always | `rain`, `snow` or `none`: the first wet spell in the next 24 hours (Open-Meteo hourly forecast) |
 | **Nextube Next Precipitation In** | `sensor` | Always | Minutes until that spell starts (0 when it is already wet; unknown when none is forecast) |
 | **Nextube Next Precipitation Amount** | `sensor` | Always | Heaviest hour of that spell, in mm/h |
-| **Nextube Mode** | `select` | Always | Read and set the active display mode (Clock, Weather, YouTube, …) |
+| **Nextube Mode** | `select` | Always | Read and set the active display mode (Clock, Weather, Energy, YouTube, …) |
 | **Nextube Display** | `switch` | Always | Turn the backlight ON or OFF (same as the middle touch button) |
 | **Nextube LCD Brightness** | `number` | Always | LCD brightness 0–100 slider. Shows the brightness actually in use; during the Night Mode window it reads and sets the night brightness, otherwise the daytime one. Reads 0 while the display is off. |
 | **Nextube LED Brightness** | `number` | Always | Accent LED (rear glow) brightness 0–100 slider. Same night/day behavior as LCD Brightness. Reads 0 while LED mode is Off (except Spectrum mode's custom glow, which stays lit). |
@@ -1092,6 +1290,8 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | **Subscribe** | `nextube/<hostname>/ticker_speed/set` | `4` (integer 1–20; clamped, echoed back) |
 | Publish | `nextube/<hostname>/ticker_sound/state` | `ON` / `OFF` — chime on ticker text |
 | **Subscribe** | `nextube/<hostname>/ticker_sound/set` | `ON` / `OFF` — persisted to config |
+| **Subscribe** | `nextube/<hostname>/energy/set` | Energy data JSON, same as `POST /api/energy` (see [Data in over MQTT](#data-in-over-mqtt)) |
+| **Subscribe** | `nextube/<hostname>/weather/set` | Weather data JSON, same as `POST /api/weather` (External source) |
 | Publish | `nextube/<hostname>/ntp/xtal_drift/state` | Signed ms the free-running ESP crystal drifted since the previous NTP sync (retained; updated per sync) |
 | Publish | `nextube/<hostname>/ntp/rtc_err/state` | Worst single-minute clock error (ms) the PCF8563 discipline allowed since the previous sync (retained; PCF-slave mode only) |
 | Publish | `nextube/<hostname>/health/state` | *(optional group)* `{"rssi":-53,"heap":51234,"uptime_min":185}` every 60 s |
@@ -1114,6 +1314,46 @@ All topics use the device hostname (default `nextube-remaster`, configurable in 
 | Publish | `homeassistant/sensor/<hostname>_update_ver/config` | HA discovery JSON (retained) |
 | Publish | `homeassistant/sensor/<hostname>_{rssi,heap,uptime}/config` | HA discovery JSON (retained; health group only) |
 | Publish | `homeassistant/device_automation/<hostname>_btn_{left,middle,right}/config` | HA device-trigger discovery (retained; buttons group only) |
+
+### Data in over MQTT
+
+Home Assistant can **push weather and energy data to the clock over MQTT**, with the same JSON as `POST /api/weather` and `POST /api/energy` (every field and rule in [External weather](#external-weather-push-your-own-data) and the [Energy panel](#energy-panel) applies). The two [blueprints](#sending-data-from-home-assistant-blueprints) set this up from the Home Assistant UI; this section is the detail behind them. It needs MQTT enabled on the clock; no REST command or token is involved.
+
+| Direction | Topic | Payload |
+|---|---|---|
+| **Subscribe** | `nextube/<hostname>/energy/set` | The `POST /api/energy` JSON, e.g. `{"grid_w":-1200,"solar_w":3400,"battery_pct":78,"ts":1795000000}` |
+| **Subscribe** | `nextube/<hostname>/weather/set` | The `POST /api/weather` JSON, e.g. `{"temp_c":15.3,"humidity":65,"pressure_hpa":1013.2,"wind_dir_deg":315,"ts":1795000000}` |
+
+- **Retained messages are fine, with a timestamp.** Add `"ts"` (epoch seconds) to the payload and the clock ignores a message older than 10 minutes, so a retained message from before a long outage does not look fresh when the clock reconnects. Without `ts` a retained message is accepted as if it had just arrived.
+- **Size:** a message up to about 3 KB is accepted (a weather push with the 24-hour outlook is about 1 KB). Larger ones are ignored with a log line.
+- For weather the External source must be selected (**Modes → Weather → Source → External**), exactly as for the HTTP push.
+
+Without the weather blueprint, a plain automation using the built-in `mqtt.publish` action:
+
+```yaml
+alias: Nextube weather
+trigger:
+  - platform: time_pattern
+    minutes: "/5"
+action:
+  - service: mqtt.publish
+    data:
+      topic: nextube/nextube-remaster/weather/set     # nextube/<hostname>/weather/set
+      retain: true
+      payload: >-
+        {{ {
+          'ts': now().timestamp() | int,
+          'temp_c': states('sensor.outdoor_temperature') | float,
+          'humidity': states('sensor.outdoor_humidity') | float,
+          'pressure_hpa': states('sensor.outdoor_pressure') | float,
+          'wind_kph': states('sensor.wind_speed') | float,
+          'wind_dir_deg': states('sensor.wind_bearing') | float,
+          'rain_today_mm': states('sensor.rain_today') | float,
+          'max_age_min': 20
+        } | to_json }}
+```
+
+Use only the entities you have; leave a line out and that field simply keeps its value (or `--` after `max_age_min`). A sensor that is `unavailable` makes `| float` fail, which is one reason the blueprint is the easier route (it skips such a sensor).
 
 ### Notes
 
@@ -1276,6 +1516,7 @@ Unlike WeatherLive, DotMatrix does **not** hide the Weather Icon or Pushed Image
 |---|---|
 | **Background** | **WeatherLive (animated sky)** — the fully procedural animated sky described above; **Custom color / gradient** — a solid fill or gradient you configure yourself (see below); or any installed **theme name** — that theme's static background artwork with no animation. |
 | **Digit font** | Any `.ttf` uploaded to `/fonts/` on the device, or **Logisoso (built-in)**. Click **↺** to refresh the list after uploading a new font. |
+| **Info panel font** | The font for the labels and info panels (weather, date, Tube 5/6, the Station panel). **Same as digit font** (the default), **Logisoso (built-in)**, or any uploaded `.ttf`. Lets you keep a decorative clock font such as Kings and use a plainer one such as Roboto for small text. |
 | **Font color** | Color applied to clock digits rendered by the TTF engine. |
 | **Glyph color** | Color for weather-panel glyphs and info-panel text rendered with the TTF engine. |
 | **Shadow** | Toggle drop shadow on/off and pick its color. Applies to clock digits, panel text, and the graphical weather elements (Hi/Lo range bar, current-temperature marker, and humidity teardrop). |
@@ -1455,7 +1696,7 @@ The WeatherLive theme and all custom clock faces support user-supplied TrueType 
 - The full `.ttf` file is loaded into **PSRAM** once (on start-up or when changed via the web UI). Only the characters actually displayed are rasterized — everything else costs nothing at render time.
 - A 128-slot FIFO **glyph cache** in PSRAM holds pre-rasterized bitmaps so each character is decoded once per size, then reused.
 - Font height is automatically **normalized** using `0` as the reference: the renderer scales the font so the digit `0` fills the target pixel height. Glyphs that are natively taller than `0` in the font file (e.g. `1` in Jim Nightshade) are automatically capped to the same height, so all digits appear visually uniform regardless of the font's internal bounding-box metrics.
-- **Clock mode** renders each digit individually, centered in its own tube at full tube height.
+- **Clock mode** renders each digit individually, centered in its own tube at full tube height. A decimal point or comma sits on the digits' baseline, like the built-in font; a colon stays centred.
 - **Weather and WeatherLive panel text** (temperature, Hi/Lo, humidity value, wind speed, etc.) is rendered as a string that is first fitted to the tube width, then height-capped so no glyph overflows. The degree symbol (°) is appended inline as part of the temperature string and positioned naturally by the renderer rather than drawn as a separate fixed element.
 - **Width overflow is handled in two passes to keep stroke weight uniform.** First, all digits `0`–`9` are scanned and if the widest one would exceed the tube width (80 px minus 5 px margin each side), the universal height scale is reduced so that every character shrinks proportionally — stroke weight stays consistent across the whole string. Second, a per-glyph fallback catches any individual character (e.g. `K`, `M`, `°`) that is still wider than the tube after the universal reduction; those are capped individually and do not affect the scale applied to other glyphs.
 
@@ -1471,6 +1712,7 @@ When a Custom Face font is active a **drop shadow** can be drawn around glyphs. 
   | Hi/Lo temperature range track (tube 4) | Soft underline shadow below the bar |
   | Current-temperature marker (tube 4) | Drop shadow offset below the circle |
   | Humidity teardrop (tube 5) | Halo around the teardrop outline |
+  | Station compass, trend mark, gust mark and rain drop | Halo around each glyph |
 
 Set either color to pure black for a classic engraved look, or to a tinted hue to complement the theme palette. Turn a shadow off entirely by setting its On/Off toggle to Off — no need to fight with color values.
 
@@ -1580,6 +1822,7 @@ GET  /api/wl_scene           → what the WeatherLive sky is drawn from, for the
 GET  /api/settings           → full configuration JSON
 POST /api/settings           → update config (JSON body; partial — only keys present are changed)
 POST /api/weather            → push external weather data (External source); JSON: temp_c OR temp_f, humidity, condition, icon, weather_code, lat, lon (all optional)
+POST /api/energy             → push Home Assistant energy data for the Energy panel; JSON, all optional: grid_w, solar_w, home_w, battery_pct, battery_w (or the _kw forms), max_age_min; null = no such source
 POST /api/cx_image?tube=5|6  → push an 80×160 JPG (binary body) to a 24H Custom tube-5/6 "Pushed image" info panel (asset themes)
 GET  /api/firmwareVersion    → {"version":"1.0.0"}
 GET  /api/hardwareVersion    → {"version":"1.31"}

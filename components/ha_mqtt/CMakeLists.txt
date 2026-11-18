@@ -11,5 +11,6 @@ idf_component_register(
         ntp_time
         leds
         wled_sync
+        weather
         mqtt
 )

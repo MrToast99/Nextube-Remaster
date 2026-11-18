@@ -623,7 +623,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
 </div>
 <div id="theme-error-banner" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.6;align-items:flex-start;gap:.6rem">
   <span style="flex:1">⚠️ <strong>Theme image error</strong> — JPEG decode failed for <code id="te-path"></code>.
-  Images must be exactly <strong>80 × 160 px</strong> RGB JPEG. Check <strong>System → Device Log</strong> for details or upload a corrected file via <strong>System → LittleFS Files</strong>.</span>
+  Images must be <strong>80 × 160 px</strong> baseline (non-progressive) RGB JPEGs; re-saving the file with the Image Converter Helper fixes most cases. Check <strong>System → Device Log</strong> for details or upload a corrected file via <strong>System → LittleFS Files</strong>.</span>
   <button onclick="$('theme-error-banner').style.display='none'" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.1rem;line-height:1;padding:0 .2rem" title="Dismiss">✕</button>
 </div>
 <nav id="tabs" role="tablist" aria-label="Sections">
@@ -669,6 +669,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <button class="btn btn-outline" data-mode-bit="9"  data-mode-name="Instagram" data-ico="camera" onclick="setMode('Instagram')">Instagram</button>
       <button class="btn btn-outline" data-mode-bit="10" data-mode-name="TikTok" data-ico="note"    onclick="setMode('TikTok')">TikTok</button>
       <button class="btn btn-outline" data-mode-bit="11" data-mode-name="Mastodon" data-ico="chat"  onclick="setMode('Mastodon')">Mastodon</button>
+      <button class="btn btn-outline" data-mode-bit="12" data-mode-name="Energy" data-ico="zap"   onclick="setMode('Energy')" data-i18n="mode.energy">Energy</button>
     </div>
     <!-- Only shown while Mode Rotation (Modes tab) is enabled — see
          onRotationToggle(). Looks like any other Quick Actions button.
@@ -782,6 +783,11 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
             <span id="v-custom-shadow-size">2</span>
           </div>
         </div>
+        <div class="field" id="f-custom-info-font-row" style="border-left:2px solid rgba(255,255,255,.12);padding:.8rem 0 0 .8rem;margin:0">
+          <label for="f-custom-info-font" data-i18n="face.info_font">Info panel font</label>
+          <select id="f-custom-info-font" class="ttf-info-select" onchange="markDirty()"><option value="" data-i18n="face.info_font_same">Same as digit font</option><option value="builtin">Logisoso (built-in)</option></select>
+          <p class="hint" style="margin-top:.35rem" data-i18n="face.info_font_hint">For the labels and info panels (weather, date, Tube 5/6). A plain font reads better than a decorative one at small sizes.</p>
+        </div>
       </div>
       <div style="margin-bottom:.5rem">
         <div style="font-size:.85rem;font-weight:600;letter-spacing:.02em;margin-bottom:.3rem"><span style="color:var(--hi)">Digit</span> <span style="color:var(--dim);font-weight:400">— clock face numerals</span></div>
@@ -804,6 +810,13 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
             <label for="f-custom-glyph-shadow-size">Shadow size</label>
             <input type="range" id="f-custom-glyph-shadow-size" min="1" max="4" step="1" value="2" oninput="this.nextElementSibling.textContent=this.value">
             <span id="v-custom-glyph-shadow-size">2</span>
+          </div>
+        </div>
+        <div class="field" id="f-custom-digit-font-row" style="border-left:2px solid rgba(255,255,255,.12);padding:.8rem 0 0 .8rem;margin:0">
+          <label>Digit font <span style="color:var(--dim);font-size:.82rem">(TTF from /spiffs/fonts/)</span></label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="f-custom-font" class="ttf-font-select" style="flex:1" onchange="onFontSelectChange(this)"><option value="">Logisoso (built-in)</option></select>
+            <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadFontList(true)" title="Scan for TTF files on device">↺</button>
           </div>
         </div>
       </div>
@@ -878,13 +891,6 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
               <span id="v-custom-glyph-shadow-size-night">2</span>
             </div>
           </div>
-        </div>
-      </div>
-      <div class="field">
-        <label>Digit font <span style="color:var(--dim);font-size:.82rem">(TTF from /spiffs/fonts/)</span></label>
-        <div style="display:flex;gap:8px;align-items:center">
-          <select id="f-custom-font" class="ttf-font-select" style="flex:1" onchange="onFontSelectChange(this)"><option value="">Logisoso (built-in)</option></select>
-          <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadFontList(true)" title="Scan for TTF files on device">↺</button>
         </div>
       </div>
     </div>
@@ -973,6 +979,8 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div class="cxm-row"><span class="cxm-name">Air Quality <span class="hint">(AQI — Open-Meteo, no key)</span></span><span class="cxm-c"><button type="button" class="cxm-off" onclick="cxmOff(this)" aria-label="Off"></button></span><span class="cxm-c cxm-t5"><input type="checkbox" class="cxm-t cxm-t5c" id="f-cx5-aqi"></span><span class="cxm-c"><input type="checkbox" class="cxm-t cxm-t6c" id="f-cx-aqi"></span></div>
         <div class="cxm-row"><span class="cxm-name">Outdoor Temp &amp; Humidity <span class="hint">(combined panel — saves a rotation slot)</span></span><span class="cxm-c"><button type="button" class="cxm-off" onclick="cxmOff(this)" aria-label="Off"></button></span><span class="cxm-c cxm-t5"><input type="checkbox" class="cxm-t cxm-t5c" id="f-cx5-outdoor-ht"></span><span class="cxm-c"><input type="checkbox" class="cxm-t cxm-t6c" id="f-cx-outdoor-ht"></span></div>
         <div class="cxm-row"><span class="cxm-name">Rain / snow outlook <span class="hint">(first wet spell in the next 24 h + hourly bars)</span></span><span class="cxm-c"><button type="button" class="cxm-off" onclick="cxmOff(this)" aria-label="Off"></button></span><span class="cxm-c cxm-t5"><input type="checkbox" class="cxm-t cxm-t5c" id="f-cx5-outlook"></span><span class="cxm-c"><input type="checkbox" class="cxm-t cxm-t6c" id="f-cx-outlook"></span></div>
+        <div class="cxm-row"><span class="cxm-name">Station <span class="hint">(pressure + trend, wind direction + gust, rain today)</span></span><span class="cxm-c"><button type="button" class="cxm-off" onclick="cxmOff(this)" aria-label="Off"></button></span><span class="cxm-c cxm-t5"><input type="checkbox" class="cxm-t cxm-t5c" id="f-cx5-station"></span><span class="cxm-c"><input type="checkbox" class="cxm-t cxm-t6c" id="f-cx-station"></span></div>
+        <div class="cxm-row"><span class="cxm-name">Energy <span class="hint">(grid balance, solar, battery from Home Assistant)</span></span><span class="cxm-c"><button type="button" class="cxm-off" onclick="cxmOff(this)" aria-label="Off"></button></span><span class="cxm-c cxm-t5"><input type="checkbox" class="cxm-t cxm-t5c" id="f-cx5-energy"></span><span class="cxm-c"><input type="checkbox" class="cxm-t cxm-t6c" id="f-cx-energy"></span></div>
         <div class="cxm-row" id="f-cx-push-row"><span id="f-cx5-push-row" hidden></span><span class="cxm-name">Pushed Image <span class="hint">(JPG via POST /api/cx_image?tube=5 or 6)</span></span><span class="cxm-c"><button type="button" class="cxm-off" onclick="cxmOff(this)" aria-label="Off"></button></span><span class="cxm-c cxm-t5"><input type="checkbox" class="cxm-t cxm-t5c" id="f-cx5-push"></span><span class="cxm-c"><input type="checkbox" class="cxm-t cxm-t6c" id="f-cx-push"></span></div>
       </div>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;margin-bottom:1.2rem">AQI scale <select id="f-aqistd" style="font-size:.8rem;background:var(--accent);border:1px solid var(--dim);color:var(--text);border-radius:4px;padding:1px 4px"><option value="auto">Auto (by location)</option><option value="us">US AQI (0–500)</option><option value="eu">European AQI (0–100)</option></select></label>
@@ -1120,6 +1128,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       <div class="toggle-row"><label class="toggle"><input type="checkbox" id="m-instagram" onchange="markDirty()"><span class="track"><span class="thumb"></span></span></label><label for="m-instagram" style="font-size:.9rem;cursor:pointer">Instagram</label></div>
       <div class="toggle-row"><label class="toggle"><input type="checkbox" id="m-tiktok" onchange="markDirty()"><span class="track"><span class="thumb"></span></span></label><label for="m-tiktok" style="font-size:.9rem;cursor:pointer">TikTok</label></div>
       <div class="toggle-row"><label class="toggle"><input type="checkbox" id="m-mastodon" onchange="markDirty()"><span class="track"><span class="thumb"></span></span></label><label for="m-mastodon" style="font-size:.9rem;cursor:pointer">Mastodon</label></div>
+      <div class="toggle-row"><label class="toggle"><input type="checkbox" id="m-energy" onchange="markDirty()"><span class="track"><span class="thumb"></span></span></label><label for="m-energy" style="font-size:.9rem;cursor:pointer" data-i18n="mode.energy">Energy</label></div>
     </div>
   </div>
 <details class="card">
@@ -1170,6 +1179,7 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="9"  checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Instagram</span><input type="number" class="rot-weight-in" data-bit="9"  value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
         <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="10" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">TikTok</span><input type="number" class="rot-weight-in" data-bit="10" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
         <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="11" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1">Mastodon</span><input type="number" class="rot-weight-in" data-bit="11" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem;padding:.2rem .45rem;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)"><input type="checkbox" class="rot-mode-cb" data-bit="12" checked onchange="markDirty()" style="flex-shrink:0"><span style="font-size:.85rem;flex:1" data-i18n="mode.energy">Energy</span><input type="number" class="rot-weight-in" data-bit="12" value="1" min="1" max="99" oninput="markDirty()" style="width:46px;text-align:center;padding:.15rem .25rem;font-size:.82rem;border:1px solid rgba(255,255,255,.1);border-radius:4px;background:var(--accent);color:var(--text)"><span style="font-size:1.5rem;color:var(--dim)">×</span></div>
       </div>
       <p style="color:var(--dim);font-size:.76rem;margin-top:.5rem" data-i18n-html="disp.rot_weight_help">
         The <strong style="color:var(--text)">×</strong> value is a dwell multiplier applied to the base interval above.
@@ -1194,6 +1204,52 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
     </div>
   </div>
 </details>
+<details class="card" id="energy-card">
+    <summary>
+      <h2 data-ico="zap" data-i18n="en.title">Energy</h2>
+    </summary>
+    <div style="margin-top:.9rem">
+      <p class="hint" style="margin-bottom:.7rem" data-i18n="en.intro">Home Assistant pushes your power and daily kWh to POST /api/energy (see the README for the blueprint). Turn the Energy mode on under Enabled Modes.</p>
+      <div class="field"><label data-i18n="en.pages">Pages</label>
+        <div style="display:flex;flex-direction:column;gap:.35rem;margin-top:.35rem">
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-en-flow" onchange="markDirty()" checked><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-en-flow" style="font-size:.85rem;cursor:pointer"><span data-i18n="en.page_flow">Flow</span> <span class="hint">(solar → home ← grid, battery)</span></label>
+        </div>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-en-now" onchange="markDirty()" checked><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-en-now" style="font-size:.85rem;cursor:pointer"><span data-i18n="en.page_now">Now</span> <span class="hint">(grid, solar and battery power)</span></label>
+        </div>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-en-today" onchange="markDirty()" checked><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-en-today" style="font-size:.85rem;cursor:pointer"><span data-i18n="en.page_today">Today</span> <span class="hint">(solar produced, bought, sold in kWh)</span></label>
+        </div>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-en-home" onchange="markDirty()"><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-en-home" style="font-size:.85rem;cursor:pointer"><span data-i18n="en.page_home">Home</span> <span class="hint">(home use today and the share not bought from the grid)</span></label>
+        </div>
+        </div>
+        <small style="color:var(--dim);margin-top:.3rem;display:block" data-i18n="en.skip_note">A page with no data is skipped.</small>
+      </div>
+      <div class="row">
+        <div class="field"><label data-i18n="en.page_time" for="f-en-ms">Page time (seconds)</label>
+          <input id="f-en-ms" type="number" min="2" max="300" value="8" onchange="markDirty()">
+        </div>
+      </div>
+      <div class="field"><label data-i18n="en.sources">Sources</label>
+        <div style="display:flex;flex-direction:column;gap:.35rem;margin-top:.35rem">
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-energy-solar" onchange="markDirty()" checked><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-energy-solar" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.energy_show_solar">Show solar</span> <span class="hint">(when solar data is pushed)</span></label>
+        </div>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-energy-battery" onchange="markDirty()" checked><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-energy-battery" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.energy_show_battery">Show battery</span> <span class="hint">(when battery data is pushed)</span></label>
+        </div>
+        </div>
+      </div>
+    </div>
+</details>
 <details class="card" id="weather-card">
     <summary>
       <h2 data-ico="cloud" data-i18n="svc.weather">Weather</h2>
@@ -1214,14 +1270,21 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <option value="openmeteo" data-i18n="svc.wsrc_openmeteo">Open-Meteo – free, no key needed</option>
         <option value="metno" data-i18n="svc.wsrc_metno">Met.no – free, no key needed</option>
         <option value="openweather" data-i18n="svc.wsrc_openweather">OpenWeatherMap – free API key required</option>
-        <option value="external" data-i18n="svc.wsrc_external">External – push your own via POST /api/weather</option>
+        <option value="external" data-i18n="svc.wsrc_external">External – push your own (HTTP or MQTT)</option>
       </select>
     </div>
     <p id="f-wsrc-ext-hint" style="display:none;color:var(--dim);font-size:.78rem;margin:.4rem 0 0 0" data-i18n-html="svc.wsrc_external_hint">
       The clock will not fetch any online service. Push readings from your home-automation system to
       <code>POST /api/weather</code> with JSON, e.g. <code>{"temp_c":15.3,"humidity":65,"condition":"Cloudy","icon":"overcastClouds"}</code>.
-      Send <code>temp_c</code> or <code>temp_f</code> (only one). Icons: <code>sun, fewClouds, overcastClouds, fog, rain, snow, squalls, thunderstorm</code> (or send a WMO <code>weather_code</code>).
+      Send <code>temp_c</code> or <code>temp_f</code> (only one). Icons: <code>sun, fewClouds, overcastClouds, fog, rain, snow, squalls, thunderstorm</code> (or send a WMO <code>weather_code</code>). Or publish the same JSON over MQTT to <code>nextube/&lt;hostname&gt;/weather/set</code> (MQTT must be enabled under Connections).
     </p>
+    <div class="field" id="f-wext-fill-row" style="display:none;padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <label class="toggle"><input type="checkbox" id="f-wext-fill" onchange="markDirty()"><span class="track"><span class="thumb"></span></span></label>
+        <label for="f-wext-fill" style="cursor:pointer" data-i18n="svc.wext_fill">Fill gaps from Open-Meteo</label>
+      </div>
+      <p style="color:var(--dim);font-size:.78rem;margin:.4rem 0 0 24px" data-i18n="svc.wext_fill_hint">Contacts the free Open-Meteo service for wind, the daily range, the rain/snow outlook and air quality that your push doesn't include. Needs lat/lon in your push.</p>
+    </div>
     <div class="field" id="f-wkey-row" style="display:none"><label data-i18n="svc.api_key" for="f-wkey">API Key</label><input id="f-wkey" type="text"></div>
     <div class="row">
       <div class="field"><label data-i18n="svc.city" for="f-city">City</label><input id="f-city" type="text" placeholder="City name" data-i18n-ph="svc.city_ph" autocomplete="off" oninput="onCityInput()">
@@ -1234,6 +1297,11 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
       </div>
       <div class="field"><label data-i18n="svc.wind_units" for="f-windunit">Wind units</label>
         <select id="f-windunit" onchange="markDirty()"><option value="km/h">km/h</option><option value="mph">mph</option><option value="m/s">m/s</option></select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field"><label data-i18n="svc.station_units" for="f-stunits">Station units</label>
+        <select id="f-stunits" onchange="markDirty()"><option value="follow" data-i18n="svc.station_units_follow">Follow wind units (mph: inHg, in)</option><option value="metric" data-i18n="svc.station_units_metric">Metric (hPa, mm)</option><option value="kpa" data-i18n="svc.station_units_kpa">Metric, kPa (kPa, mm)</option><option value="us" data-i18n="svc.station_units_us">US (inHg, in, mph)</option></select>
       </div>
     </div>
     <div class="row">
@@ -1278,6 +1346,10 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <div class="toggle-row">
           <label class="toggle"><input type="checkbox" id="f-wx-p7" onchange="onWxPanelToggle('f-wx-p7')"><span class="track"><span class="thumb"></span></span></label>
           <label for="f-wx-p7" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_outlook">Rain / snow outlook</span> <span class="hint">(panel 7 — next 24 hours on all six tubes)</span></label>
+        </div>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="f-wx-p8" onchange="onWxPanelToggle('f-wx-p8')"><span class="track"><span class="thumb"></span></span></label>
+          <label for="f-wx-p8" style="font-size:.85rem;cursor:pointer"><span data-i18n="svc.wx_station">Station</span> <span class="hint">(panel 8 — pressure, wind direction + gust, rain today; one view each)</span></label>
         </div>
       </div>
       <small style="color:var(--dim);margin-top:.3rem;display:block" data-i18n="svc.wx_one_panel">At least one panel must remain enabled.</small>
@@ -2479,6 +2551,27 @@ details.card>summary>h2{margin:0;border:none;padding:0;flex:1}
         <button class="btn btn-outline" onclick="dbgHide()">Close Debug Panel</button>
       </div>
     </div>
+    <div class="card" style="border:1px solid rgba(255,160,0,.4);background:rgba(255,160,0,.06)">
+      <h2 style="color:#ffa000">&#x1F4F7; Screen Capture</h2>
+      <p style="font-size:.8rem;color:var(--dim);margin-bottom:.6rem">
+        Grabs the frames the firmware has drawn for the tubes, pixel for pixel (80&times;160 each, before the per-tube brightness and gamma unless you tick the box below).
+        It forces one repaint, so it takes about a second. A tube drawn straight to the LCD (Spectrum bars, test patterns, snow and burn-in) can't be captured and is reported as missing.
+      </p>
+      <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:end;margin-bottom:.6rem">
+        <div class="field" style="margin-bottom:0;min-width:150px">
+          <label for="dbg-cap-tube">Screen</label>
+          <select id="dbg-cap-tube" data-no-dirty="1"><option value="all">All screens</option><option value="0">Tube 1</option><option value="1">Tube 2</option><option value="2">Tube 3</option><option value="3">Tube 4</option><option value="4">Tube 5</option><option value="5">Tube 6</option></select>
+        </div>
+        <div class="field" style="margin-bottom:0;min-width:110px">
+          <label for="dbg-cap-zoom">Image size</label>
+          <select id="dbg-cap-zoom" data-no-dirty="1"><option value="1">1&times; (80&times;160)</option><option value="2" selected>2&times;</option><option value="4">4&times;</option></select>
+        </div>
+        <label style="font-weight:normal;cursor:pointer;font-size:.85rem"><input type="checkbox" id="dbg-cap-lut" data-no-dirty="1"> As sent to the LCD (with brightness and gamma)</label>
+        <button id="dbg-cap-btn" class="btn btn-primary" style="background:#ffa000;border-color:#ffa000" onclick="dbgCapture()">Capture</button>
+      </div>
+      <p id="dbg-cap-msg" style="font-size:.8rem;color:var(--dim);margin:.3rem 0"></p>
+      <div id="dbg-cap-out" style="display:flex;gap:.8rem;flex-wrap:wrap;align-items:flex-start"></div>
+    </div>
   </div>
 </div>
 </main>
@@ -2663,8 +2756,9 @@ Object.assign(I18N.en, {
   "svc.source":"Source",
   "svc.wsrc_wttr":"wttr.in – free, no key needed","svc.wsrc_openmeteo":"Open-Meteo – free, no key needed",
   "svc.wsrc_metno":"Met.no – free, no key needed","svc.wsrc_openweather":"OpenWeatherMap – free API key required",
-  "svc.wsrc_external":"External – push your own via POST /api/weather",
-  "svc.wsrc_external_hint":"The clock will not fetch any online service. Push readings from your home-automation system to <code>POST /api/weather</code> with JSON, e.g. <code>{&quot;temp_c&quot;:15.3,&quot;humidity&quot;:65,&quot;condition&quot;:&quot;Cloudy&quot;,&quot;icon&quot;:&quot;overcastClouds&quot;}</code>. Send <code>temp_c</code> or <code>temp_f</code> (only one). Icons: <code>sun, fewClouds, overcastClouds, fog, rain, snow, squalls, thunderstorm</code> (or send a WMO <code>weather_code</code>).",
+  "svc.wsrc_external":"External – push your own (HTTP or MQTT)",
+  "svc.wsrc_external_hint":"The clock will not fetch any online service. Push readings from your home-automation system to <code>POST /api/weather</code> with JSON, e.g. <code>{&quot;temp_c&quot;:15.3,&quot;humidity&quot;:65,&quot;condition&quot;:&quot;Cloudy&quot;,&quot;icon&quot;:&quot;overcastClouds&quot;}</code>. Send <code>temp_c</code> or <code>temp_f</code> (only one). Icons: <code>sun, fewClouds, overcastClouds, fog, rain, snow, squalls, thunderstorm</code> (or send a WMO <code>weather_code</code>). Or publish the same JSON over MQTT to <code>nextube/&lt;hostname&gt;/weather/set</code> (MQTT must be enabled under Connections).",
+  "svc.wext_fill":"Fill gaps from Open-Meteo","svc.wext_fill_hint":"Contacts the free Open-Meteo service for wind, the daily range, the rain/snow outlook and air quality that your push doesn't include. Needs lat/lon in your push.",
   "svc.api_key":"API Key","svc.city":"City","svc.city_ph":"City name","svc.temp_units":"Temperature units","svc.wind_units":"Wind units",
   "svc.wlive_anim":"WeatherLive scene","svc.wlive_realtime":"Realtime (animated)","svc.wlive_static":"Static (updates ~10 min)",
   "opt.celsius":"Celsius","opt.fahrenheit":"Fahrenheit",
@@ -2770,6 +2864,28 @@ Object.assign(I18N.en, {
   "au.release_notes":"Release notes",
   "au.ok":"OK",
   "svc.wx_outlook":"Rain / snow outlook",
+  "face.info_font":"Info panel font",
+  "face.info_font_same":"Same as digit font",
+  "face.info_font_hint":"For the labels and info panels (weather, date, Tube 5/6). A plain font reads better than a decorative one at small sizes.",
+  "svc.wx_station":"Station",
+  "mode.energy":"Energy",
+  "en.title":"Energy",
+  "en.intro":"Home Assistant pushes your power and daily kWh to POST /api/energy (see the README for the blueprint). Turn the Energy mode on under Enabled Modes.",
+  "en.pages":"Pages",
+  "en.page_flow":"Flow",
+  "en.page_now":"Now",
+  "en.page_today":"Today",
+  "en.page_home":"Home",
+  "en.skip_note":"A page with no data is skipped.",
+  "en.page_time":"Page time (seconds)",
+  "en.sources":"Sources",
+  "svc.energy_show_solar":"Show solar",
+  "svc.energy_show_battery":"Show battery",
+  "svc.station_units":"Station units",
+  "svc.station_units_follow":"Follow wind units (mph: inHg, in)",
+  "svc.station_units_metric":"Metric (hPa, mm)",
+  "svc.station_units_kpa":"Metric, kPa (kPa, mm)",
+  "svc.station_units_us":"US (inHg, in, mph)",
   "svc.wx_sun_split":"Large sunrise / sunset times",
   "cp.hex":"Hex color","cp.pick":"Color picker","cp.done":"Done","cp.preset":"Preset color","cp.recent":"Recent color","cp.red":"Red","cp.green":"Green","cp.blue":"Blue",
   "adv.reset_tube_title":"Reset tube settings",
@@ -3124,7 +3240,7 @@ async function saveAndReboot() {
 
 /* ── Weather panel enable guard (at least one must remain on) ── */
 function onWxPanelToggle(changedId) {
-  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked && !$('f-wx-p2').checked && !$('f-wx-p3').checked && !$('f-wx-p4').checked && !$('f-wx-p5').checked && !$('f-wx-p6').checked && !$('f-wx-p7').checked) {
+  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked && !$('f-wx-p2').checked && !$('f-wx-p3').checked && !$('f-wx-p4').checked && !$('f-wx-p5').checked && !$('f-wx-p6').checked && !$('f-wx-p7').checked && !$('f-wx-p8').checked) {
     /* Prevent all being unchecked — restore the one that was just changed */
     $(changedId).checked = true;
   }
@@ -3139,6 +3255,7 @@ function toggleWeatherKey() {
   $('f-wkey-row').style.display = (src === 'openweather') ? '' : 'none';
   /* External push needs no city (no geocoding) — show the push instructions. */
   if ($('f-wsrc-ext-hint')) $('f-wsrc-ext-hint').style.display = ext ? '' : 'none';
+  if ($('f-wext-fill-row')) $('f-wext-fill-row').style.display = ext ? '' : 'none';
   if ($('f-city')) {
     $('f-city').closest('.field').style.display = ext ? 'none' : '';
     /* City placeholder varies by service */
@@ -4764,6 +4881,7 @@ function _wlSunBuf(rising) {
   return buf;
 }
 function _wlPanel(fb, kind, d, st, data, isCustom) {
+  if (st.info) st = st.info;
   const lang = ($('f-language') && $('f-language').value) || 'en';
   const fahr = ($('f-tempfmt') && $('f-tempfmt').value) === 'Fahrenheit';
   const disp = c => { const v = fahr ? c * 9 / 5 + 32 : c; return Math.sign(v) * Math.round(Math.abs(v)); };
@@ -5035,6 +5153,13 @@ function _wlFrame(face) {
     ttf: ttfFam,
     ttfFile
   };
+  /* Labels and info panels use the info font when one is chosen (Custom face), the digit font otherwise. */
+  {
+    const infoSel = val('f-custom-info-font', '');
+    const infoFile = infoSel === 'builtin' ? '' : (infoSel || ttfFile);
+    st.info = infoFile === ttfFile ? st : Object.assign({}, st, { ttf: infoFile ? _previewFontFamily(infoFile) : null, ttfFile: infoFile });
+    if (st.info !== st) st.info.info = st.info;
+  }
 
   /* Tube layout (render_weatherlive). */
   const tt = val('f-timetype', '24H');
@@ -5071,7 +5196,7 @@ function _wlFrame(face) {
     _wlPaintBackground(fb, tube, sc, bg);
     if (sl.k === 'g') _wlGlyph(fb, sl.ch, st);
     else if (sl.k === 'ampm') {
-      _wlText(fb, 40, 65, 'l28', pm ? 'P' : 'A', st.font, st);
+      _wlText(fb, 40, 65, 'l28', pm ? 'P' : 'A', st.font, st.info || st);
       _wlText(fb, 40, 119, 'l28', 'M', st.font, st);
     } else _wlPanel(fb, sl.kind, d, st, data, isCustom);
     for (let i = 0, j = 0; i < WL_N; i++, j += 4) {   /* RGB565 → RGBA, expanded like the panel */
@@ -6130,8 +6255,19 @@ async function loadFontList(manual) {
       .filter(f => f.type === 'file' && /\.ttf$/i.test(f.name))
       .map(f => f.name)
       .sort((a, b) => a.localeCompare(b));
-    const optsHtml = '<option value="">Logisoso (built-in)</option>' +
-      ttfs.map(n => `<option value="${escAttr(n)}">${esc(n)}</option>`).join('');
+    const fontOpts = ttfs.map(n => `<option value="${escAttr(n)}">${esc(n)}</option>`).join('');
+    const optsHtml = '<option value="">Logisoso (built-in)</option>' + fontOpts;
+    /* The info-font picker is its own setting: "" = same as the digit font, "builtin" = Logisoso. */
+    document.querySelectorAll('.ttf-info-select').forEach(sel => {
+      const current = sel.value;
+      sel.innerHTML = '<option value="" data-i18n="face.info_font_same">' + esc(tr('face.info_font_same')) + '</option><option value="builtin">Logisoso (built-in)</option>' + fontOpts;
+      if (current && current !== 'builtin' && !ttfs.includes(current)) {
+        const opt = document.createElement('option');
+        opt.value = current; opt.textContent = current + ' (?)';
+        sel.appendChild(opt);
+      }
+      sel.value = current;
+    });
     sels.forEach(sel => {
       const current = sel.value;
       sel.innerHTML = optsHtml;
@@ -6326,6 +6462,17 @@ const SETTINGS_SCHEMA = [
           _fsel.value = _fval;
         });
       }
+      {
+        const _isel = $('f-custom-info-font'), _ival = cfg.custom_info_font || '';
+        if (_isel) {
+          if (_ival && !Array.from(_isel.options).find(o => o.value === _ival)) {
+            const _iopt = document.createElement('option');
+            _iopt.value = _ival; _iopt.textContent = _ival;
+            _isel.appendChild(_iopt);
+          }
+          _isel.value = _ival;
+        }
+      }
       updateClockFaceControls();
       $('f-timetype').value = a.type || '24H'; onTimeTypeChange();
       $('f-tube5').value = a.clock_tube5 || 'blank';
@@ -6367,6 +6514,7 @@ const SETTINGS_SCHEMA = [
       body.custom_glyph_shadow_night = $('f-custom-glyph-shadow-night') ? $('f-custom-glyph-shadow-night').checked : true;
       body.custom_glyph_shadow_color_night = rgbFromHex(hexVal('f-custom-glyph-shadow-color-night', '#000000'));
       body.custom_font = $('f-custom-font')?.value || '';
+      body.custom_info_font = $('f-custom-info-font')?.value || '';
       body.dm_on_color = rgbFromHex(hexVal('f-dm-on-color', '#ffffff'));
       body.dm_off_color = rgbFromHex(hexVal('f-dm-off-color', '#191919'));
       body.seg_on_color = rgbFromHex(hexVal('f-seg-on-color', '#ffffff'));
@@ -6390,6 +6538,8 @@ const SETTINGS_SCHEMA = [
   { key:'aqi_standard',         id:'f-aqistd',      type:'str',  def:'auto' },
   { key:'tube6_panel_outdoor_ht', id:'f-cx-outdoor-ht', type:'bool', def:false },
   { key:'tube6_panel_outlook', id:'f-cx-outlook', type:'bool', def:false },
+  { key:'tube6_panel_station', id:'f-cx-station', type:'bool', def:false },
+  { key:'tube6_panel_energy', id:'f-cx-energy', type:'bool', def:false },
   { key:'tube6_panel_push',     id:'f-cx-push',     type:'bool', def:false },
   { load(cfg) { $('f-cx-panel-ms').value = Math.round((cfg.tube6_panel_ms || 5000) / 1000); },
     save(body) { body.tube6_panel_ms = Math.max(1, +$('f-cx-panel-ms').value) * 1000; } },
@@ -6406,6 +6556,8 @@ const SETTINGS_SCHEMA = [
   { key:'tube5_panel_aqi',      id:'f-cx5-aqi',      type:'bool', def:false },
   { key:'tube5_panel_outdoor_ht', id:'f-cx5-outdoor-ht', type:'bool', def:false },
   { key:'tube5_panel_outlook', id:'f-cx5-outlook', type:'bool', def:false },
+  { key:'tube5_panel_station', id:'f-cx5-station', type:'bool', def:false },
+  { key:'tube5_panel_energy', id:'f-cx5-energy', type:'bool', def:false },
   { key:'tube5_panel_push',     id:'f-cx5-push',     type:'bool', def:false },
 
   { key:'leading_zero', id:'f-leading-zero', type:'bool', def:false },
@@ -6597,6 +6749,7 @@ const SETTINGS_SCHEMA = [
 
   // ── Weather ──
   { key:'weather_enabled', id:'f-weather-en', type:'bool', def:true },
+  { key:'weather_ext_fill', id:'f-wext-fill', type:'bool', def:false },
   { load(cfg) {
       const _isFahr = (cfg.temperature_format || 'Celsius') === 'Fahrenheit';
       const _rawC   = cfg.sht30_temp_offset != null ? cfg.sht30_temp_offset : 0;
@@ -6624,6 +6777,16 @@ const SETTINGS_SCHEMA = [
   { key:'weather_panel5_en', id:'f-wx-p5', type:'bool', def:false },
   { key:'weather_panel6_en', id:'f-wx-p6', type:'bool', def:false },
   { key:'weather_panel7_en', id:'f-wx-p7', type:'bool', def:false },
+  { key:'weather_panel8_en', id:'f-wx-p8', type:'bool', def:false },
+  { key:'energy_show_solar', id:'f-energy-solar', type:'bool', def:true },
+  { key:'energy_show_battery', id:'f-energy-battery', type:'bool', def:true },
+  { key:'energy_page_flow', id:'f-en-flow', type:'bool', def:true },
+  { key:'energy_page_now', id:'f-en-now', type:'bool', def:true },
+  { key:'energy_page_today', id:'f-en-today', type:'bool', def:true },
+  { key:'energy_page_home', id:'f-en-home', type:'bool', def:false },
+  { key:'energy_panel_ms', load(cfg) { $('f-en-ms').value = Math.round((cfg.energy_panel_ms || 8000) / 1000); },
+    save(body) { body.energy_panel_ms = Math.max(2000, +$('f-en-ms').value * 1000); } },
+  { key:'weather_station_units', id:'f-stunits', type:'str', def:'follow' },
   { key:'weather_sun_split', id:'f-wx-sunsplit', type:'bool', def:false },
 
   // ── Social counters ──
@@ -6717,6 +6880,7 @@ const SETTINGS_SCHEMA = [
       $('m-instagram').checked  = !!(em & (1 << 9));
       $('m-tiktok').checked     = !!(em & (1 << 10));
       $('m-mastodon').checked   = !!(em & (1 << 11));
+      $('m-energy').checked     = !!(em & (1 << 12));
       /* If a service fetch is enabled but its mode bit wasn't saved, add the mode */
       [['f-weather-en','m-weather'],
        ['f-youtube-en','m-youtube'],['f-insta-en','m-instagram'],
@@ -7384,7 +7548,8 @@ function readEnabledModes() {
          ($('m-youtube').checked    ? (1 << 8)  : 0) |
          ($('m-instagram').checked  ? (1 << 9)  : 0) |
          ($('m-tiktok').checked     ? (1 << 10) : 0) |
-         ($('m-mastodon').checked   ? (1 << 11) : 0);
+         ($('m-mastodon').checked   ? (1 << 11) : 0) |
+         ($('m-energy').checked     ? (1 << 12) : 0);
 }
 
 /* ── Dashboard visibility — hide tiles/buttons for disabled modes ── */
@@ -7524,11 +7689,11 @@ function updateRotWeightStates() {
 /* Build weights array [0..11] from rot-weight-in inputs.
  * Clamps each value to 1–99; missing inputs default to 1. */
 function rotWeightsArray() {
-  const arr = new Array(12).fill(1);
+  const arr = new Array(13).fill(1);
   document.querySelectorAll('.rot-weight-in').forEach(inp => {
     const bit = parseInt(inp.dataset.bit);
     const v   = Math.max(1, Math.min(99, parseInt(inp.value) || 1));
-    if (bit >= 0 && bit < 12) arr[bit] = v;
+    if (bit >= 0 && bit < 13) arr[bit] = v;
   });
   return arr;
 }
@@ -7933,9 +8098,10 @@ function _otaSetBusy(busy) {
  * firing location.reload() into a device that wasn't listening yet —
  * ERR_CONNECTION_REFUSED. Polling adapts to however long THIS boot
  * actually takes instead of assuming every boot matches one measurement. */
+let _deviceIp = '';   /* the clock's IP, kept from the last status poll, so a reboot wait does not depend on the .local name coming back */
 async function waitForDeviceThenReload(statusEl) {
   const start = Date.now();
-  const giveUpMs = 120 * 1000;
+  const giveUpMs = 240 * 1000;
   const secs = () => Math.round((Date.now() - start) / 1000);
   const ping = async ms => {
     try { return (await fetch('/api/ping', { cache: 'no-store', signal: abortTimeoutSignal(ms) })).ok; }
@@ -7944,11 +8110,31 @@ async function waitForDeviceThenReload(statusEl) {
   /* /api/ping is the readiness probe, not /api/status: the first status call after a boot rebuilds the filesystem-size cache and can take
    * several seconds, so a short-timeout status poll kept aborting and never saw the device come back, even while the page's own status poll
    * (longer timeout) showed "Connected". Wait for the device to go offline first, so the pre-reboot firmware is never mistaken for the new one. */
+  /* Name lookups (nextube-remaster.local) are often the slow part after a reboot: Windows and browsers cache the old mDNS answer or a failure for a
+   * while. The IP needs no lookup, so it is probed too. A no-cors request cannot be read, but it only completes when something answers. */
+  const ipProbe = async ms => {
+    if (!_deviceIp || location.hostname === _deviceIp) return false;
+    try { await fetch('http://' + _deviceIp + '/api/ping', { mode: 'no-cors', cache: 'no-store', signal: abortTimeoutSignal(ms) }); return true; }
+    catch (e) { return false; }
+  };
   await new Promise(res => setTimeout(res, 2000));
   statusEl.textContent = 'Rebooting…';
   for (let i = 0; i < 12 && await ping(1500); i++) await new Promise(res => setTimeout(res, 1500));
+  let ipUpAt = 0;
   for (;;) {
     if (await ping(3000)) break;
+    if (await ipProbe(2000)) {
+      if (!ipUpAt) ipUpAt = Date.now();
+      if (Date.now() - ipUpAt > 20000) {   /* the clock is up but the name still does not resolve: carry on at its address */
+        statusEl.textContent = 'Device is back — opening it by address…';
+        await new Promise(res => setTimeout(res, 1500));
+        location.href = 'http://' + _deviceIp + location.pathname;
+        return;
+      }
+      statusEl.textContent = 'Device is up, waiting for its name to resolve (' + secs() + 's)';
+      await new Promise(res => setTimeout(res, 1500));
+      continue;
+    }
     if (Date.now() - start > giveUpMs) {
       statusEl.textContent = 'Device did not come back online after ' + Math.round(giveUpMs / 1000)
         + 's — check power/WiFi, then reload this page manually.';
@@ -8362,6 +8548,78 @@ function doReboot() {
 
 /* ── Hidden debug panel ─────────────────────────────────────────────── */
 let _dbgTaps = 0, _dbgTimer = null, _dbgPollId = null;
+
+
+/* ── Debug: screen capture ───────────────────────────────────────────── */
+function dbgCapCanvas(frame) {   /* RGB565 big-endian 80x160 -> canvas, each channel expanded the usual way */
+  const c = document.createElement('canvas'); c.width = 80; c.height = 160;
+  const ctx = c.getContext('2d'), img = ctx.createImageData(80, 160);
+  for (let i = 0; i < 80 * 160; i++) {
+    const px = (frame[i * 2] << 8) | frame[i * 2 + 1];
+    const r = (px >> 11) & 31, g = (px >> 5) & 63, b = px & 31;
+    img.data[i * 4] = (r << 3) | (r >> 2); img.data[i * 4 + 1] = (g << 2) | (g >> 4); img.data[i * 4 + 2] = (b << 3) | (b >> 2); img.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+function dbgCapScaled(canvases, zoom, gap) {   /* one PNG-ready canvas holding the given tubes side by side, nearest-neighbour scaled */
+  const n = canvases.length, out = document.createElement('canvas');
+  out.width = (n * 80 + (n - 1) * gap) * zoom; out.height = 160 * zoom;
+  const ctx = out.getContext('2d'); ctx.imageSmoothingEnabled = false; ctx.fillStyle = '#000'; ctx.fillRect(0, 0, out.width, out.height);
+  canvases.forEach((c, i) => ctx.drawImage(c, i * (80 + gap) * zoom, 0, 80 * zoom, 160 * zoom));
+  return out;
+}
+function dbgCapDownload(canvas, name) {
+  canvas.toBlob(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }, 'image/png');
+}
+async function dbgCapture() {
+  const sel = $('dbg-cap-tube').value, mask = sel === 'all' ? 63 : (1 << +sel);
+  const zoom = +$('dbg-cap-zoom').value, lut = $('dbg-cap-lut').checked ? 1 : 0;
+  const msg = $('dbg-cap-msg'), out = $('dbg-cap-out'), btn = $('dbg-cap-btn');
+  const json = { 'Content-Type': 'application/json' };
+  btn.disabled = true; out.innerHTML = ''; msg.textContent = 'Capturing…';
+  try {
+    const arm = await secureFetch('/api/screenshot', { method: 'POST', headers: json, body: JSON.stringify({ tubes: mask }) });
+    if (!arm.ok) throw new Error('could not start (HTTP ' + arm.status + ')');
+    let done = 0;
+    for (let i = 0; i < 40 && (done & mask) !== mask; i++) {   /* about 8 s at most */
+      await new Promise(r => setTimeout(r, 200));
+      done = (await (await secureFetch('/api/screenshot')).json()).done | 0;
+    }
+    const shots = [], missing = [];
+    for (let t = 0; t < 6; t++) {
+      if (!(mask & (1 << t))) continue;
+      if (!(done & (1 << t))) { missing.push(t + 1); continue; }
+      const r = await secureFetch('/api/screenshot?tube=' + t + '&lut=' + lut);
+      if (!r.ok) { missing.push(t + 1); continue; }
+      shots.push({ t: t + 1, c: dbgCapCanvas(new Uint8Array(await r.arrayBuffer())) });
+    }
+    secureFetch('/api/screenshot', { method: 'POST', headers: json, body: JSON.stringify({ release: true }) }).catch(() => {});
+    shots.forEach(s => {
+      const box = document.createElement('div'); box.style.textAlign = 'center';
+      const shown = dbgCapScaled([s.c], zoom, 0); shown.style.imageRendering = 'pixelated'; shown.style.border = '1px solid rgba(255,160,0,.4)';
+      shown.style.maxWidth = '100%';
+      const lab = document.createElement('div'); lab.style.cssText = 'font-size:.78rem;color:var(--dim);margin:.25rem 0';
+      lab.textContent = 'Tube ' + s.t;
+      const dl = document.createElement('button'); dl.className = 'btn btn-outline'; dl.style.cssText = 'padding:.2rem .6rem;font-size:.78rem';
+      dl.textContent = 'Download PNG'; dl.onclick = () => dbgCapDownload(dbgCapScaled([s.c], zoom, 0), 'nextube-tube' + s.t + (lut ? '-sent' : '') + '.png');
+      box.append(shown, lab, dl); out.appendChild(box);
+    });
+    if (shots.length > 1) {
+      const all = document.createElement('div'); all.style.cssText = 'width:100%';
+      const dl = document.createElement('button'); dl.className = 'btn btn-primary'; dl.style.cssText = 'background:#ffa000;border-color:#ffa000;padding:.3rem .8rem;font-size:.85rem';
+      dl.textContent = 'Download all as one PNG';
+      dl.onclick = () => dbgCapDownload(dbgCapScaled(shots.map(s => s.c), zoom, 6), 'nextube-screens' + (lut ? '-sent' : '') + '.png');
+      all.appendChild(dl); out.prepend(all);
+    }
+    msg.textContent = shots.length
+      ? shots.length + ' screen' + (shots.length === 1 ? '' : 's') + ' captured' + (lut ? ' (as sent to the LCD)' : '') + (missing.length ? '; not captured: tube ' + missing.join(', ') + ' (drawn straight to the LCD, or held by a test pattern)' : '')
+      : 'Nothing captured' + (missing.length ? ' (tube ' + missing.join(', ') + ' is drawn straight to the LCD or held by a test pattern)' : '');
+  } catch (e) {
+    if (e.message !== 'unauthorized') msg.textContent = 'Capture failed: ' + e.message;
+  }
+  btn.disabled = false;
+}
 
 function dbgTap() {
   clearTimeout(_dbgTimer);
@@ -9236,6 +9494,7 @@ async function refreshStatus() {
   if (s.heap_free) animateStatValue('s-heap', Math.round(s.heap_free / 1024), 'K');
   else { $('s-heap').textContent = '--'; delete $('s-heap').dataset.rawVal; }
   $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';
+  if (s.wifi_connected && s.ip && s.ip !== '0.0.0.0') _deviceIp = s.ip;
   if ($('dbg-flash-fail-count')) $('dbg-flash-fail-count').textContent = s.flash_write_fail_count ?? '--';
 
   /* LittleFS storage card */

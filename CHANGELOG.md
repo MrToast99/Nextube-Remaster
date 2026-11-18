@@ -1,6 +1,34 @@
 # Changelog
 
 
+## [1.22.0] - 2026-11-17
+
+### Added
+- **External weather** can now drive every weather panel: a push can also carry wind (`wind_kph`, `wind_mph` or `wind_ms`), rain rate (`precip_mm`), today's measured low/high (`day_min_c` + `day_max_c`), cloud cover (`cloud_cover_pct`), air quality (`us_aqi` / `european_aqi`) and the 24-hour rain/snow outlook (`outlook_mm`, `outlook_snow_cm`, `outlook_prob`) (#121, #122).
+- **External weather** readings can be set to go stale: send `max_age_min` and the weather panels show `--` once the last push is older than that, instead of keeping an old reading on screen (#121).
+- **External weather: Fill gaps from Open-Meteo**, a new option (Modes, Weather). When on, wind, the rain/snow outlook, air quality and the daily range that your push doesn't supply come from the free Open-Meteo service, using the `lat`/`lon` you push. Before, these stayed empty on the External source (#122).
+
+- **Energy panel** and **Energy mode** for Home Assistant energy data. The Tube 5/6 panel shows grid balance (green = exporting, red = importing), solar and battery. The new **Energy mode** has its own pages and page timer: a six-tube flow diagram (solar to home to grid, with the battery), power now, **today's kWh** (solar produced, bought, sold), and home use today. Home Assistant pushes the numbers to the new `POST /api/energy` every 30 seconds or so; a source you don't have (no battery, no solar) is left out, and one that stops reporting shows `--`. A Home Assistant blueprint sets up the sending side from the UI (pick your sensors, units are detected), and the README has the plain-YAML version too.
+- **Weather and Energy data over MQTT:** Home Assistant can now push the same JSON as `POST /api/weather` and `POST /api/energy` to `nextube/<hostname>/weather/set` and `energy/set`, with no REST command or token. Retained messages work: add a `ts` timestamp and a message older than 10 minutes is ignored. The Energy blueprint sends over MQTT by default.
+- **Nextube weather**, a new Home Assistant blueprint for the External weather source: pick your temperature, humidity, pressure, wind, gust, direction and rain sensors (units are detected) and it sends them over MQTT. The README's Home Assistant setup is now one section covering both blueprints.
+- **Station panel**, a new Tube 5/6 info panel and Weather-mode page: pressure with a rising / steady / falling mark, wind direction (a compass and letters in your language) with the gust, and rain so far today. Pressure, direction, gust and rain today come from Open-Meteo on every weather source, or from your own push (`pressure_hpa`, `wind_dir_deg`, `wind_gust_kph`, `rain_today_mm`, optional `pressure_trend`). New **Station units** setting (follows the wind units by default; hPa, kPa or inHg) (#121).
+
+- **Info panel font**, a new setting in the Font section, under its colour and shadow (Appearance, Clock face): the labels and info panels can use their own font, e.g. a plain one like Roboto with a decorative clock font like Kings. The default, *Same as digit font*, changes nothing.
+
+### Fixed
+- Firmware updates are safer: before anything is erased, the clock now checks the whole new firmware (its structure, checksum and built-in hash), so a damaged or cut-short file is refused with the reason and nothing is written. An update also no longer fails just because memory is fragmented; the clock frees its picture and font caches first and tries again.
+- A decimal point in a TTF font now sits on the baseline of the digits, like the built-in font does, instead of floating mid-tube.
+- Cloud cover and the current rain rate (which scale the WeatherLive sky) were never read from Open-Meteo, because the request also asked for its older wind block, which makes it leave out the newer one. Wind, cloud cover, rain rate, pressure, gusts and wind direction now all arrive.
+- Wide letters such as the W in "NW" no longer run off the edge of the tube on the Station panel; text on the Station and Energy panels is now sized to its real width.
+
+- After a firmware or web UI upload, the update page no longer depends on the clock's `.local` name coming back. It also checks the clock's IP address and, if the name still doesn't resolve after 20 seconds, carries on at the address; it waits up to 4 minutes before giving up.
+
+### Changed
+- The Digit font picker now sits in the Digit section, above Night color set, and the Info panel font picker lines up with the Font section's colour row.
+- The Station panel redraws much faster on animated faces such as WeatherLive.
+- About 50 KB of the clock's scarce internal memory is freed by keeping the device log and the Album picture list in PSRAM, which helps keep updates and Wi-Fi stable.
+- The log now says why an Album picture does not show: a file over 200 KB, one that is not a `.jpg`, one past the 64-picture limit, or a JPEG the clock cannot read (progressive, CMYK or larger than the tube; the image converter fixes these). With display debug logging on, it also lists which picture each tube shows as the album rotates (#120).
+
 ## [1.21.1] - 2026-11-04
 
 ### Added

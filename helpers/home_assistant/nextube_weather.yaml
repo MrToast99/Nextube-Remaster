@@ -1,0 +1,231 @@
+blueprint:
+  name: Nextube weather
+  description: >-
+    Sends your own weather readings (temperature, humidity, pressure, wind, gusts, wind direction, rain today and, optionally, the condition from a
+    weather entity) to a Nextube-Remaster clock whose weather Source is set to External. Pick only the sensors you have; a reading you leave empty
+    is simply not sent. Units (°C/°F, hPa/kPa/inHg, km/h/mph/m/s/kn, mm/in) are detected from each sensor, so nothing needs converting. Needs MQTT
+    enabled on the clock, or the REST command from the README (rest_command.nextube_weather).
+  domain: automation
+  source_url: https://github.com/MrToast99/Nextube-Remaster/blob/main/helpers/home_assistant/nextube_weather.yaml
+  input:
+    transport:
+      name: How to send
+      description: >-
+        MQTT needs no extra Home Assistant configuration (it uses the built-in MQTT publish) and the clock keeps the last values across a reboot, but
+        the clock's MQTT must be enabled and connected to the same broker. REST needs the rest_command from the README.
+      default: mqtt
+      selector:
+        select:
+          options:
+            - label: MQTT (recommended)
+              value: mqtt
+            - label: REST command
+              value: rest
+    mqtt_topic:
+      name: MQTT topic (MQTT only)
+      description: nextube/ followed by the clock's hostname, then /weather/set. The hostname is shown in the clock's Web UI (default nextube-remaster).
+      default: nextube/nextube-remaster/weather/set
+      selector:
+        text:
+    mqtt_retain:
+      name: Retain the message (MQTT only)
+      description: >-
+        On: the broker keeps the last message so a clock that reboots gets its values straight away (the message carries a timestamp, so one older
+        than 10 minutes is ignored).
+      default: true
+      selector:
+        boolean:
+    rest_command:
+      name: REST command (REST only)
+      description: The REST command that posts to the clock (one per clock if you have several).
+      default: rest_command.nextube_weather
+      selector:
+        text:
+    temperature:
+      name: Temperature
+      description: Outdoor temperature. °C, °F and K are detected.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: temperature
+    humidity:
+      name: Humidity
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: humidity
+    pressure:
+      name: Pressure
+      description: Barometric pressure (hPa, mbar, kPa, Pa, inHg, mmHg and psi are detected). Feeds the Station panel.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: atmospheric_pressure
+            - domain: sensor
+              device_class: pressure
+    wind_speed:
+      name: Wind speed
+      description: km/h, mph, m/s, knots and ft/s are detected.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: wind_speed
+    wind_gust:
+      name: Wind gust
+      description: The strongest recent gust. Feeds the Station panel.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: wind_speed
+    wind_direction:
+      name: Wind direction
+      description: Degrees the wind blows from (0 = north). Feeds the Station panel's compass.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+    rain_today:
+      name: Rain today
+      description: Rain since midnight (mm, cm or in). It must be a sensor that starts again at midnight. Feeds the Station panel.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: precipitation
+    weather_entity:
+      name: Weather entity (optional)
+      description: >-
+        Used for the icon and condition text (sunny, rainy, snowy, ...) and for cloud cover when it reports it. Leave empty to keep the icon the clock
+        already has.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: weather
+    send_location:
+      name: Send my Home Assistant location
+      description: >-
+        Sends your home's latitude and longitude, which the clock needs for its sunrise and sunset panel (and for the optional gap filling from
+        Open-Meteo).
+      default: true
+      selector:
+        boolean:
+    interval_minutes:
+      name: Update interval
+      description: How often to send the readings.
+      default: "5"
+      selector:
+        select:
+          options:
+            - label: Every minute
+              value: "1"
+            - label: Every 5 minutes
+              value: "5"
+            - label: Every 10 minutes
+              value: "10"
+            - label: Every 15 minutes
+              value: "15"
+    max_age_min:
+      name: Mark data stale after (minutes)
+      description: >-
+        If this automation stops sending (Home Assistant down, sensors unavailable), the clock shows "--" on its weather panels after this many
+        minutes. 0 = never. Keep it above the update interval.
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 240
+          mode: box
+
+mode: single
+
+variables:
+  transport: !input transport
+  temp: !input temperature
+  hum: !input humidity
+  pres: !input pressure
+  wind: !input wind_speed
+  gust: !input wind_gust
+  wdir: !input wind_direction
+  rain: !input rain_today
+  wx: !input weather_entity
+  send_loc: !input send_location
+  interval: !input interval_minutes
+  max_age: !input max_age_min
+
+trigger:
+  - platform: time_pattern
+    minutes: "/1"
+  - platform: homeassistant
+    event: start
+
+condition:
+  - condition: template
+    value_template: >-
+      {{ trigger.platform == 'homeassistant'
+         or (((now().timestamp() // 60) | int) % (interval | int)) == 0 }}
+
+action:
+  - variables:
+      payload_json: >-
+        {%- set d = namespace(v={'max_age_min': max_age | int, 'ts': (now().timestamp() | int)}) -%}
+        {%- if temp and is_number(states(temp)) -%}
+          {%- set u = state_attr(temp, 'unit_of_measurement') -%}
+          {%- set t = states(temp) | float -%}
+          {%- set d.v = dict(d.v, temp_c=((t - 32) * 5 / 9 if u == '°F' else (t - 273.15 if u == 'K' else t))) -%}
+        {%- endif -%}
+        {%- if hum and is_number(states(hum)) -%}{%- set d.v = dict(d.v, humidity=(states(hum) | float)) -%}{%- endif -%}
+        {%- if pres and is_number(states(pres)) -%}
+          {%- set k = {'inHg': 33.8639, 'kPa': 10, 'Pa': 0.01, 'mmHg': 1.33322, 'psi': 68.9476}.get(state_attr(pres, 'unit_of_measurement'), 1) -%}
+          {%- set d.v = dict(d.v, pressure_hpa=((states(pres) | float) * k)) -%}
+        {%- endif -%}
+        {%- set to_kph = {'mph': 1.609344, 'm/s': 3.6, 'kn': 1.852, 'kt': 1.852, 'ft/s': 1.09728} -%}
+        {%- if wind and is_number(states(wind)) -%}
+          {%- set d.v = dict(d.v, wind_kph=((states(wind) | float) * to_kph.get(state_attr(wind, 'unit_of_measurement'), 1))) -%}
+        {%- endif -%}
+        {%- if gust and is_number(states(gust)) -%}
+          {%- set d.v = dict(d.v, wind_gust_kph=((states(gust) | float) * to_kph.get(state_attr(gust, 'unit_of_measurement'), 1))) -%}
+        {%- endif -%}
+        {%- if wdir and is_number(states(wdir)) -%}{%- set d.v = dict(d.v, wind_dir_deg=((states(wdir) | float) % 360)) -%}{%- endif -%}
+        {%- if rain and is_number(states(rain)) -%}
+          {%- set k = {'in': 25.4, 'cm': 10}.get(state_attr(rain, 'unit_of_measurement'), 1) -%}
+          {%- set d.v = dict(d.v, rain_today_mm=((states(rain) | float) * k)) -%}
+        {%- endif -%}
+        {%- if wx -%}
+          {%- set icons = {'sunny': 'sun', 'clear-night': 'sun', 'partlycloudy': 'fewClouds', 'cloudy': 'overcastClouds', 'fog': 'fog', 'rainy': 'rain', 'pouring': 'rain', 'hail': 'rain', 'snowy': 'snow', 'snowy-rainy': 'snow', 'windy': 'squalls', 'windy-variant': 'squalls', 'lightning': 'thunderstorm', 'lightning-rainy': 'thunderstorm'} -%}
+          {%- set st = states(wx) -%}
+          {%- if st in icons -%}{%- set d.v = dict(d.v, icon=icons[st], condition=(st | replace('-', ' ') | replace('partlycloudy', 'partly cloudy') | title)) -%}{%- endif -%}
+          {%- set cc = state_attr(wx, 'cloud_coverage') -%}
+          {%- if cc is number -%}{%- set d.v = dict(d.v, cloud_cover_pct=cc) -%}{%- endif -%}
+        {%- endif -%}
+        {%- if send_loc and is_number(state_attr('zone.home', 'latitude')) and is_number(state_attr('zone.home', 'longitude')) -%}
+          {%- set d.v = dict(d.v, lat=state_attr('zone.home', 'latitude'), lon=state_attr('zone.home', 'longitude')) -%}
+        {%- endif -%}
+        {{- d.v | to_json -}}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ transport == 'mqtt' }}"
+        sequence:
+          - service: mqtt.publish
+            data:
+              topic: !input mqtt_topic
+              payload: "{{ payload_json }}"
+              retain: !input mqtt_retain
+    default:
+      - service: !input rest_command
+        data:
+          payload: "{{ payload_json }}"

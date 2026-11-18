@@ -375,7 +375,7 @@ static void publish_discovery(bool include_sensors)
              "\"options\":["
                "\"Clock\","
                "\"YouTube\",\"Date\",\"Album\",\"Weather\","
-               "\"Spectrum\",\"Instagram\",\"TikTok\",\"Mastodon\""
+               "\"Spectrum\",\"Instagram\",\"TikTok\",\"Mastodon\",\"Energy\""
              "],"
              "\"device\":{%s}"
              "}",
@@ -1074,6 +1074,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             make_topic(topic, sizeof(topic), "ticker_sound/set");
             esp_mqtt_client_subscribe(s_client, topic, 1);
             vTaskDelay(pdMS_TO_TICKS(1));
+            make_topic(topic, sizeof(topic), "energy/set");
+            esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
+            make_topic(topic, sizeof(topic), "weather/set");
+            esp_mqtt_client_subscribe(s_client, topic, 1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             esp_mqtt_client_subscribe(s_client, s_topic_ticker_set, 1);
             vTaskDelay(pdMS_TO_TICKS(1));
         }
@@ -1183,8 +1189,40 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             t[sizeof(t) - 1] = '\0';
         }
 
-        if (event->current_data_offset + event->data_len >= event->total_data_len) {
+        const bool msg_complete = (event->current_data_offset + event->data_len >= event->total_data_len);
+        if (msg_complete) {
             s_frag_topic[0] = '\0';   /* message complete — don't leak topic to next message */
+        }
+
+        /* Data pushed by Home Assistant: the same JSON as POST /api/energy and /api/weather, possibly retained. These can be much larger than the
+         * 128-byte command payloads below, so they are collected across fragments into a PSRAM buffer and handed to the shared parser. */
+        {
+            char et[TOPIC_MAXLEN], wt[TOPIC_MAXLEN];
+            make_topic(et, sizeof(et), "energy/set");
+            make_topic(wt, sizeof(wt), "weather/set");
+            const int kind = !strcmp(t, et) ? 1 : (!strcmp(t, wt) ? 2 : 0);
+            if (kind) {
+                static uint8_t *s_in_buf = NULL;
+                static size_t   s_in_len = 0;
+                static bool     s_in_over = false;
+                const size_t IN_MAX = 3072;
+                if (event->current_data_offset == 0) { s_in_len = 0; s_in_over = false; }
+                if (!s_in_buf) s_in_buf = (uint8_t *)heap_caps_malloc(IN_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!s_in_buf) break;
+                if (s_in_len + (size_t)event->data_len > IN_MAX) s_in_over = true;
+                else { memcpy(s_in_buf + s_in_len, event->data, (size_t)event->data_len); s_in_len += (size_t)event->data_len; }
+                if (msg_complete) {
+                    if (s_in_over) {
+                        ESP_LOGW(TAG, "%s/set message too large (%d B) - ignored", kind == 1 ? "energy" : "weather", (int)event->total_data_len);
+                    } else {
+                        s_in_buf[s_in_len] = '\0';
+                        const bool ok = (kind == 1) ? energy_set_json((const char *)s_in_buf) : weather_set_json((const char *)s_in_buf);
+                        ESP_LOGD(TAG, "%s/set: %s (%u B)", kind == 1 ? "energy" : "weather", ok ? "applied" : "rejected", (unsigned)s_in_len);
+                    }
+                    s_in_len = 0;
+                }
+                break;
+            }
         }
 
         char p[128];

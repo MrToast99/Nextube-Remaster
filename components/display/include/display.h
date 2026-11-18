@@ -314,6 +314,11 @@ void display_show_wait(void);
  *  Safe to call from any task. */
 void display_resume_after_wait(void);
 
+/* Frees the PSRAM the display keeps as caches (decoded theme images, the WeatherLive previous frames, rasterised font glyphs), so a firmware
+ * update can find one block big enough for the whole image. Only does anything while the display task is parked by display_show_wait();
+ * everything is rebuilt on demand if the display resumes. Returns roughly how many bytes were freed. */
+size_t display_release_caches(void);
+
 /** Push an externally-supplied JPG to a 24H_CX info-panel tube (asset themes).
  *  Decodes the JPG (which must be exactly LCD_WIDTH×LCD_HEIGHT = 80×160) to
  *  RGB565 in a per-tube PSRAM buffer; render_cx_panel() blits it whenever that
@@ -370,6 +375,15 @@ void display_wake(void);
  *  Called automatically by display_apply_tube_offsets(). Calls display_wake().
  *  Thread-safe: safe to call from any task. */
 void display_invalidate(void);
+
+/* Screen capture for the debug panel. display_capture_arm() reserves a PSRAM frame for each tube in tube_mask (bit n = tube n + 1) and forces a
+ * full repaint; each tube's next full-frame push is copied. The frames are exactly what the firmware drew, before the per-tube brightness and
+ * gamma. Tubes drawn straight to the LCD (Spectrum bars, the ticker, test patterns, snow / burn-in) never show up as done. The reservation
+ * frees itself after two minutes. */
+bool    display_capture_arm(uint8_t tube_mask);
+uint8_t display_capture_done_mask(void);                                   /* tubes captured so far */
+bool    display_capture_read(int tube, uint8_t *out, bool as_sent);        /* out: 25 600 B, RGB565 big-endian; as_sent applies the tube's gamma/brightness */
+void    display_capture_release(void);
 
 #ifdef __cplusplus
 }

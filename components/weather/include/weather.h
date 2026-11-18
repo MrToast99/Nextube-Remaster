@@ -45,6 +45,14 @@ typedef struct {
     float   outlook_snow_cm[24];   /* snowfall per hour (cm) */
     uint8_t outlook_prob[24];      /* precipitation probability, % */
     time_t  outlook_slot0;
+    /* Station panel data. Pressure comes from a push or from Open-Meteo's pressure_msl; direction and gust likewise; rain-today only from a push
+     * (a forecast total would not be "so far"). All default to -1 = not available. pressure_trend: +1 rising, -1 falling, 0 steady or not
+     * enough history yet (worked out over the last 3 h of samples, or taken from the push). */
+    float  pressure_hpa;
+    float  wind_dir_deg;     /* direction the wind blows FROM, 0-359 */
+    float  wind_gust_kph;
+    float  rain_today_mm;
+    int8_t pressure_trend;
 } weather_data_t;
 
 /** The precipitation outlook lined up with the current hour (slot 0 = this hour), plus a summary of the first wet spell in it. An hour counts
@@ -70,6 +78,40 @@ typedef struct {
 bool weather_get_outlook(weather_outlook_t *o);
 void weather_start(void);
 const weather_data_t *weather_get(void);
+/** Thread-safe copy for any task other than the display task (weather_get() hands out one shared buffer, which a second task would
+ *  overwrite while the first is still reading it). */
+void weather_get_copy(weather_data_t *out);
+
+/* ── Energy (Home Assistant energy data pushed to POST /api/energy) ──────────────────────────────────────────────────────────────────
+ * Every source is optional. A source that was never pushed (or was pushed as null) is absent and its zone is left out of the panel; one that
+ * was pushed and then went stale reads as stale (shown as "--"). Power is in watts: grid > 0 imports, grid < 0 exports; battery > 0 charges. */
+typedef struct {
+    bool  has_grid, has_solar, has_home, has_batt;       /* ever pushed and not cleared */
+    bool  stale_grid, stale_solar, stale_home, stale_batt; /* pushed, but older than max_age_min */
+    float grid_w, solar_w, home_w;
+    float batt_pct, batt_w;
+    bool  has_batt_w;
+    bool  has_tot[4], stale_tot[4];                       /* today's kWh: 0 solar produced, 1 grid import, 2 grid export, 3 home used */
+    float tot_kwh[4];
+    uint32_t seq;                                         /* bumped on every push, so the display can tell when to redraw */
+} energy_data_t;
+
+/** Values: NAN = not in this push (kept as is); clear_* = the push said null (the source is absent). max_age_min < 0 = unchanged, 0 = never stale. */
+typedef struct {
+    float grid_w, solar_w, home_w, batt_pct, batt_w;
+    float tot_kwh[4];  bool clear_tot[4];    /* today's totals; NAN = not in this push */
+    bool  clear_grid, clear_solar, clear_home, clear_batt, clear_batt_w;   /* clear_batt_w: battery stays, its power reading is gone */
+    int   max_age_min;
+} energy_push_t;
+void energy_push_init(energy_push_t *p);
+void energy_set(const energy_push_t *p);
+void energy_get_copy(energy_data_t *out);
+
+/** The JSON of POST /api/weather and POST /api/energy, parsed and applied. Shared by the HTTP routes and the MQTT input (nextube/<host>/weather/set and
+ *  energy/set). An optional "ts" (epoch seconds) older than 10 minutes makes the message ignored: a retained MQTT message must not look fresh after
+ *  a reboot. Returns false for bad JSON or a message that is too old. */
+bool weather_set_json(const char *json);
+bool energy_set_json(const char *json);
 
 /** Inject externally-sourced weather data (e.g. POST /api/weather).  Lets a
  *  home-automation system that already averages several providers push the
@@ -89,6 +131,34 @@ const weather_data_t *weather_get(void);
  *  next provider poll (≤10 min) overwrites it.  Thread-safe. */
 void weather_set_external(float temp_c, float humidity,
                           const char *condition, const char *icon, int wmo_code);
+
+/** Optional extras of an external push: everything the Open-Meteo path fills in, so a push can drive every panel. Start from
+ *  weather_ext_push_init() (marks all fields absent), set what the push carries, then call weather_set_external_extras() after
+ *  weather_set_external(). While a pushed field is fresh the Open-Meteo gap-fill does not overwrite it. */
+typedef struct {
+    float   wind_kph;                /* NAN = absent */
+    float   precip_mm;               /* rain rate, mm/h; NAN = absent */
+    float   day_min_c, day_max_c;    /* both NAN = absent */
+    float   cloud_cover_pct;         /* 0-100; NAN = absent */
+    int     us_aqi, european_aqi;    /* < 0 = absent */
+    float   pm2_5;                   /* NAN = absent */
+    float   pressure_hpa;            /* NAN = absent */
+    int     pressure_trend;          /* 2 = absent (worked out on the clock), else -1 / 0 / +1 */
+    float   wind_dir_deg;            /* NAN = absent */
+    float   wind_gust_kph;           /* NAN = absent */
+    float   rain_today_mm;           /* NAN = absent */
+    int     max_age_min;             /* < 0 = absent; 0 = readings never go stale */
+    uint8_t outlook_hours;           /* 0 = absent; else slots filled below (slot 0 = the hour of the push) */
+    float   outlook_mm[24];
+    float   outlook_snow_cm[24];
+    uint8_t outlook_prob[24];
+} weather_ext_push_t;
+
+void weather_ext_push_init(weather_ext_push_t *x);
+
+/** Applies the extras. max_age_min is the number of minutes after the last push at which the reading counts as stale: weather_get() then
+ *  reports valid = false and the AQI and outlook accessors report nothing. Held in RAM only. */
+void weather_set_external_extras(const weather_ext_push_t *x);
 
 /** Set the location (lat/lon) used by the Sunrise & Sunset panel from an
  *  external push.  Thread-safe. */

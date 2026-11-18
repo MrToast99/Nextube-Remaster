@@ -1,0 +1,328 @@
+blueprint:
+  name: Nextube energy panel
+  description: >-
+    Sends your home's power data (grid, solar, home, battery) and today's kWh totals to a Nextube-Remaster clock for its Energy panel and Energy mode.
+    Pick only the sensors you have; a source you leave empty is left out of the panel. Several sensors for one
+    source (solar through multiple breakers, a three-phase grid) are added together. Units (W / kW / MW) are
+    detected from each sensor, so nothing needs converting. Needs the REST command from the README
+    (rest_command.nextube_energy) set up once with the clock's address, or MQTT enabled on the clock.
+  domain: automation
+  source_url: https://github.com/MrToast99/Nextube-Remaster/blob/main/helpers/home_assistant/nextube_energy_panel.yaml
+  input:
+    transport:
+      name: How to send
+      description: >-
+        MQTT needs no extra Home Assistant configuration (it uses the built-in MQTT publish) and the clock keeps the last values across a reboot, but
+        the clock's MQTT must be enabled and connected to the same broker. REST needs the rest_command from the README.
+      default: mqtt
+      selector:
+        select:
+          options:
+            - label: MQTT (recommended)
+              value: mqtt
+            - label: REST command
+              value: rest
+    mqtt_topic:
+      name: MQTT topic (MQTT only)
+      description: nextube/ followed by the clock's hostname, then /energy/set. The hostname is shown in the clock's Web UI (default nextube-remaster).
+      default: nextube/nextube-remaster/energy/set
+      selector:
+        text:
+    mqtt_retain:
+      name: Retain the message (MQTT only)
+      description: >-
+        On: the broker keeps the last message so a clock that reboots gets its values straight away (the message carries a timestamp, so one older
+        than 10 minutes is ignored).
+      default: true
+      selector:
+        boolean:
+    rest_command:
+      name: REST command (REST only)
+      description: The REST command that posts to the clock (one per clock if you have several).
+      default: rest_command.nextube_energy
+      selector:
+        text:
+    grid_power:
+      name: Grid power
+      description: >-
+        A sensor that is positive when importing from the grid and negative when exporting. Pick several to add them
+        together (for example one per phase).
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: power
+    grid_invert:
+      name: Flip the grid sign
+      description: Turn on if your grid sensor is positive when exporting.
+      default: false
+      selector:
+        boolean:
+    grid_import_power:
+      name: Grid import power (alternative)
+      description: Use these two instead of the single grid sensor when import and export are separate sensors.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: power
+    grid_export_power:
+      name: Grid export power (alternative)
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: power
+    solar_power:
+      name: Solar power
+      description: >-
+        Solar production, 0 or more. If the solar runs through several breakers or inverters, pick all of their power
+        sensors and they are added together. Leave empty if you have no solar.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: power
+    home_power:
+      name: Home consumption (optional)
+      description: If left empty, the clock works it out from solar, grid and battery.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: power
+    battery_level:
+      name: Battery level
+      description: State of charge in percent. Leave empty if you have no battery.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: battery
+    battery_power:
+      name: Battery power
+      description: Positive when charging, negative when discharging.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: power
+    battery_invert:
+      name: Flip the battery sign
+      description: Turn on if your battery sensor is positive when discharging.
+      default: false
+      selector:
+        boolean:
+    allow_partial:
+      name: Keep sending when one of several sensors is unavailable
+      description: >-
+        Off (recommended): if any sensor of a multi-sensor source is unavailable, that source is not sent, so the clock
+        shows "--" for it once the stale time passes (a sum with a missing part would read too low). On: add up the
+        sensors that do answer.
+      default: false
+      selector:
+        boolean:
+    # ── Today's totals (kWh), for the Energy mode's Today and Home pages ──
+    solar_today:
+      name: Solar energy today
+      description: >-
+        Energy produced today. It must be a sensor that starts again at midnight (see the README: a Utility Meter helper with a daily cycle on your cumulative solar sensor). Pick several to add them together.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: energy
+    import_today:
+      name: Grid import today
+      description: >-
+        Energy bought from the grid today (a daily-reset sensor).
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: energy
+    export_today:
+      name: Grid export today
+      description: >-
+        Energy sold to the grid today (a daily-reset sensor).
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: energy
+    home_today:
+      name: Home consumption today
+      description: >-
+        Energy used by the house today (a daily-reset sensor).
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: energy
+    interval_seconds:
+      name: Update interval
+      description: How often to send the numbers.
+      default: 30
+      selector:
+        select:
+          options:
+            - label: Every 15 seconds
+              value: "15"
+            - label: Every 30 seconds
+              value: "30"
+            - label: Every minute
+              value: "60"
+            - label: Every 2 minutes
+              value: "120"
+    max_age_min:
+      name: Mark data stale after (minutes)
+      description: >-
+        If this automation stops sending (Home Assistant down, sensor unavailable), the clock shows "--" for the
+        affected source after this many minutes. 0 = never.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 120
+          mode: box
+    declare_absent:
+      name: Tell the clock about sources you left empty
+      description: >-
+        On: an empty source is sent as "none", so the clock hides its zone right away. Off: it is simply not
+        sent (the zone appears only once a value has been sent).
+      default: true
+      selector:
+        boolean:
+
+mode: single
+
+variables:
+  transport: !input transport
+  rest_command: !input rest_command
+  grid: !input grid_power
+  grid_invert: !input grid_invert
+  grid_in: !input grid_import_power
+  grid_out: !input grid_export_power
+  solar: !input solar_power
+  home: !input home_power
+  batt_pct: !input battery_level
+  batt_w: !input battery_power
+  batt_invert: !input battery_invert
+  interval: !input interval_seconds
+  max_age: !input max_age_min
+  declare_absent: !input declare_absent
+  allow_partial: !input allow_partial
+  solar_t: !input solar_today
+  import_t: !input import_today
+  export_t: !input export_today
+  home_t: !input home_today
+
+trigger:
+  - platform: time_pattern
+    seconds: "/15"
+  - platform: homeassistant
+    event: start
+
+condition:
+  - condition: template
+    value_template: >-
+      {{ trigger.platform == 'homeassistant'
+         or (((now().timestamp() // 15) | int) % ((interval | int) // 15)) == 0 }}
+
+action:
+  - variables:
+      payload_json: >-
+        {%- macro total(ents) -%}
+          {%- set list = ents if (ents is iterable and ents is not string) else [ents] -%}
+          {%- set ns = namespace(sum=0, n=0, bad=0) -%}
+          {%- for e in list if e -%}
+            {%- if is_number(states(e)) -%}
+              {%- set u = state_attr(e, 'unit_of_measurement') -%}
+              {%- set ns.sum = ns.sum + (states(e) | float(0)) * (1000 if u == 'kW' else (1000000 if u == 'MW' else 1)) -%}
+              {%- set ns.n = ns.n + 1 -%}
+            {%- else -%}
+              {%- set ns.bad = ns.bad + 1 -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{- ns.sum if (ns.n > 0 and (ns.bad == 0 or allow_partial)) else '' -}}
+        {%- endmacro -%}
+        {%- macro total_kwh(ents) -%}
+          {%- set list = ents if (ents is iterable and ents is not string) else [ents] -%}
+          {%- set ns = namespace(sum=0, n=0, bad=0) -%}
+          {%- for e in list if e -%}
+            {%- if is_number(states(e)) -%}
+              {%- set u = state_attr(e, 'unit_of_measurement') -%}
+              {%- set ns.sum = ns.sum + (states(e) | float(0)) * (0.001 if u == 'Wh' else (1000 if u == 'MWh' else 1)) -%}
+              {%- set ns.n = ns.n + 1 -%}
+            {%- else -%}
+              {%- set ns.bad = ns.bad + 1 -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{- ns.sum if (ns.n > 0 and (ns.bad == 0 or allow_partial)) else '' -}}
+        {%- endmacro -%}
+        {%- macro has(ents) -%}{{- 'y' if (ents and ents | length > 0) else '' -}}{%- endmacro -%}
+        {%- set g_s = total(grid) | trim -%}
+        {%- set gi_s = total(grid_in) | trim -%}
+        {%- set go_s = total(grid_out) | trim -%}
+        {%- set gw = none -%}
+        {%- if g_s != '' -%}
+          {%- set gw = (g_s | float) * (-1 if grid_invert else 1) -%}
+        {%- elif gi_s != '' or go_s != '' -%}
+          {%- set gw = ((gi_s | float(0)) - (go_s | float(0))) * (-1 if grid_invert else 1) -%}
+        {%- endif -%}
+        {%- set so_s = total(solar) | trim -%}
+        {%- set ho_s = total(home) | trim -%}
+        {%- set bw_s = total(batt_w) | trim -%}
+        {%- set d = {'max_age_min': max_age | int, 'ts': (now().timestamp() | int)} -%}
+        {%- if gw is not none -%}{%- set d = dict(d, grid_w=gw) -%}
+        {%- elif declare_absent and not (has(grid) or has(grid_in) or has(grid_out)) -%}{%- set d = dict(d, grid_w=none) -%}{%- endif -%}
+        {%- if so_s != '' -%}{%- set d = dict(d, solar_w=(so_s | float)) -%}
+        {%- elif declare_absent and not has(solar) -%}{%- set d = dict(d, solar_w=none) -%}{%- endif -%}
+        {%- if ho_s != '' -%}{%- set d = dict(d, home_w=(ho_s | float)) -%}
+        {%- elif declare_absent and not has(home) -%}{%- set d = dict(d, home_w=none) -%}{%- endif -%}
+        {%- if batt_pct and is_number(states(batt_pct)) -%}{%- set d = dict(d, battery_pct=(states(batt_pct) | float)) -%}
+        {%- elif declare_absent and not batt_pct -%}{%- set d = dict(d, battery_pct=none) -%}{%- endif -%}
+        {%- if bw_s != '' -%}{%- set d = dict(d, battery_w=((bw_s | float) * (-1 if batt_invert else 1))) -%}{%- endif -%}
+        {%- set dd = namespace(v=d) -%}
+        {%- for key, ents in [('solar_today_kwh', solar_t), ('grid_import_today_kwh', import_t), ('grid_export_today_kwh', export_t), ('home_today_kwh', home_t)] -%}
+          {%- set v = total_kwh(ents) | trim -%}
+          {%- if v != '' -%}{%- set dd.v = dict(dd.v, **{key: (v | float)}) -%}
+          {%- elif declare_absent and not has(ents) -%}{%- set dd.v = dict(dd.v, **{key: none}) -%}{%- endif -%}
+        {%- endfor -%}
+        {{- dd.v | to_json -}}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ transport == 'mqtt' }}"
+        sequence:
+          - service: mqtt.publish
+            data:
+              topic: !input mqtt_topic
+              payload: "{{ payload_json }}"
+              retain: !input mqtt_retain
+    default:
+      - service: !input rest_command
+        data:
+          payload: "{{ payload_json }}"

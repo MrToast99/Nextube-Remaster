@@ -45,7 +45,8 @@ typedef enum {
     APP_MODE_INSTAGRAM  = 9,
     APP_MODE_TIKTOK     = 10,
     APP_MODE_MASTODON   = 11,
-    APP_MODE_MAX        = 12,
+    APP_MODE_ENERGY     = 12, /* Home Assistant energy data: flow, now, today's kWh, home */
+    APP_MODE_MAX        = 13,
 } app_mode_t;
 
 /* ── Backlight effect modes ────────────────────────────────────────── */
@@ -134,6 +135,7 @@ typedef struct {
      * predates this field. Only meaningful while custom_night_colors is on. */
     bool             custom_night_drift;
     uint16_t         custom_night_drift_period_s;  /* full A-B-A cycle length; default 300 (5 min), clamp >= 5 */
+    char             custom_info_font[64];   /* WeatherLive / Custom face: TTF for the labels and info panels; "" = the same as custom_font, "builtin" = Logisoso */
     char             custom_font[64];        /* TTF filename in /spiffs/fonts/; "" = logisoso (u8g2 fallback).
                                                * Also applies to 24H_CX asset-theme Outdoor Temp/Humidity/Wind/
                                                * AQI/combined-H-T panels (they share wl_text() with WeatherLive). */
@@ -262,6 +264,7 @@ typedef struct {
     float            weather_ext_lat;
     float            weather_ext_lon;
     bool             weather_ext_loc_valid;
+    bool             weather_ext_fill;   /* external source: fill wind/range/outlook/AQI the push lacks from Open-Meteo (needs lat/lon) */
     char             temp_format[12];    /* "Celsius" or "Fahrenheit" */
     char             wind_unit[8];       /* "km/h", "mph", or "m/s" */
 
@@ -380,6 +383,15 @@ typedef struct {
     bool             weather_panel5_en;  /* true = show indoor temperature panel (SHT30) */
     bool             weather_panel6_en;  /* true = show indoor humidity panel (SHT30)    */
     bool             weather_panel7_en;  /* true = show the 24 h rain / snow outlook chart (6 tubes) */
+    uint16_t         energy_panel_ms;    /* Energy mode: how long each page is shown */
+    bool             energy_page_flow;   /* Energy mode pages: flow diagram, power now, today's kWh, home today */
+    bool             energy_page_now;
+    bool             energy_page_today;
+    bool             energy_page_home;
+    bool             energy_show_solar;  /* Energy panel: show the solar zone when solar data is pushed (off = always left out) */
+    bool             energy_show_battery;/* same for the battery zone */
+    bool             weather_panel8_en;  /* true = show the Station page: pressure + trend, wind direction + gust, rain today */
+    char             weather_station_units[8];   /* Station panel units: "follow" (the wind unit decides), "metric" (hPa, mm, km/h), "kpa" (metric with the pressure in kPa) or "us" (inHg, in, mph) */
     bool             weather_sun_split;  /* true = sunrise and sunset on separate screens, one large time each, laid out like the clock */
 
     /* Mode Rotation – auto-cycle through enabled modes on a timer.
@@ -392,7 +404,7 @@ typedef struct {
     bool             rotation_enabled;     /* false = manual-only mode switching */
     uint16_t         rotation_interval_s;  /* seconds per mode; 0 treated as 60 */
     uint16_t         rotation_modes;       /* bitmask of modes to rotate; 0 = all enabled */
-    uint8_t          rotation_weights[12]; /* per-mode dwell multiplier (1–99, default 1).
+    uint8_t          rotation_weights[APP_MODE_MAX]; /* per-mode dwell multiplier (1–99, default 1).
                                             * effective dwell = rotation_interval_s × weight.
                                             * index == app_mode_t value.  0 treated as 1. */
 
@@ -450,6 +462,8 @@ typedef struct {
                                                 * combines what tube6_panel_temp + tube6_panel_humidity would
                                                 * otherwise need two separate rotation slots for. */
     bool             tube6_panel_outlook;     /* Rain / snow outlook: first wet spell in the next 24 h + an hourly bar strip */
+    bool             tube6_panel_energy;      /* Energy: grid balance, solar, battery (zones for the sources that are pushed) */
+    bool             tube6_panel_station;     /* Station: pressure + trend, wind direction + gust, rain today */
     uint16_t         tube6_panel_ms;         /* ms per panel; below 1000 resets to 5000 */
     /* Dual info-panel mode (24H Custom): when true the colon is dropped and an
      * INDEPENDENT info panel is shown on BOTH tube 5 (2nd-from-right, LCD index
@@ -469,6 +483,8 @@ typedef struct {
     bool             tube5_panel_aqi;         /* Air quality — US EPA AQI (Open-Meteo, keyless) */
     bool             tube5_panel_outdoor_ht;  /* Outdoor temp (top half) + outdoor humidity (bottom half) */
     bool             tube5_panel_outlook;     /* Rain / snow outlook (see tube6_panel_outlook) */
+    bool             tube5_panel_energy;      /* Energy (see tube6_panel_energy) */
+    bool             tube5_panel_station;     /* Station (see tube6_panel_station) */
     char             aqi_standard[8];         /* AQI scale: "auto" (by location) | "us" | "eu" */
     char             update_repo[64];
 } nextube_config_t;
@@ -530,11 +546,11 @@ const nextube_config_t *config_get(void);
  * The per-panel config flags (tube6_panel_*, tube5_panel_*, weather_panelN_en) stay separate fields and JSON keys; these helpers give the
  * display and the web server the same flags as arrays, so a new panel is one line in config_mgr.c's lists instead of a dozen places. */
 enum { CFG_CXP_WEATHER, CFG_CXP_WEEKDATE, CFG_CXP_HT, CFG_CXP_TEMP, CFG_CXP_SUNRISE, CFG_CXP_PUSH, CFG_CXP_HUMIDITY, CFG_CXP_WIND,
-       CFG_CXP_AQI, CFG_CXP_OUTDOOR_HT, CFG_CXP_OUTLOOK, CFG_CXP_COUNT };
-#define CFG_WX_PANEL_COUNT 8
+       CFG_CXP_AQI, CFG_CXP_OUTDOOR_HT, CFG_CXP_OUTLOOK, CFG_CXP_STATION, CFG_CXP_ENERGY, CFG_CXP_COUNT };
+#define CFG_WX_PANEL_COUNT 9
 /* Which panels are enabled for tube 6 (tube == 6) or tube 5 (tube == 5), in CFG_CXP_* order. Returns how many are on. */
 int  config_cx_panels(const nextube_config_t *cfg, int tube, bool out[CFG_CXP_COUNT]);
-/* Which weather-mode pages are enabled (page 0..7). */
+/* Which weather-mode pages are enabled (page 0..8). */
 void config_weather_panels(const nextube_config_t *cfg, bool out[CFG_WX_PANEL_COUNT]);
 
 /** The per-tube LCD tuning values only (everything the Advanced LCD Tuning card sets), under the same names as in nextube_config_t. */

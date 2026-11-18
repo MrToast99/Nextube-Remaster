@@ -30,9 +30,9 @@ uint32_t config_mgr_get_flash_write_fail_count(void) { return s_flash_write_fail
 #define CX_PANEL_LIST(X) \
     X(weather, false, false) X(weekdate, true, false) X(ht, true, true) X(temp, false, false) X(sunrise, false, false) \
     X(push, false, false) X(humidity, false, false) X(wind, false, false) X(aqi, false, false) X(outdoor_ht, false, false) \
-    X(outlook, false, false)
+    X(outlook, false, false) X(station, false, false) X(energy, false, false)
 /* The weather-mode pages: number, default. */
-#define WX_PANEL_LIST(X) X(0, true) X(1, true) X(2, false) X(3, false) X(4, false) X(5, false) X(6, false) X(7, false)
+#define WX_PANEL_LIST(X) X(0, true) X(1, true) X(2, false) X(3, false) X(4, false) X(5, false) X(6, false) X(7, false) X(8, false)
 
 #define X(n, d6, d5) +1
 _Static_assert(0 CX_PANEL_LIST(X) == CFG_CXP_COUNT, "CX_PANEL_LIST and CFG_CXP_* disagree");
@@ -110,13 +110,14 @@ static void set_defaults(void)
     s_cfg.custom_night_drift            = false;  /* default: Follow Sun, not Drift */
     s_cfg.custom_night_drift_period_s   = 300;    /* 5 min full A-B-A cycle */
     s_cfg.custom_font[0]        = '\0';
+    s_cfg.custom_info_font[0]   = '\0';
     s_cfg.dm_on_color[0]  = 255; s_cfg.dm_on_color[1]  = 255; s_cfg.dm_on_color[2]  = 255;
     s_cfg.dm_off_color[0] = 25;  s_cfg.dm_off_color[1] = 25;  s_cfg.dm_off_color[2] = 25;
     s_cfg.seg_on_color[0]  = 255; s_cfg.seg_on_color[1]  = 255; s_cfg.seg_on_color[2]  = 255;
     s_cfg.seg_off_color[0] = 10;  s_cfg.seg_off_color[1] = 10;  s_cfg.seg_off_color[2] = 10;
     /* All modes enabled by default. Clock and Date are independent — both
      * can be active simultaneously in the touch cycle. */
-    s_cfg.enabled_modes   = 0xFFF;   /* all 12 modes (bits 0–11) */
+    s_cfg.enabled_modes   = 0xFFF;   /* the 12 original modes (bits 0–11); Energy (bit 12) is opt-in */
 
     /* Spectrum mode LED color — matches stock firmware spectrum_RGB default */
     s_cfg.spectrum_rgb[0] = 50;
@@ -217,6 +218,7 @@ static void set_defaults(void)
     s_cfg.weather_ext_lat       = 0.0f;
     s_cfg.weather_ext_lon       = 0.0f;
     s_cfg.weather_ext_loc_valid = false;
+    s_cfg.weather_ext_fill      = false;
     strncpy(s_cfg.city, "", sizeof(s_cfg.city) - 1);
     strncpy(s_cfg.temp_format, "Celsius", sizeof(s_cfg.temp_format) - 1);
     strncpy(s_cfg.wind_unit,   "km/h",    sizeof(s_cfg.wind_unit)   - 1);
@@ -298,7 +300,13 @@ static void set_defaults(void)
 #define X(i, d) s_cfg.weather_panel##i##_en = d;   /* temperature and humidity on, the rest off (indoor ones need an SHT30) */
     WX_PANEL_LIST(X)
 #undef X
+    s_cfg.energy_panel_ms = 8000;
+    s_cfg.energy_page_flow = s_cfg.energy_page_now = s_cfg.energy_page_today = true;
+    s_cfg.energy_page_home = false;
+    s_cfg.energy_show_solar = true;
+    s_cfg.energy_show_battery = true;
     s_cfg.weather_sun_split = false;  /* sunrise / sunset: both small on one screen unless turned on */
+    strncpy(s_cfg.weather_station_units, "follow", sizeof(s_cfg.weather_station_units) - 1);
 
     /* 24H Custom — tube 6 panel rotation */
 #define X(n, d6, d5) s_cfg.tube6_panel_##n = d6;
@@ -492,6 +500,7 @@ static void parse_json(const char *json, size_t len)
         else if (strcmp(app_name, "Instagram")   == 0) s_cfg.current_mode = APP_MODE_INSTAGRAM;
         else if (strcmp(app_name, "TikTok")      == 0) s_cfg.current_mode = APP_MODE_TIKTOK;
         else if (strcmp(app_name, "Mastodon")    == 0) s_cfg.current_mode = APP_MODE_MASTODON;
+        else if (strcmp(app_name, "Energy")      == 0) s_cfg.current_mode = APP_MODE_ENERGY;
 
         json_read_str(app0, "theme", s_cfg.theme, sizeof(s_cfg.theme));
         /* Removed baked-JPEG themes → migrate to their procedural
@@ -517,6 +526,7 @@ static void parse_json(const char *json, size_t len)
     json_read_float(root, "weather_ext_lat", &s_cfg.weather_ext_lat);
     json_read_float(root, "weather_ext_lon", &s_cfg.weather_ext_lon);
     json_read_bool(root, "weather_ext_loc_valid", &s_cfg.weather_ext_loc_valid);
+    json_read_bool(root, "weather_ext_fill", &s_cfg.weather_ext_fill);
     json_read_str(root, "City",             s_cfg.city,            sizeof(s_cfg.city));
     /* Accept the old misspelled key first, then the corrected one so that
      * new configs with the fixed key take precedence over legacy files. */
@@ -717,6 +727,7 @@ static void parse_json(const char *json, size_t len)
         if (!have_glyph_shadow_night) s_cfg.custom_glyph_shadow_night = s_cfg.custom_shadow_night;
     }
     json_read_str(root, "custom_font", s_cfg.custom_font, sizeof(s_cfg.custom_font));
+    json_read_str(root, "custom_info_font", s_cfg.custom_info_font, sizeof(s_cfg.custom_info_font));
     {
         bool have_glyph_shadow_color       = cJSON_IsArray(cJSON_GetObjectItem(root, "custom_glyph_shadow_color"));
         bool have_glyph_shadow_color_night = cJSON_IsArray(cJSON_GetObjectItem(root, "custom_glyph_shadow_color_night"));
@@ -778,6 +789,17 @@ static void parse_json(const char *json, size_t len)
         WX_PANEL_LIST(X)
 #undef X
         json_read_bool(root, "weather_sun_split", &s_cfg.weather_sun_split);
+        json_read_bool(root, "energy_show_solar", &s_cfg.energy_show_solar);
+        json_read_u16(root, "energy_panel_ms", &s_cfg.energy_panel_ms);
+        if (s_cfg.energy_panel_ms < 2000) s_cfg.energy_panel_ms = 8000;
+        json_read_bool(root, "energy_page_flow", &s_cfg.energy_page_flow);
+        json_read_bool(root, "energy_page_now", &s_cfg.energy_page_now);
+        json_read_bool(root, "energy_page_today", &s_cfg.energy_page_today);
+        json_read_bool(root, "energy_page_home", &s_cfg.energy_page_home);
+        json_read_bool(root, "energy_show_battery", &s_cfg.energy_show_battery);
+        json_read_str(root, "weather_station_units", s_cfg.weather_station_units, sizeof(s_cfg.weather_station_units));
+        if (strcmp(s_cfg.weather_station_units, "metric") && strcmp(s_cfg.weather_station_units, "kpa") && strcmp(s_cfg.weather_station_units, "us"))
+            strncpy(s_cfg.weather_station_units, "follow", sizeof(s_cfg.weather_station_units));
     }
     {
         bool wx_on[CFG_WX_PANEL_COUNT];
@@ -1406,6 +1428,7 @@ char *config_to_json(bool include_password)
     cJSON_AddNumberToObject(root, "weather_ext_lat",  s_cfg.weather_ext_lat);
     cJSON_AddNumberToObject(root, "weather_ext_lon",  s_cfg.weather_ext_lon);
     cJSON_AddBoolToObject(root,   "weather_ext_loc_valid", s_cfg.weather_ext_loc_valid);
+    cJSON_AddBoolToObject(root,   "weather_ext_fill", s_cfg.weather_ext_fill);
     cJSON_AddStringToObject(root, "temperature_format",  s_cfg.temp_format);
     cJSON_AddStringToObject(root, "wind_unit",           s_cfg.wind_unit);
     cJSON_AddStringToObject(root, "date_format",         s_cfg.date_format);
@@ -1493,6 +1516,7 @@ char *config_to_json(bool include_password)
     cJSON_AddNumberToObject(root, "custom_glyph_shadow_size_night", s_cfg.custom_glyph_shadow_size_night);
     cJSON_AddBoolToObject  (root, "custom_glyph_shadow_night",  s_cfg.custom_glyph_shadow_night);
     cJSON_AddStringToObject(root, "custom_font",          s_cfg.custom_font);
+    cJSON_AddStringToObject(root, "custom_info_font",     s_cfg.custom_info_font);
     {
         const char *const keys[14]   = { "custom_font_color", "custom_glyph_color", "custom_shadow_color",
                                         "dm_on_color", "dm_off_color",
@@ -1527,6 +1551,14 @@ char *config_to_json(bool include_password)
     WX_PANEL_LIST(X)
 #undef X
     cJSON_AddBoolToObject  (root, "weather_sun_split",      s_cfg.weather_sun_split);
+    cJSON_AddBoolToObject  (root, "energy_show_solar",      s_cfg.energy_show_solar);
+    cJSON_AddNumberToObject(root, "energy_panel_ms",        s_cfg.energy_panel_ms);
+    cJSON_AddBoolToObject  (root, "energy_page_flow",       s_cfg.energy_page_flow);
+    cJSON_AddBoolToObject  (root, "energy_page_now",        s_cfg.energy_page_now);
+    cJSON_AddBoolToObject  (root, "energy_page_today",      s_cfg.energy_page_today);
+    cJSON_AddBoolToObject  (root, "energy_page_home",       s_cfg.energy_page_home);
+    cJSON_AddBoolToObject  (root, "energy_show_battery",    s_cfg.energy_show_battery);
+    cJSON_AddStringToObject(root, "weather_station_units", s_cfg.weather_station_units);
 #define X(n, d6, d5) cJSON_AddBoolToObject(root, "tube6_panel_" #n, s_cfg.tube6_panel_##n);
     CX_PANEL_LIST(X)
 #undef X
@@ -1702,7 +1734,7 @@ void config_advance_mode(void)
         /* No flash write — auto-rotation fires every few seconds and flash
          * wear from that frequency is unacceptable.  Mode is persisted only
          * when the user saves settings via the web UI. */
-        ESP_LOGI(TAG, "Rotation: advanced to mode %d", m);
+        ESP_LOGI(TAG, "Rotation: advanced to mode %d (%s)", m, app_mode_name((app_mode_t)m));
     }
 
     xSemaphoreGiveRecursive(s_mutex);
@@ -1767,6 +1799,7 @@ const char *app_mode_name(app_mode_t mode)
         [APP_MODE_INSTAGRAM]    = "Instagram",
         [APP_MODE_TIKTOK]       = "TikTok",
         [APP_MODE_MASTODON]     = "Mastodon",
+        [APP_MODE_ENERGY]       = "Energy",
     };
     if ((unsigned)mode >= APP_MODE_MAX) return names[APP_MODE_CLOCK];
     return names[mode];

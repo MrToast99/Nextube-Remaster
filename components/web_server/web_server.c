@@ -428,13 +428,13 @@ static const char *content_type(const char *p);
 /* ── In-RAM log ring buffer ────────────────────────────────────────── */
 /* Captures all ESP_LOG* output into a circular buffer so the web UI
  * can display recent device logs without a serial connection.
- * Lines are stored in internal SRAM; nothing is written to flash.
+ * Lines are stored in PSRAM (32 KB, allocated once when the hook is installed); nothing is written to flash.
  * The buffer holds the most recent LOG_RING_LINES entries and wraps
  * silently once full — oldest lines are overwritten. */
 #define LOG_RING_LINES  200
 #define LOG_LINE_LEN   160
 
-static char              s_log_ring[LOG_RING_LINES][LOG_LINE_LEN];
+static char            (*s_log_ring)[LOG_LINE_LEN] = NULL;   /* LOG_RING_LINES rows; NULL = no memory, lines are not kept */
 static int               s_log_head  = 0;   /* next write slot */
 static int               s_log_count = 0;   /* lines stored (≤ LOG_RING_LINES) */
 static SemaphoreHandle_t s_log_mutex = NULL;
@@ -453,7 +453,7 @@ static int log_vprintf_hook(const char *fmt, va_list args)
 
     /* Buffer the formatted line — non-blocking try-lock so we never
      * stall the logging task if the HTTP handler holds the mutex. */
-    if (s_log_mutex && xSemaphoreTake(s_log_mutex, 0) == pdTRUE) {
+    if (s_log_ring && s_log_mutex && xSemaphoreTake(s_log_mutex, 0) == pdTRUE) {
         char line[LOG_LINE_LEN];
         vsnprintf(line, sizeof(line), fmt, copy);
         /* Strip trailing newline / carriage-return */
@@ -588,7 +588,20 @@ static esp_err_t api_audio_play(httpd_req_t *r)
  *     "icon":         "overcastClouds",  // one of the 8 built-in icon names
  *     "weather_code": 3,                 // WMO code; fills icon/condition if absent
  *     "lat":          51.3,              // optional — for Sunrise & Sunset panel
- *     "lon":          -114.0
+ *     "lon":          -114.0,
+ *     "wind_kph":     12.4,              // optional — or wind_mph / wind_ms
+ *     "precip_mm":    0.6,               // optional — rain rate, mm/h
+ *     "day_min_c":    8.1,               // optional — today's min/max, send both
+ *     "day_max_c":    16.9,
+ *     "cloud_cover_pct": 80,             // optional — 0-100
+ *     "us_aqi": 42, "european_aqi": 25,  // optional — either or both; "pm2_5": 8.5
+ *     "outlook_mm": [0,0,0.4, ...],      // optional — up to 24 hourly values, slot 0 = the hour of the push;
+ *     "outlook_snow_cm": [...],          //   "outlook_snow_cm" and "outlook_prob" (0-100 %) are optional too
+ *     "pressure_hpa": 1013.2,            // optional — or pressure_inhg / pressure_kpa; "pressure_trend": "rising"|"steady"|"falling"
+ *     "wind_dir_deg": 315,               // optional — direction the wind blows FROM, 0-359
+ *     "wind_gust_kph": 27,               // optional — or wind_gust_mph / wind_gust_ms
+ *     "rain_today_mm": 4.2,              // optional — or rain_today_in; rain so far today
+ *     "max_age_min":  30                 // optional — show "--" once the last push is older (0 = never)
  *   }
  *
  * Temperature is stored internally in Celsius (the UI °C/°F setting only affects
@@ -602,42 +615,104 @@ static esp_err_t api_audio_play(httpd_req_t *r)
 static esp_err_t api_post_weather(httpd_req_t *r)
 {
     REQUIRE_AUTH(r);
-    char buf[512] = {0};
-    int  n = httpd_req_recv(r, buf, sizeof(buf) - 1);
+    /* A full push with the 24-hour outlook runs to ~1 KB, so the body goes on the heap (PSRAM first), not the httpd stack. */
+    const size_t cap = 2048;
+    if (r->content_len == 0 || r->content_len >= cap)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, r->content_len ? "Body too large" : "No body"), ESP_FAIL;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) buf = malloc(cap);
+    if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory"), ESP_FAIL;
+    size_t got = 0;
+    int timeouts = 0;
+    while (got < r->content_len) {
+        int rn = httpd_req_recv(r, buf + got, r->content_len - got);
+        if (rn == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= 2) continue;   /* bounded: a stalled sender must not hold the worker */
+        if (rn <= 0) { free(buf); return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body"), ESP_FAIL; }
+        got += (size_t)rn;
+    }
+    buf[got] = '\0';
+    const bool ok = weather_set_json(buf);
+    free(buf);
+    if (!ok) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON or too old"), ESP_FAIL;
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
+/* Debug panel screen capture.
+ *   POST {"tubes": mask}      arm: bit n = tube n + 1 (63 = all); the next full frame of each tube is kept
+ *   POST {"release": true}    free the captured frames
+ *   GET                       {"done": mask} of the tubes captured so far
+ *   GET ?tube=N[&lut=1]       that tube's frame, raw RGB565 big-endian, 25 600 B (lut=1: with the tube's brightness and gamma applied) */
+static esp_err_t api_screenshot_post(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char buf[64] = {0};
+    if (r->content_len == 0 || r->content_len >= sizeof(buf)) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body"), ESP_FAIL;
+    int n = httpd_req_recv(r, buf, sizeof(buf) - 1);
     if (n <= 0) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "No body"), ESP_FAIL;
-    buf[n] = '\0';
     cJSON *root = cJSON_Parse(buf);
     if (!root) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
-
-    /* Temperature: accept temp_c (Celsius) or temp_f (Fahrenheit).  Stored
-     * internally as Celsius, so temp_f is converted on ingest.  Send only one;
-     * temp_c takes precedence if both are present. */
-    float temp = NAN, hum = NAN;
-    cJSON *jt = cJSON_GetObjectItem(root, "temp_c");
-    cJSON *jf = cJSON_GetObjectItem(root, "temp_f");
-    cJSON *jh = cJSON_GetObjectItem(root, "humidity");
-    if (cJSON_IsNumber(jt))      temp = (float)jt->valuedouble;
-    else if (cJSON_IsNumber(jf)) temp = ((float)jf->valuedouble - 32.0f) * 5.0f / 9.0f;
-    if (cJSON_IsNumber(jh)) hum  = (float)jh->valuedouble;
-
-    const char *cond = NULL, *icon = NULL;
-    cJSON *jc = cJSON_GetObjectItem(root, "condition");
-    cJSON *ji = cJSON_GetObjectItem(root, "icon");
-    if (cJSON_IsString(jc)) cond = jc->valuestring;
-    if (cJSON_IsString(ji)) icon = ji->valuestring;
-
-    int wmo = -1;
-    cJSON *jw = cJSON_GetObjectItem(root, "weather_code");
-    if (cJSON_IsNumber(jw)) wmo = jw->valueint;
-
-    weather_set_external(temp, hum, cond, icon, wmo);
-
-    cJSON *jlat = cJSON_GetObjectItem(root, "lat");
-    cJSON *jlon = cJSON_GetObjectItem(root, "lon");
-    if (cJSON_IsNumber(jlat) && cJSON_IsNumber(jlon))
-        weather_set_external_location((float)jlat->valuedouble, (float)jlon->valuedouble);
-
+    cJSON *rel = cJSON_GetObjectItem(root, "release");
+    cJSON *msk = cJSON_GetObjectItem(root, "tubes");
+    bool ok = true;
+    if (cJSON_IsTrue(rel))        display_capture_release();
+    else if (cJSON_IsNumber(msk)) ok = display_capture_arm((uint8_t)msk->valueint);
+    else                          ok = false;
     cJSON_Delete(root);
+    if (!ok) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Capture failed"), ESP_FAIL;
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
+static esp_err_t api_screenshot_get(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    int tube = -1, lut = 0;
+    char q[48];
+    if (httpd_req_get_url_query_str(r, q, sizeof(q)) == ESP_OK) {
+        char v[8];
+        if (httpd_query_key_value(q, "tube", v, sizeof(v)) == ESP_OK) tube = atoi(v);
+        if (httpd_query_key_value(q, "lut",  v, sizeof(v)) == ESP_OK) lut  = atoi(v);
+    }
+    if (tube < 0) {
+        char j[32];
+        snprintf(j, sizeof(j), "{\"done\":%u}", (unsigned)display_capture_done_mask());
+        return send_json(r, j);
+    }
+    const size_t bytes = 80 * 160 * 2;
+    uint8_t *frame = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!frame) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory"), ESP_FAIL;
+    if (!display_capture_read(tube, frame, lut != 0)) {
+        free(frame);
+        return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not captured"), ESP_FAIL;
+    }
+    httpd_resp_set_type(r, "application/octet-stream");
+    httpd_resp_set_hdr(r, "Cache-Control", "no-store");
+    esp_err_t e = httpd_resp_send(r, (const char *)frame, (ssize_t)bytes);
+    free(frame);
+    return e;
+}
+
+/* POST /api/energy — Home Assistant energy data for the Energy panel and flow page. All fields optional; the sources are watts:
+ *   "grid_w": 1200          import > 0, export < 0          (or "grid_kw")
+ *   "solar_w": 3400         production, >= 0                (or "solar_kw")
+ *   "home_w": 2100          consumption; derived from the others when left out   (or "home_kw")
+ *   "battery_pct": 78       state of charge, 0-100
+ *   "battery_w": -800       charge > 0, discharge < 0       (or "battery_kw")
+ *   "solar_today_kwh", "grid_import_today_kwh", "grid_export_today_kwh", "home_today_kwh": today's totals in kWh, for the Energy mode
+ *   "max_age_min": 5        show "--" for a source once it is older than this (0 = never)
+ * A field sent as null says "I have no such source": its zone is left out. A field that is simply not in the push is kept as it was. */
+static esp_err_t api_post_energy(httpd_req_t *r)
+{
+    REQUIRE_AUTH(r);
+    char buf[512] = {0};
+    if (r->content_len == 0 || r->content_len >= sizeof(buf)) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body"), ESP_FAIL;
+    size_t got = 0; int timeouts = 0;
+    while (got < r->content_len) {
+        int rn = httpd_req_recv(r, buf + got, r->content_len - got);
+        if (rn == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= 2) continue;
+        if (rn <= 0) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad body"), ESP_FAIL;
+        got += (size_t)rn;
+    }
+    if (!energy_set_json(buf)) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON or too old"), ESP_FAIL;
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
@@ -1325,7 +1400,9 @@ static esp_err_t api_wl_scene(httpd_req_t *r)
     cJSON_AddBoolToObject(root, "south", south);
     float lat, lon;   /* no location: sunrise/sunset above are the 6:00/19:00 fallback */
     cJSON_AddBoolToObject(root, "has_loc", weather_get_location(&lat, &lon));
-    const weather_data_t *w = weather_get();
+    weather_data_t wx_copy;                       /* own copy: weather_get()'s shared one belongs to the display task */
+    weather_get_copy(&wx_copy);
+    const weather_data_t *w = &wx_copy;
     cJSON_AddBoolToObject(root, "valid", w && w->valid);
     if (w && w->valid) {
         cJSON_AddStringToObject(root, "icon", w->icon);
@@ -1337,6 +1414,13 @@ static esp_err_t api_wl_scene(httpd_req_t *r)
         cJSON_AddBoolToObject(root, "day_range_valid", w->day_range_valid);
         cJSON_AddNumberToObject(root, "day_min_c", json_round1(w->day_min_c));
         cJSON_AddNumberToObject(root, "day_max_c", json_round1(w->day_max_c));
+        if (w->pressure_hpa >= 0.0f) {
+            cJSON_AddNumberToObject(root, "pressure_hpa", json_round1(w->pressure_hpa));
+            cJSON_AddNumberToObject(root, "pressure_trend", w->pressure_trend);
+        }
+        if (w->wind_dir_deg >= 0.0f)   cJSON_AddNumberToObject(root, "wind_dir_deg", json_round1(w->wind_dir_deg));
+        if (w->wind_gust_kph >= 0.0f)  cJSON_AddNumberToObject(root, "wind_gust_kph", json_round1(w->wind_gust_kph));
+        if (w->rain_today_mm >= 0.0f)  cJSON_AddNumberToObject(root, "rain_today_mm", json_round1(w->rain_today_mm));
     }
     bool aqi_eu;
     int aqi = weather_get_aqi(&aqi_eu);   /* -1 until the first AQI fetch */
@@ -1390,7 +1474,9 @@ static esp_err_t api_status(httpd_req_t *r)
      * N = seconds remaining until auto-resume. */
     cJSON_AddNumberToObject(root, "rotation_pause_remaining_s", display_rotation_pause_remaining_s());
     int64_t t_wifi = esp_timer_get_time();
-    const weather_data_t *w = weather_get();
+    weather_data_t wx_copy;                       /* own copy: weather_get()'s shared one belongs to the display task */
+    weather_get_copy(&wx_copy);
+    const weather_data_t *w = &wx_copy;
     if (w && w->valid) {
         cJSON *wj = cJSON_AddObjectToObject(root, "weather");
         cJSON_AddNumberToObject(wj, "temp_c", json_round1(w->temp_c));
@@ -1845,6 +1931,66 @@ static esp_err_t api_ota(httpd_req_t *r)
     return e;
 }
 
+static void ota_sha256(const uint8_t *buf, size_t len, uint8_t out[32])
+{
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);   /* 0 = SHA-256, not SHA-224 */
+    mbedtls_sha256_update(&ctx, buf, len);
+    mbedtls_sha256_finish(&ctx, out);
+    mbedtls_sha256_free(&ctx);
+}
+
+/* Checks an app image held in RAM the way the bootloader will: the segment table stays inside the file, the XOR checksum matches, and the
+ * appended SHA-256 matches when the image carries one (IDF builds do). Lets a truncated or corrupted image be refused before the inactive
+ * slot is erased. Layout: 24-byte header (byte 1 = segment count, byte 23 = hash appended), then per segment an 8-byte header whose second
+ * word is the data length, then padding to 16 bytes ending in the checksum byte, then the 32-byte hash. */
+static bool ota_image_ram_ok(const uint8_t *img, size_t len, const char **why)
+{
+    *why = "not an app image";
+    if (len < 24 + 8 + 16 || img[0] != 0xE9) return false;
+    const unsigned segs = img[1];
+    if (segs == 0 || segs > 16) return false;
+    /* An application's first segment starts with its descriptor (magic word 0xABCD5432); a bootloader image has none. */
+    if (!(img[32] == 0x32 && img[33] == 0x54 && img[34] == 0xCD && img[35] == 0xAB)) { *why = "not an application image"; return false; }
+
+    *why = "the file is cut short";
+    size_t  off = 24;
+    uint8_t ck  = 0xEF;
+    for (unsigned i = 0; i < segs; i++) {
+        if (off + 8 > len) return false;
+        const uint32_t dl = (uint32_t)img[off + 4] | ((uint32_t)img[off + 5] << 8) | ((uint32_t)img[off + 6] << 16) | ((uint32_t)img[off + 7] << 24);
+        off += 8;
+        if (dl > len - off) return false;
+        for (uint32_t k = 0; k < dl; k++) ck ^= img[off + k];
+        off += dl;
+    }
+    const size_t end = (off + 1 + 15) & ~(size_t)15;       /* checksum is the last byte of the 16-byte-padded image */
+    if (end > len) return false;
+    if (img[end - 1] != ck) { *why = "checksum mismatch (the file is damaged)"; return false; }
+
+    if (img[23] == 1) {
+        if (end + 32 > len) return false;
+        uint8_t digest[32];
+        ota_sha256(img, end, digest);
+        if (memcmp(digest, img + end, 32) != 0) { *why = "hash mismatch (the file is damaged)"; return false; }
+    }
+    *why = "";
+    return true;
+}
+
+/* One PSRAM block for a whole firmware image. If none is free, hand back the display's caches (it is parked for the update) and try once more. */
+static uint8_t *ota_image_alloc(size_t len)
+{
+    uint8_t *b = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (!b) {
+        const size_t freed = display_release_caches();
+        ESP_LOGW(TAG, "OTA: no PSRAM block of %u B; released %u B of display caches, retrying", (unsigned)len, (unsigned)freed);
+        b = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    }
+    return b;
+}
+
 static esp_err_t api_ota_impl(httpd_req_t *r)
 {
     if (r->content_len <= 0)
@@ -1896,7 +2042,7 @@ static esp_err_t api_ota_impl(httpd_req_t *r)
      *   idle so cache-disable windows cause no TCP stalls at all.
      * Falls back to the original 4 KB interleaved loop when PSRAM cannot
      * satisfy the allocation (image larger than free PSRAM). */
-    uint8_t *img_buf = (uint8_t *)heap_caps_malloc((size_t)img_len, MALLOC_CAP_SPIRAM);
+    uint8_t *img_buf = ota_image_alloc((size_t)img_len);
 
     if (img_buf) {
         ESP_LOGI(TAG, "OTA: receiving %d B into PSRAM buffer…", img_len);
@@ -1918,6 +2064,17 @@ static esp_err_t api_ota_impl(httpd_req_t *r)
             heap_caps_free(img_buf);
             return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
                 "Wrong file: upload nextube-fw-ota.bin, not nextube-fw-full.bin"), ESP_FAIL;
+        }
+        /* Whole image is in RAM: check it now, so a damaged or cut-short upload is refused before anything is erased. */
+        {
+            const char *why = "";
+            if (!ota_image_ram_ok(img_buf, (size_t)img_len, &why)) {
+                heap_caps_free(img_buf);
+                char msg[128];
+                snprintf(msg, sizeof(msg), "Bad firmware file: %s. Nothing was written.", why);
+                ESP_LOGE(TAG, "OTA: %s", msg);
+                return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, msg), ESP_FAIL;
+            }
         }
 
         ESP_LOGI(TAG, "OTA: receive done, flashing %d B from PSRAM…", img_len);
@@ -3010,7 +3167,7 @@ static void ota_pull_task(void *arg)
     s_pull.bytes_received = 0;
     s_pull.bytes_flashed  = 0;
 
-    uint8_t *img = (uint8_t *)heap_caps_malloc((size_t)content_len, MALLOC_CAP_SPIRAM);
+    uint8_t *img = ota_image_alloc((size_t)content_len);
     if (!img) img = (uint8_t *)malloc((size_t)content_len);
     if (!img) {
         snprintf(s_pull.error, sizeof(s_pull.error),
@@ -3053,6 +3210,15 @@ static void ota_pull_task(void *arg)
         goto pull_err;
     }
     ESP_LOGI(TAG, "[ota] SHA-256 OK%s", s_pull.sha256[0] ? "" : " (no hash provided, skipped)");
+    {
+        const char *why = "";
+        if (!ota_image_ram_ok(img, (size_t)received, &why)) {   /* the image's own checksum and hash, before anything is erased */
+            snprintf(s_pull.error, sizeof(s_pull.error), "Bad firmware image: %s", why);
+            ESP_LOGE(TAG, "[ota] %s", s_pull.error);
+            free(img);
+            goto pull_err;
+        }
+    }
 
     /* Hold the DOWNLOADING state at 100% so the UI has at least two poll
      * cycles to show the download bar full before the phase transition.  */
@@ -7289,6 +7455,9 @@ static const httpd_uri_t uris[] = {
     R(HTTP_POST, "/api/audio/play",      api_audio_play),
     R(HTTP_POST, "/api/rotation_pause",  api_rotation_pause),
     R(HTTP_POST, "/api/weather",         api_post_weather),
+    R(HTTP_POST, "/api/screenshot",      api_screenshot_post),
+    R(HTTP_POST, "/api/energy",          api_post_energy),
+    R(HTTP_GET,  "/api/screenshot",      api_screenshot_get),
     R(HTTP_POST, "/api/cx_image",        api_cx_image),
     R(HTTP_GET,  "/api/status",          api_status),
     R(HTTP_GET,  "/api/wl_scene",        api_wl_scene),
@@ -7534,6 +7703,9 @@ void web_server_start(void)
      * subsequent calls (after a WiFi reconnect) skip straight to httpd_start. */
     if (!s_log_mutex) {
         s_log_mutex = xSemaphoreCreateMutex();
+        /* Off the internal heap: this used to be a 32 KB static array. Only ever touched from task context (the hook and the log routes). */
+        s_log_ring = heap_caps_calloc(LOG_RING_LINES, LOG_LINE_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_log_ring) ESP_LOGW(TAG, "no PSRAM for the device log buffer - the web UI log will be empty");
         au_boot_note();
         periodic_net_poll_register(np_job_tick, 0, "jobs");   /* update and Theme Manager jobs run on the shared network task */
         esp_log_set_vprintf(log_vprintf_hook);
@@ -7615,7 +7787,7 @@ void web_server_start(void)
      * registrations fail and, since the wildcard registers last, every web
      * UI page 404s while the APIs still work. The loop below logs any
      * failure loudly. */
-    cfg.max_uri_handlers = 86;
+    cfg.max_uri_handlers = 90;
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     cfg.stack_size       = 8192;
     /* Bump the open-socket cap so concurrent OTA + page reload + status polls

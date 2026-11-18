@@ -1167,10 +1167,47 @@ static inline void spi_tx_pixels(const void *buf, size_t len_bytes)
     spi_tx_sync(buf, len_bytes);
 }
 
+/* ── Screen capture (debug panel) ────────────────────────────────────────────────────────────────────────────────────────────────
+ * Armed from the web server; each armed tube copies its next full-frame push (display_show_digit / display_fill / the dirty-row path hands over
+ * the whole frame). Disarmed it costs one mask test per push. */
+#define CAP_FRAME_BYTES  (LCD_WIDTH * LCD_HEIGHT * 2)
+static uint8_t *s_cap_buf[LCD_COUNT];
+static volatile uint8_t s_cap_pending;    /* armed and still waiting for a frame */
+static volatile uint8_t s_cap_done;       /* frame captured */
+static int64_t  s_cap_armed_us;
+static portMUX_TYPE s_cap_mux = portMUX_INITIALIZER_UNLOCKED;   /* guards the buffer pointers, the masks and s_cap_readers */
+static volatile uint8_t s_cap_readers;    /* web-task copies in progress (display_capture_read) */
+static volatile bool s_cap_skip_fill;     /* set while the forced repaint blanks every tube, so the capture waits for the frame drawn after it */
+
+static inline void cap_note_frame(int tube, const uint8_t *data, int w, int h)
+{
+    if (!(s_cap_pending & (1u << tube))) return;
+    if (w != LCD_WIDTH || h != LCD_HEIGHT || !s_cap_buf[tube]) return;
+    memcpy(s_cap_buf[tube], data, CAP_FRAME_BYTES);
+    portENTER_CRITICAL(&s_cap_mux);
+    if (s_cap_pending & (1u << tube)) {       /* still wanted (the web task may have released meanwhile) */
+        s_cap_done    |= (uint8_t)(1u << tube);
+        s_cap_pending &= (uint8_t)~(1u << tube);
+    }
+    portEXIT_CRITICAL(&s_cap_mux);
+}
+static inline void cap_note_fill(int tube, uint16_t color)
+{
+    if (s_cap_skip_fill || !(s_cap_pending & (1u << tube)) || !s_cap_buf[tube]) return;
+    for (int i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) { s_cap_buf[tube][i * 2] = (uint8_t)(color >> 8); s_cap_buf[tube][i * 2 + 1] = (uint8_t)(color & 0xFF); }
+    portENTER_CRITICAL(&s_cap_mux);
+    if (s_cap_pending & (1u << tube)) {
+        s_cap_done    |= (uint8_t)(1u << tube);
+        s_cap_pending &= (uint8_t)~(1u << tube);
+    }
+    portEXIT_CRITICAL(&s_cap_mux);
+}
+
 void display_fill(int tube, uint16_t color)
 {
     if (tube < 0 || tube >= LCD_COUNT) return;
     if (BURNIN_HELD(tube) && !s_bi_bypass) return;
+    cap_note_fill(tube, color);
     select_tube(tube);
     /* Fill the whole ±BURNIN_SHIFT_MAX band in one window — solid color, so
      * simply widening the fill covers the shifted window AND every edge
@@ -1218,6 +1255,95 @@ static inline __attribute__((always_inline)) uint16_t wl_apply_px(uint16_t px, i
     g = s_gamma_lut_6bit[tube][g];
     b = s_gamma_lut_5bit_b[tube][b];
     return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+#define CAP_TIMEOUT_US  (120LL * 1000000LL)
+
+/* Take the buffers out of the shared state in one step and free them, so two tasks can never free the same one. */
+static void cap_detach_and_free(void)
+{
+    uint8_t *bufs[LCD_COUNT];
+    portENTER_CRITICAL(&s_cap_mux);
+    s_cap_pending = 0;
+    s_cap_done = 0;
+    for (int t = 0; t < LCD_COUNT; t++) { bufs[t] = s_cap_buf[t]; s_cap_buf[t] = NULL; }
+    portEXIT_CRITICAL(&s_cap_mux);
+    for (int t = 0; t < LCD_COUNT; t++) if (bufs[t]) heap_caps_free(bufs[t]);
+}
+
+/* Web task: stop capturing, let a copy the display task has already started finish, then free. */
+void display_capture_release(void)
+{
+    portENTER_CRITICAL(&s_cap_mux);
+    s_cap_pending = 0;
+    s_cap_done = 0;
+    portEXIT_CRITICAL(&s_cap_mux);
+    vTaskDelay(pdMS_TO_TICKS(30));
+    cap_detach_and_free();
+}
+
+/* Display task, once per tick: a capture nobody collected (page closed mid-way) gives its PSRAM back after two minutes. The display task
+ * is the only writer of the frames, so it can free them directly unless the web task is in the middle of reading one. */
+static void cap_timeout_tick(void)
+{
+    if (!(s_cap_pending | s_cap_done)) return;
+    if (esp_timer_get_time() - s_cap_armed_us <= CAP_TIMEOUT_US) return;
+    if (s_cap_readers) return;                 /* try again next tick */
+    cap_detach_and_free();
+    ESP_LOGI(TAG, "screen capture timed out - frames released");
+}
+
+bool display_capture_arm(uint8_t tube_mask)
+{
+    tube_mask &= (uint8_t)((1u << LCD_COUNT) - 1u);
+    if (!tube_mask) return false;
+    display_capture_release();
+    uint8_t *bufs[LCD_COUNT] = {0};
+    for (int t = 0; t < LCD_COUNT; t++) {
+        if (!(tube_mask & (1u << t))) continue;
+        bufs[t] = (uint8_t *)heap_caps_malloc(CAP_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!bufs[t]) {
+            for (int k = 0; k < LCD_COUNT; k++) if (bufs[k]) heap_caps_free(bufs[k]);
+            return false;
+        }
+    }
+    portENTER_CRITICAL(&s_cap_mux);
+    for (int t = 0; t < LCD_COUNT; t++) s_cap_buf[t] = bufs[t];
+    s_cap_armed_us = esp_timer_get_time();
+    s_cap_done = 0;
+    s_cap_pending = tube_mask;
+    portEXIT_CRITICAL(&s_cap_mux);
+    display_invalidate();                     /* every tube pushes a full frame on the next tick */
+    return true;
+}
+
+uint8_t display_capture_done_mask(void)
+{
+    return s_cap_done;                        /* the two-minute timeout runs in the display task (cap_timeout_tick) */
+}
+
+bool display_capture_read(int tube, uint8_t *out, bool as_sent)
+{
+    if (tube < 0 || tube >= LCD_COUNT || !out) return false;
+    portENTER_CRITICAL(&s_cap_mux);
+    const uint8_t *src = (s_cap_done & (1u << tube)) ? s_cap_buf[tube] : NULL;
+    if (src) s_cap_readers++;                 /* holds off the display task's timeout while this copy runs */
+    portEXIT_CRITICAL(&s_cap_mux);
+    if (!src) return false;
+    if (!as_sent) {
+        memcpy(out, src, CAP_FRAME_BYTES);
+    } else {
+        const bool lut = s_gamma_lut_active[tube];
+        for (int i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) {
+            uint16_t px = (uint16_t)(((uint16_t)src[i * 2] << 8) | src[i * 2 + 1]);
+            px = wl_apply_px(px, tube, lut);
+            out[i * 2] = (uint8_t)(px >> 8); out[i * 2 + 1] = (uint8_t)(px & 0xFF);
+        }
+    }
+    portENTER_CRITICAL(&s_cap_mux);
+    s_cap_readers--;
+    portEXIT_CRITICAL(&s_cap_mux);
+    return true;
 }
 
 /* Paint the burn-in edge BANDS — every GRAM column the shifted CASET window
@@ -1323,6 +1449,7 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
     const uint8_t *marg_src = s_wl_edge_margin_src ? s_wl_edge_margin_src : data;
     s_wl_edge_margin_src = NULL;
     if (BURNIN_HELD(tube) && !s_bi_bypass) return;
+    cap_note_frame(tube, data, w, h);
 
     select_tube(tube);
     uint8_t ox = (uint8_t)((int)LCD_OFFSET_X + (int)s_burnin_shift_x + (int)s_col_offsets[tube] + (int)s_profile_col_off[tube]);
@@ -1691,6 +1818,15 @@ void display_set_debug_wl_fps(int fps)
 #define WEATHER_PANEL_INTMP 5   /* indoor temperature (SHT30) — mirrors TEMP */
 #define WEATHER_PANEL_INHUM 6   /* indoor humidity (SHT30) — mirrors HUM */
 #define WEATHER_PANEL_RAIN  7   /* next 24 h rain / snow outlook — one bar chart across all six tubes */
+#define WEATHER_PANEL_STATION 8 /* pressure + trend, wind direction + gust, rain today — three views of six tubes each */
+#define WEATHER_STATION_VIEWS 3
+/* How many screens a weather page steps through before the rotation moves on (the phase counter, hilo_phase, counts them). */
+static inline int wx_phases(const nextube_config_t *cfg, int panel)
+{
+    if (panel == WEATHER_PANEL_STATION) return WEATHER_STATION_VIEWS;
+    if (panel == WEATHER_PANEL_HILO || (panel == WEATHER_PANEL_SUN && cfg->weather_sun_split)) return 2;
+    return 1;
+}
 /* Stack: config snapshot (~1900 B, moved to static cfg_snap in display_task
  * so it's off the stack) + JPEG decode call chain. 8 KB was too tight — the
  * panic handler couldn't print a backtrace. Measured peak across
@@ -1824,10 +1960,13 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > MAX_JPEG_FILE_SIZE) { fclose(f); return NULL; }
+    if (sz <= 0 || sz > MAX_JPEG_FILE_SIZE) {
+        ESP_LOGW(TAG, "Image skipped: %s is %ld bytes (limit %d)", full, sz, MAX_JPEG_FILE_SIZE);
+        fclose(f); return NULL;
+    }
 
     uint8_t *jpeg_buf = PSRAM_MALLOC(sz);
-    if (!jpeg_buf) { fclose(f); return NULL; }
+    if (!jpeg_buf) { ESP_LOGW(TAG, "Image skipped, out of memory: %s", full); fclose(f); return NULL; }
     if (fread(jpeg_buf, 1, (size_t)sz, f) != (size_t)sz) {
         ESP_LOGW(TAG, "Truncated read: %s", full);
         fclose(f); free(jpeg_buf); return NULL;
@@ -1837,13 +1976,13 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
     /* Allocate output buffer on first use of this slot (kept forever). */
     if (!s_img_cache[slot].data) {
         s_img_cache[slot].data = PSRAM_MALLOC(LCD_WIDTH * LCD_HEIGHT * 2);
-        if (!s_img_cache[slot].data) { free(jpeg_buf); return NULL; }
+        if (!s_img_cache[slot].data) { ESP_LOGW(TAG, "Image skipped, out of memory: %s", full); free(jpeg_buf); return NULL; }
     }
 
     /* Ensure the work buffer is available (pre-allocated at init; lazy fallback). */
     if (!s_jpeg_work_buf)
         s_jpeg_work_buf = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
-    if (!s_jpeg_work_buf) { free(jpeg_buf); return NULL; }
+    if (!s_jpeg_work_buf) { ESP_LOGW(TAG, "Image skipped, out of memory: %s", full); free(jpeg_buf); return NULL; }
 
     esp_jpeg_image_cfg_t dec_cfg = {0};
     dec_cfg.indata                       = jpeg_buf;
@@ -1858,16 +1997,24 @@ static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
 
     esp_jpeg_image_output_t out_img = {0};
     esp_err_t err = esp_jpeg_decode(&dec_cfg, &out_img);
+    /* A failed decode leaves out_img empty, so read the size from the header instead; it only understands baseline JPEGs, which also tells
+     * a progressive / CMYK / damaged file apart from one that is simply too big. Must run before the file buffer is freed. */
+    esp_jpeg_image_output_t info = {0};
+    bool have_info = (err != ESP_OK) && esp_jpeg_get_image_info(&dec_cfg, &info) == ESP_OK;
     free(jpeg_buf);
 
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "JPEG decode failed (err=%d) decoded=%ux%u buf=%u: %s",
-                 err, out_img.width, out_img.height, LCD_WIDTH * LCD_HEIGHT * 2, full);
+        char why[96];
+        if (!have_info)
+            snprintf(why, sizeof(why), "not a baseline JPEG (progressive, CMYK or damaged)");
+        else if (info.width > LCD_WIDTH || info.height > LCD_HEIGHT)
+            snprintf(why, sizeof(why), "%ux%u is larger than the %dx%d tube", (unsigned)info.width, (unsigned)info.height, LCD_WIDTH, LCD_HEIGHT);
+        else
+            snprintf(why, sizeof(why), "decode error, %ux%u", (unsigned)info.width, (unsigned)info.height);
+        ESP_LOGW(TAG, "JPEG decode failed (err=%d): %s: %s", err, full, why);
         /* Record for the web UI banner — strip the /spiffs prefix for brevity */
         const char *rel = (strncmp(full, "/spiffs", 7) == 0) ? full + 7 : full;
-        snprintf(s_theme_error, sizeof(s_theme_error),
-                 "%.320s (%ux%u decoded, need %ux%u)",
-                 rel, out_img.width, out_img.height, LCD_WIDTH, LCD_HEIGHT);
+        snprintf(s_theme_error, sizeof(s_theme_error), "%.280s (%s)", rel, why);
         s_img_cache[slot].path[0] = '\0';   /* slot reusable; data buffer kept for next decode */
         return NULL;
     }
@@ -3339,7 +3486,7 @@ static void cx_stamp_update_indicator(int tube)
  * panel_id is an index into the ordered list [weather, weekdate, ht, temp,
  * sunrise, push]; the caller resolves which concrete panel this maps to.       */
 /* Render one 24H-Custom info panel onto `lcd_tube` (5 = rightmost, 4 = the
- * 2nd-from-right in dual mode).  `enabled[10]` is the caller's panel set
+ * 2nd-from-right in dual mode).  `enabled[CFG_CXP_COUNT]` is the caller's panel set
  * (tube6_panel_* or tube5_panel_*); `panel_id` indexes the enabled entries;
  * `*last_kind` tracks the previously drawn kind for that tube so backgrounds
  * are cleared only on a panel switch. */
@@ -3361,6 +3508,8 @@ static void wl_wind_panel(uint8_t *fb, int wind_kph, const char *unit, int r, in
 static void wl_aqi_panel(uint8_t *fb, int aqi, bool european, int fg_r, int fg_g, int fg_b);
 static void wl_outdoor_ht_panel(uint8_t *fb, const char *lang, int temp_disp, int hum, bool valid,
                                 int fg_r, int fg_g, int fg_b);
+static void wl_station_panel(uint8_t *fb, const char *lang, const char *setting, const char *wind_unit, int fg_r, int fg_g, int fg_b);
+static void wl_energy_panel(uint8_t *fb, bool show_solar, bool show_batt, int fg_r, int fg_g, int fg_b);
 static void wl_outlook_panel(uint8_t *fb, int fg_r, int fg_g, int fg_b);
 static void outlook_rect(uint8_t *fb, int x0, int y0, int w, int h, uint16_t c);
 
@@ -3399,7 +3548,8 @@ static uint8_t s_wl_bg_color2_r = 60, s_wl_bg_color2_g = 60, s_wl_bg_color2_b = 
 static char    s_wl_bg_color_cache_key[64] = ""; /* "fill:r,g,b:r,g,b" of the currently baked buffer */
 static uint8_t *s_wl_bg_color_buf       = NULL;  /* RGB565 cache in PSRAM for solid/gradient bg */
 /* FreeType face id for the active custom digit font; -1 = no custom font (u8g2 logisoso). */
-static int s_ft_face_id = -1;
+static int s_ft_face_id = -1;      /* the INFO face: labels and info panels (everything that goes through wl_text and the fr_* text calls) */
+static int s_ft_clock_id = -1;     /* the CLOCK face: the big clock digits only (wl_glyph) */
 
 /* "DotMatrix" theme's configured on/off colors — refreshed unconditionally
  * once per display_task tick (regardless of app mode/theme) so they're
@@ -3442,24 +3592,35 @@ static uint16_t ft_px_for_u8g2(const uint8_t *font)
     return 28;
 }
 
-/* Load or switch the active TTF face; flushes the glyph cache on face change. */
-static void wl_refresh_ft_face(const char *custom_font)
+/* Load or switch the TTF faces; flushes the glyph cache when either changes. The clock digits use cfg->custom_font. The info text uses
+ * cfg->custom_info_font when a drawn clock face (WeatherLive / Custom) is on and one is set, otherwise the same font as the clock (on an asset theme custom_font
+ * is the info font already, its digits being images). font_render keeps up to four faces and returns the same id for the same file. */
+static void wl_refresh_ft_face(const nextube_config_t *cfg)
 {
-    if (custom_font && custom_font[0]) {
-        char path[128];
-        snprintf(path, sizeof(path), "/spiffs/fonts/%s", custom_font);
-        int id = fr_load_face(path);
-        if (id != s_ft_face_id) {
-            fr_cache_flush();
-            s_ft_face_id = id;
-        }
-    } else {
-        if (s_ft_face_id >= 0) {
-            fr_cache_flush();
-            fr_unload_face(s_ft_face_id);
-        }
-        s_ft_face_id = -1;
+    const bool drawn_face = (cfg->clock_face[0] != '\0');   /* WeatherLive / Custom; an asset theme's digits are images */
+    const char *clock_name = cfg->custom_font;
+    const char *info_name  = (drawn_face && cfg->custom_info_font[0]) ? cfg->custom_info_font : cfg->custom_font;
+    static char    s_seen_clock[64] = { 1 }, s_seen_info[64] = { 1 };   /* names resolved last time (1 = never) */
+    static int64_t s_seen_retry_us;
+    const bool want_info = info_name[0] && strcmp(info_name, "builtin") != 0;
+    if (!strcmp(clock_name, s_seen_clock) && !strcmp(info_name, s_seen_info)) {
+        const bool missing = (clock_name[0] && s_ft_clock_id < 0) || (want_info && s_ft_face_id < 0);
+        if (!missing || esp_timer_get_time() < s_seen_retry_us) return;
     }
+    snprintf(s_seen_clock, sizeof(s_seen_clock), "%s", clock_name);
+    snprintf(s_seen_info,  sizeof(s_seen_info),  "%s", info_name);
+    s_seen_retry_us = esp_timer_get_time() + 5000000;
+
+    int cid = -1, iid = -1;
+    char path[128];
+    if (clock_name[0]) { snprintf(path, sizeof(path), "/spiffs/fonts/%s", clock_name); cid = fr_load_face(path); }
+    if (info_name[0] && strcmp(info_name, "builtin") != 0) { snprintf(path, sizeof(path), "/spiffs/fonts/%s", info_name); iid = fr_load_face(path); }   /* "builtin" = Logisoso for the info text */
+    if (cid == s_ft_clock_id && iid == s_ft_face_id) return;
+    fr_cache_flush();
+    if (s_ft_clock_id >= 0 && s_ft_clock_id != cid && s_ft_clock_id != iid) fr_unload_face(s_ft_clock_id);
+    if (s_ft_face_id >= 0 && s_ft_face_id != iid && s_ft_face_id != cid) fr_unload_face(s_ft_face_id);
+    s_ft_clock_id = cid;
+    s_ft_face_id  = iid;
 }
 
 /* Forward declarations for WeatherLive types/functions needed by render_cx_panel,
@@ -3564,7 +3725,7 @@ static float to_display_temp(float celsius, bool use_fahrenheit)
 }
 
 static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
-                             int lcd_tube, const bool enabled[11],
+                             int lcd_tube, const bool enabled[CFG_CXP_COUNT],
                              uint8_t panel_id, int8_t *last_kind)
 {
     /* Same burn-in/snow guard as wl_draw_tube()/wl_draw_panel() — avoids a
@@ -3580,7 +3741,7 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
      * caller of wl_refresh_ft_face().  Without this, s_ft_face_id would be a
      * stale leftover from whatever theme/clock-face was last active instead
      * of reflecting the current setting.  Cheap no-op when unchanged. */
-    wl_refresh_ft_face(cfg->custom_font);
+    wl_refresh_ft_face(cfg);
 
     /* "DotMatrix" theme: gate wl_text()'s dot-matrix branch for the duration
      * of this render (kinds 3/6/7/8/9 below reuse wl_text() via the shared
@@ -3620,10 +3781,10 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
     /* Resolve panel_id → concrete panel kind by walking the caller's enabled[].
      * Order: 0=weather, 1=weekdate, 2=indoor H/T, 3=outdoor temp+Hi/Lo,
      * 4=sunrise, 5=externally-pushed image, 6=outdoor humidity, 7=wind,
-     * 8=air quality, 9=outdoor H/T (combined), 10=rain / snow outlook. */
+     * 8=air quality, 9=outdoor H/T (combined), 10=rain / snow outlook, 11=station. */
     int kind = -1;
     int count = 0;
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < CFG_CXP_COUNT; i++) {
         if (enabled[i]) {
             if (count == (int)panel_id) { kind = i; break; }
             count++;
@@ -4027,6 +4188,31 @@ static void render_cx_panel(const nextube_config_t *cfg, const struct tm *t,
         int fg_r, fg_g, fg_b;
         cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
         wl_outlook_panel(fb, fg_r, fg_g, fg_b);
+        display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
+
+    } else if (kind == 12) {
+        /* ── Energy: grid balance, solar and battery, one zone per source that is pushed. Needs no weather data, so no weekdate fallback. */
+        uint8_t *fb = wl_fb();
+        if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+
+        cx_seed_framebuf(fb, lcd_tube, cfg);
+
+        int fg_r, fg_g, fg_b;
+        cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
+        wl_energy_panel(fb, cfg->energy_show_solar, cfg->energy_show_battery, fg_r, fg_g, fg_b);
+        display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
+
+    } else if (kind == 11) {
+        /* ── Station: pressure + trend, wind direction + gust, rain today. Its data (pushed, or Open-Meteo for pressure and wind) does not
+         * need the current-conditions fetch to have succeeded, so there is no weekdate fallback: missing fields show "--". */
+        uint8_t *fb = wl_fb();
+        if (!fb) { if (kind != *last_kind) display_fill(lcd_tube, 0x0000); goto cx_tube6_done; }
+
+        cx_seed_framebuf(fb, lcd_tube, cfg);
+
+        int fg_r, fg_g, fg_b;
+        cx_fg_rgb8(cfg, &fg_r, &fg_g, &fg_b);
+        wl_station_panel(fb, cfg->language, cfg->weather_station_units, cfg->wind_unit, fg_r, fg_g, fg_b);
         display_show_digit(lcd_tube, fb, LCD_WIDTH, LCD_HEIGHT);
     }
 
@@ -5136,9 +5322,9 @@ static void wl_glyph(uint8_t *fb, char ch)
     if (ch == ' ' || ch == '\0') return;
 
     /* FreeType fast-path: delegate to font_render when a TTF face is loaded. */
-    if (s_ft_face_id >= 0) {
+    if (s_ft_clock_id >= 0) {
         fr_draw_glyph_centered(fb, LCD_WIDTH, LCD_HEIGHT,
-                               (uint8_t)s_ft_face_id, (uint32_t)(unsigned char)ch,
+                               (uint8_t)s_ft_clock_id, (uint32_t)(unsigned char)ch,
                                WL_FT_BIG_PX,
                                s_wl_glyph_r, s_wl_glyph_g, s_wl_glyph_b,
                                s_wl_glyph_shadow, s_wl_glyph_shadow_r, s_wl_glyph_shadow_g, s_wl_glyph_shadow_b,
@@ -5919,6 +6105,7 @@ static void display_show_digit_dirty(int tube, const uint8_t *data, int w, int h
     const uint8_t *marg_src = s_wl_edge_margin_src ? s_wl_edge_margin_src : data;
     s_wl_edge_margin_src = NULL;
     if (BURNIN_HELD(tube) && !s_bi_bypass) { s_wl_prev_valid[tube] = false; return; }
+    cap_note_frame(tube, data, w, h);
 
     const size_t tube_bytes = (size_t)w * h * 2;
     const int    row_bytes  = w * 2;
@@ -7450,6 +7637,702 @@ static void wl_outdoor_ht_panel(uint8_t *fb, const char *lang, int temp_disp, in
     }
 }
 
+/* ── Station panel: pressure + trend, wind direction + gust, rain today ─────────────────────────────────────────────────────────
+ * One tube, three zones (rows 0-52, 56-106, 110-159). Shared by the WeatherLive / Custom info panel and the six-tube weather page. */
+
+/* Anti-aliased shapes: coverage from a signed distance, blended over what is already in the framebuffer. */
+typedef float (*st_sd_fn)(float x, float y, const float *p);
+static float st_sd_disc(float x, float y, const float *p) { return hypotf(x - p[0], y - p[1]) - p[2]; }
+static float st_sd_ring(float x, float y, const float *p) { return fabsf(hypotf(x - p[0], y - p[1]) - p[2]) - p[3]; }
+static float st_sd_seg(float x, float y, const float *p)
+{
+    const float dx = p[2] - p[0], dy = p[3] - p[1];
+    float t = ((x - p[0]) * dx + (y - p[1]) * dy) / (dx * dx + dy * dy + 1e-6f);
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    return hypotf(x - (p[0] + t * dx), y - (p[1] + t * dy)) - p[4];
+}
+static float st_sd_tri(float x, float y, const float *p)
+{
+    float d = 1e9f; bool in = true;
+    for (int i = 0; i < 3; i++) {
+        const float ax = p[i * 2], ay = p[i * 2 + 1], bx = p[((i + 1) % 3) * 2], by = p[((i + 1) % 3) * 2 + 1];
+        const float ex = bx - ax, ey = by - ay;
+        const float cross = ex * (y - ay) - ey * (x - ax);
+        float t = ((x - ax) * ex + (y - ay) * ey) / (ex * ex + ey * ey + 1e-6f);
+        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+        const float dist = hypotf(x - (ax + t * ex), y - (ay + t * ey));
+        if (dist < d) d = dist;
+        if (cross < 0.0f) in = false;       /* st_tri() orders the corners so that inside is on the positive side of every edge */
+    }
+    return in ? -d : d;
+}
+/* The shadow pass draws each glyph again first, grown by s_st_grow pixels, in the shadow colour at s_st_alpha (see the st_* wrappers below). */
+static float s_st_grow = 0.0f;
+static int   s_st_alpha = 255;
+/* When set, shapes are written here as coverage (LCD_WIDTH x LCD_HEIGHT, 8-bit) instead of being blended into the framebuffer: the Station
+ * panel bakes its glyphs once per data change and only blends the two maps per frame (the distance-field maths is far too slow for 20 Hz). */
+static uint8_t *s_st_target = NULL;
+static uint8_t *s_st_target_col = NULL;   /* with s_st_target: a palette index per pixel, so one map can hold several colours */
+static uint8_t  s_st_pal[8][3];
+static int      s_st_pal_n = 0;
+static uint8_t st_pal_idx(int r, int g, int b)
+{
+    for (int i = 0; i < s_st_pal_n; i++) if (s_st_pal[i][0] == r && s_st_pal[i][1] == g && s_st_pal[i][2] == b) return (uint8_t)i;
+    if (s_st_pal_n < 8) { s_st_pal[s_st_pal_n][0] = (uint8_t)r; s_st_pal[s_st_pal_n][1] = (uint8_t)g; s_st_pal[s_st_pal_n][2] = (uint8_t)b; return (uint8_t)s_st_pal_n++; }
+    return 7;
+}
+static bool     s_st_skip_tick = false;   /* the red north tick is drawn per frame, not baked into the single-colour ink map */
+static void st_shape(uint8_t *fb, st_sd_fn sd, const float *p, int bx0, int by0, int bx1, int by1, int r, int g, int b, int amax)
+{
+    const int gi = (int)ceilf(s_st_grow);
+    bx0 -= gi; by0 -= gi; bx1 += gi; by1 += gi;
+    amax = amax * s_st_alpha / 255;
+    const uint8_t ci = (s_st_target && s_st_target_col) ? st_pal_idx(r, g, b) : 0;
+    for (int y = by0; y <= by1; y++) {
+        if (y < 0 || y >= LCD_HEIGHT) continue;
+        for (int x = bx0; x <= bx1; x++) {
+            if (x < 0 || x >= LCD_WIDTH) continue;
+            float cov = 0.5f - (sd((float)x + 0.5f, (float)y + 0.5f, p) - s_st_grow);
+            if (cov <= 0.0f) continue;
+            if (cov > 1.0f) cov = 1.0f;
+            const int a = (int)(cov * (float)amax);
+            if (s_st_target) { uint8_t *t = s_st_target + y * LCD_WIDTH + x; if (a > *t) { *t = (uint8_t)a; if (s_st_target_col) s_st_target_col[y * LCD_WIDTH + x] = ci; } }
+            else wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, r, g, b, a);
+        }
+    }
+}
+static void st_disc(uint8_t *fb, float cx, float cy, float rad, int r, int g, int b)
+{
+    const float p[3] = { cx, cy, rad };
+    st_shape(fb, st_sd_disc, p, (int)(cx - rad - 1), (int)(cy - rad - 1), (int)(cx + rad + 1), (int)(cy + rad + 1), r, g, b, 255);
+}
+static void st_ring(uint8_t *fb, float cx, float cy, float rad, float thick, int r, int g, int b, int a)
+{
+    const float p[4] = { cx, cy, rad, thick * 0.5f };
+    st_shape(fb, st_sd_ring, p, (int)(cx - rad - 2), (int)(cy - rad - 2), (int)(cx + rad + 2), (int)(cy + rad + 2), r, g, b, a);
+}
+static void st_line(uint8_t *fb, float x0, float y0, float x1, float y1, float w, int r, int g, int b)
+{
+    const float p[5] = { x0, y0, x1, y1, w * 0.5f };
+    const int m = (int)(w + 2.0f);
+    st_shape(fb, st_sd_seg, p, (int)fminf(x0, x1) - m, (int)fminf(y0, y1) - m, (int)fmaxf(x0, x1) + m, (int)fmaxf(y0, y1) + m, r, g, b, 255);
+}
+static void st_tri(uint8_t *fb, float x0, float y0, float x1, float y1, float x2, float y2, int r, int g, int b)
+{
+    float p[6] = { x0, y0, x1, y1, x2, y2 };
+    if ((x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0) < 0.0f) { p[2] = x2; p[3] = y2; p[4] = x1; p[5] = y1; }   /* inside = positive side of each edge */
+    st_shape(fb, st_sd_tri, p, (int)fminf(x0, fminf(x1, x2)) - 1, (int)fminf(y0, fminf(y1, y2)) - 1,
+             (int)fmaxf(x0, fmaxf(x1, x2)) + 1, (int)fmaxf(y0, fmaxf(y1, y2)) + 1, r, g, b, 255);
+}
+
+/* Rising / falling triangle or a steady bar, centred on (cx, cy); s = half-width. */
+static void st_trend_raw(uint8_t *fb, float cx, float cy, float s, int trend, int r, int g, int b)
+{
+    if (trend > 0)      st_tri(fb, cx - s, cy + s * 0.9f, cx + s, cy + s * 0.9f, cx, cy - s * 0.9f, r, g, b);
+    else if (trend < 0) st_tri(fb, cx - s, cy - s * 0.9f, cx + s, cy - s * 0.9f, cx, cy + s * 0.9f, r, g, b);
+    else                st_line(fb, cx - s, cy, cx + s, cy, s * 0.7f, r, g, b);
+}
+static void st_drop_raw(uint8_t *fb, float cx, float cy, float s, int r, int g, int b)   /* cy = middle of the drop */
+{
+    st_disc(fb, cx, cy + s * 0.35f, s * 0.62f, r, g, b);
+    st_tri(fb, cx, cy - s, cx - s * 0.58f, cy + s * 0.1f, cx + s * 0.58f, cy + s * 0.1f, r, g, b);
+}
+static void st_gust_raw(uint8_t *fb, float cx, float cy, float s, int r, int g, int b)   /* a zigzag */
+{
+    st_line(fb, cx - s, cy + s * 0.5f, cx - s * 0.3f, cy - s * 0.5f, 1.8f, r, g, b);
+    st_line(fb, cx - s * 0.3f, cy - s * 0.5f, cx + s * 0.3f, cy + s * 0.5f, 1.8f, r, g, b);
+    st_line(fb, cx + s * 0.3f, cy + s * 0.5f, cx + s, cy - s * 0.5f, 1.8f, r, g, b);
+}
+/* Compass: a ring with a north tick and a needle that points the way the wind blows (dir = where it comes FROM, -1 = unknown). */
+static void st_compass_raw(uint8_t *fb, float cx, float cy, float rad, float dir_deg, bool calm, int r, int g, int b)
+{
+    st_ring(fb, cx, cy, rad, rad * 0.09f + 0.6f, r, g, b, 140);
+    /* The north tick is red, except in the shadow pass (shadow colour) and in DotMatrix (one colour for everything). */
+    const bool red = (s_st_grow <= 0.0f) && !s_wl_dm_active;
+    if (!s_st_skip_tick)
+        st_line(fb, cx, cy - rad - rad * 0.14f, cx, cy - rad + rad * 0.2f, rad * 0.09f + 0.8f, red ? 235 : r, red ? 55 : g, red ? 55 : b);
+    if (calm) { st_disc(fb, cx, cy, rad * 0.18f, r, g, b); return; }
+    if (dir_deg < 0.0f) return;
+    const float a = (dir_deg + 180.0f) * 0.01745329f;
+    const float ux = sinf(a), uy = -cosf(a), px = -uy, py = ux;
+    const float tipx = cx + ux * rad * 0.78f, tipy = cy + uy * rad * 0.78f;
+    st_line(fb, cx - ux * rad * 0.57f, cy - uy * rad * 0.57f, tipx, tipy, rad * 0.17f, r, g, b);
+    st_tri(fb, tipx, tipy, tipx - ux * rad * 0.45f + px * rad * 0.36f, tipy - uy * rad * 0.45f + py * rad * 0.36f,
+           tipx - ux * rad * 0.45f - px * rad * 0.36f, tipy - uy * rad * 0.45f - py * rad * 0.36f, r, g, b);
+}
+
+/* The glyphs get the same drop shadow as the other tube icons: a grown copy in the shadow colour underneath, then the glyph itself. */
+static void st_shadow_begin(void) { s_st_grow = s_wl_shadow_size ? (float)s_wl_shadow_size : 2.0f; s_st_alpha = 160; }
+static void st_shadow_end(void)   { s_st_grow = 0.0f; s_st_alpha = 255; }
+static void st_trend(uint8_t *fb, float cx, float cy, float s, int trend, int r, int g, int b)
+{
+    if (wl_shadow_on()) { st_shadow_begin(); st_trend_raw(fb, cx, cy, s, trend, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b); st_shadow_end(); }
+    st_trend_raw(fb, cx, cy, s, trend, r, g, b);
+}
+static void st_drop(uint8_t *fb, float cx, float cy, float s, int r, int g, int b)
+{
+    if (wl_shadow_on()) { st_shadow_begin(); st_drop_raw(fb, cx, cy, s, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b); st_shadow_end(); }
+    st_drop_raw(fb, cx, cy, s, r, g, b);
+}
+static void st_gust(uint8_t *fb, float cx, float cy, float s, int r, int g, int b)
+{
+    if (wl_shadow_on()) { st_shadow_begin(); st_gust_raw(fb, cx, cy, s, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b); st_shadow_end(); }
+    st_gust_raw(fb, cx, cy, s, r, g, b);
+}
+static void st_compass(uint8_t *fb, float cx, float cy, float rad, float dir_deg, bool calm, int r, int g, int b)
+{
+    if (wl_shadow_on()) { st_shadow_begin(); st_compass_raw(fb, cx, cy, rad, dir_deg, calm, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b); st_shadow_end(); }
+    st_compass_raw(fb, cx, cy, rad, dir_deg, calm, r, g, b);
+}
+
+/* Text centred on (cx, cy) vertically. px = the TTF height wanted, fn = the u8g2 stand-in (16 / 20 / 28 / 42). */
+static const uint8_t *st_font(int fn)
+{
+    return fn >= 42 ? u8g2_font_logisoso42_tf : fn >= 28 ? u8g2_font_logisoso28_tf : fn >= 20 ? u8g2_font_logisoso20_tf : u8g2_font_logisoso16_tf;
+}
+/* The real width of a string in the font the panel will draw it with (measured, not estimated). */
+static int st_text_w(const char *s, int px, int fn)
+{
+    return 2 * wl_label_half_w(s, st_font(fn), (uint16_t)px);
+}
+static void st_text(uint8_t *fb, int cx, int cy, const char *s, int px, int fn, int r, int g, int b)
+{
+    if (s_ft_face_id >= 0) wl_text(fb, cx, cy + 7 * px / 10, u8g2_font_logisoso28_tf, s, r, g, b, (uint16_t)px);
+    else                   wl_text(fb, cx, cy + fn / 2, st_font(fn), s, r, g, b, 0);
+}
+/* How wide a string runs, counted in digit widths (a point or colon is about half). */
+static float st_ndig(const char *s)
+{
+    float n = 0.0f;
+    for (; *s; s++) n += (*s == '.' || *s == ':' || *s == ' ') ? 0.5f : 1.0f;
+    return n;
+}
+/* Largest TTF height and u8g2 stand-in that keep `s` inside maxw pixels. The digit-count guess is only the starting point: letters such as W and
+ * M are far wider than a digit, so the result is then checked against the measured width and shrunk until it really fits. */
+static void st_fit(const char *s, int maxw, int hi_px, int hi_fn, int *px, int *fn)
+{
+    const float n = st_ndig(s) < 1.0f ? 1.0f : st_ndig(s);
+    int p = (int)((float)maxw / (0.6f * n));
+    if (p > hi_px) p = hi_px;
+    if (p < 9) p = 9;
+    static const int fns[4] = { 42, 28, 20, 16 };
+    int f = 16;
+    if (s_ft_face_id >= 0) {                                   /* TTF face: only the pixel height matters */
+        while (p > 9 && st_text_w(s, p, 16) > maxw) p--;
+    } else {                                                   /* built-in font: only the stand-in size matters */
+        for (int i = 0; i < 4; i++) if (fns[i] <= hi_fn && st_text_w(s, p, fns[i]) <= maxw) { f = fns[i]; break; }
+    }
+    *px = p; *fn = f;
+}
+
+/* The eight compass points, per language (north, then clockwise). Latin-1 letters only. */
+static const char *st_cardinal(const char *lang, float deg)
+{
+    static const char *en[8] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+    static const char *de[8] = { "N", "NO", "O", "SO", "S", "SW", "W", "NW" };
+    static const char *fr[8] = { "N", "NE", "E", "SE", "S", "SO", "O", "NO" };   /* also es, it */
+    static const char *pt[8] = { "N", "NE", "L", "SE", "S", "SO", "O", "NO" };
+    static const char *nl[8] = { "N", "NO", "O", "ZO", "Z", "ZW", "W", "NW" };
+    static const char *sv[8] = { "N", "NO", "O", "SO", "S", "SV", "V", "NV" };
+    static const char *da[8] = { "N", "N\xc3\x98", "\xc3\x98", "S\xc3\x98", "S", "SV", "V", "NV" };   /* also no */
+    static const char *fi[8] = { "P", "KO", "I", "KA", "E", "LO", "L", "LU" };
+    const char **t = en;
+    if (lang && lang[0]) {
+        if      (!strcmp(lang, "de")) t = de;
+        else if (!strcmp(lang, "fr") || !strcmp(lang, "es") || !strcmp(lang, "it")) t = fr;
+        else if (!strcmp(lang, "pt")) t = pt;
+        else if (!strcmp(lang, "nl")) t = nl;
+        else if (!strcmp(lang, "sv")) t = sv;
+        else if (!strcmp(lang, "no") || !strcmp(lang, "da")) t = da;
+        else if (!strcmp(lang, "fi")) t = fi;
+    }
+    int i = (int)lroundf(deg / 45.0f) % 8;
+    if (i < 0) i += 8;
+    return t[i];
+}
+static const char *st_calm_word(const char *lang)
+{
+    if (lang && lang[0]) {
+        if      (!strcmp(lang, "de")) return "Ruhe";
+        else if (!strcmp(lang, "fr")) return "calme";
+        else if (!strcmp(lang, "es") || !strcmp(lang, "it") || !strcmp(lang, "pt")) return "calma";
+        else if (!strcmp(lang, "nl")) return "stil";
+        else if (!strcmp(lang, "sv")) return "lugn";
+        else if (!strcmp(lang, "no") || !strcmp(lang, "da")) return "stille";
+        else if (!strcmp(lang, "fi")) return "tyyni";
+        else if (!strcmp(lang, "pl")) return "cisza";
+    }
+    return "calm";
+}
+
+/* Resolve the Station units: `setting` is the config value ("follow" / "metric" / "us"), `wind_unit` the Wind units setting. */
+static bool station_use_us(const char *setting, const char *wind_unit)
+{
+    if (setting && !strcmp(setting, "us"))     return true;
+    if (setting && !strcmp(setting, "metric")) return false;
+    return wind_unit && !strcmp(wind_unit, "mph");
+}
+static bool station_use_kpa(const char *setting) { return setting && !strcmp(setting, "kpa"); }
+static const char *station_gust_unit(bool us, const char *wind_unit)
+{
+    if (us) return "mph";
+    return (wind_unit && !strcmp(wind_unit, "m/s")) ? "m/s" : "km/h";
+}
+
+/* Everything the panel and the page show, already formatted. A field that is not available is left blank and its have_* false. */
+typedef struct {
+    bool have_p;    char p[10];     const char *punit;  int trend;
+    bool have_dir;  bool calm;      const char *card;   float dir;
+    bool have_gust; char gust[8];   const char *gunit;
+    bool have_rain; char rain[10];  const char *runit;
+} st_vals_t;
+
+static void st_fill(st_vals_t *v, const weather_data_t *w, const char *lang, bool us, bool kpa, const char *wind_unit)
+{
+    memset(v, 0, sizeof(*v));
+    v->punit = us ? "inHg" : (kpa ? "kPa" : "hPa");
+    v->runit = us ? "in" : "mm";
+    v->gunit = station_gust_unit(us, wind_unit);
+    if (!w || !w->valid) return;
+    if (w->pressure_hpa > 0.0f) {
+        v->have_p = true; v->trend = w->pressure_trend;
+        if (us)       snprintf(v->p, sizeof(v->p), "%.2f", (double)(w->pressure_hpa * 0.029530f));
+        else if (kpa) snprintf(v->p, sizeof(v->p), "%.1f", (double)(w->pressure_hpa * 0.1f));
+        else          snprintf(v->p, sizeof(v->p), "%d", (int)lroundf(w->pressure_hpa));
+    }
+    const float peak = w->wind_gust_kph > w->wind_kph ? w->wind_gust_kph : w->wind_kph;
+    if (w->wind_dir_deg >= 0.0f) {
+        v->have_dir = true; v->dir = w->wind_dir_deg;
+        v->calm = (peak < 2.0f);
+        v->card = v->calm ? st_calm_word(lang) : st_cardinal(lang, w->wind_dir_deg);
+    }
+    if (w->wind_gust_kph >= 0.0f && !(v->have_dir && v->calm)) {
+        float g = w->wind_gust_kph;
+        if (us) g *= 0.621371f; else if (!strcmp(v->gunit, "m/s")) g /= 3.6f;
+        v->have_gust = true;
+        snprintf(v->gust, sizeof(v->gust), "%d", (int)lroundf(g));
+    }
+    if (w->rain_today_mm >= 0.0f) {
+        v->have_rain = true;
+        if (us)                            snprintf(v->rain, sizeof(v->rain), "%.2f", (double)(w->rain_today_mm / 25.4f));
+        else if (w->rain_today_mm < 10.0f) snprintf(v->rain, sizeof(v->rain), "%.1f", (double)w->rain_today_mm);
+        else                               snprintf(v->rain, sizeof(v->rain), "%d", (int)lroundf(w->rain_today_mm));
+    }
+}
+
+/* What the panel showed last: the inputs it was built from, then everything derived from them (formatted values, measured layout, and
+ * whether the baked glyph maps match). Rebuilt only when an input changes, so a 20 Hz redraw does no float formatting, text measuring
+ * or distance-field maths. */
+typedef struct {
+    bool    ready, valid, us, kpa, shadow, maps_valid;
+    uint8_t shadow_size;
+    int8_t  trend;
+    int     face;
+    float   p_hpa, dir, gust, wind, rain;
+    char    lang[4], wind_unit[8];
+    st_vals_t v;
+    int     p_px, p_fn, u1_gx, u1_tw;
+    int     c_px, c_fn;
+    char    gline[16];
+    int     g_gx, g_gw;
+    int     r_px, r_fn, u3_gx, u3_tw;
+} st_memo_t;
+static st_memo_t s_st_memo;
+static uint8_t  *s_st_map_ink = NULL, *s_st_map_sh = NULL;   /* PSRAM, 12.8 KB each, allocated on first use */
+
+static void st_memo_update(st_memo_t *m, const weather_data_t *w, const char *lang, bool us, bool kpa, const char *wind_unit)
+{
+    const bool valid = (w && w->valid);
+    const bool shadow = wl_shadow_on();
+    const float p = valid ? w->pressure_hpa : -1.0f, d = valid ? w->wind_dir_deg : -1.0f, gu = valid ? w->wind_gust_kph : -1.0f;
+    const float wi = valid ? w->wind_kph : 0.0f, ra = valid ? w->rain_today_mm : -1.0f;
+    const int8_t tr = valid ? w->pressure_trend : 0;
+    if (m->ready && m->valid == valid && m->us == us && m->kpa == kpa && m->shadow == shadow && m->shadow_size == s_wl_shadow_size &&
+        m->trend == tr && m->face == s_ft_face_id && m->p_hpa == p && m->dir == d && m->gust == gu && m->wind == wi && m->rain == ra &&
+        !strncmp(m->lang, lang ? lang : "", sizeof(m->lang) - 1) && !strncmp(m->wind_unit, wind_unit ? wind_unit : "", sizeof(m->wind_unit) - 1))
+        return;
+
+    m->ready = true; m->valid = valid; m->us = us; m->kpa = kpa; m->shadow = shadow; m->shadow_size = s_wl_shadow_size;
+    m->trend = tr; m->face = s_ft_face_id; m->p_hpa = p; m->dir = d; m->gust = gu; m->wind = wi; m->rain = ra;
+    snprintf(m->lang, sizeof(m->lang), "%.3s", lang ? lang : "");
+    snprintf(m->wind_unit, sizeof(m->wind_unit), "%.7s", wind_unit ? wind_unit : "");
+    m->maps_valid = false;
+
+    st_fill(&m->v, w, lang, us, kpa, wind_unit);
+    const st_vals_t *v = &m->v;
+    st_fit(v->have_p ? v->p : "--", 74, 32, 28, &m->p_px, &m->p_fn);
+    m->u1_tw = st_text_w(v->punit, 14, 16);
+    m->u1_gx = 40 - (9 + 4 + m->u1_tw) / 2;
+    {
+        const char *c = v->have_dir ? v->card : "--";
+        st_fit(c, v->calm ? 44 : 40, 26, 28, &m->c_px, &m->c_fn);   /* right of the compass ring (which ends at x=34), inside the 80 px tube */
+        if (strlen(c) >= 4) { if (m->c_px > 20) m->c_px = 20; if (m->c_fn > 20) m->c_fn = 20; }
+    }
+    m->gline[0] = '\0'; m->g_gw = 0; m->g_gx = 40;
+    if (v->have_gust) {
+        snprintf(m->gline, sizeof(m->gline), "%s %s", v->gust, v->gunit);
+        m->g_gw = st_text_w(m->gline, 15, 16);
+        if (9 + 4 + m->g_gw > 78) {                       /* the unit would run off the tube: show the number alone */
+            snprintf(m->gline, sizeof(m->gline), "%s", v->gust);
+            m->g_gw = st_text_w(m->gline, 15, 16);
+        }
+        m->g_gx = 40 - (9 + 4 + m->g_gw) / 2;
+    }
+    st_fit(v->have_rain ? v->rain : "--", 74, 30, 28, &m->r_px, &m->r_fn);
+    m->u3_tw = st_text_w(v->runit, 14, 16);
+    m->u3_gx = 40 - (8 + 4 + m->u3_tw) / 2;
+}
+
+/* The four glyphs at their panel positions, in one colour (the baking passes and the no-memory fallback share this). */
+#define ST_PANEL_GLYPHS(sfx, m, r, g, b) do { \
+        if ((m)->v.have_p)    st_trend##sfx(fb, (float)(m)->u1_gx + 4.5f, 44.0f, 4.5f, (m)->v.trend, r, g, b); \
+        st_compass##sfx(fb, 21.0f, 74.0f, 13.0f, (m)->v.have_dir ? (m)->v.dir : -1.0f, (m)->v.calm, r, g, b); \
+        if ((m)->v.have_gust) st_gust##sfx(fb, (float)(m)->g_gx + 4.5f, 97.0f, 4.5f, r, g, b); \
+        if ((m)->v.have_rain) st_drop##sfx(fb, (float)(m)->u3_gx + 4.0f, 150.0f, 6.5f, r, g, b); \
+    } while (0)
+
+static void wl_station_panel(uint8_t *fb, const char *lang, const char *setting, const char *wind_unit, int fg_r, int fg_g, int fg_b)
+{
+    const bool us = station_use_us(setting, wind_unit);
+    st_memo_t *m = &s_st_memo;
+    st_memo_update(m, weather_get(), lang, us, station_use_kpa(setting), wind_unit);
+    const st_vals_t *v = &m->v;
+    const char *p = v->have_p ? v->p : "--", *rain = v->have_rain ? v->rain : "--";
+
+    if (s_wl_dm_active) {
+        /* DotMatrix: three rows of dot text on one shared pitch; the trend arrow sits left of the pressure, the compass is its letters. */
+        char row2[16];
+        if (!v->have_dir)       snprintf(row2, sizeof(row2), "--");
+        else if (v->have_gust)  snprintf(row2, sizeof(row2), "%s %s", v->card, v->gust);
+        else                    snprintf(row2, sizeof(row2), "%s", v->card);
+        int cell = dm_fit_cell(p);
+        if (dm_fit_cell(row2) < cell) cell = dm_fit_cell(row2);
+        if (dm_fit_cell(rain) < cell) cell = dm_fit_cell(rain);
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        const bool arrow = v->have_p && v->trend != 0;
+        dm_draw_text_p_on(fb, arrow ? 46 : 40, 27, p, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        if (arrow)
+            dm_draw_glyph_on_scaled(fb, 8, 27, v->trend > 0 ? DM_CP_ARROW_UP : DM_CP_ARROW_DOWN, 1, 1, 1, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        dm_draw_text_p_on(fb, 40, 80, row2, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        dm_draw_text_p_on(fb, 40, 133, rain, cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        return;
+    }
+
+    /* Hairlines between the zones. */
+    for (int y = 54; y <= 108; y += 54)
+        for (int x = 10; x < 70; x++) wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, fg_r, fg_g, fg_b, 60);
+
+    /* Glyphs: baked into two coverage maps (shadow, ink) when the data changes, blended from them every frame. */
+    const size_t map_bytes = (size_t)LCD_WIDTH * LCD_HEIGHT;
+    if (!s_st_map_ink) s_st_map_ink = (uint8_t *)heap_caps_malloc(map_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_st_map_sh)  s_st_map_sh  = (uint8_t *)heap_caps_malloc(map_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_st_map_ink && s_st_map_sh) {
+        if (!m->maps_valid) {
+            memset(s_st_map_ink, 0, map_bytes);
+            memset(s_st_map_sh, 0, map_bytes);
+            if (m->shadow) {
+                s_st_target = s_st_map_sh;
+                st_shadow_begin();
+                ST_PANEL_GLYPHS(_raw, m, 0, 0, 0);
+                st_shadow_end();
+            }
+            s_st_target = s_st_map_ink;
+            s_st_skip_tick = true;
+            ST_PANEL_GLYPHS(_raw, m, 0, 0, 0);
+            s_st_skip_tick = false;
+            s_st_target = NULL;
+            m->maps_valid = true;
+        }
+        if (m->shadow) {
+            const uint8_t *sh = s_st_map_sh;
+            for (size_t i = 0; i < map_bytes; i++) if (sh[i]) wl_blend_px(fb + i * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, sh[i]);
+        }
+        const uint8_t *ink = s_st_map_ink;
+        for (size_t i = 0; i < map_bytes; i++) if (ink[i]) wl_blend_px(fb + i * 2, fg_r, fg_g, fg_b, ink[i]);
+        st_line(fb, 21.0f, 74.0f - 13.0f - 13.0f * 0.14f, 21.0f, 74.0f - 13.0f + 13.0f * 0.2f, 13.0f * 0.09f + 0.8f, 235, 55, 55);   /* red north tick */
+    } else {
+        ST_PANEL_GLYPHS(, m, fg_r, fg_g, fg_b);           /* no memory for the maps: draw directly (slow, but correct) */
+    }
+
+    /* Text, from the memoised strings and layout. */
+    st_text(fb, 40, 18, p, m->p_px, m->p_fn, fg_r, fg_g, fg_b);
+    st_text(fb, m->u1_gx + 9 + 4 + m->u1_tw / 2, 44, v->punit, 14, 16, fg_r, fg_g, fg_b);
+    st_text(fb, 57, 74, v->have_dir ? v->card : "--", m->c_px, m->c_fn, fg_r, fg_g, fg_b);
+    if (v->have_gust) st_text(fb, m->g_gx + 9 + 4 + m->g_gw / 2, 97, m->gline, 15, 16, fg_r, fg_g, fg_b);
+    st_text(fb, 40, 123, rain, m->r_px, m->r_fn, fg_r, fg_g, fg_b);
+    st_text(fb, m->u3_gx + 8 + 4 + m->u3_tw / 2, 150, v->runit, 14, 16, fg_r, fg_g, fg_b);
+}
+
+/* ── Energy panel: grid balance, solar and battery, one zone per source that is pushed ────────────────────────────────────────────
+ * Shared by the WeatherLive / Custom info panel (baked glyph maps, like the Station panel) and the six-tube flow page (drawn directly: it only
+ * redraws when the data changes). Sources that were never pushed are left out; a stale one reads "--". */
+/* A filled rectangle from its own distance field. (Two triangles leave a faint diagonal seam where their anti-aliased edges meet.) */
+static float st_sd_box(float x, float y, const float *p)
+{
+    const float dx = fmaxf(p[0] - x, x - p[2]), dy = fmaxf(p[1] - y, y - p[3]);
+    return hypotf(fmaxf(dx, 0.0f), fmaxf(dy, 0.0f)) + fminf(fmaxf(dx, dy), 0.0f);
+}
+static void st_rect_fill(uint8_t *fb, float x0, float y0, float x1, float y1, int r, int g, int b)
+{
+    const float p[4] = { x0, y0, x1, y1 };
+    st_shape(fb, st_sd_box, p, (int)x0 - 1, (int)y0 - 1, (int)x1 + 1, (int)y1 + 1, r, g, b, 255);
+}
+static void en_sun_raw(uint8_t *fb, float cx, float cy, float rad, int r, int g, int b)
+{
+    st_disc(fb, cx, cy, rad * 0.5f, r, g, b);
+    for (int k = 0; k < 8; k++) {
+        const float a = (float)k * 0.785398f;
+        st_line(fb, cx + cosf(a) * rad * 0.72f, cy + sinf(a) * rad * 0.72f, cx + cosf(a) * rad, cy + sinf(a) * rad, rad * 0.16f + 0.8f, r, g, b);
+    }
+}
+static void en_pylon_raw(uint8_t *fb, float cx, float cy, float s, int r, int g, int b)
+{
+    const float w = s * 0.13f + 0.7f;
+    st_line(fb, cx - s * 0.55f, cy + s, cx, cy - s, w, r, g, b);
+    st_line(fb, cx, cy - s, cx + s * 0.55f, cy + s, w, r, g, b);
+    st_line(fb, cx - s * 0.72f, cy - s * 0.35f, cx + s * 0.72f, cy - s * 0.35f, w, r, g, b);
+    st_line(fb, cx - s * 0.5f, cy + s * 0.25f, cx + s * 0.5f, cy + s * 0.25f, w, r, g, b);
+    st_line(fb, cx - s * 0.55f, cy + s, cx + s * 0.5f, cy + s * 0.25f, w * 0.8f, r, g, b);
+    st_line(fb, cx + s * 0.55f, cy + s, cx - s * 0.5f, cy + s * 0.25f, w * 0.8f, r, g, b);
+}
+static void en_house_raw(uint8_t *fb, float cx, float cy, float s, int r, int g, int b)
+{
+    st_tri(fb, cx - s, cy - s * 0.05f, cx, cy - s, cx + s, cy - s * 0.05f, r, g, b);
+    st_rect_fill(fb, cx - s * 0.72f, cy - s * 0.2f, cx + s * 0.72f, cy + s * 0.85f, r, g, b);   /* starts inside the roof so the two merge */
+}
+/* Battery outline with a fill of `pct` percent; horizontal (terminal on the right) or upright (terminal on top). */
+static void en_battery_raw(uint8_t *fb, float cx, float cy, float w, float h, int pct, bool horiz, int fr, int fg_, int fb_, int r, int g, int b)
+{
+    const float x0 = cx - w / 2, x1 = cx + w / 2, y0 = cy - h / 2, y1 = cy + h / 2, t = (horiz ? h : w) * 0.16f + 0.5f;
+    st_line(fb, x0, y0, x1, y0, t, r, g, b); st_line(fb, x0, y1, x1, y1, t, r, g, b);
+    st_line(fb, x0, y0, x0, y1, t, r, g, b); st_line(fb, x1, y0, x1, y1, t, r, g, b);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    if (horiz) {
+        st_rect_fill(fb, x1, cy - h * 0.22f, x1 + 2.0f, cy + h * 0.22f, r, g, b);
+        const float fw = (x1 - x0 - 2.6f) * (float)pct / 100.0f;
+        if (fw > 0.5f) st_rect_fill(fb, x0 + 1.3f, y0 + 1.3f, x0 + 1.3f + fw, y1 - 1.3f, fr, fg_, fb_);
+    } else {
+        st_rect_fill(fb, cx - w * 0.22f, y0 - 2.4f, cx + w * 0.22f, y0, r, g, b);
+        const float fh = (y1 - y0 - 2.6f) * (float)pct / 100.0f;
+        if (fh > 0.5f) st_rect_fill(fb, x0 + 1.3f, y1 - 1.3f - fh, x1 - 1.3f, y1 - 1.3f, fr, fg_, fb_);
+    }
+}
+static void en_harrow_raw(uint8_t *fb, float cx, float cy, float len, float thick, int dir, int r, int g, int b)
+{
+    const float x0 = cx - (float)dir * len / 2, x1 = cx + (float)dir * len / 2, head = thick * 1.9f > 7.0f ? thick * 1.9f : 7.0f;
+    st_line(fb, x0, cy, x1 - (float)dir * head * 0.6f, cy, thick, r, g, b);
+    st_tri(fb, x1, cy, x1 - (float)dir * head, cy - head * 0.75f, x1 - (float)dir * head, cy + head * 0.75f, r, g, b);
+}
+
+static const uint8_t EN_GREEN[3] = { 95, 218, 130 }, EN_RED[3] = { 255, 108, 88 }, EN_AMBER[3] = { 255, 196, 72 }, EN_DIM[3] = { 150, 158, 176 };
+
+typedef struct {
+    uint8_t n, kind[3];            /* zones in order; kind 0 = grid, 1 = solar, 2 = battery */
+    char    val[3][8];
+    uint8_t vcol[3];               /* value colour: 0 font, 1 green, 2 red, 3 dim */
+    int8_t  dir[3];                /* grid: +1 export, -1 import; solar: unused; battery: +1 charging, -1 discharging */
+    bool    on[3];                 /* solar producing */
+    uint8_t pct;                   /* battery level */
+    char    bw[8];                 /* battery power, kW */
+    int8_t  bdir;
+    uint8_t fg[3];                 /* font colour the bake used */
+    bool    shadow; uint8_t shadow_size; int face;
+} en_vals_t;
+
+static void en_kw(char *out, size_t n, float w)
+{
+    const float v = fabsf(w) / 1000.0f;
+    if (v < 9.95f) snprintf(out, n, "%.1f", (double)v); else snprintf(out, n, "%d", (int)lroundf(v));
+}
+static void en_fill(en_vals_t *v, const energy_data_t *e, bool show_solar, bool show_batt, int fg_r, int fg_g, int fg_b)
+{
+    memset(v, 0, sizeof(*v));
+    v->fg[0] = (uint8_t)fg_r; v->fg[1] = (uint8_t)fg_g; v->fg[2] = (uint8_t)fg_b;
+    v->shadow = wl_shadow_on(); v->shadow_size = s_wl_shadow_size; v->face = s_ft_face_id;
+    if (e->has_grid) {
+        const int i = v->n++; v->kind[i] = 0;
+        if (e->stale_grid) { snprintf(v->val[i], sizeof(v->val[i]), "--"); v->vcol[i] = 3; }
+        else {
+            en_kw(v->val[i], sizeof(v->val[i]), e->grid_w);
+            v->dir[i] = e->grid_w < -50.0f ? 1 : (e->grid_w > 50.0f ? -1 : 0);
+            v->vcol[i] = e->grid_w < -50.0f ? 1 : (e->grid_w > 50.0f ? 2 : 0);
+        }
+    }
+    if (e->has_solar && show_solar) {
+        const int i = v->n++; v->kind[i] = 1;
+        if (e->stale_solar) { snprintf(v->val[i], sizeof(v->val[i]), "--"); v->vcol[i] = 3; }
+        else { en_kw(v->val[i], sizeof(v->val[i]), e->solar_w); v->on[i] = e->solar_w > 50.0f; v->vcol[i] = v->on[i] ? 0 : 3; }
+    }
+    if (e->has_batt && show_batt) {
+        const int i = v->n++; v->kind[i] = 2;
+        if (e->stale_batt) { snprintf(v->val[i], sizeof(v->val[i]), "--"); v->vcol[i] = 3; }
+        else {
+            snprintf(v->val[i], sizeof(v->val[i]), "%d%%", (int)lroundf(e->batt_pct));
+            v->pct = (uint8_t)lroundf(e->batt_pct);
+            if (e->has_batt_w && fabsf(e->batt_w) > 50.0f) { v->bdir = e->batt_w > 0 ? 1 : -1; en_kw(v->bw, sizeof(v->bw), e->batt_w); }
+        }
+    }
+}
+static void en_set_col(int code, const en_vals_t *v, int *r, int *g, int *b)
+{
+    const uint8_t *c = code == 1 ? EN_GREEN : code == 2 ? EN_RED : code == 3 ? EN_DIM : v->fg;
+    *r = c[0]; *g = c[1]; *b = c[2];
+}
+static void en_battery_col(int pct, int *r, int *g, int *b)
+{
+    const uint8_t *c = pct > 30 ? EN_GREEN : (pct > 15 ? EN_AMBER : EN_RED);
+    *r = c[0]; *g = c[1]; *b = c[2];
+}
+
+/* Zone geometry. n = 3: three compact zones; n = 2: two half-height zones; n = 1: one full-height zone (bigger icon and number). */
+typedef struct { float icon_x, icon_y, icon_s, tri_x, tri_y, val_x, val_y, cap_x, cap_y; int val_px, val_fn, val_maxw; } en_geo_t;
+static en_geo_t en_geo(const en_vals_t *v, int i)
+{
+    const int n = v->n, kind = v->kind[i];
+    en_geo_t g = {0};
+    const float y0 = (n == 3) ? 0.0f : (n == 2 ? (float)i * 80.0f : 0.0f);
+    if (n == 3) {
+        if (kind == 0)      g = (en_geo_t){ 17, 44, 6.5f, 30, 44, 40, 18, 52, 44, 32, 28, 74 };
+        else if (kind == 1) g = (en_geo_t){ 21, 76, 11, 0, 0, 57, 74, 57, 97, 32, 28, 40 };
+        else                g = (en_geo_t){ 20, 150, 11, 39, 150, 40, 123, 58, 150, 32, 28, 74 };
+    } else if (n == 2) {
+        if (kind == 0)      g = (en_geo_t){ 17, y0 + 30, 8, 17, y0 + 55, 54, y0 + 34, 54, y0 + 62, 32, 28, 40 };
+        else if (kind == 1) g = (en_geo_t){ 18, y0 + 36, 11, 0, 0, 56, y0 + 34, 56, y0 + 62, 32, 28, 40 };
+        else                g = (en_geo_t){ 40, y0 + 14, 12, 20, y0 + 68, 40, y0 + 42, 52, y0 + 68, 32, 28, 74 };
+    } else {
+        if (kind == 0)      g = (en_geo_t){ 40, 34, 20, 22, 134, 40, 92, 50, 134, 48, 42, 74 };
+        else if (kind == 1) g = (en_geo_t){ 40, 34, 20, 0, 0, 40, 92, 40, 134, 48, 42, 74 };
+        else                g = (en_geo_t){ 40, 34, 20, 20, 134, 40, 92, 52, 134, 48, 42, 74 };
+    }
+    return g;
+}
+
+/* All glyphs of the panel, in the colours of the font (or, with `sh`, the shadow colour for the shadow pass). */
+static void en_glyphs(uint8_t *fb, const en_vals_t *v, bool sh)
+{
+    for (int i = 0; i < v->n; i++) {
+        const en_geo_t g = en_geo(v, i);
+        const int kind = v->kind[i];
+        int fr, fgc, fbc, vr, vg, vb;
+        en_set_col(0, v, &fr, &fgc, &fbc);
+        en_set_col(v->vcol[i], v, &vr, &vg, &vb);
+        if (sh) { fr = s_wl_shadow_r; fgc = s_wl_shadow_g; fbc = s_wl_shadow_b; vr = fr; vg = fgc; vb = fbc; }
+        if (kind == 0) {
+            en_pylon_raw(fb, g.icon_x, g.icon_y, g.icon_s, fr, fgc, fbc);
+            if (v->dir[i]) {
+                const float s = v->n == 1 ? 6.0f : (v->n == 2 ? 4.5f : 4.2f), cx = g.tri_x, cy = g.tri_y;
+                const bool up = v->dir[i] > 0;
+                if (up) st_tri(fb, cx - s, cy + s * 0.85f, cx + s, cy + s * 0.85f, cx, cy - s * 0.85f, vr, vg, vb);
+                else    st_tri(fb, cx - s, cy - s * 0.85f, cx + s, cy - s * 0.85f, cx, cy + s * 0.85f, vr, vg, vb);
+            }
+        } else if (kind == 1) {
+            if (sh) en_sun_raw(fb, g.icon_x, g.icon_y, g.icon_s, fr, fgc, fbc);
+            else    en_sun_raw(fb, g.icon_x, g.icon_y, g.icon_s, v->on[i] ? EN_AMBER[0] : EN_DIM[0], v->on[i] ? EN_AMBER[1] : EN_DIM[1], v->on[i] ? EN_AMBER[2] : EN_DIM[2]);
+        } else {
+            int pr, pg, pb;
+            en_battery_col(v->pct, &pr, &pg, &pb);
+            if (sh) { pr = fr; pg = fgc; pb = fbc; }
+            const bool upright = (v->n == 1);
+            if (v->n == 3)      en_battery_raw(fb, g.icon_x, g.icon_y, 22, 11, v->pct, true, pr, pg, pb, fr, fgc, fbc);
+            else if (v->n == 2) en_battery_raw(fb, g.icon_x, g.icon_y, 26, 12, v->pct, true, pr, pg, pb, fr, fgc, fbc);
+            else                en_battery_raw(fb, g.icon_x, g.icon_y, 26, 40, v->pct, !upright, pr, pg, pb, fr, fgc, fbc);
+            if (v->bdir) {
+                const float s = v->n == 1 ? 5.0f : 4.0f, cx = g.tri_x, cy = g.tri_y;
+                int ar, ag, ab;
+                const uint8_t *c = v->bdir > 0 ? EN_GREEN : EN_AMBER;
+                ar = sh ? fr : c[0]; ag = sh ? fgc : c[1]; ab = sh ? fbc : c[2];
+                if (v->bdir > 0) st_tri(fb, cx - s, cy + s * 0.85f, cx + s, cy + s * 0.85f, cx, cy - s * 0.85f, ar, ag, ab);
+                else             st_tri(fb, cx - s, cy - s * 0.85f, cx + s, cy - s * 0.85f, cx, cy + s * 0.85f, ar, ag, ab);
+            }
+        }
+    }
+}
+static void en_shadowed_glyphs(uint8_t *fb, const en_vals_t *v)
+{
+    if (v->shadow) { st_shadow_begin(); en_glyphs(fb, v, true); st_shadow_end(); }
+    en_glyphs(fb, v, false);
+}
+
+static en_vals_t s_en_memo;
+static bool      s_en_memo_ok;
+static uint8_t   s_en_pal[8][3];
+static uint8_t  *s_en_cov = NULL, *s_en_col = NULL, *s_en_sh = NULL;   /* PSRAM, 12.8 KB each, allocated on first use */
+static bool      s_en_maps_ok;
+static uint32_t  s_en_last_pal_n;
+
+static void wl_energy_panel(uint8_t *fb, bool show_solar, bool show_batt, int fg_r, int fg_g, int fg_b)
+{
+    energy_data_t e;
+    energy_get_copy(&e);
+    en_vals_t v;
+    en_fill(&v, &e, show_solar, show_batt, fg_r, fg_g, fg_b);
+    if (!s_en_memo_ok || memcmp(&v, &s_en_memo, sizeof(v)) != 0) { s_en_memo = v; s_en_memo_ok = true; s_en_maps_ok = false; }
+    const en_vals_t *m = &s_en_memo;
+
+    if (s_wl_dm_active) {
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        char rows[3][12]; int ny = m->n ? m->n : 1;
+        if (!m->n) snprintf(rows[0], sizeof(rows[0]), "--");
+        for (int i = 0; i < m->n; i++) snprintf(rows[i], sizeof(rows[i]), "%c %.7s", m->kind[i] == 0 ? 'G' : (m->kind[i] == 1 ? 'S' : 'B'), m->val[i]);
+        int cell = dm_fit_cell(rows[0]);
+        for (int i = 1; i < ny; i++) if (dm_fit_cell(rows[i]) < cell) cell = dm_fit_cell(rows[i]);
+        dm_paint_grid_bg(fb, cell, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        for (int i = 0; i < ny; i++) dm_draw_text_p_on(fb, 40, (int)(160.0f * ((float)i + 0.5f) / (float)ny), rows[i], cell, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        return;
+    }
+    if (!m->n) { st_text(fb, 40, 80, "--", 28, 28, EN_DIM[0], EN_DIM[1], EN_DIM[2]); return; }
+
+    if (m->n > 1)
+        for (int i = 1; i < m->n; i++) {
+            const int y = (m->n == 3) ? (i == 1 ? 54 : 108) : 80;
+            for (int x = 10; x < 70; x++) wl_blend_px(fb + (y * LCD_WIDTH + x) * 2, fg_r, fg_g, fg_b, 60);
+        }
+
+    /* Glyphs: baked into coverage + colour-index + shadow maps when the data changes, blended from them every frame. */
+    const size_t mb = (size_t)LCD_WIDTH * LCD_HEIGHT;
+    if (!s_en_cov) s_en_cov = (uint8_t *)heap_caps_malloc(mb, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_en_col) s_en_col = (uint8_t *)heap_caps_malloc(mb, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_en_sh)  s_en_sh  = (uint8_t *)heap_caps_malloc(mb, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_en_cov && s_en_col && s_en_sh) {
+        if (!s_en_maps_ok) {
+            memset(s_en_cov, 0, mb); memset(s_en_col, 0, mb); memset(s_en_sh, 0, mb);
+            if (m->shadow) {
+                s_st_target = s_en_sh; s_st_target_col = NULL;
+                st_shadow_begin(); en_glyphs(fb, m, true); st_shadow_end();
+            }
+            s_st_pal_n = 0;
+            s_st_target = s_en_cov; s_st_target_col = s_en_col;
+            en_glyphs(fb, m, false);
+            s_st_target = NULL; s_st_target_col = NULL;
+            memcpy(s_en_pal, s_st_pal, sizeof(s_en_pal));
+            s_en_last_pal_n = (uint32_t)s_st_pal_n;
+            s_en_maps_ok = true;
+        }
+        if (m->shadow)
+            for (size_t i = 0; i < mb; i++) if (s_en_sh[i]) wl_blend_px(fb + i * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, s_en_sh[i]);
+        for (size_t i = 0; i < mb; i++)
+            if (s_en_cov[i]) { const uint8_t *c = s_en_pal[s_en_col[i] & 7]; wl_blend_px(fb + i * 2, c[0], c[1], c[2], s_en_cov[i]); }
+    } else {
+        en_shadowed_glyphs(fb, m);                           /* no memory for the maps: draw directly (slow, but correct) */
+    }
+
+    /* Text, per frame. */
+    for (int i = 0; i < m->n; i++) {
+        const en_geo_t g = en_geo(m, i);
+        int vr, vg, vb, px, fn;
+        en_set_col(m->vcol[i], m, &vr, &vg, &vb);
+        st_fit(m->val[i], g.val_maxw, g.val_px, g.val_fn, &px, &fn);
+        st_text(fb, (int)g.val_x, (int)g.val_y, m->val[i], px, fn, vr, vg, vb);
+        if (m->kind[i] != 2) {
+            st_text(fb, (int)g.cap_x, (int)g.cap_y, "kW", 14, 16, fg_r, fg_g, fg_b);
+        } else if (m->bdir) {
+            st_text(fb, (int)g.cap_x, (int)g.cap_y, m->bw, 14, 16, fg_r, fg_g, fg_b);
+        }
+    }
+}
+
 /* Drawing helpers shared by the six-tube outlook page (render_weather_outlook) and the tube 5/6 outlook panel (wl_outlook_panel). */
 #define OUTLOOK_TOP      54   /* chart row of 4 mm/h (the peak pill sits 21 rows above it) */
 #define OUTLOOK_YMAX     135  /* chart row of a dry hour (the baseline sits right under it) */
@@ -7796,7 +8679,9 @@ static void wl_outlook_panel(uint8_t *fb, int fg_r, int fg_g, int fg_b)
     s_wl_shadow_r = sv_sr;  s_wl_shadow_g = sv_sg;  s_wl_shadow_b = sv_sb;  s_wl_shadow_size = sv_ss;
 }
 
-enum { WLP_WEEKDATE = 0, WLP_TEMP, WLP_SUNRISE, WLP_HUMIDITY, WLP_WIND, WLP_INDOOR_HT, WLP_AQI, WLP_OUTDOOR_HT, WLP_OUTLOOK };
+enum { WLP_WEEKDATE = 0, WLP_TEMP, WLP_SUNRISE, WLP_HUMIDITY, WLP_WIND, WLP_INDOOR_HT, WLP_AQI, WLP_OUTDOOR_HT, WLP_OUTLOOK, WLP_STATION, WLP_ENERGY };
+static bool s_wl_energy_solar = true, s_wl_energy_batt = true;   /* the Energy panel's Show solar / Show battery settings, loaded with the style */
+static char s_wl_station_units[8] = "follow";   /* the Station units setting, loaded with the rest of the style by wl_load_style() */
 
 /* Render one WeatherLive info panel (`kind`) over the sky panorama on `tube`.
  * Temperatures are already unit-converted by the caller; sunrise/sunset are
@@ -7899,6 +8784,12 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
     } else if (kind == WLP_OUTLOOK) {
         wl_outlook_panel(fb, fg_r, fg_g, fg_b);
 
+    } else if (kind == WLP_ENERGY) {
+        wl_energy_panel(fb, s_wl_energy_solar, s_wl_energy_batt, fg_r, fg_g, fg_b);
+
+    } else if (kind == WLP_STATION) {
+        wl_station_panel(fb, lang, s_wl_station_units, wind_unit, fg_r, fg_g, fg_b);
+
     } else { /* WLP_SUNRISE — asset-style sun glyphs: rise on top, set below. */
         char rs[8], ss[8];
         snprintf(rs, sizeof(rs), "%02d:%02d", (sunrise / 60) % 24, sunrise % 60);
@@ -7923,7 +8814,7 @@ static void wl_draw_panel(int tube, const wl_scene_t *sc, const struct tm *t,
 /* Build the ordered list of WeatherLive panel kinds enabled for a tube; returns
  * the count (≥1, falls back to weekday/date).  The TEMP panel already carries
  * today's high/low, so there is no separate Hi/Lo entry. */
-static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, bool aq, bool oht, bool ol, int out[9])
+static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, bool aq, bool oht, bool ol, bool st, bool en, int out[11])
 {
     int n = 0;
     if (wd) out[n++] = WLP_WEEKDATE;
@@ -7935,6 +8826,8 @@ static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, b
     if (aq) out[n++] = WLP_AQI;
     if (oht) out[n++] = WLP_OUTDOOR_HT;
     if (ol) out[n++] = WLP_OUTLOOK;
+    if (st) out[n++] = WLP_STATION;
+    if (en) out[n++] = WLP_ENERGY;
     if (n == 0) out[n++] = WLP_WEEKDATE;
     return n;
 }
@@ -7946,6 +8839,9 @@ static int wl_panel_list(bool wd, bool tp, bool sr, bool hm, bool wn, bool ht, b
 static void wl_load_style(const nextube_config_t *cfg)
 {
     s_wl_is_custom = (strcmp(cfg->clock_face, "custom") == 0);
+    snprintf(s_wl_station_units, sizeof(s_wl_station_units), "%s", cfg->weather_station_units);
+    s_wl_energy_solar = cfg->energy_show_solar;
+    s_wl_energy_batt  = cfg->energy_show_battery;
     /* Night color set (issue #73): crossfade day→night colors by the scene's
      * twilight-aware darkness (wl_scene_t.night, 0..255, driven by the real
      * geocoded sunrise/sunset — the same value that fades the stars in).
@@ -8013,7 +8909,7 @@ static void wl_load_style(const nextube_config_t *cfg)
         s_wl_shadow_size       = shadow_sz       ? shadow_sz       : 2;
         s_wl_glyph_shadow_size = glyph_shadow_sz ? glyph_shadow_sz : 2;
     }
-    wl_refresh_ft_face(cfg->custom_font);
+    wl_refresh_ft_face(cfg);
     if (s_wl_is_custom) {
         strncpy(s_wl_bg_theme, cfg->custom_bg, sizeof(s_wl_bg_theme) - 1);
         s_wl_bg_theme[sizeof(s_wl_bg_theme) - 1] = '\0';
@@ -8203,7 +9099,7 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     /* Tube-6 panel kinds for this device (WeatherLive subset).  Default layout
      * (non-CX) rotates weekday/date → temp → lo/hi on tube 6 every ~rot_ms. */
     /* Panel-list cache — only rebuilt when the config flags change. */
-    static int  s_l6[9], s_n6, s_l5[9], s_n5;
+    static int  s_l6[11], s_n6, s_l5[11], s_n5;
     static bool s_f6[CFG_CXP_COUNT], s_f5[CFG_CXP_COUNT];
     static bool s_pl_init;
     bool f6[CFG_CXP_COUNT], f5[CFG_CXP_COUNT];
@@ -8212,10 +9108,10 @@ static void render_weatherlive(const nextube_config_t *cfg, const struct tm *t, 
     if (!s_pl_init || memcmp(f6, s_f6, sizeof(f6)) != 0 || memcmp(f5, s_f5, sizeof(f5)) != 0) {
         s_n6 = is_24cx
             ? wl_panel_list(f6[CFG_CXP_WEEKDATE], f6[CFG_CXP_TEMP], f6[CFG_CXP_SUNRISE], f6[CFG_CXP_HUMIDITY], f6[CFG_CXP_WIND], f6[CFG_CXP_HT],
-                            f6[CFG_CXP_AQI], f6[CFG_CXP_OUTDOOR_HT], f6[CFG_CXP_OUTLOOK], s_l6)
+                            f6[CFG_CXP_AQI], f6[CFG_CXP_OUTDOOR_HT], f6[CFG_CXP_OUTLOOK], f6[CFG_CXP_STATION], f6[CFG_CXP_ENERGY], s_l6)
             : (s_l6[0] = WLP_WEEKDATE, s_l6[1] = WLP_TEMP, s_l6[2] = WLP_SUNRISE, 3);
         s_n5 = wl_panel_list(f5[CFG_CXP_WEEKDATE], f5[CFG_CXP_TEMP], f5[CFG_CXP_SUNRISE], f5[CFG_CXP_HUMIDITY], f5[CFG_CXP_WIND], f5[CFG_CXP_HT],
-                             f5[CFG_CXP_AQI], f5[CFG_CXP_OUTDOOR_HT], f5[CFG_CXP_OUTLOOK], s_l5);
+                             f5[CFG_CXP_AQI], f5[CFG_CXP_OUTDOOR_HT], f5[CFG_CXP_OUTLOOK], f5[CFG_CXP_STATION], f5[CFG_CXP_ENERGY], s_l5);
         memcpy(s_f6, f6, sizeof(f6));
         memcpy(s_f5, f5, sizeof(f5));
         s_pl_init = true;
@@ -9183,7 +10079,7 @@ static void render_spectrum(const nextube_config_t *cfg, bool force_margin_repai
 #include "dirent.h"
 #define MAX_ALBUM      64
 #define MAX_ALBUM_PATH 280   /* "/images/album/" (14) + d_name (255) + NUL */
-static char s_album_files[MAX_ALBUM][MAX_ALBUM_PATH];
+static char (*s_album_files)[MAX_ALBUM_PATH] = NULL;   /* MAX_ALBUM rows in PSRAM (17.9 KB), allocated on first use; was a static array */
 static int  s_album_count  = 0;
 static int  s_album_index  = 0;
 static bool s_album_loaded = false;
@@ -9198,12 +10094,25 @@ static void album_load_list(bool shuffle)
 {
     if (s_album_loaded) return;
     s_album_count = 0;
+    if (!s_album_files) {
+        s_album_files = heap_caps_calloc(MAX_ALBUM, MAX_ALBUM_PATH, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_album_files) {
+            ESP_LOGE(TAG, "Album: no memory for the picture list");
+            s_album_loaded = true;            /* shows "no pictures"; display_album_invalidate() lets it try again */
+            return;
+        }
+    }
     DIR *dp = opendir("/spiffs/images/album");
     if (dp) {
         struct dirent *e;
-        while ((e = readdir(dp)) && s_album_count < MAX_ALBUM) {
+        while ((e = readdir(dp))) {
+            if (e->d_name[0] == '.') continue;
             char *ext = strrchr(e->d_name, '.');
-            if (ext && strcasecmp(ext, ".jpg") == 0) {
+            if (!ext || strcasecmp(ext, ".jpg") != 0) {
+                ESP_LOGW(TAG, "Album: ignoring %s (only .jpg files are used)", e->d_name);
+            } else if (s_album_count >= MAX_ALBUM) {
+                ESP_LOGW(TAG, "Album: ignoring %s (limit of %d pictures)", e->d_name, MAX_ALBUM);
+            } else {
                 snprintf(s_album_files[s_album_count], MAX_ALBUM_PATH,
                          "/images/album/%s", e->d_name);
                 s_album_count++;
@@ -9211,6 +10120,7 @@ static void album_load_list(bool shuffle)
         }
         closedir(dp);
     }
+    ESP_LOGI(TAG, "Album: %d picture(s)", s_album_count);
     /* Fisher-Yates shuffle when requested */
     if (shuffle && s_album_count > 1) {
         for (int i = (int)s_album_count - 1; i > 0; i--) {
@@ -9333,8 +10243,11 @@ static void render_album(const nextube_config_t *cfg,
         /* Each tube shows a different image offset by its position, creating a
          * sliding-window effect.  With fewer images than tubes the list wraps
          * naturally so some images repeat — no special-casing needed. */
-        for (int i = 0; i < LCD_COUNT; i++)
-            display_show_image(i, s_album_files[(s_album_index + i) % s_album_count]);
+        for (int i = 0; i < LCD_COUNT; i++) {
+            const char *f = s_album_files[(s_album_index + i) % s_album_count];
+            ESP_LOGD(TAG, "Album: tube %d shows %s", i + 1, f);
+            display_show_image(i, f);
+        }
         s_album_index = (s_album_index + 1) % s_album_count;
     }
 }
@@ -10191,6 +11104,531 @@ static void render_weather_wind(const nextube_config_t *cfg)
     else display_show_ampm(5, "blank", th);
 }
 
+/* render_weather_station – panel 8: the Station page. Three views, each held for the rotation time: 0 = pressure, 1 = wind direction + gust,
+ * 2 = rain today. Digits use the theme's number images like the wind page; the glyph and label tubes are drawn into the shared framebuffer.
+ *
+ *   view 0:  [digits, right-aligned in tubes 0-4]  [trend mark + hPa / inHg]
+ *   view 1:  [compass] [cardinal or calm word] [blank] [gust digits, tubes 2-4]  [zigzag + unit]
+ *   view 2:  [drop] [rain digits, right-aligned in tubes 1-4]  [mm / in] */
+static void wxs_blank(int tube, const char *th, bool wl_sky)
+{
+    if (wl_sky) wl_tube_sky(tube); else display_show_ampm(tube, "blank", th);
+}
+
+/* A tube drawn into the framebuffer over the theme's blank (or the sky); NULL when no framebuffer is free, in which case it shows blank. */
+static uint8_t *wxs_begin(int tube, const char *th, bool wl_sky)
+{
+    uint8_t *fb = wl_fb();
+    if (!fb) { wxs_blank(tube, th, wl_sky); return NULL; }
+    if (wl_sky) {
+        wl_paint_background(fb, tube, &s_wl_last_scene);
+    } else {
+        char path[128];
+        display_path_ampm(path, sizeof(path), th, "blank");
+        seed_fb_blank(fb, path);
+    }
+    if (s_wl_dm_active) {
+        memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+        dm_paint_grid_bg(fb, 2, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+    }
+    return fb;
+}
+
+static void wxs_char(int tube, char ch, const char *th, bool wl_sky)
+{
+    if (ch == ' ') { wxs_blank(tube, th, wl_sky); return; }
+    if (wl_sky) {
+        char ds[2] = { ch, '\0' };
+        wl_tube_str(tube, u8g2_font_logisoso46_tf, ds, 100);
+        return;
+    }
+    if (ch == '.') {
+        display_show_ampm(tube, "dot", th);
+    } else if (ch >= '0' && ch <= '9') {
+        char path[128];
+        display_path_number(path, sizeof(path), th, ch - '0');
+        display_show_image(tube, path);
+    } else {
+        wxs_blank(tube, th, wl_sky);
+    }
+}
+
+/* `s` right-aligned over tubes first..last; the tubes left of it are blank. */
+static void wxs_digits(int first, int last, const char *s, const char *th, bool wl_sky)
+{
+    const int n = (int)strlen(s), slots = last - first + 1;
+    for (int t = first; t <= last; t++) {
+        const int k = n - (last - t) - 1;     /* index into s for this tube */
+        if (k >= 0 && k < n && n <= slots) wxs_char(t, s[k], th, wl_sky);
+        else wxs_blank(t, th, wl_sky);
+    }
+}
+
+static void wxs_text_tube(int tube, const char *th, bool wl_sky, const char *s, int hi_px, int hi_fn, int r, int g, int b)
+{
+    uint8_t *fb = wxs_begin(tube, th, wl_sky);
+    if (!fb) return;
+    int px, fn;
+    st_fit(s, 74, hi_px, hi_fn, &px, &fn);
+    st_text(fb, 40, 80, s, px, fn, r, g, b);
+    display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+}
+
+/* The last tube of a view: a glyph (trend mark / gust zigzag, glyph 0 = none, 1 = rising, 2 = falling, 3 = steady, 4 = zigzag) over a unit label. */
+static void wxs_unit_tube(int tube, const char *th, bool wl_sky, int glyph, const char *unit, int r, int g, int b, int lr, int lg, int lb)
+{
+    uint8_t *fb = wxs_begin(tube, th, wl_sky);
+    if (!fb) return;
+    if (glyph == 4) {
+        st_gust(fb, 40.0f, 50.0f, 14.0f, r, g, b);
+    } else if (glyph >= 1 && glyph <= 3) {
+        if (s_wl_dm_active) {
+            if (glyph != 3)
+                dm_draw_glyph_on_scaled(fb, 40, 50, glyph == 1 ? DM_CP_ARROW_UP : DM_CP_ARROW_DOWN, 2, 1, 1, true, s_dm_on_r, s_dm_on_g, s_dm_on_b);
+        } else {
+            st_trend(fb, 40.0f, 50.0f, 15.0f, glyph == 1 ? 1 : (glyph == 2 ? -1 : 0), r, g, b);
+        }
+    }
+    int px, fn;
+    st_fit(unit, 72, 28, 20, &px, &fn);
+    st_text(fb, 40, glyph ? 104 : 80, unit, px, fn, lr, lg, lb);
+    display_show_digit(tube, fb, LCD_WIDTH, LCD_HEIGHT);
+}
+
+static void render_weather_station(const nextube_config_t *cfg, int view)
+{
+    const char *th = wx_panel_prep(cfg);
+    const weather_data_t *w = weather_get();
+    const bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
+    const bool us = station_use_us(cfg->weather_station_units, cfg->wind_unit);
+    st_vals_t v;
+    st_fill(&v, w, cfg->language, us, station_use_kpa(cfg->weather_station_units), cfg->wind_unit);
+
+    /* Same colour rule as the wind page: white glyphs and a pale label, or the theme's own colours for Segments and DotMatrix. */
+    int r = 255, g = 255, b = 255, lr = 210, lg = 220, lb = 235;
+    if (!strcmp(th, "Segments")) { r = lr = s_seg_on_r; g = lg = s_seg_on_g; b = lb = s_seg_on_b; }
+    if (s_wl_dm_active)          { r = lr = s_dm_on_r;  g = lg = s_dm_on_g;  b = lb = s_dm_on_b; }
+
+    if (view == 0) {
+        if (v.have_p) {
+            wxs_digits(0, 4, v.p, th, wl_sky);
+            wxs_unit_tube(5, th, wl_sky, v.trend > 0 ? 1 : (v.trend < 0 ? 2 : 3), v.punit, r, g, b, lr, lg, lb);
+        } else {
+            for (int t = 0; t < 6; t++) wxs_blank(t, th, wl_sky);
+            wxs_text_tube(2, th, wl_sky, "--", 44, 42, r, g, b);
+        }
+    } else if (view == 1) {
+        uint8_t *fb = wxs_begin(0, th, wl_sky);
+        if (fb) {
+            st_compass(fb, 40.0f, 80.0f, 30.0f, v.have_dir ? v.dir : -1.0f, v.calm, r, g, b);
+            display_show_digit(0, fb, LCD_WIDTH, LCD_HEIGHT);
+        }
+        wxs_text_tube(1, th, wl_sky, v.have_dir ? v.card : "--", 44, 42, r, g, b);
+        wxs_blank(2, th, wl_sky);
+        if (v.have_gust) {
+            wxs_digits(2, 4, v.gust, th, wl_sky);
+            wxs_unit_tube(5, th, wl_sky, 4, v.gunit, r, g, b, lr, lg, lb);
+        } else {
+            wxs_blank(3, th, wl_sky); wxs_blank(4, th, wl_sky); wxs_blank(5, th, wl_sky);
+        }
+    } else {
+        uint8_t *fb = wxs_begin(0, th, wl_sky);
+        if (fb) {
+            if (v.have_rain) st_drop(fb, 40.0f, 80.0f, 28.0f, r, g, b);
+            display_show_digit(0, fb, LCD_WIDTH, LCD_HEIGHT);
+        }
+        if (v.have_rain) {
+            wxs_digits(1, 4, v.rain, th, wl_sky);
+            wxs_unit_tube(5, th, wl_sky, 0, v.runit, r, g, b, lr, lg, lb);
+        } else {
+            wxs_blank(1, th, wl_sky); wxs_blank(2, th, wl_sky); wxs_blank(4, th, wl_sky); wxs_blank(5, th, wl_sky);
+            wxs_text_tube(3, th, wl_sky, "--", 44, 42, r, g, b);
+        }
+    }
+}
+
+/* render_weather_energy – panel 9: the energy flow page across all six tubes:
+ *   [solar] [flow →] [home] [← flow] [grid] [battery]
+ * A tube for a source that is not pushed stays dark, and so does its arrow. Arrow thickness follows the power; its colour is the grid's
+ * (green = exporting, red = importing) or solar's amber. Drawn directly (no baking): it only redraws when the data changes. */
+static void en_flow_tube(uint8_t *fb, int tube, const energy_data_t *e, const en_vals_t *v, float home_w, bool have_home, bool sh,
+                         int fg_r, int fg_g, int fg_b)
+{
+    const int sr = s_wl_shadow_r, sg = s_wl_shadow_g, sb = s_wl_shadow_b;
+    const bool grid_ok = e->has_grid && !e->stale_grid, solar_ok = e->has_solar && !e->stale_solar;
+    #define COL(c, rr, gg, bb) (sh ? sr : (c)[0]), (sh ? sg : (c)[1]), (sh ? sb : (c)[2])
+    float thick = 0.0f;
+    switch (tube) {
+    case 0:
+        en_sun_raw(fb, 40, 52, 22, COL(solar_ok && e->solar_w > 50.0f ? EN_AMBER : EN_DIM, 0, 0, 0)); break;
+    case 1:
+        if (solar_ok && e->solar_w > 50.0f) {
+            const float cap = have_home ? home_w + (e->has_grid && e->grid_w < 0 ? -e->grid_w : 0.0f) : e->solar_w;
+            thick = 2.0f + 9.0f * fminf(5000.0f, fminf(e->solar_w, cap > 50.0f ? cap : e->solar_w)) / 5000.0f;
+            en_harrow_raw(fb, 40, 80, 64, thick, 1, COL(EN_AMBER, 0, 0, 0));
+        }
+        break;
+    case 2:
+        en_house_raw(fb, 40, 52, 22, sh ? sr : fg_r, sh ? sg : fg_g, sh ? sb : fg_b); break;
+    case 3:
+        if (grid_ok && fabsf(e->grid_w) > 50.0f) {
+            thick = 2.0f + 9.0f * fminf(5000.0f, fabsf(e->grid_w)) / 5000.0f;
+            en_harrow_raw(fb, 40, 80, 64, thick, e->grid_w > 0 ? -1 : 1, COL(e->grid_w > 0 ? EN_RED : EN_GREEN, 0, 0, 0));
+        }
+        break;
+    case 4:
+        en_pylon_raw(fb, 40, 52, 22, sh ? sr : fg_r, sh ? sg : fg_g, sh ? sb : fg_b);
+        if (grid_ok && fabsf(e->grid_w) > 50.0f) {
+            const bool up = e->grid_w < 0; const float s = 5.0f, cx = 16.0f, cy = 136.0f;
+            const uint8_t *c = up ? EN_GREEN : EN_RED;
+            const int r = sh ? sr : c[0], g = sh ? sg : c[1], b = sh ? sb : c[2];
+            if (up) st_tri(fb, cx - s, cy + s * 0.85f, cx + s, cy + s * 0.85f, cx, cy - s * 0.85f, r, g, b);
+            else    st_tri(fb, cx - s, cy - s * 0.85f, cx + s, cy - s * 0.85f, cx, cy + s * 0.85f, r, g, b);
+        }
+        break;
+    default: {
+        int pr, pg, pb;
+        en_battery_col((int)lroundf(e->batt_pct), &pr, &pg, &pb);
+        en_battery_raw(fb, 40, 52, 30, 46, (int)lroundf(e->batt_pct), false, sh ? sr : pr, sh ? sg : pg, sh ? sb : pb, sh ? sr : fg_r, sh ? sg : fg_g, sh ? sb : fg_b);
+        if (e->has_batt_w && fabsf(e->batt_w) > 50.0f) {
+            const bool up = e->batt_w > 0; const float s = 5.0f, cx = 14.0f, cy = 136.0f;
+            const uint8_t *c = up ? EN_GREEN : EN_AMBER;
+            const int r = sh ? sr : c[0], g = sh ? sg : c[1], b = sh ? sb : c[2];
+            if (up) st_tri(fb, cx - s, cy + s * 0.85f, cx + s, cy + s * 0.85f, cx, cy - s * 0.85f, r, g, b);
+            else    st_tri(fb, cx - s, cy - s * 0.85f, cx + s, cy - s * 0.85f, cx, cy + s * 0.85f, r, g, b);
+        }
+        break; }
+    }
+    #undef COL
+    (void)v;
+}
+
+/* Baked glyph maps for the six tubes (coverage, palette index, shadow: 12.8 KB each per tube, PSRAM, allocated on first use). */
+static uint8_t *s_enf_cov[6], *s_enf_col[6], *s_enf_sh[6];
+static uint8_t  s_enf_pal[6][8][3];
+typedef struct {
+    energy_data_t e;
+    float   home_w;
+    bool    have_home, show_solar, show_batt, shadow;
+    uint8_t fg[3], shadow_size;
+    int     face;
+} enf_key_t;
+static bool      s_enp_baked;
+static enf_key_t s_enf_key;
+static bool      s_enf_baked;
+static int       s_enf_owner = -1;        /* which page type the baked maps belong to: 0 flow, 1 pairs */
+static int64_t   s_enf_last_use_us;
+
+static bool enf_maps_ready(void)
+{
+    const size_t mb = (size_t)LCD_WIDTH * LCD_HEIGHT;
+    for (int t = 0; t < 6; t++) {
+        if (!s_enf_cov[t]) s_enf_cov[t] = (uint8_t *)heap_caps_malloc(mb, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_enf_col[t]) s_enf_col[t] = (uint8_t *)heap_caps_malloc(mb, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_enf_sh[t])  s_enf_sh[t]  = (uint8_t *)heap_caps_malloc(mb, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_enf_cov[t] || !s_enf_col[t] || !s_enf_sh[t]) return false;
+    }
+    return true;
+}
+
+static void render_weather_energy(const nextube_config_t *cfg)
+{
+    const char *th = wx_panel_prep(cfg);
+    const bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
+    energy_data_t e;
+    energy_get_copy(&e);
+    int r = 255, g = 255, b = 255;
+    if (!strcmp(th, "Segments")) { r = s_seg_on_r; g = s_seg_on_g; b = s_seg_on_b; }
+    if (s_wl_dm_active)          { r = s_dm_on_r;  g = s_dm_on_g;  b = s_dm_on_b; }
+
+    const bool show_solar = e.has_solar && cfg->energy_show_solar, show_batt = e.has_batt && cfg->energy_show_battery;
+    /* Home consumption: pushed, or worked out from the others (solar + grid import + battery discharge). */
+    float home_w = 0.0f; bool have_home = false;
+    if (e.has_home && !e.stale_home) { home_w = e.home_w; have_home = true; }
+    else if (e.has_grid || e.has_solar) {
+        home_w = (e.has_solar ? e.solar_w : 0.0f) + (e.has_grid ? e.grid_w : 0.0f) - (e.has_batt_w ? e.batt_w : 0.0f);
+        if (home_w < 0.0f) home_w = 0.0f;
+        have_home = true;
+    }
+    en_vals_t v;
+    en_fill(&v, &e, true, true, r, g, b);
+
+    /* Bake the glyphs when the data or the style changed. */
+    const bool maps = enf_maps_ready();
+    if (maps) {
+        enf_key_t key;
+        memset(&key, 0, sizeof(key));
+        key.e = e; key.home_w = home_w; key.have_home = have_home; key.show_solar = show_solar; key.show_batt = show_batt;
+        key.shadow = wl_shadow_on(); key.shadow_size = s_wl_shadow_size; key.fg[0] = (uint8_t)r; key.fg[1] = (uint8_t)g; key.fg[2] = (uint8_t)b; key.face = s_ft_face_id;
+        if (s_enf_owner != 0 || !s_enf_baked || memcmp(&key, &s_enf_key, sizeof(key)) != 0) {
+            const size_t mb = (size_t)LCD_WIDTH * LCD_HEIGHT;
+            for (int t = 0; t < 6; t++) {
+                memset(s_enf_cov[t], 0, mb); memset(s_enf_col[t], 0, mb); memset(s_enf_sh[t], 0, mb);
+                if (key.shadow) {
+                    s_st_target = s_enf_sh[t]; s_st_target_col = NULL;
+                    st_shadow_begin(); en_flow_tube(NULL, t, &e, &v, home_w, have_home, true, r, g, b); st_shadow_end();
+                }
+                s_st_pal_n = 0;
+                s_st_target = s_enf_cov[t]; s_st_target_col = s_enf_col[t];
+                en_flow_tube(NULL, t, &e, &v, home_w, have_home, false, r, g, b);
+                s_st_target = NULL; s_st_target_col = NULL;
+                memcpy(s_enf_pal[t], s_st_pal, sizeof(s_enf_pal[t]));
+            }
+            s_enf_key = key; s_enf_baked = true; s_enf_owner = 0; s_enp_baked = false;
+        }
+    }
+
+    for (int t = 0; t < 6; t++) {
+        const bool present = (t == 0) ? show_solar : (t == 1) ? show_solar : (t == 2) ? have_home : (t == 3) ? e.has_grid : (t == 4) ? e.has_grid : show_batt;
+        if (!present) {
+            if (t == 2 && !e.has_grid && !e.has_solar && !e.has_batt) { wxs_text_tube(2, th, wl_sky, "--", 44, 42, r, g, b); continue; }
+            wxs_blank(t, th, wl_sky); continue;
+        }
+        uint8_t *fb = wxs_begin(t, th, wl_sky);
+        if (!fb) continue;
+        char val[12] = "", cap[12] = "kW";
+        int vr = r, vg = g, vb = b, cy_cap = 136, cap_x = 40;
+        if (t == 0)      { if (e.stale_solar) snprintf(val, sizeof(val), "--"); else en_kw(val, sizeof(val), e.solar_w);
+                           if (!(e.solar_w > 50.0f) || e.stale_solar) { vr = EN_DIM[0]; vg = EN_DIM[1]; vb = EN_DIM[2]; } }
+        else if (t == 2) { en_kw(val, sizeof(val), home_w); }
+        else if (t == 4) { if (e.stale_grid) { snprintf(val, sizeof(val), "--"); vr = EN_DIM[0]; vg = EN_DIM[1]; vb = EN_DIM[2]; }
+                           else { en_kw(val, sizeof(val), e.grid_w); const uint8_t *c = e.grid_w < -50.0f ? EN_GREEN : (e.grid_w > 50.0f ? EN_RED : NULL); if (c) { vr = c[0]; vg = c[1]; vb = c[2]; } }
+                           cap_x = 48; }
+        else if (t == 5) { if (e.stale_batt) snprintf(val, sizeof(val), "--"); else snprintf(val, sizeof(val), "%d%%", (int)lroundf(e.batt_pct));
+                           cap[0] = '\0'; if (e.has_batt_w && fabsf(e.batt_w) > 50.0f && !e.stale_batt) { en_kw(cap, sizeof(cap), e.batt_w); strncat(cap, " kW", sizeof(cap) - strlen(cap) - 1); }
+                           cap_x = 46; }
+        if (t == 1 || t == 3) val[0] = '\0';
+        if (s_wl_dm_active) {
+            memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2);
+            dm_paint_grid_bg(fb, 2, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b);
+        }
+        if (maps && s_enf_baked && s_enf_owner == 0) {
+            const size_t mb = (size_t)LCD_WIDTH * LCD_HEIGHT;
+            if (s_enf_key.shadow)
+                for (size_t i = 0; i < mb; i++) if (s_enf_sh[t][i]) wl_blend_px(fb + i * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, s_enf_sh[t][i]);
+            for (size_t i = 0; i < mb; i++)
+                if (s_enf_cov[t][i]) { const uint8_t *c = s_enf_pal[t][s_enf_col[t][i] & 7]; wl_blend_px(fb + i * 2, c[0], c[1], c[2], s_enf_cov[t][i]); }
+        } else {
+            if (wl_shadow_on()) { st_shadow_begin(); en_flow_tube(fb, t, &e, &v, home_w, have_home, true, r, g, b); st_shadow_end(); }
+            en_flow_tube(fb, t, &e, &v, home_w, have_home, false, r, g, b);
+        }
+        if (val[0]) { int px, fn; st_fit(val, 74, 34, 28, &px, &fn); st_text(fb, 40, 108, val, px, fn, vr, vg, vb); }
+        if (t != 1 && t != 3 && cap[0]) st_text(fb, cap_x, cy_cap, cap, 14, 16, r, g, b);
+        display_show_digit(t, fb, LCD_WIDTH, LCD_HEIGHT);
+    }
+}
+
+/* ── Energy mode: pages ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ * Page 0 is the flow diagram above. Pages 1-3 are "pairs": an icon tube followed by a value tube for each source, centred on the six tubes.
+ *   1 Now:   grid, solar, battery power            2 Today: solar produced, grid import, grid export (kWh)
+ *   3 Home:  home used today (kWh) and the share of it that was not bought from the grid
+ * A page whose data was never pushed is skipped by the rotation. */
+typedef struct {
+    uint8_t glyph;                 /* 0 none, 1 sun, 2 pylon, 3 battery, 4 house */
+    uint8_t gcol;                  /* sun colour: 3 dim, 4 amber */
+    uint8_t pct;                   /* battery fill */
+    int8_t  tri;                   /* +1 up, -1 down, 0 none */
+    uint8_t tcol;                  /* triangle colour code */
+    char    val[10];
+    uint8_t vcol;                  /* 0 font, 1 green, 2 red, 3 dim */
+    char    cap[14];
+} en_tspec_t;
+
+static void en_rgb(int code, const uint8_t fg[3], int *r, int *g, int *b)
+{
+    const uint8_t *c = code == 1 ? EN_GREEN : code == 2 ? EN_RED : code == 3 ? EN_DIM : code == 4 ? EN_AMBER : fg;
+    *r = c[0]; *g = c[1]; *b = c[2];
+}
+static void en_kwh(char *out, size_t n, float v)
+{
+    if (v < 99.95f) snprintf(out, n, "%.1f", (double)v); else snprintf(out, n, "%d", (int)lroundf(v));
+}
+
+/* Which pages have something to show. */
+static void en_pages_available(const nextube_config_t *cfg, const energy_data_t *e, bool out[4])
+{
+    const bool power = e->has_grid || (e->has_solar && cfg->energy_show_solar) || (e->has_batt && cfg->energy_show_battery);
+    out[0] = cfg->energy_page_flow  && (power || e->has_home);
+    out[1] = cfg->energy_page_now   && power;
+    out[2] = cfg->energy_page_today && (e->has_tot[0] || e->has_tot[1] || e->has_tot[2]);
+    out[3] = cfg->energy_page_home  && e->has_tot[3];
+}
+
+/* Fill the six tube specs for a pair page; returns the number of pairs (0 = nothing to show). */
+static int en_pairs(en_tspec_t t[6], int page, const nextube_config_t *cfg, const energy_data_t *e)
+{
+    en_tspec_t ic[3], va[3];
+    memset(ic, 0, sizeof(ic)); memset(va, 0, sizeof(va)); memset(t, 0, 6 * sizeof(en_tspec_t));
+    int n = 0;
+    if (page == 1) {
+        if (e->has_grid) {
+            ic[n].glyph = 2; va[n].vcol = 0;
+            if (e->stale_grid) { snprintf(va[n].val, sizeof(va[n].val), "--"); va[n].vcol = 3; }
+            else {
+                en_kw(va[n].val, sizeof(va[n].val), e->grid_w);
+                if (e->grid_w < -50.0f) { ic[n].tri = 1; ic[n].tcol = 1; va[n].vcol = 1; }
+                else if (e->grid_w > 50.0f) { ic[n].tri = -1; ic[n].tcol = 2; va[n].vcol = 2; }
+            }
+            snprintf(va[n].cap, sizeof(va[n].cap), "kW"); n++;
+        }
+        if (e->has_solar && cfg->energy_show_solar) {
+            ic[n].glyph = 1; ic[n].gcol = 3;
+            if (e->stale_solar) { snprintf(va[n].val, sizeof(va[n].val), "--"); va[n].vcol = 3; }
+            else { en_kw(va[n].val, sizeof(va[n].val), e->solar_w); if (e->solar_w > 50.0f) ic[n].gcol = 4; else va[n].vcol = 3; }
+            snprintf(va[n].cap, sizeof(va[n].cap), "kW"); n++;
+        }
+        if (e->has_batt && cfg->energy_show_battery) {
+            ic[n].glyph = 3;
+            if (e->stale_batt) { snprintf(va[n].val, sizeof(va[n].val), "--"); va[n].vcol = 3; }
+            else {
+                snprintf(va[n].val, sizeof(va[n].val), "%d%%", (int)lroundf(e->batt_pct)); ic[n].pct = (uint8_t)lroundf(e->batt_pct);
+                if (e->has_batt_w && fabsf(e->batt_w) > 50.0f) {
+                    ic[n].tri = e->batt_w > 0 ? 1 : -1; ic[n].tcol = e->batt_w > 0 ? 1 : 4;
+                    char kw[8]; en_kw(kw, sizeof(kw), e->batt_w); snprintf(va[n].cap, sizeof(va[n].cap), "%.5s kW", kw);
+                }
+            }
+            n++;
+        }
+    } else if (page == 2) {
+        const int idx[3] = { 0, 1, 2 };
+        for (int k = 0; k < 3; k++) {
+            const int i = idx[k];
+            if (!e->has_tot[i]) continue;
+            ic[n].glyph = (i == 0) ? 1 : 2;
+            if (i == 0) ic[n].gcol = 4; else { ic[n].tri = (i == 2) ? 1 : -1; ic[n].tcol = (i == 2) ? 1 : 2; }
+            if (e->stale_tot[i]) { snprintf(va[n].val, sizeof(va[n].val), "--"); va[n].vcol = 3; }
+            else en_kwh(va[n].val, sizeof(va[n].val), e->tot_kwh[i]);
+            snprintf(va[n].cap, sizeof(va[n].cap), "kWh"); n++;
+        }
+    } else if (page == 3 && e->has_tot[3]) {
+        ic[n].glyph = 4;
+        if (e->stale_tot[3]) { snprintf(va[n].val, sizeof(va[n].val), "--"); va[n].vcol = 3; }
+        else en_kwh(va[n].val, sizeof(va[n].val), e->tot_kwh[3]);
+        snprintf(va[n].cap, sizeof(va[n].cap), "kWh"); n++;
+        if (e->has_tot[1] && !e->stale_tot[1] && !e->stale_tot[3] && e->tot_kwh[3] > 0.1f) {     /* share not bought from the grid */
+            float share = 100.0f * (e->tot_kwh[3] - e->tot_kwh[1]) / e->tot_kwh[3];
+            if (share < 0.0f) share = 0.0f;
+            if (share > 100.0f) share = 100.0f;
+            ic[n].glyph = 1; ic[n].gcol = 4;
+            snprintf(va[n].val, sizeof(va[n].val), "%d%%", (int)lroundf(share)); va[n].vcol = 1;
+            n++;
+        }
+    }
+    const int first = (6 - 2 * n) / 2;
+    for (int k = 0; k < n; k++) { t[first + 2 * k] = ic[k]; t[first + 2 * k + 1] = va[k]; }
+    return n;
+}
+
+static void en_spec_glyph(uint8_t *fb, const en_tspec_t *sp, bool sh, const uint8_t fg[3])
+{
+    int fr, fgc, fb_, ar, ag, ab;
+    en_rgb(0, fg, &fr, &fgc, &fb_);
+    en_rgb(sp->gcol, fg, &ar, &ag, &ab);
+    if (sh) { fr = s_wl_shadow_r; fgc = s_wl_shadow_g; fb_ = s_wl_shadow_b; ar = fr; ag = fgc; ab = fb_; }
+    switch (sp->glyph) {
+    case 1: en_sun_raw(fb, 40, 64, 24, ar, ag, ab); break;
+    case 2: en_pylon_raw(fb, 40, 64, 24, fr, fgc, fb_); break;
+    case 3: { int pr, pg, pb; en_battery_col(sp->pct, &pr, &pg, &pb);
+              en_battery_raw(fb, 40, 64, 30, 46, sp->pct, false, sh ? fr : pr, sh ? fgc : pg, sh ? fb_ : pb, fr, fgc, fb_); break; }
+    case 4: en_house_raw(fb, 40, 64, 24, fr, fgc, fb_); break;
+    default: break;
+    }
+    if (sp->tri) {
+        int tr, tg, tb;
+        en_rgb(sp->tcol, fg, &tr, &tg, &tb);
+        if (sh) { tr = fr; tg = fgc; tb = fb_; }
+        const float s = 6.0f, cx = 40.0f, cy = 124.0f;
+        if (sp->tri > 0) st_tri(fb, cx - s, cy + s * 0.85f, cx + s, cy + s * 0.85f, cx, cy - s * 0.85f, tr, tg, tb);
+        else             st_tri(fb, cx - s, cy - s * 0.85f, cx + s, cy - s * 0.85f, cx, cy + s * 0.85f, tr, tg, tb);
+    }
+}
+
+typedef struct { en_tspec_t t[6]; int page; uint8_t fg[3], shadow_size; bool shadow; int face; } enp_key_t;
+static enp_key_t s_enp_key;
+
+static void render_energy_pairs(const nextube_config_t *cfg, int page)
+{
+    const char *th = wx_panel_prep(cfg);
+    const bool wl_sky = cx_is_wl_sky(cfg) && s_wl_scene_valid;
+    energy_data_t e;
+    energy_get_copy(&e);
+    uint8_t fg[3] = { 255, 255, 255 };
+    if (!strcmp(th, "Segments")) { fg[0] = s_seg_on_r; fg[1] = s_seg_on_g; fg[2] = s_seg_on_b; }
+    if (s_wl_dm_active)          { fg[0] = s_dm_on_r;  fg[1] = s_dm_on_g;  fg[2] = s_dm_on_b; }
+
+    enp_key_t key;
+    memset(&key, 0, sizeof(key));
+    key.page = page; key.fg[0] = fg[0]; key.fg[1] = fg[1]; key.fg[2] = fg[2]; key.shadow = wl_shadow_on(); key.shadow_size = s_wl_shadow_size; key.face = s_ft_face_id;
+    const int pairs = en_pairs(key.t, page, cfg, &e);
+    if (pairs == 0) { for (int t = 0; t < 6; t++) wxs_blank(t, th, wl_sky); wxs_text_tube(2, th, wl_sky, "--", 44, 42, fg[0], fg[1], fg[2]); return; }
+
+    const bool maps = enf_maps_ready();
+    if (maps) {
+        if (s_enf_owner != 1 || !s_enp_baked || memcmp(&key, &s_enp_key, sizeof(key)) != 0) {
+            const size_t mb = (size_t)LCD_WIDTH * LCD_HEIGHT;
+            for (int t = 0; t < 6; t++) {
+                memset(s_enf_cov[t], 0, mb); memset(s_enf_col[t], 0, mb); memset(s_enf_sh[t], 0, mb);
+                if (!key.t[t].glyph && !key.t[t].tri) continue;
+                if (key.shadow) { s_st_target = s_enf_sh[t]; s_st_target_col = NULL; st_shadow_begin(); en_spec_glyph(NULL, &key.t[t], true, fg); st_shadow_end(); }
+                s_st_pal_n = 0; s_st_target = s_enf_cov[t]; s_st_target_col = s_enf_col[t];
+                en_spec_glyph(NULL, &key.t[t], false, fg);
+                s_st_target = NULL; s_st_target_col = NULL;
+                memcpy(s_enf_pal[t], s_st_pal, sizeof(s_enf_pal[t]));
+            }
+            s_enp_key = key; s_enp_baked = true; s_enf_owner = 1; s_enf_baked = false;
+        }
+    }
+    for (int t = 0; t < 6; t++) {
+        const en_tspec_t *sp = &key.t[t];
+        if (!sp->glyph && !sp->tri && !sp->val[0]) { wxs_blank(t, th, wl_sky); continue; }
+        uint8_t *fb = wxs_begin(t, th, wl_sky);
+        if (!fb) continue;
+        if (s_wl_dm_active) { memset(fb, 0, (size_t)LCD_WIDTH * LCD_HEIGHT * 2); dm_paint_grid_bg(fb, 2, 1, s_dm_off_r, s_dm_off_g, s_dm_off_b); }
+        if (sp->glyph || sp->tri) {
+            if (maps && s_enf_owner == 1) {
+                const size_t mb = (size_t)LCD_WIDTH * LCD_HEIGHT;
+                if (key.shadow) for (size_t i = 0; i < mb; i++) if (s_enf_sh[t][i]) wl_blend_px(fb + i * 2, s_wl_shadow_r, s_wl_shadow_g, s_wl_shadow_b, s_enf_sh[t][i]);
+                for (size_t i = 0; i < mb; i++)
+                    if (s_enf_cov[t][i]) { const uint8_t *c = s_enf_pal[t][s_enf_col[t][i] & 7]; wl_blend_px(fb + i * 2, c[0], c[1], c[2], s_enf_cov[t][i]); }
+            } else {
+                if (key.shadow) { st_shadow_begin(); en_spec_glyph(fb, sp, true, fg); st_shadow_end(); }
+                en_spec_glyph(fb, sp, false, fg);
+            }
+        }
+        if (sp->val[0]) {
+            int vr, vg, vb, px, fn;
+            en_rgb(sp->vcol, fg, &vr, &vg, &vb);
+            st_fit(sp->val, 74, 40, 28, &px, &fn);
+            st_text(fb, 40, 70, sp->val, px, fn, vr, vg, vb);
+            if (sp->cap[0]) st_text(fb, 40, 112, sp->cap, 14, 16, fg[0], fg[1], fg[2]);
+        }
+        display_show_digit(t, fb, LCD_WIDTH, LCD_HEIGHT);
+    }
+}
+
+/* One page of the Energy mode. */
+static void render_energy_page(const nextube_config_t *cfg, int page)
+{
+    wl_load_style(cfg);
+    if (cx_is_wl_sky(cfg)) wl_ensure_scene(cfg);          /* keeps the live sky's animation clock moving, as every other page does */
+    s_enf_last_use_us = esp_timer_get_time();
+    if (page == 0) render_weather_energy(cfg);
+    else           render_energy_pairs(cfg, page);
+}
+
+/* The six-tube maps (230 KB of PSRAM) are given back once the Energy mode has not been shown for two minutes. */
+static void enf_release_if_idle(void)
+{
+    if (!s_enf_cov[0] || esp_timer_get_time() - s_enf_last_use_us < 120LL * 1000000LL) return;
+    for (int t = 0; t < 6; t++) {
+        if (s_enf_cov[t]) { heap_caps_free(s_enf_cov[t]); s_enf_cov[t] = NULL; }
+        if (s_enf_col[t]) { heap_caps_free(s_enf_col[t]); s_enf_col[t] = NULL; }
+        if (s_enf_sh[t])  { heap_caps_free(s_enf_sh[t]);  s_enf_sh[t]  = NULL; }
+    }
+    s_enf_baked = s_enp_baked = false;
+    s_enf_owner = -1;
+}
+
 /* render_weather_hilo – panel 4: daily Hi (show_hi=true) or Lo (false).
  *
  * Layout mirrors the temperature panel — tube 0 is replaced by a procedural
@@ -11033,6 +12471,7 @@ static void render_weather_outlook(const nextube_config_t *cfg)
     OUTLOOK_MIX(c->ft);
     OUTLOOK_MIX(c->dm);
     OUTLOOK_MIX(s_ft_face_id);
+    for (const char *ch = cfg->custom_info_font; *ch; ch++) OUTLOOK_MIX((uint8_t)*ch);
     for (const char *ch = cfg->custom_font; *ch; ch++) OUTLOOK_MIX((uint8_t)*ch);   /* a changed font must rebuild the text (and the live-sky overlay) */
     OUTLOOK_MIX((uint32_t)(int32_t)s_burnin_shift_x);
     OUTLOOK_MIX(s_lut_gen);
@@ -11139,6 +12578,12 @@ static void render_weather(const nextube_config_t *cfg, int panel, bool anim_onl
     /* Panel 4 — Hi/Lo — dedicated renderer; hilo_phase 0 = HI, 1 = LO */
     if (panel == WEATHER_PANEL_HILO) {
         render_weather_hilo(cfg, hilo_phase == 0);
+        return;
+    }
+
+    /* Panel 8 — Station — three views, phase = which one */
+    if (panel == WEATHER_PANEL_STATION) {
+        render_weather_station(cfg, hilo_phase);
         return;
     }
 
@@ -11358,6 +12803,7 @@ static void display_task(void *arg)
     uint8_t       last_custom_shadow_size       = 0;   /* 0 = sentinel, forces first-tick sync (valid range 1-4) */
     uint8_t       last_custom_glyph_shadow_size = 0;
     char          last_custom_font[64]        = {0};
+    char          last_custom_info_font[64]   = {0};
     /* Night color set (issue #73) — tracked separately so custom_changed
      * fires immediately for these too, not just the day-set fields above. */
     uint8_t       last_custom_glyph_color_night[3]  = {0};
@@ -11405,6 +12851,10 @@ static void display_task(void *arg)
     int           weather_panel      = WEATHER_PANEL_TEMP;
     TickType_t    weather_panel_tick = 0;      /* tick of last panel switch */
     int           hilo_phase        = 0;       /* 0 = show HI, 1 = show LO (panel 4 only) */
+    int           energy_page       = 0;       /* Energy mode: the page on show (0 flow, 1 now, 2 today, 3 home) */
+    TickType_t    energy_page_tick  = 0;       /* tick of the last page switch */
+    uint32_t      energy_last_seq   = UINT32_MAX;
+    int           energy_last_min   = -1;
     bool          first              = true;
     bool          mic_test_blanked   = false;  /* tubes blanked for the mic test mode */
     int           last_hour             = -1;  /* for hourly burn-in shift update */
@@ -11643,6 +13093,7 @@ static void display_task(void *arg)
                               (cfg->custom_shadow_size          != last_custom_shadow_size)       ||
                               (cfg->custom_glyph_shadow_size    != last_custom_glyph_shadow_size) ||
                               (strcmp(cfg->custom_font,         last_custom_font)         != 0)    ||
+                              (strcmp(cfg->custom_info_font,    last_custom_info_font)    != 0)    ||
                               (memcmp(cfg->custom_glyph_color_night,  last_custom_glyph_color_night,  3) != 0) ||
                               (memcmp(cfg->custom_font_color_night,   last_custom_font_color_night,   3) != 0) ||
                               (cfg->custom_shadow_night         != last_custom_shadow_night)     ||
@@ -11667,9 +13118,12 @@ static void display_task(void *arg)
          * below, which resets album / weather-panel / timer as on a normal mode
          * switch.  The explicit sentinel resets cover render paths that don't check
          * mode_changed (e.g. YouTube subscriber count, weather data values). */
+        cap_timeout_tick();
         if (s_full_repaint_request) {
             s_full_repaint_request = false;
+            s_cap_skip_fill = true;                     /* the blanking pass is not a frame worth capturing */
             for (int _t = 0; _t < LCD_COUNT; _t++) display_fill(_t, 0x0000);
+            s_cap_skip_fill = false;
             mode_changed  = true;
             last_t        = (struct tm){0};
             last_subs     = UINT32_MAX;
@@ -11992,6 +13446,8 @@ static void display_task(void *arg)
             last_custom_glyph_shadow_size = cfg->custom_glyph_shadow_size;
             strncpy(last_custom_font, cfg->custom_font, sizeof(last_custom_font) - 1);
             last_custom_font[sizeof(last_custom_font) - 1] = '\0';
+            strncpy(last_custom_info_font, cfg->custom_info_font, sizeof(last_custom_info_font) - 1);
+            last_custom_info_font[sizeof(last_custom_info_font) - 1] = '\0';
             /* Force the remaining change-detection state to "no last frame"
              * so when the AP closes (or a client connects) the next
              * normal-mode tick re-renders from scratch — otherwise the
@@ -12150,6 +13606,8 @@ static void display_task(void *arg)
                 last_custom_glyph_shadow_size = cfg->custom_glyph_shadow_size;
                 strncpy(last_custom_font, cfg->custom_font, sizeof(last_custom_font) - 1);
                 last_custom_font[sizeof(last_custom_font) - 1] = '\0';
+                strncpy(last_custom_info_font, cfg->custom_info_font, sizeof(last_custom_info_font) - 1);
+                last_custom_info_font[sizeof(last_custom_info_font) - 1] = '\0';
                 vTaskDelayUntil(&wake, pdMS_TO_TICKS(DISPLAY_TICK_MS_SLOW));
                 continue;   /* skip mode switch, burn-in, rotation this tick */
             } else {
@@ -12240,9 +13698,14 @@ static void display_task(void *arg)
             case APP_MODE_WEATHER:
                 render_weather(cfg, weather_panel, false, hilo_phase);
                 break;
+            case APP_MODE_ENERGY:
+                render_energy_page(cfg, energy_page);
+                break;
             default: break;
             }
         }
+
+        if (mode != APP_MODE_ENERGY) enf_release_if_idle();
 
         switch (mode) {
 
@@ -12627,7 +14090,7 @@ static void display_task(void *arg)
              * synced config from a unit that does have one).
              * Panel 4 (HILO) has an internal HI→LO sub-rotation: the first timer
              * fire flips hilo_phase 0→1; the second fire advances to the next panel.
-             * Panel 2 does the same (sunrise→sunset) when weather_sun_split is on.
+             * Panel 2 does the same (sunrise→sunset) when weather_sun_split is on, and panel 8 (Station) steps through its three views.
              * If the currently active panel has been disabled, jumps to the next
              * enabled one immediately without waiting for the rotation timer.   */
             int  prev_weather_panel = weather_panel;
@@ -12642,8 +14105,8 @@ static void display_task(void *arg)
                 config_weather_panels(cfg, pen);
                 pen[WEATHER_PANEL_INTMP] = pen[WEATHER_PANEL_INTMP] && sht_present;   /* the indoor pages need the sensor */
                 pen[WEATHER_PANEL_INHUM] = pen[WEATHER_PANEL_INHUM] && sht_present;
-                int elist[8]; int ecnt = 0;
-                for (int _i = 0; _i < 8; _i++)
+                int elist[CFG_WX_PANEL_COUNT]; int ecnt = 0;
+                for (int _i = 0; _i < CFG_WX_PANEL_COUNT; _i++)
                     if (pen[_i]) elist[ecnt++] = _i;
                 if (ecnt == 0) {
                     /* Stale/corrupt config — enable the original 5 outdoor
@@ -12660,8 +14123,7 @@ static void display_task(void *arg)
                     weather_panel = elist[0]; weather_panel_tick = 0;
                     hilo_phase = 0; panel_flipped = true;
                 } else if ((now_valid || pen[5] || pen[6] || pen[7]) &&
-                           (ecnt > 1 || weather_panel == WEATHER_PANEL_HILO ||
-                            (weather_panel == WEATHER_PANEL_SUN && cfg->weather_sun_split))) {
+                           (ecnt > 1 || wx_phases(cfg, weather_panel) > 1)) {
                     /* Timer-based rotation — needs valid outdoor data, or at
                      * least one indoor panel enabled (SHT30 present), so an
                      * indoor-only setup still cycles even if the outdoor
@@ -12671,10 +14133,9 @@ static void display_task(void *arg)
                         weather_panel_tick = now_t;
                     } else if ((now_t - weather_panel_tick) >= pdMS_TO_TICKS(
                                    cfg->weather_panel_ms ? cfg->weather_panel_ms : 5000)) {
-                        if ((weather_panel == WEATHER_PANEL_HILO ||
-                             (weather_panel == WEATHER_PANEL_SUN && cfg->weather_sun_split)) && hilo_phase == 0) {
-                            /* HI (or sunrise) shown — flip to LO (or sunset) before moving on */
-                            hilo_phase         = 1;
+                        if (hilo_phase + 1 < wx_phases(cfg, weather_panel)) {
+                            /* HI (or sunrise, or the Station's first view) shown — step to the next screen before moving on */
+                            hilo_phase++;
                             weather_panel_tick = now_t;
                             panel_flipped      = true;
                         } else {
@@ -12717,7 +14178,7 @@ static void display_task(void *arg)
             }
             /* The rain / snow outlook counts down ("in 1h16") and has its own data, so it is redrawn every minute, even with it as the only
              * enabled page (nothing else would redraw it) or while the current-conditions fetch has not succeeded. */
-            if (!wx_changed && weather_panel == WEATHER_PANEL_RAIN)
+            if (!wx_changed && (weather_panel == WEATHER_PANEL_RAIN || weather_panel == WEATHER_PANEL_STATION))
                 wx_changed = (wx_tm.tm_min != last_wx_min);
             bool valid_changed = (now_valid != last_wx_valid);
 
@@ -12770,6 +14231,42 @@ static void display_task(void *arg)
             break;
         }
 
+
+        case APP_MODE_ENERGY: {
+            /* Energy mode: pages rotate on their own timer (Flow, Now, Today, Home); a page whose data was never pushed is skipped. */
+            energy_data_t en_now;
+            energy_get_copy(&en_now);
+            bool pav[4];
+            en_pages_available(cfg, &en_now, pav);
+            int elist[4], ecnt = 0;
+            for (int _i = 0; _i < 4; _i++) if (pav[_i]) elist[ecnt++] = _i;
+            if (ecnt == 0) elist[ecnt++] = 0;                    /* nothing yet: the flow page shows "--" */
+            bool panel_flipped = false;
+            bool cur_ok = false;
+            for (int _i = 0; _i < ecnt; _i++) if (elist[_i] == energy_page) { cur_ok = true; break; }
+            if (!cur_ok) {
+                energy_page = elist[0]; energy_page_tick = 0; panel_flipped = true;
+            } else if (ecnt > 1) {
+                const TickType_t now_t = xTaskGetTickCount();
+                if (energy_page_tick == 0) energy_page_tick = now_t;
+                else if ((now_t - energy_page_tick) >= pdMS_TO_TICKS(cfg->energy_panel_ms ? cfg->energy_panel_ms : 8000)) {
+                    int cur_pos = 0;
+                    for (int _i = 0; _i < ecnt; _i++) if (elist[_i] == energy_page) { cur_pos = _i; break; }
+                    energy_page = elist[(cur_pos + 1) % ecnt];
+                    energy_page_tick = now_t;
+                    panel_flipped = true;
+                }
+            }
+            struct tm en_tm; ntp_get_local(&en_tm);
+            const bool en_changed = (en_now.seq != energy_last_seq) || (en_tm.tm_min != energy_last_min);   /* a push, or a source going stale */
+            const bool full_redraw = (first || mode_changed || theme_changed || custom_changed || en_changed || panel_flipped || burnin_force_render);
+            if (full_redraw) {
+                if (!wl_anim_tick || first || mode_changed) render_energy_page(cfg, energy_page);   /* animated sky: the unified loop already drew it */
+                energy_last_seq = en_now.seq;
+                energy_last_min = en_tm.tm_min;
+            }
+            break;
+        }
         default: break;
         }
 
@@ -12800,6 +14297,8 @@ static void display_task(void *arg)
             last_custom_glyph_shadow_size = cfg->custom_glyph_shadow_size;
             strncpy(last_custom_font, cfg->custom_font, sizeof(last_custom_font) - 1);
             last_custom_font[sizeof(last_custom_font) - 1] = '\0';
+            strncpy(last_custom_info_font, cfg->custom_info_font, sizeof(last_custom_info_font) - 1);
+            last_custom_info_font[sizeof(last_custom_info_font) - 1] = '\0';
             memcpy(last_custom_glyph_color_night,  cfg->custom_glyph_color_night,  3);
             memcpy(last_custom_font_color_night,   cfg->custom_font_color_night,   3);
             last_custom_shadow_night = cfg->custom_shadow_night;
@@ -13031,6 +14530,22 @@ void display_show_wait(void)
  * hard-suspended rather than cooperatively parked, this still un-suspends it
  * via the same vTaskResume — s_park_req/s_parked being false either way is
  * harmless since the task re-checks them fresh on its next loop iteration). */
+size_t display_release_caches(void)
+{
+    if (!s_parked) return 0;                  /* the display task owns these buffers unless it is parked */
+    size_t freed = 0;
+    img_cache_flush();
+    for (int i = 0; i < IMG_CACHE_ENTRIES; i++) {
+        if (s_img_cache[i].data) { heap_caps_free(s_img_cache[i].data); s_img_cache[i].data = NULL; freed += LCD_WIDTH * LCD_HEIGHT * 2; }
+    }
+    for (int t = 0; t < LCD_COUNT; t++) {
+        s_wl_prev_valid[t] = false;
+        if (s_wl_prev_fb[t]) { heap_caps_free(s_wl_prev_fb[t]); s_wl_prev_fb[t] = NULL; freed += LCD_WIDTH * LCD_HEIGHT * 2; }
+    }
+    fr_cache_flush();
+    return freed;
+}
+
 void display_resume_after_wait(void)
 {
     bool resume = false;

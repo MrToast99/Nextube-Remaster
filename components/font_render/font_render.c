@@ -513,8 +513,9 @@ void fr_draw_glyph_centered(uint8_t *fb, int fb_w, int fb_h,
 
     int x0 = (fb_w - probe->width) / 2;     /* horizontal centre */
     int y0;
-    if (L->baseline_valid && codepoint >= '0' && codepoint <= '9') {
-        /* All digits stand on the shared baseline so they don't jitter. */
+    if (L->baseline_valid && ((codepoint >= '0' && codepoint <= '9') || codepoint == '.' || codepoint == ',')) {
+        /* All digits stand on the shared baseline so they don't jitter, and a decimal point or comma sits on it too (the bitmap font does
+         * the same) instead of floating mid-tube like the colon. */
         y0 = L->universal_baseline - probe->bearing_y;
     } else {
         /* Punctuation / letters centre by their own height. */
